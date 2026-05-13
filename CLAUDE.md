@@ -56,9 +56,9 @@ For the full breakdown of what goes inside each project, see the *Clean Architec
 | Logging | Serilog | Console + Application Insights sinks |
 | Validation | FluentValidation | One validator class per request DTO |
 | API Docs | Swashbuckle (Swagger) | Every endpoint documented |
-| Frontend | React + TypeScript + Vite | |
-| State | Redux Toolkit + Redux Saga | |
-| HTTP | Axios | With JWT interceptor |
+| Frontend | Angular + TypeScript | |
+| State | NgRx (Store + Effects) | |
+| HTTP | Angular HttpClient | With JWT interceptor |
 | Testing (unit) | xUnit + FluentAssertions + NSubstitute | |
 | Testing (integration) | xUnit + Testcontainers (SQL Server) | |
 

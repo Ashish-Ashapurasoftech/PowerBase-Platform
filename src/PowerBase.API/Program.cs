@@ -1,4 +1,8 @@
 using PowerBase.API.Middleware;
+using PowerBase.Application.Apps.Commands.CreateApp;
+using PowerBase.Application.Apps.Commands.DeleteApp;
+using PowerBase.Application.Apps.Queries.GetApp;
+using PowerBase.Application.Apps.Queries.ListApps;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
 using PowerBase.Application.Auth.Queries.Login;
@@ -58,6 +62,10 @@ builder.Services.AddScoped<IAuditRepository, AuditRepository>();
 builder.Services.AddScoped<SignupCommandHandler>();
 builder.Services.AddScoped<LoginQueryHandler>();
 builder.Services.AddScoped<GetMeQueryHandler>();
+builder.Services.AddScoped<CreateAppCommandHandler>();
+builder.Services.AddScoped<DeleteAppCommandHandler>();
+builder.Services.AddScoped<GetAppQueryHandler>();
+builder.Services.AddScoped<ListAppsQueryHandler>();
 
 var app = builder.Build();
 

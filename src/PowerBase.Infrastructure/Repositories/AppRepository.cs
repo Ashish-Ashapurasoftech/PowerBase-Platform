@@ -43,13 +43,15 @@ public class AppRepository : BaseRepository, IAppRepository
 
     private const string InsertSql = """
         INSERT INTO meta.App (TenantId, OwnerId, Name, Description, Icon, Color, Status, IsDeleted, CreatedOn, CreatedBy)
-        OUTPUT INSERTED.Id
+        OUTPUT INSERTED.PublicId
         VALUES (@tenantId, @ownerId, @name, @description, @icon, @color, @status, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string SoftDeleteSql = """
         UPDATE meta.App
-        SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        SET IsDeleted = 1,
+            ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy,
+            DeletedOn  = SYSUTCDATETIME(), DeletedBy  = @modifiedBy
         WHERE TenantId = @tenantId
           AND PublicId = @publicId
           AND IsDeleted = 0
@@ -88,10 +90,10 @@ public class AppRepository : BaseRepository, IAppRepository
             new CommandDefinition(NameExistsSql, new { tenantId = QueryContext.TenantId, name }, cancellationToken: ct));
     }
 
-    public async Task<long> CreateAsync(App app, CancellationToken ct = default)
+    public async Task<Guid> CreateAsync(App app, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        return await connection.ExecuteScalarAsync<long>(
+        return await connection.ExecuteScalarAsync<Guid>(
             new CommandDefinition(InsertSql, new
             {
                 tenantId = QueryContext.TenantId,
