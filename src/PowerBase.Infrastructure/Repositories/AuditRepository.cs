@@ -1,3 +1,4 @@
+using System.Data;
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Infrastructure.Persistence;
@@ -12,7 +13,7 @@ public class AuditRepository : BaseRepository, IAuditRepository
         """;
 
     private const string InsertSessionSql = """
-        INSERT INTO audit.UserSession (UserId, TenantId, JwtId, IpAddress, ExpiresOn, CreatedOn)
+        INSERT INTO audit.UserSession (UserId, TenantId, JwtId, IpAddress, ExpiresOn, IssuedOn)
         VALUES (@userId, @tenantId, @jwtId, @ipAddress, @expiresOn, SYSUTCDATETIME())
         """;
 
@@ -26,8 +27,14 @@ public class AuditRepository : BaseRepository, IAuditRepository
             new CommandDefinition(InsertLoginAttemptSql, new { emailAttempted, ipAddress, wasSuccessful, userId, failureReason }, cancellationToken: ct));
     }
 
-    public async Task CreateSessionAsync(long userId, long tenantId, Guid jwtId, string ipAddress, DateTime expiresOn, CancellationToken ct = default)
+    public async Task CreateSessionAsync(long userId, long tenantId, Guid jwtId, string ipAddress, DateTime expiresOn, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(InsertSessionSql, new { userId, tenantId, jwtId, ipAddress, expiresOn }, transaction, cancellationToken: ct));
+            return;
+        }
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(InsertSessionSql, new { userId, tenantId, jwtId, ipAddress, expiresOn }, cancellationToken: ct));

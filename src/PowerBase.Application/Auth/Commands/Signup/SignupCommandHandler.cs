@@ -93,13 +93,13 @@ public class SignupCommandHandler
                 new TenantUser { TenantId = tenantId, UserId = userId, TenantRoleId = adminRoleId, IsOwner = true, IsActive = true },
                 _uow.Transaction, ct);
 
-            await _uow.CommitAsync(ct);
-
             var tokenUser = new User { Id = userId, PublicId = user.PublicId, Email = user.Email, Name = user.Name };
             var token = _jwtService.GenerateToken(tokenUser, tenantId, out var jwtId);
             var expiresAt = DateTime.UtcNow.AddMinutes(1440);
 
-            await _auditRepo.CreateSessionAsync(userId, tenantId, jwtId, _queryContext.IpAddress, expiresAt, ct);
+            await _auditRepo.CreateSessionAsync(userId, tenantId, jwtId, _queryContext.IpAddress, expiresAt, _uow.Transaction, ct);
+
+            await _uow.CommitAsync(ct);
 
             var created = await _userRepo.GetByIdAsync(userId, ct);
 

@@ -3,17 +3,15 @@ BEGIN
     CREATE TABLE audit.UserSession (
         Id            BIGINT IDENTITY(1,1) NOT NULL,
         UserId        BIGINT           NOT NULL,
-        TenantId      BIGINT           NOT NULL,
+        TenantId      BIGINT           NULL,
         JwtId         UNIQUEIDENTIFIER NOT NULL,
-        IpAddress     NVARCHAR(50)     NULL,
+        IpAddress     VARCHAR(45)      NULL,
         UserAgent     NVARCHAR(500)    NULL,
+        IssuedOn      DATETIME2(3)     NOT NULL CONSTRAINT df_UserSession_IssuedOn DEFAULT SYSUTCDATETIME(),
         ExpiresOn     DATETIME2(3)     NOT NULL,
         RevokedOn     DATETIME2(3)     NULL,
-        RevokedReason NVARCHAR(200)    NULL,
-        CreatedOn     DATETIME2(3)     NOT NULL DEFAULT SYSUTCDATETIME(),
-        CONSTRAINT PK_UserSession PRIMARY KEY CLUSTERED (Id),
-        CONSTRAINT UX_UserSession_JwtId UNIQUE (JwtId),
-        CONSTRAINT FK_UserSession_User FOREIGN KEY (UserId) REFERENCES core.[User](Id)
+        RevokedReason VARCHAR(50)      NULL,
+        CONSTRAINT pk_UserSession PRIMARY KEY CLUSTERED (Id)
     );
 END
 GO

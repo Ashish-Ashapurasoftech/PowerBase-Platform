@@ -61,7 +61,7 @@ public class LoginQueryHandler
         var token = _jwtService.GenerateToken(user, tenantId, out var jwtId);
         var expiresAt = DateTime.UtcNow.AddMinutes(1440);
 
-        await _auditRepo.CreateSessionAsync(user.Id, tenantId, jwtId, query.IpAddress, expiresAt, ct);
+        await _auditRepo.CreateSessionAsync(user.Id, tenantId, jwtId, query.IpAddress, expiresAt, ct: ct);
 
         return new LoginResult
         {

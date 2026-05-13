@@ -56,7 +56,10 @@ public class JwtService : IJwtService
         try
         {
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secretKey));
-            var handler = new JwtSecurityTokenHandler();
+            var handler = new JwtSecurityTokenHandler
+            {
+                MapInboundClaims = false
+            };
             var principal = handler.ValidateToken(token, new TokenValidationParameters
             {
                 ValidateIssuerSigningKey = true,
