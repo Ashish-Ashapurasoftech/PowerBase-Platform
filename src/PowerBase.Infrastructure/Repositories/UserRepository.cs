@@ -9,7 +9,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class UserRepository : BaseRepository, IUserRepository
 {
-    private const string SelectColumns = "Id, PublicId, Email, PasswordHash, FirstName, LastName, SystemRoleId, IsActive, IsDeleted, CreatedAt, UpdatedAt, RowVersion";
+    private const string SelectColumns = "Id, PublicId, Email, EmailNormalized, HashedPassword, Name, IsEmailVerified, IsActive, IsDeleted, LastLoginOn, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
 
     private const string GetByEmailSql = $"""
         SELECT {SelectColumns}
@@ -33,9 +33,9 @@ public class UserRepository : BaseRepository, IUserRepository
         """;
 
     private const string InsertSql = """
-        INSERT INTO core.[User] (Email, PasswordHash, FirstName, LastName, SystemRoleId, IsActive, IsDeleted, CreatedAt, UpdatedAt)
+        INSERT INTO core.[User] (Email, EmailNormalized, HashedPassword, Name, IsEmailVerified, IsActive, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
-        VALUES (@email, @passwordHash, @firstName, @lastName, @systemRoleId, 1, 0, SYSUTCDATETIME(), SYSUTCDATETIME())
+        VALUES (@email, @emailNormalized, @hashedPassword, @name, 0, 1, 0, SYSUTCDATETIME(), 0)
         """;
 
     public UserRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -74,10 +74,9 @@ public class UserRepository : BaseRepository, IUserRepository
                 new CommandDefinition(InsertSql, new
                 {
                     email = user.Email,
-                    passwordHash = user.PasswordHash,
-                    firstName = user.FirstName,
-                    lastName = user.LastName,
-                    systemRoleId = user.SystemRoleId,
+                    emailNormalized = user.Email.ToUpperInvariant(),
+                    hashedPassword = user.HashedPassword,
+                    name = user.Name,
                 }, transaction, cancellationToken: ct));
         }
         finally

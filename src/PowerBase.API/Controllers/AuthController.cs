@@ -33,9 +33,9 @@ public class AuthController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Signup([FromBody] SignupRequest request, CancellationToken ct)
     {
-        var command = new SignupCommand(request.Email, request.Password, request.FirstName, request.LastName, request.TenantName);
+        var command = new SignupCommand(request.Email, request.Password, request.Name, request.TenantName);
         var result = await _signupHandler.HandleAsync(command, ct);
-        var response = MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId, result.Email, result.FirstName, result.LastName);
+        var response = MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId, result.Email, result.Name);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<AuthResponse>(response));
     }
 
@@ -49,7 +49,7 @@ public class AuthController : ControllerBase
         var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
         var query = new LoginQuery(request.Email, request.Password, ipAddress);
         var result = await _loginHandler.HandleAsync(query, ct);
-        var response = MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId, result.Email, result.FirstName, result.LastName);
+        var response = MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId, result.Email, result.Name);
         return Ok(new ApiResponse<AuthResponse>(response));
     }
 
@@ -65,13 +65,12 @@ public class AuthController : ControllerBase
         {
             PublicId = user.PublicId,
             Email = user.Email,
-            FirstName = user.FirstName,
-            LastName = user.LastName,
+            Name = user.Name,
         };
         return Ok(new ApiResponse<UserResponse>(response));
     }
 
-    private static AuthResponse MapToAuthResponse(string token, DateTime expiresAt, Guid publicId, string email, string firstName, string lastName)
+    private static AuthResponse MapToAuthResponse(string token, DateTime expiresAt, Guid publicId, string email, string name)
         => new()
         {
             Token = token,
@@ -80,8 +79,7 @@ public class AuthController : ControllerBase
             {
                 PublicId = publicId,
                 Email = email,
-                FirstName = firstName,
-                LastName = lastName,
+                Name = name,
             }
         };
 }

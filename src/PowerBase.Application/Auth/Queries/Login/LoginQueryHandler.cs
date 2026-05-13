@@ -9,8 +9,7 @@ public class LoginResult
     public DateTime ExpiresAt { get; init; }
     public Guid UserPublicId { get; init; }
     public string Email { get; init; } = string.Empty;
-    public string FirstName { get; init; } = string.Empty;
-    public string LastName { get; init; } = string.Empty;
+    public string Name { get; init; } = string.Empty;
 }
 
 public class LoginQueryHandler
@@ -49,18 +48,18 @@ public class LoginQueryHandler
                     .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
 
         var user = await _userRepo.GetByEmailAsync(query.Email, ct);
-        if (user is null || !_passwordService.Verify(query.Password, user.PasswordHash))
+        if (user is null || !_passwordService.Verify(query.Password, user.HashedPassword))
         {
-            await _auditRepo.RecordLoginAttemptAsync(query.Email, query.IpAddress, isSuccess: false, ct);
+            await _auditRepo.RecordLoginAttemptAsync(query.Email, query.IpAddress, wasSuccessful: false, userId: user?.Id, failureReason: "Invalid credentials", ct);
             throw new UnauthorizedActionException("login");
         }
 
-        await _auditRepo.RecordLoginAttemptAsync(query.Email, query.IpAddress, isSuccess: true, ct);
+        await _auditRepo.RecordLoginAttemptAsync(query.Email, query.IpAddress, wasSuccessful: true, userId: user.Id, ct: ct);
 
         var tenantId = await _tenantRepo.GetActiveTenantIdByUserIdAsync(user.Id, ct);
 
         var token = _jwtService.GenerateToken(user, tenantId, out var jwtId);
-        var expiresAt = DateTime.UtcNow.AddDays(1);
+        var expiresAt = DateTime.UtcNow.AddMinutes(1440);
 
         await _auditRepo.CreateSessionAsync(user.Id, tenantId, jwtId, query.IpAddress, expiresAt, ct);
 
@@ -70,8 +69,7 @@ public class LoginQueryHandler
             ExpiresAt = expiresAt,
             UserPublicId = user.PublicId,
             Email = user.Email,
-            FirstName = user.FirstName,
-            LastName = user.LastName,
+            Name = user.Name,
         };
     }
 }

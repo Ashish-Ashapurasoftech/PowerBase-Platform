@@ -27,9 +27,9 @@ public class JwtService : IJwtService
             ?? throw new InvalidOperationException("Jwt:Audience is not configured.");
     }
 
-    public string GenerateToken(User user, long tenantId, out string jwtId)
+    public string GenerateToken(User user, long tenantId, out Guid jwtId)
     {
-        jwtId = Guid.NewGuid().ToString();
+        jwtId = Guid.NewGuid();
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secretKey));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
@@ -37,7 +37,7 @@ public class JwtService : IJwtService
         {
             new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
             new Claim("tid", tenantId.ToString()),
-            new Claim(JwtRegisteredClaimNames.Jti, jwtId),
+            new Claim(JwtRegisteredClaimNames.Jti, jwtId.ToString()),
         };
 
         var token = new JwtSecurityToken(
@@ -50,9 +50,9 @@ public class JwtService : IJwtService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    public bool ValidateToken(string token, out long userId, out long tenantId, out string jwtId)
+    public bool ValidateToken(string token, out long userId, out long tenantId, out Guid jwtId)
     {
-        userId = 0; tenantId = 0; jwtId = string.Empty;
+        userId = 0; tenantId = 0; jwtId = Guid.Empty;
         try
         {
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secretKey));
@@ -71,7 +71,7 @@ public class JwtService : IJwtService
 
             userId = long.Parse(principal.FindFirst(JwtRegisteredClaimNames.Sub)!.Value);
             tenantId = long.Parse(principal.FindFirst("tid")!.Value);
-            jwtId = principal.FindFirst(JwtRegisteredClaimNames.Jti)!.Value;
+            jwtId = Guid.Parse(principal.FindFirst(JwtRegisteredClaimNames.Jti)!.Value);
             return true;
         }
         catch

@@ -1,5 +1,3 @@
-using PowerBase.Domain.Enums;
-
 namespace PowerBase.Domain.Entities;
 
 public class App
@@ -10,9 +8,15 @@ public class App
     public long OwnerId { get; set; }
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }
-    public AppStatus Status { get; set; }
+    public string? Icon { get; set; }
+    public string? Color { get; set; }
+    public string Status { get; set; } = "Active";
     public bool IsDeleted { get; set; }
-    public DateTime CreatedAt { get; set; }
-    public DateTime UpdatedAt { get; set; }
+    public DateTime CreatedOn { get; set; }
+    public long CreatedBy { get; set; }
+    public DateTime? ModifiedOn { get; set; }
+    public long? ModifiedBy { get; set; }
+    public DateTime? DeletedOn { get; set; }
+    public long? DeletedBy { get; set; }
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
 }

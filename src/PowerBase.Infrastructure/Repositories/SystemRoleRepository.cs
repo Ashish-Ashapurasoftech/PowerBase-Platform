@@ -14,10 +14,10 @@ public class SystemRoleRepository : BaseRepository, ISystemRoleRepository
     public SystemRoleRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
-    public async Task<long> GetIdByCodeAsync(string code, CancellationToken ct = default)
+    public async Task<int> GetIdByCodeAsync(string code, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        var id = await connection.ExecuteScalarAsync<long?>(
+        var id = await connection.ExecuteScalarAsync<int?>(
             new CommandDefinition(GetIdByCodeSql, new { code }, cancellationToken: ct));
         return id ?? throw new NotFoundException("SystemRole", code);
     }

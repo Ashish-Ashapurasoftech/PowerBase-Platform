@@ -1,12 +1,15 @@
-using PowerBase.Domain.Enums;
-
 namespace PowerBase.Domain.Entities;
 
 public class FieldType
 {
-    public long Id { get; set; }
+    public int Id { get; set; }
     public string Code { get; set; } = string.Empty;
-    public string Name { get; set; } = string.Empty;
-    public string SqlType { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string Category { get; set; } = string.Empty;
+    public string SqlDataType { get; set; } = string.Empty;
+    public bool SupportsDefault { get; set; }
+    public bool SupportsRequired { get; set; }
+    public bool SupportsUnique { get; set; }
+    public int DisplayOrder { get; set; }
     public bool IsActive { get; set; }
 }

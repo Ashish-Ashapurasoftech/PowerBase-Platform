@@ -8,7 +8,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class AppRepository : BaseRepository, IAppRepository
 {
-    private const string SelectColumns = "Id, PublicId, TenantId, OwnerId, Name, Description, Status, IsDeleted, CreatedAt, UpdatedAt, RowVersion";
+    private const string SelectColumns = "Id, PublicId, TenantId, OwnerId, Name, Description, Icon, Color, Status, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
 
     private const string GetByPublicIdSql = $"""
         SELECT {SelectColumns}
@@ -42,14 +42,14 @@ public class AppRepository : BaseRepository, IAppRepository
         """;
 
     private const string InsertSql = """
-        INSERT INTO meta.App (PublicId, TenantId, OwnerId, Name, Description, Status, IsDeleted, CreatedAt, UpdatedAt)
+        INSERT INTO meta.App (TenantId, OwnerId, Name, Description, Icon, Color, Status, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
-        VALUES (NEWID(), @tenantId, @ownerId, @name, @description, @status, 0, SYSUTCDATETIME(), SYSUTCDATETIME())
+        VALUES (@tenantId, @ownerId, @name, @description, @icon, @color, @status, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string SoftDeleteSql = """
         UPDATE meta.App
-        SET IsDeleted = 1, UpdatedAt = SYSUTCDATETIME()
+        SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE TenantId = @tenantId
           AND PublicId = @publicId
           AND IsDeleted = 0
@@ -98,7 +98,10 @@ public class AppRepository : BaseRepository, IAppRepository
                 ownerId = app.OwnerId,
                 name = app.Name,
                 description = app.Description,
-                status = (int)app.Status
+                icon = app.Icon,
+                color = app.Color,
+                status = app.Status,
+                createdBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }
 
@@ -106,7 +109,7 @@ public class AppRepository : BaseRepository, IAppRepository
     {
         await using var connection = ConnectionFactory.Create();
         var affected = await connection.ExecuteAsync(
-            new CommandDefinition(SoftDeleteSql, new { tenantId = QueryContext.TenantId, publicId }, cancellationToken: ct));
+            new CommandDefinition(SoftDeleteSql, new { tenantId = QueryContext.TenantId, publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
         if (affected == 0)
             throw new NotFoundException("App", publicId);
     }

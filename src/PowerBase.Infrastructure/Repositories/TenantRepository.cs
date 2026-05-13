@@ -21,25 +21,26 @@ public class TenantRepository : BaseRepository, ITenantRepository
         JOIN meta.Tenant t ON t.Id = tu.TenantId
         WHERE tu.UserId = @userId
           AND tu.IsActive = 1
+          AND tu.IsDeleted = 0
           AND t.IsDeleted = 0
         ORDER BY tu.Id
         """;
 
     private const string InsertTenantSql = """
-        INSERT INTO meta.Tenant (Name, Slug, Status, IsDeleted, CreatedAt, UpdatedAt)
+        INSERT INTO meta.Tenant (Name, Slug, PlanCode, Status, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
-        VALUES (@name, @slug, @status, 0, SYSUTCDATETIME(), SYSUTCDATETIME())
+        VALUES (@name, @slug, 'Free', 'Active', 0, SYSUTCDATETIME(), 0)
         """;
 
     private const string InsertTenantRoleSql = """
-        INSERT INTO meta.TenantRole (TenantId, Name, IsDefault, CreatedAt, UpdatedAt)
+        INSERT INTO meta.TenantRole (TenantId, Name, IsDefault, IsSystem, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
-        VALUES (@tenantId, @name, @isDefault, SYSUTCDATETIME(), SYSUTCDATETIME())
+        VALUES (@tenantId, @name, @isDefault, @isSystem, 0, SYSUTCDATETIME(), 0)
         """;
 
     private const string InsertTenantUserSql = """
-        INSERT INTO meta.TenantUser (TenantId, UserId, TenantRoleId, IsActive, CreatedAt, UpdatedAt)
-        VALUES (@tenantId, @userId, @tenantRoleId, @isActive, SYSUTCDATETIME(), SYSUTCDATETIME())
+        INSERT INTO meta.TenantUser (TenantId, UserId, TenantRoleId, IsOwner, IsActive, IsDeleted, JoinedOn, CreatedOn, CreatedBy)
+        VALUES (@tenantId, @userId, @tenantRoleId, @isOwner, @isActive, 0, SYSUTCDATETIME(), SYSUTCDATETIME(), 0)
         """;
 
     public TenantRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -71,7 +72,6 @@ public class TenantRepository : BaseRepository, ITenantRepository
                 {
                     name = tenant.Name,
                     slug = tenant.Slug,
-                    status = (int)tenant.Status,
                 }, transaction, cancellationToken: ct));
         }
         finally
@@ -92,6 +92,7 @@ public class TenantRepository : BaseRepository, ITenantRepository
                     tenantId = role.TenantId,
                     name = role.Name,
                     isDefault = role.IsDefault,
+                    isSystem = role.IsSystem,
                 }, transaction, cancellationToken: ct));
         }
         finally
@@ -112,6 +113,7 @@ public class TenantRepository : BaseRepository, ITenantRepository
                     tenantId = tenantUser.TenantId,
                     userId = tenantUser.UserId,
                     tenantRoleId = tenantUser.TenantRoleId,
+                    isOwner = tenantUser.IsOwner,
                     isActive = tenantUser.IsActive,
                 }, transaction, cancellationToken: ct));
         }
