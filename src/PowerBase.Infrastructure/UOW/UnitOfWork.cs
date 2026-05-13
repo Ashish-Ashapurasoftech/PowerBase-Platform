@@ -1,4 +1,6 @@
+using System.Data;
 using Microsoft.Data.SqlClient;
+using PowerBase.Application.Common.Interfaces;
 using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.UOW;
@@ -13,12 +15,12 @@ public class UnitOfWork : IUnitOfWork
         _connection = factory.Create();
     }
 
-    public SqlConnection Connection => _connection;
-    public SqlTransaction? Transaction => _transaction;
+    public IDbConnection Connection => _connection;
+    public IDbTransaction? Transaction => _transaction;
 
     public async Task BeginAsync(CancellationToken ct = default)
     {
-        if (_connection.State != System.Data.ConnectionState.Open)
+        if (_connection.State != ConnectionState.Open)
             await _connection.OpenAsync(ct);
         _transaction = (SqlTransaction)await _connection.BeginTransactionAsync(ct);
     }

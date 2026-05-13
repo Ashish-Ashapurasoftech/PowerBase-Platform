@@ -1,4 +1,7 @@
 using PowerBase.API.Middleware;
+using PowerBase.Application.Auth.Commands.Signup;
+using PowerBase.Application.Auth.Queries.GetMe;
+using PowerBase.Application.Auth.Queries.Login;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Infrastructure.Persistence;
 using PowerBase.Infrastructure.Repositories;
@@ -46,6 +49,15 @@ builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<ITenantRepository, TenantRepository>();
+builder.Services.AddScoped<ISystemRoleRepository, SystemRoleRepository>();
+builder.Services.AddScoped<IAuditRepository, AuditRepository>();
+
+// Handlers
+builder.Services.AddScoped<SignupCommandHandler>();
+builder.Services.AddScoped<LoginQueryHandler>();
+builder.Services.AddScoped<GetMeQueryHandler>();
 
 var app = builder.Build();
 
