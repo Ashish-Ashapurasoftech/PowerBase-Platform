@@ -1,0 +1,28 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [staging]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore PowerBase.sln
+
+      - name: Build
+        run: dotnet build PowerBase.sln --no-restore --configuration Release
+
+      - name: Publish
+        run: dotnet publish src/PowerBase.API/PowerBase.API.csproj --configuration Release --output ./publish
+
+      # Add Azure deployment step here (e.g. azure/webapps-deploy@v3)

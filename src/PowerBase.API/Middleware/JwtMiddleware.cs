@@ -1,0 +1,27 @@
+using PowerBase.Application.Common.Interfaces;
+using PowerBase.Infrastructure.Services;
+
+namespace PowerBase.API.Middleware;
+
+public class JwtMiddleware
+{
+    private readonly RequestDelegate _next;
+
+    public JwtMiddleware(RequestDelegate next) => _next = next;
+
+    public async Task InvokeAsync(HttpContext context, IJwtService jwtService, IQueryContext queryContext)
+    {
+        var token = context.Request.Headers["Authorization"]
+            .FirstOrDefault()?.Split(" ").Last();
+
+        if (token is not null && jwtService.ValidateToken(token, out var userId, out var tenantId, out _))
+        {
+            var ctx = (QueryContext)queryContext;
+            ctx.UserId = userId;
+            ctx.TenantId = tenantId;
+            ctx.IpAddress = context.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
+        }
+
+        await _next(context);
+    }
+}
