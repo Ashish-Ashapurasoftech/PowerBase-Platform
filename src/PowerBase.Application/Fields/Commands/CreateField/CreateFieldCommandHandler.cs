@@ -1,0 +1,98 @@
+using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
+using PowerBase.Domain.Entities;
+using PowerBase.Domain.Exceptions;
+
+namespace PowerBase.Application.Fields.Commands.CreateField;
+
+public class CreateFieldResult
+{
+    public long Id { get; init; }
+    public Guid PublicId { get; init; }
+    public string Name { get; init; } = string.Empty;
+    public string? Label { get; init; }
+    public string? Description { get; init; }
+    public string TypeCode { get; init; } = string.Empty;
+    public string PhysicalColumnName { get; init; } = string.Empty;
+    public bool IsRequired { get; init; }
+    public int DisplayOrder { get; init; }
+    public DateTime CreatedOn { get; init; }
+}
+
+public class CreateFieldCommandHandler
+{
+    private readonly IAppTableRepository _tableRepo;
+    private readonly IAppFieldRepository _fieldRepo;
+    private readonly IFieldTypeRepository _fieldTypeRepo;
+    private readonly ISchemaEngineService _schemaEngine;
+    private readonly IQueryContext _queryContext;
+
+    public CreateFieldCommandHandler(
+        IAppTableRepository tableRepo,
+        IAppFieldRepository fieldRepo,
+        IFieldTypeRepository fieldTypeRepo,
+        ISchemaEngineService schemaEngine,
+        IQueryContext queryContext)
+    {
+        _tableRepo = tableRepo;
+        _fieldRepo = fieldRepo;
+        _fieldTypeRepo = fieldTypeRepo;
+        _schemaEngine = schemaEngine;
+        _queryContext = queryContext;
+    }
+
+    public async Task<CreateFieldResult> HandleAsync(CreateFieldCommand command, CancellationToken ct = default)
+    {
+        var validator = new CreateFieldCommandValidator();
+        var validation = await validator.ValidateAsync(command, ct);
+        if (!validation.IsValid)
+            throw new ValidationException(
+                validation.Errors
+                    .GroupBy(e => e.PropertyName)
+                    .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
+
+        var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
+
+        if (await _fieldRepo.NameExistsInTableAsync(table.Id, command.Name, ct))
+            throw new DuplicateException("Field", "name", command.Name);
+
+        var fieldType = await _fieldTypeRepo.GetByCodeAsync(command.TypeCode, ct)
+            ?? throw new NotFoundException("FieldType", command.TypeCode);
+
+        var field = new AppField
+        {
+            TenantId = _queryContext.TenantId,
+            AppTableId = table.Id,
+            FieldTypeId = fieldType.Id,
+            Name = command.Name,
+            Label = command.Label,
+            Description = command.Description,
+            IsRequired = command.IsRequired,
+            CreatedBy = _queryContext.UserId,
+        };
+
+        var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
+        field.Id = id;
+        field.PublicId = publicId;
+
+        var physicalColumn = PhysicalNaming.ColumnName(id);
+        await _fieldRepo.UpdatePhysicalColumnNameAsync(id, physicalColumn, ct);
+        field.PhysicalColumnName = physicalColumn;
+
+        await _schemaEngine.AddColumnAsync(table, field, ct);
+
+        return new CreateFieldResult
+        {
+            Id = id,
+            PublicId = publicId,
+            Name = field.Name,
+            Label = field.Label,
+            Description = field.Description,
+            TypeCode = command.TypeCode,
+            PhysicalColumnName = physicalColumn,
+            IsRequired = field.IsRequired,
+            DisplayOrder = 0,
+            CreatedOn = DateTime.UtcNow,
+        };
+    }
+}

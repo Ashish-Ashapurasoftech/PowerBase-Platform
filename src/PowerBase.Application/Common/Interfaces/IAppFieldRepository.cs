@@ -4,7 +4,8 @@ namespace PowerBase.Application.Common.Interfaces;
 
 public interface IAppFieldRepository
 {
-    Task<IReadOnlyList<AppField>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default);
+    Task<IReadOnlyList<AppField>> ListByTableAsync(long tableId, CancellationToken ct = default);
     Task<bool> NameExistsInTableAsync(long tableId, string name, CancellationToken ct = default);
-    Task<long> CreateAsync(AppField field, CancellationToken ct = default);
+    Task<(long Id, Guid PublicId)> CreateAsync(AppField field, CancellationToken ct = default);
+    Task UpdatePhysicalColumnNameAsync(long id, string physicalColumnName, CancellationToken ct = default);
 }

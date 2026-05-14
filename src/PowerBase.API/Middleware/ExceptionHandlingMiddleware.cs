@@ -7,11 +7,13 @@ public class ExceptionHandlingMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ILogger<ExceptionHandlingMiddleware> _logger;
+    private readonly IHostEnvironment _env;
 
-    public ExceptionHandlingMiddleware(RequestDelegate next, ILogger<ExceptionHandlingMiddleware> logger)
+    public ExceptionHandlingMiddleware(RequestDelegate next, ILogger<ExceptionHandlingMiddleware> logger, IHostEnvironment env)
     {
         _next = next;
         _logger = logger;
+        _env = env;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -38,14 +40,24 @@ public class ExceptionHandlingMiddleware
         };
 
         if (statusCode == StatusCodes.Status500InternalServerError)
-            _logger.LogError(exception, "Unhandled exception");
+            _logger.LogError(exception, "Unhandled exception: {Message}", exception.Message);
 
         context.Response.ContentType = "application/json";
         context.Response.StatusCode = statusCode;
 
-        var body = errors is not null
-            ? new { error = new { code, message, errors } }
-            : (object)new { error = new { code, message } };
+        object body;
+        if (statusCode == StatusCodes.Status500InternalServerError && _env.IsDevelopment())
+        {
+            body = new { error = new { code, message = exception.Message, detail = exception.ToString() } };
+        }
+        else if (errors is not null)
+        {
+            body = new { error = new { code, message, errors } };
+        }
+        else
+        {
+            body = new { error = new { code, message } };
+        }
 
         await context.Response.WriteAsync(JsonSerializer.Serialize(body,
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));

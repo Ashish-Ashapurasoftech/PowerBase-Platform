@@ -1,0 +1,10 @@
+namespace PowerBase.API.Models.Fields;
+
+public class CreateFieldRequest
+{
+    public string TypeCode { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string? Label { get; set; }
+    public string? Description { get; set; }
+    public bool IsRequired { get; set; }
+}

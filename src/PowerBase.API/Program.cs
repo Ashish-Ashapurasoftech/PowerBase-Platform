@@ -7,6 +7,12 @@ using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
 using PowerBase.Application.Auth.Queries.Login;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Fields.Commands.CreateField;
+using PowerBase.Application.Fields.Queries.ListFields;
+using PowerBase.Application.Tables.Commands.CreateTable;
+using PowerBase.Application.Tables.Commands.DeleteTable;
+using PowerBase.Application.Tables.Queries.GetTable;
+using PowerBase.Application.Tables.Queries.ListTables;
 using PowerBase.Infrastructure.Persistence;
 using PowerBase.Infrastructure.Repositories;
 using PowerBase.Infrastructure.Services;
@@ -53,10 +59,13 @@ builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
+builder.Services.AddScoped<IAppTableRepository, AppTableRepository>();
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<ISystemRoleRepository, SystemRoleRepository>();
 builder.Services.AddScoped<IAuditRepository, AuditRepository>();
+builder.Services.AddScoped<IAppFieldRepository, AppFieldRepository>();
+builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 
 // Handlers
 builder.Services.AddScoped<SignupCommandHandler>();
@@ -66,6 +75,12 @@ builder.Services.AddScoped<CreateAppCommandHandler>();
 builder.Services.AddScoped<DeleteAppCommandHandler>();
 builder.Services.AddScoped<GetAppQueryHandler>();
 builder.Services.AddScoped<ListAppsQueryHandler>();
+builder.Services.AddScoped<CreateTableCommandHandler>();
+builder.Services.AddScoped<DeleteTableCommandHandler>();
+builder.Services.AddScoped<GetTableQueryHandler>();
+builder.Services.AddScoped<ListTablesQueryHandler>();
+builder.Services.AddScoped<CreateFieldCommandHandler>();
+builder.Services.AddScoped<ListFieldsQueryHandler>();
 
 var app = builder.Build();
 
@@ -78,6 +93,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.UseMiddleware<QueryContextMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.MapControllers();
 

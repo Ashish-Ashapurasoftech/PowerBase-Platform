@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "PowerBase.Migrator": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

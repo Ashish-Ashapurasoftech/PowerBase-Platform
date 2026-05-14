@@ -7,6 +7,7 @@ public class AppField
     public long TenantId { get; set; }
     public long AppTableId { get; set; }
     public int FieldTypeId { get; set; }
+    public string TypeCode { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string? Label { get; set; }
     public string? HelpText { get; set; }

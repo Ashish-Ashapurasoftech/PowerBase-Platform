@@ -1,0 +1,8 @@
+using PowerBase.Domain.Entities;
+
+namespace PowerBase.Application.Common.Interfaces;
+
+public interface IFieldTypeRepository
+{
+    Task<FieldType?> GetByCodeAsync(string code, CancellationToken ct = default);
+}

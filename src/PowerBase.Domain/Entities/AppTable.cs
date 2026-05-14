@@ -10,6 +10,7 @@ public class AppTable
     public string? SingularLabel { get; set; }
     public string? PluralLabel { get; set; }
     public string? Description { get; set; }
+    public string? Icon { get; set; }
     public string? PhysicalTableName { get; set; }
     public long? DisplayFieldId { get; set; }
     public int RecordCount { get; set; }
