@@ -9,6 +9,11 @@ using PowerBase.Application.Auth.Queries.Login;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Queries.ListFields;
+using PowerBase.Application.Records.Commands.CreateRecord;
+using PowerBase.Application.Records.Commands.DeleteRecord;
+using PowerBase.Application.Records.Commands.UpdateRecord;
+using PowerBase.Application.Records.Queries.GetRecord;
+using PowerBase.Application.Records.Queries.ListRecords;
 using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
 using PowerBase.Application.Tables.Queries.GetTable;
@@ -66,6 +71,7 @@ builder.Services.AddScoped<ISystemRoleRepository, SystemRoleRepository>();
 builder.Services.AddScoped<IAuditRepository, AuditRepository>();
 builder.Services.AddScoped<IAppFieldRepository, AppFieldRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
+builder.Services.AddScoped<IRecordRepository, RecordRepository>();
 
 // Handlers
 builder.Services.AddScoped<SignupCommandHandler>();
@@ -81,6 +87,11 @@ builder.Services.AddScoped<GetTableQueryHandler>();
 builder.Services.AddScoped<ListTablesQueryHandler>();
 builder.Services.AddScoped<CreateFieldCommandHandler>();
 builder.Services.AddScoped<ListFieldsQueryHandler>();
+builder.Services.AddScoped<CreateRecordCommandHandler>();
+builder.Services.AddScoped<UpdateRecordCommandHandler>();
+builder.Services.AddScoped<DeleteRecordCommandHandler>();
+builder.Services.AddScoped<ListRecordsQueryHandler>();
+builder.Services.AddScoped<GetRecordQueryHandler>();
 
 var app = builder.Build();
 
