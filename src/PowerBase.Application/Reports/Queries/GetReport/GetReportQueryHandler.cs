@@ -1,0 +1,34 @@
+using System.Text.Json;
+using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Reports;
+
+namespace PowerBase.Application.Reports.Queries.GetReport;
+
+public class GetReportQueryHandler
+{
+    private readonly IReportRepository _reportRepo;
+
+    public GetReportQueryHandler(IReportRepository reportRepo)
+    {
+        _reportRepo = reportRepo;
+    }
+
+    public async Task<ReportDetailResult> HandleAsync(GetReportQuery query, CancellationToken ct = default)
+    {
+        var report = await _reportRepo.GetByPublicIdAsync(query.PublicId, ct);
+        var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+
+        return new ReportDetailResult
+        {
+            Id = report.PublicId,
+            Name = report.Name,
+            Description = report.Description,
+            ReportType = report.ReportType,
+            Visibility = report.Visibility,
+            Definition = definition,
+            IsDefault = report.IsDefault,
+            DisplayOrder = report.DisplayOrder,
+            CreatedOn = report.CreatedOn,
+        };
+    }
+}

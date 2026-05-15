@@ -14,6 +14,10 @@ using PowerBase.Application.Records.Commands.DeleteRecord;
 using PowerBase.Application.Records.Commands.UpdateRecord;
 using PowerBase.Application.Records.Queries.GetRecord;
 using PowerBase.Application.Records.Queries.ListRecords;
+using PowerBase.Application.Reports.Commands.CreateReport;
+using PowerBase.Application.Reports.Queries.GetReport;
+using PowerBase.Application.Reports.Queries.ListReports;
+using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
 using PowerBase.Application.Tables.Queries.GetTable;
@@ -72,6 +76,7 @@ builder.Services.AddScoped<IAuditRepository, AuditRepository>();
 builder.Services.AddScoped<IAppFieldRepository, AppFieldRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
+builder.Services.AddScoped<IReportRepository, ReportRepository>();
 
 // Handlers
 builder.Services.AddScoped<SignupCommandHandler>();
@@ -92,6 +97,10 @@ builder.Services.AddScoped<UpdateRecordCommandHandler>();
 builder.Services.AddScoped<DeleteRecordCommandHandler>();
 builder.Services.AddScoped<ListRecordsQueryHandler>();
 builder.Services.AddScoped<GetRecordQueryHandler>();
+builder.Services.AddScoped<CreateReportCommandHandler>();
+builder.Services.AddScoped<GetReportQueryHandler>();
+builder.Services.AddScoped<ListReportsQueryHandler>();
+builder.Services.AddScoped<RunReportQueryHandler>();
 
 var app = builder.Build();
 

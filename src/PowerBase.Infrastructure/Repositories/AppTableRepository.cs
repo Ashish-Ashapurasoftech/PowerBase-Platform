@@ -14,6 +14,14 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion
         """;
 
+    private const string GetByIdSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.AppTable
+        WHERE TenantId = @tenantId
+          AND Id = @id
+          AND IsDeleted = 0
+        """;
+
     private const string GetByPublicIdSql = $"""
         SELECT {SelectColumns}
         FROM meta.AppTable
@@ -60,6 +68,14 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
 
     public AppTableRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
+
+    public async Task<AppTable> GetByIdAsync(long id, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var table = await connection.QuerySingleOrDefaultAsync<AppTable>(
+            new CommandDefinition(GetByIdSql, new { tenantId = QueryContext.TenantId, id }, cancellationToken: ct));
+        return table ?? throw new NotFoundException("Table", id);
+    }
 
     public async Task<AppTable> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
