@@ -34,6 +34,30 @@ public class AppRepository : BaseRepository, IAppRepository
           AND IsDeleted = 0
         """;
 
+    private const string ListByUserSql = """
+        SELECT a.Id, a.PublicId, a.TenantId, a.OwnerId, a.Name, a.Description, a.Icon, a.Color,
+               a.Status, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
+               a.DeletedOn, a.DeletedBy, a.RowVersion
+        FROM meta.App a
+        JOIN meta.AppUser au ON au.AppId = a.Id
+        WHERE a.TenantId  = @tenantId
+          AND au.UserId   = @userId
+          AND au.IsDeleted = 0
+          AND a.IsDeleted  = 0
+        ORDER BY a.Name
+        OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+        """;
+
+    private const string CountByUserSql = """
+        SELECT COUNT(1)
+        FROM meta.App a
+        JOIN meta.AppUser au ON au.AppId = a.Id
+        WHERE a.TenantId  = @tenantId
+          AND au.UserId   = @userId
+          AND au.IsDeleted = 0
+          AND a.IsDeleted  = 0
+        """;
+
     private const string NameExistsSql = """
         SELECT CAST(CASE WHEN EXISTS (
             SELECT 1 FROM meta.App
@@ -41,9 +65,14 @@ public class AppRepository : BaseRepository, IAppRepository
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
+    private const string GetIdByPublicIdSql = """
+        SELECT Id FROM meta.App
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+        """;
+
     private const string InsertSql = """
         INSERT INTO meta.App (TenantId, OwnerId, Name, Description, Icon, Color, Status, IsDeleted, CreatedOn, CreatedBy)
-        OUTPUT INSERTED.PublicId
+        OUTPUT INSERTED.PublicId, INSERTED.Id
         VALUES (@tenantId, @ownerId, @name, @description, @icon, @color, @status, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
@@ -90,21 +119,53 @@ public class AppRepository : BaseRepository, IAppRepository
             new CommandDefinition(NameExistsSql, new { tenantId = QueryContext.TenantId, name }, cancellationToken: ct));
     }
 
-    public async Task<Guid> CreateAsync(App app, CancellationToken ct = default)
+    public async Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        return await connection.ExecuteScalarAsync<Guid>(
-            new CommandDefinition(InsertSql, new
-            {
-                tenantId = QueryContext.TenantId,
-                ownerId = app.OwnerId,
-                name = app.Name,
-                description = app.Description,
-                icon = app.Icon,
-                color = app.Color,
-                status = app.Status,
-                createdBy = QueryContext.UserId,
-            }, cancellationToken: ct));
+        var id = await connection.ExecuteScalarAsync<long?>(
+            new CommandDefinition(GetIdByPublicIdSql, new { tenantId = QueryContext.TenantId, publicId }, cancellationToken: ct));
+        return id ?? throw new NotFoundException("App", publicId);
+    }
+
+    public async Task<(Guid PublicId, long Id)> CreateAsync(App app, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var parameters = new
+        {
+            tenantId = QueryContext.TenantId,
+            ownerId = app.OwnerId,
+            name = app.Name,
+            description = app.Description,
+            icon = app.Icon,
+            color = app.Color,
+            status = app.Status,
+            createdBy = QueryContext.UserId,
+        };
+
+        if (transaction is not null)
+        {
+            var row = await transaction.Connection!.QuerySingleAsync<(Guid PublicId, long Id)>(
+                new CommandDefinition(InsertSql, parameters, transaction, cancellationToken: ct));
+            return row;
+        }
+
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleAsync<(Guid PublicId, long Id)>(
+            new CommandDefinition(InsertSql, parameters, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<App>> ListByUserAsync(long userId, int page, int pageSize, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<App>(
+            new CommandDefinition(ListByUserSql, new { tenantId = QueryContext.TenantId, userId, offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task<int> CountByUserAsync(long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(CountByUserSql, new { tenantId = QueryContext.TenantId, userId }, cancellationToken: ct));
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)

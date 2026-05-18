@@ -1,8 +1,15 @@
 using PowerBase.API.Middleware;
+using PowerBase.Application.Apps.Commands.AddAppUser;
+using PowerBase.Application.Apps.Commands.ChangeAppUserRole;
 using PowerBase.Application.Apps.Commands.CreateApp;
+using PowerBase.Application.Apps.Commands.CreateAppRole;
 using PowerBase.Application.Apps.Commands.DeleteApp;
+using PowerBase.Application.Apps.Commands.DeleteAppRole;
+using PowerBase.Application.Apps.Commands.RemoveAppUser;
 using PowerBase.Application.Apps.Queries.GetApp;
+using PowerBase.Application.Apps.Queries.ListAppRoles;
 using PowerBase.Application.Apps.Queries.ListApps;
+using PowerBase.Application.Apps.Queries.ListAppUsers;
 using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
@@ -84,11 +91,14 @@ builder.Services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<UnitOfWork>(
 builder.Services.AddScoped<QueryContext>();
 builder.Services.AddScoped<IQueryContext>(sp => sp.GetRequiredService<QueryContext>());
 builder.Services.AddScoped<IJwtService, JwtService>();
+builder.Services.AddScoped<IAppAccessService, AppAccessService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
+builder.Services.AddScoped<IAppRoleRepository, AppRoleRepository>();
+builder.Services.AddScoped<IAppUserRepository, AppUserRepository>();
 builder.Services.AddScoped<IAppTableRepository, AppTableRepository>();
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
@@ -108,6 +118,13 @@ builder.Services.AddScoped<GetMeQueryHandler>();
 builder.Services.AddScoped<SelectTenantCommandHandler>();
 builder.Services.AddScoped<CreateTenantCommandHandler>();
 builder.Services.AddScoped<CreateAppCommandHandler>();
+builder.Services.AddScoped<ListAppUsersQueryHandler>();
+builder.Services.AddScoped<AddAppUserCommandHandler>();
+builder.Services.AddScoped<ChangeAppUserRoleCommandHandler>();
+builder.Services.AddScoped<RemoveAppUserCommandHandler>();
+builder.Services.AddScoped<ListAppRolesQueryHandler>();
+builder.Services.AddScoped<CreateAppRoleCommandHandler>();
+builder.Services.AddScoped<DeleteAppRoleCommandHandler>();
 builder.Services.AddScoped<DeleteAppCommandHandler>();
 builder.Services.AddScoped<GetAppQueryHandler>();
 builder.Services.AddScoped<ListAppsQueryHandler>();

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
+using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Fields;
 using PowerBase.API.Models.Tables;
@@ -35,6 +36,7 @@ public class TablesController : ControllerBase
     /// <summary>Create a table inside an app (also provisions the physical data table).</summary>
     [HttpPost("apps/{appId:guid}/tables")]
     [RequirePermission(PermissionCodes.TablesCreate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByAppId)]
     [ProducesResponseType(typeof(ApiResponse<TableResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -50,6 +52,7 @@ public class TablesController : ControllerBase
     /// <summary>List all tables for an app.</summary>
     [HttpGet("apps/{appId:guid}/tables")]
     [RequirePermission(PermissionCodes.TablesRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByAppId)]
     [ProducesResponseType(typeof(ApiListResponse<TableResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -63,6 +66,7 @@ public class TablesController : ControllerBase
     /// <summary>Get a single table by its public ID, including its fields.</summary>
     [HttpGet("tables/{publicId:guid}")]
     [RequirePermission(PermissionCodes.TablesRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTablePublicId)]
     [ProducesResponseType(typeof(ApiResponse<TableResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -75,6 +79,7 @@ public class TablesController : ControllerBase
     /// <summary>Soft-delete a table by its public ID (does not drop the physical table).</summary>
     [HttpDelete("tables/{publicId:guid}")]
     [RequirePermission(PermissionCodes.TablesDelete)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTablePublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

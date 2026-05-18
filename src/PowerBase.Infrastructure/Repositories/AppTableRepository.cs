@@ -30,6 +30,11 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
           AND IsDeleted = 0
         """;
 
+    private const string GetAppIdByPublicIdSql = """
+        SELECT AppId FROM meta.AppTable
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+        """;
+
     private const string ListByAppSql = $"""
         SELECT {SelectColumns}
         FROM meta.AppTable
@@ -83,6 +88,14 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         var table = await connection.QuerySingleOrDefaultAsync<AppTable>(
             new CommandDefinition(GetByPublicIdSql, new { tenantId = QueryContext.TenantId, publicId }, cancellationToken: ct));
         return table ?? throw new NotFoundException("Table", publicId);
+    }
+
+    public async Task<long> GetAppIdByPublicIdAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var appId = await connection.ExecuteScalarAsync<long?>(
+            new CommandDefinition(GetAppIdByPublicIdSql, new { tenantId = QueryContext.TenantId, publicId = tablePublicId }, cancellationToken: ct));
+        return appId ?? throw new NotFoundException("Table", tablePublicId);
     }
 
     public async Task<IReadOnlyList<AppTable>> ListByAppAsync(long appId, CancellationToken ct = default)

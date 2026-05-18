@@ -10,9 +10,12 @@ namespace PowerBase.UnitTests.Apps;
 public class CreateAppCommandHandlerTests
 {
     private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
+    private readonly IAppRoleRepository _appRoleRepo = Substitute.For<IAppRoleRepository>();
+    private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
+    private readonly IUnitOfWork _uow = Substitute.For<IUnitOfWork>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
 
-    private CreateAppCommandHandler CreateSut() => new(_appRepo, _queryContext);
+    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext);
 
     public CreateAppCommandHandlerTests()
     {
@@ -20,12 +23,20 @@ public class CreateAppCommandHandlerTests
         _queryContext.UserId.Returns(1L);
     }
 
+    private void SetupHappyPath(Guid publicId, long appId = 10)
+    {
+        _appRepo.NameExistsAsync(Arg.Any<string>()).Returns(false);
+        _appRepo.CreateAsync(Arg.Any<App>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+            .Returns((publicId, appId));
+        _appRoleRepo.CreateAsync(Arg.Any<AppRole>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+            .Returns((1L, Guid.NewGuid()));
+    }
+
     [Fact]
     public async Task HandleAsync_ValidCommand_ReturnsAppWithPublicId()
     {
         var expected = Guid.NewGuid();
-        _appRepo.NameExistsAsync("My App").Returns(false);
-        _appRepo.CreateAsync(Arg.Any<App>()).Returns(expected);
+        SetupHappyPath(expected);
         var sut = CreateSut();
 
         var result = await sut.HandleAsync(new CreateAppCommand("My App", null, null, null));
@@ -33,6 +44,18 @@ public class CreateAppCommandHandlerTests
         result.PublicId.Should().Be(expected);
         result.Name.Should().Be("My App");
         result.Status.Should().Be("Active");
+    }
+
+    [Fact]
+    public async Task HandleAsync_ValidCommand_SeedsAdministratorAndViewerRoles()
+    {
+        SetupHappyPath(Guid.NewGuid());
+        var sut = CreateSut();
+
+        await sut.HandleAsync(new CreateAppCommand("My App", null, null, null));
+
+        await _appRoleRepo.Received(2).CreateAsync(Arg.Any<AppRole>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _appUserRepo.Received(1).CreateAsync(Arg.Any<AppUser>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

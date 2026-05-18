@@ -14,10 +14,12 @@ public class ListAppsResult
 public class ListAppsQueryHandler
 {
     private readonly IAppRepository _appRepo;
+    private readonly IQueryContext _queryContext;
 
-    public ListAppsQueryHandler(IAppRepository appRepo)
+    public ListAppsQueryHandler(IAppRepository appRepo, IQueryContext queryContext)
     {
         _appRepo = appRepo;
+        _queryContext = queryContext;
     }
 
     public async Task<ListAppsResult> HandleAsync(ListAppsQuery query, CancellationToken ct = default)
@@ -25,8 +27,8 @@ public class ListAppsQueryHandler
         var page = query.Page < 1 ? 1 : query.Page;
         var pageSize = query.PageSize is < 1 or > 100 ? 20 : query.PageSize;
 
-        var items = await _appRepo.ListAsync(page, pageSize, ct);
-        var total = await _appRepo.CountAsync(ct);
+        var items = await _appRepo.ListByUserAsync(_queryContext.UserId, page, pageSize, ct);
+        var total = await _appRepo.CountByUserAsync(_queryContext.UserId, ct);
 
         return new ListAppsResult { Items = items, Total = total, Page = page, PageSize = pageSize };
     }

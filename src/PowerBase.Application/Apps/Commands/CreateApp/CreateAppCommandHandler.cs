@@ -18,11 +18,22 @@ public class CreateAppResult
 public class CreateAppCommandHandler
 {
     private readonly IAppRepository _appRepo;
+    private readonly IAppRoleRepository _appRoleRepo;
+    private readonly IAppUserRepository _appUserRepo;
+    private readonly IUnitOfWork _uow;
     private readonly IQueryContext _queryContext;
 
-    public CreateAppCommandHandler(IAppRepository appRepo, IQueryContext queryContext)
+    public CreateAppCommandHandler(
+        IAppRepository appRepo,
+        IAppRoleRepository appRoleRepo,
+        IAppUserRepository appUserRepo,
+        IUnitOfWork uow,
+        IQueryContext queryContext)
     {
         _appRepo = appRepo;
+        _appRoleRepo = appRoleRepo;
+        _appUserRepo = appUserRepo;
+        _uow = uow;
         _queryContext = queryContext;
     }
 
@@ -53,17 +64,55 @@ public class CreateAppCommandHandler
             CreatedBy = _queryContext.UserId,
         };
 
-        var publicId = await _appRepo.CreateAsync(app, ct);
-
-        return new CreateAppResult
+        await _uow.BeginAsync(ct);
+        try
         {
-            PublicId = publicId,
-            Name = app.Name,
-            Description = app.Description,
-            Icon = app.Icon,
-            Color = app.Color,
-            Status = app.Status,
-            CreatedOn = now,
-        };
+            var (publicId, appId) = await _appRepo.CreateAsync(app, _uow.Transaction, ct);
+
+            var (adminRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
+            {
+                AppId = appId,
+                TenantId = _queryContext.TenantId,
+                Name = "Administrator",
+                IsSystem = true,
+                IsDefault = false,
+            }, _uow.Transaction, ct);
+
+            await _appRoleRepo.CreateAsync(new AppRole
+            {
+                AppId = appId,
+                TenantId = _queryContext.TenantId,
+                Name = "Viewer",
+                IsSystem = true,
+                IsDefault = true,
+            }, _uow.Transaction, ct);
+
+            await _appUserRepo.CreateAsync(new AppUser
+            {
+                AppId = appId,
+                TenantId = _queryContext.TenantId,
+                UserId = _queryContext.UserId,
+                AppRoleId = adminRoleId,
+                Status = "Active",
+            }, _uow.Transaction, ct);
+
+            await _uow.CommitAsync(ct);
+
+            return new CreateAppResult
+            {
+                PublicId = publicId,
+                Name = app.Name,
+                Description = app.Description,
+                Icon = app.Icon,
+                Color = app.Color,
+                Status = app.Status,
+                CreatedOn = now,
+            };
+        }
+        catch
+        {
+            await _uow.RollbackAsync(ct);
+            throw;
+        }
     }
 }

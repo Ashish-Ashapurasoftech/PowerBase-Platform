@@ -22,6 +22,13 @@ public class ReportRepository : BaseRepository, IReportRepository
           AND r.IsDeleted = 0
         """;
 
+    private const string GetAppIdByPublicIdSql = """
+        SELECT t.AppId
+        FROM meta.Report r
+        JOIN meta.AppTable t ON t.Id = r.AppTableId
+        WHERE r.TenantId = @tenantId AND r.PublicId = @publicId AND r.IsDeleted = 0
+        """;
+
     private const string ListByAppSql = $"""
         SELECT {SelectColumns}
         FROM meta.Report r
@@ -53,6 +60,14 @@ public class ReportRepository : BaseRepository, IReportRepository
                 new { tenantId = QueryContext.TenantId, publicId },
                 cancellationToken: ct));
         return report ?? throw new NotFoundException("Report", publicId);
+    }
+
+    public async Task<long> GetAppIdByPublicIdAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var appId = await connection.ExecuteScalarAsync<long?>(
+            new CommandDefinition(GetAppIdByPublicIdSql, new { tenantId = QueryContext.TenantId, publicId = reportPublicId }, cancellationToken: ct));
+        return appId ?? throw new NotFoundException("Report", reportPublicId);
     }
 
     public async Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default)

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
+using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Records;
 using PowerBase.API.Models.Reports;
@@ -35,6 +36,7 @@ public class ReportsController : ControllerBase
     /// <summary>Save a report definition for a table.</summary>
     [HttpPost("tables/{tableId:guid}/reports")]
     [RequirePermission(PermissionCodes.ReportsCreate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -56,6 +58,7 @@ public class ReportsController : ControllerBase
     /// <summary>List all reports for an app.</summary>
     [HttpGet("apps/{appId:guid}/reports")]
     [RequirePermission(PermissionCodes.ReportsRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByAppId)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<ReportResponse>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -69,6 +72,7 @@ public class ReportsController : ControllerBase
     /// <summary>Get a single report definition.</summary>
     [HttpGet("reports/{publicId:guid}")]
     [RequirePermission(PermissionCodes.ReportsRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -81,6 +85,7 @@ public class ReportsController : ControllerBase
     /// <summary>Execute a report and return paged results.</summary>
     [HttpGet("reports/{publicId:guid}/run")]
     [RequirePermission(PermissionCodes.ReportsRun)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(ApiResponse<ReportRunResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

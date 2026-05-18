@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
+using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Fields;
 using PowerBase.Application.Fields.Commands.CreateField;
@@ -24,6 +25,7 @@ public class FieldsController : ControllerBase
     /// <summary>Add a field to a table (also runs ALTER TABLE on the physical data table).</summary>
     [HttpPost("tables/{tableId:guid}/fields")]
     [RequirePermission(PermissionCodes.FieldsCreate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<FieldResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -39,6 +41,7 @@ public class FieldsController : ControllerBase
     /// <summary>List all fields for a table.</summary>
     [HttpGet("tables/{tableId:guid}/fields")]
     [RequirePermission(PermissionCodes.FieldsRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiListResponse<FieldResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

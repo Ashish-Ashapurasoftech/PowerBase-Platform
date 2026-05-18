@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
+using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Apps;
 using PowerBase.Application.Apps.Commands.CreateApp;
@@ -61,6 +62,7 @@ public class AppsController : ControllerBase
     /// <summary>Get a single app by its public ID.</summary>
     [HttpGet("{publicId:guid}")]
     [RequirePermission(PermissionCodes.AppsRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByAppPublicId)]
     [ProducesResponseType(typeof(ApiResponse<AppResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -73,6 +75,7 @@ public class AppsController : ControllerBase
     /// <summary>Soft-delete an app by its public ID.</summary>
     [HttpDelete("{publicId:guid}")]
     [RequirePermission(PermissionCodes.AppsDelete)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByAppPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
