@@ -10,7 +10,7 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
     private const string SelectColumns = """
         af.Id, af.PublicId, af.TenantId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName,
-        af.DisplayOrder, af.IsRequired, af.IsSystem, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        af.DisplayOrder, af.IsRequired, af.IsReportable, af.IsSystem, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
     private const string ListByTableSql = $"""

@@ -1,10 +1,1 @@
-﻿namespace PowerBase.UnitTests;
-
-public class UnitTest1
-{
-    [Fact]
-    public void Test1()
-    {
-
-    }
-}
+// Placeholder removed — see Auth/, Apps/, Tables/, Fields/, Records/, Reports/ for tests.

@@ -28,4 +28,11 @@
     <ProjectReference Include="..\..\src\PowerBase.Infrastructure\PowerBase.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\database\migrations\*.sql">
+      <Link>Migrations\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
