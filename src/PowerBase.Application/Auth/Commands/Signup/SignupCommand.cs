@@ -1,8 +1,3 @@
 namespace PowerBase.Application.Auth.Commands.Signup;
 
-public record SignupCommand(
-    string Email,
-    string Password,
-    string Name,
-    string TenantName
-);
+public record SignupCommand(string Email, string Password, string Name);

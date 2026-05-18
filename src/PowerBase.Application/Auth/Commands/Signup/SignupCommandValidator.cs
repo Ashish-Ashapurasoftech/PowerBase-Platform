@@ -18,9 +18,5 @@ public class SignupCommandValidator : AbstractValidator<SignupCommand>
         RuleFor(x => x.Name)
             .NotEmpty()
             .MaximumLength(200);
-
-        RuleFor(x => x.TenantName)
-            .NotEmpty()
-            .MaximumLength(200);
     }
 }

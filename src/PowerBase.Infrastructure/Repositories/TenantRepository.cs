@@ -1,6 +1,8 @@
 using System.Data;
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Tenants;
+using PowerBase.Application.Users;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
@@ -26,10 +28,33 @@ public class TenantRepository : BaseRepository, ITenantRepository
         ORDER BY tu.Id
         """;
 
+    private const string ListTenantsForUserSql = """
+        SELECT t.PublicId, t.Name, t.Slug, tu.IsOwner
+        FROM meta.TenantUser tu
+        JOIN meta.Tenant t ON t.Id = tu.TenantId
+        WHERE tu.UserId  = @userId
+          AND tu.IsActive = 1
+          AND tu.IsDeleted = 0
+          AND t.IsDeleted  = 0
+        ORDER BY tu.Id
+        """;
+
+    private const string GetTenantForUserSql = """
+        SELECT t.Id, t.PublicId, t.Name, t.Slug, t.PlanCode, t.Status, t.IsDeleted,
+               t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy
+        FROM meta.Tenant t
+        JOIN meta.TenantUser tu ON tu.TenantId = t.Id
+        WHERE t.PublicId   = @tenantPublicId
+          AND tu.UserId    = @userId
+          AND tu.IsActive  = 1
+          AND tu.IsDeleted = 0
+          AND t.IsDeleted  = 0
+        """;
+
     private const string InsertTenantSql = """
-        INSERT INTO meta.Tenant (Name, Slug, PlanCode, Status, IsDeleted, CreatedOn, CreatedBy)
+        INSERT INTO meta.Tenant (PublicId, Name, Slug, PlanCode, Status, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
-        VALUES (@name, @slug, 'Free', 'Active', 0, SYSUTCDATETIME(), 0)
+        VALUES (@publicId, @name, @slug, 'Free', 'Active', 0, SYSUTCDATETIME(), 0)
         """;
 
     private const string InsertTenantRoleSql = """
@@ -39,8 +64,79 @@ public class TenantRepository : BaseRepository, ITenantRepository
         """;
 
     private const string InsertTenantUserSql = """
-        INSERT INTO meta.TenantUser (TenantId, UserId, TenantRoleId, IsOwner, IsActive, IsDeleted, JoinedOn, CreatedOn, CreatedBy)
-        VALUES (@tenantId, @userId, @tenantRoleId, @isOwner, @isActive, 0, SYSUTCDATETIME(), SYSUTCDATETIME(), 0)
+        INSERT INTO meta.TenantUser (TenantId, UserId, TenantRoleId, IsOwner, IsActive, IsDeleted, JoinedOn, InvitedBy, CreatedOn, CreatedBy)
+        VALUES (@tenantId, @userId, @tenantRoleId, @isOwner, @isActive, 0, SYSUTCDATETIME(), @invitedBy, SYSUTCDATETIME(), @createdBy)
+        """;
+
+    private const string ListUsersSql = """
+        SELECT u.PublicId AS UserPublicId, u.Email, u.Name,
+               r.PublicId AS RolePublicId, r.Name AS RoleName,
+               tu.IsOwner, tu.IsActive, tu.JoinedOn
+        FROM meta.TenantUser tu
+        JOIN core.[User] u ON u.Id = tu.UserId
+        LEFT JOIN meta.TenantRole r ON r.Id = tu.TenantRoleId AND r.IsDeleted = 0
+        WHERE tu.TenantId = @tenantId
+          AND tu.IsDeleted = 0
+        ORDER BY tu.JoinedOn
+        """;
+
+    private const string GetTenantUserByUserPublicIdSql = """
+        SELECT tu.Id, tu.TenantId, tu.UserId, tu.TenantRoleId, tu.IsOwner, tu.IsActive, tu.IsDeleted,
+               tu.JoinedOn, tu.InvitedBy, tu.CreatedOn, tu.CreatedBy, tu.ModifiedOn, tu.ModifiedBy,
+               tu.DeletedOn, tu.DeletedBy, tu.RowVersion
+        FROM meta.TenantUser tu
+        JOIN core.[User] u ON u.Id = tu.UserId
+        WHERE u.PublicId = @userPublicId
+          AND tu.TenantId = @tenantId
+          AND tu.IsDeleted = 0
+        """;
+
+    private const string IsUserInTenantSql = """
+        SELECT CAST(CASE WHEN EXISTS (
+            SELECT 1 FROM meta.TenantUser
+            WHERE UserId = @userId AND TenantId = @tenantId AND IsDeleted = 0
+        ) THEN 1 ELSE 0 END AS BIT)
+        """;
+
+    private const string UpdateTenantUserRoleSql = """
+        UPDATE meta.TenantUser
+        SET TenantRoleId = @tenantRoleId, ModifiedOn = SYSUTCDATETIME()
+        WHERE Id = @id
+        """;
+
+    private const string RemoveTenantUserSql = """
+        UPDATE meta.TenantUser
+        SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME()
+        WHERE Id = @id
+        """;
+
+    private const string ListRolesSql = """
+        SELECT Id, PublicId, TenantId, Name, Description, IsDefault, IsSystem, IsDeleted,
+               CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy
+        FROM meta.TenantRole
+        WHERE TenantId = @tenantId AND IsDeleted = 0
+        ORDER BY IsSystem DESC, Name
+        """;
+
+    private const string GetRoleByIdSql = """
+        SELECT Id, PublicId, TenantId, Name, Description, IsDefault, IsSystem, IsDeleted,
+               CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy
+        FROM meta.TenantRole
+        WHERE Id = @id AND TenantId = @tenantId AND IsDeleted = 0
+        """;
+
+    private const string GetRoleByPublicIdSql = """
+        SELECT Id, PublicId, TenantId, Name, Description, IsDefault, IsSystem, IsDeleted,
+               CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy
+        FROM meta.TenantRole
+        WHERE PublicId = @publicId AND TenantId = @tenantId AND IsDeleted = 0
+        """;
+
+    private const string RoleNameExistsSql = """
+        SELECT CAST(CASE WHEN EXISTS (
+            SELECT 1 FROM meta.TenantRole
+            WHERE TenantId = @tenantId AND Name = @name AND IsDeleted = 0
+        ) THEN 1 ELSE 0 END AS BIT)
         """;
 
     public TenantRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -70,6 +166,7 @@ public class TenantRepository : BaseRepository, ITenantRepository
             return await connection.ExecuteScalarAsync<long>(
                 new CommandDefinition(InsertTenantSql, new
                 {
+                    publicId = tenant.PublicId == Guid.Empty ? Guid.NewGuid() : tenant.PublicId,
                     name = tenant.Name,
                     slug = tenant.Slug,
                 }, transaction, cancellationToken: ct));
@@ -115,12 +212,95 @@ public class TenantRepository : BaseRepository, ITenantRepository
                     tenantRoleId = tenantUser.TenantRoleId,
                     isOwner = tenantUser.IsOwner,
                     isActive = tenantUser.IsActive,
+                    invitedBy = tenantUser.InvitedBy,
+                    createdBy = tenantUser.CreatedBy,
                 }, transaction, cancellationToken: ct));
         }
         finally
         {
             if (ownConnection) connection.Dispose();
         }
+    }
+
+    public async Task<IReadOnlyList<TenantUserDetail>> ListUsersAsync(CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var rows = await connection.QueryAsync<TenantUserDetail>(
+            new CommandDefinition(ListUsersSql, new { tenantId = QueryContext.TenantId }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<TenantUser?> GetTenantUserByUserPublicIdAsync(Guid userPublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<TenantUser>(
+            new CommandDefinition(GetTenantUserByUserPublicIdSql, new { userPublicId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+    }
+
+    public async Task<bool> IsUserInTenantAsync(long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(IsUserInTenantSql, new { userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+    }
+
+    public async Task UpdateTenantUserRoleAsync(long tenantUserId, long tenantRoleId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateTenantUserRoleSql, new { id = tenantUserId, tenantRoleId }, cancellationToken: ct));
+    }
+
+    public async Task RemoveTenantUserAsync(long tenantUserId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(RemoveTenantUserSql, new { id = tenantUserId }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<TenantRole>> ListRolesAsync(CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<TenantRole>(
+            new CommandDefinition(ListRolesSql, new { tenantId = QueryContext.TenantId }, cancellationToken: ct));
+        return results.ToList();
+    }
+
+    public async Task<TenantRole?> GetRoleByIdAsync(long id, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<TenantRole>(
+            new CommandDefinition(GetRoleByIdSql, new { id, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+    }
+
+    public async Task<TenantRole?> GetRoleByPublicIdAsync(Guid publicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<TenantRole>(
+            new CommandDefinition(GetRoleByPublicIdSql, new { publicId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+    }
+
+    public async Task<bool> RoleNameExistsAsync(string name, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(RoleNameExistsSql, new { tenantId = QueryContext.TenantId, name }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<TenantItem>> ListTenantsForUserAsync(long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var rows = await connection.QueryAsync<TenantItem>(
+            new CommandDefinition(ListTenantsForUserSql, new { userId }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<Tenant> GetTenantForUserAsync(Guid tenantPublicId, long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var tenant = await connection.QuerySingleOrDefaultAsync<Tenant>(
+            new CommandDefinition(GetTenantForUserSql, new { tenantPublicId, userId }, cancellationToken: ct));
+        return tenant ?? throw new NotFoundException("Tenant", tenantPublicId);
     }
 
     private async Task<IDbConnection> OpenNewConnectionAsync(CancellationToken ct)

@@ -7,12 +7,12 @@ using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
 using PowerBase.Application.Tables.Queries.GetTable;
 using PowerBase.Application.Tables.Queries.ListTables;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.API.Controllers;
 
 [ApiController]
-[RequireAuth]
 public class TablesController : ControllerBase
 {
     private readonly CreateTableCommandHandler _createHandler;
@@ -34,6 +34,7 @@ public class TablesController : ControllerBase
 
     /// <summary>Create a table inside an app (also provisions the physical data table).</summary>
     [HttpPost("apps/{appId:guid}/tables")]
+    [RequirePermission(PermissionCodes.TablesCreate)]
     [ProducesResponseType(typeof(ApiResponse<TableResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -48,6 +49,7 @@ public class TablesController : ControllerBase
 
     /// <summary>List all tables for an app.</summary>
     [HttpGet("apps/{appId:guid}/tables")]
+    [RequirePermission(PermissionCodes.TablesRead)]
     [ProducesResponseType(typeof(ApiListResponse<TableResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -60,6 +62,7 @@ public class TablesController : ControllerBase
 
     /// <summary>Get a single table by its public ID, including its fields.</summary>
     [HttpGet("tables/{publicId:guid}")]
+    [RequirePermission(PermissionCodes.TablesRead)]
     [ProducesResponseType(typeof(ApiResponse<TableResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -71,6 +74,7 @@ public class TablesController : ControllerBase
 
     /// <summary>Soft-delete a table by its public ID (does not drop the physical table).</summary>
     [HttpDelete("tables/{publicId:guid}")]
+    [RequirePermission(PermissionCodes.TablesDelete)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

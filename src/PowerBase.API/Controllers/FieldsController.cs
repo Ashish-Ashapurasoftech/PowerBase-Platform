@@ -4,12 +4,12 @@ using PowerBase.API.Models;
 using PowerBase.API.Models.Fields;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Queries.ListFields;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.API.Controllers;
 
 [ApiController]
-[RequireAuth]
 public class FieldsController : ControllerBase
 {
     private readonly CreateFieldCommandHandler _createHandler;
@@ -23,6 +23,7 @@ public class FieldsController : ControllerBase
 
     /// <summary>Add a field to a table (also runs ALTER TABLE on the physical data table).</summary>
     [HttpPost("tables/{tableId:guid}/fields")]
+    [RequirePermission(PermissionCodes.FieldsCreate)]
     [ProducesResponseType(typeof(ApiResponse<FieldResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -37,6 +38,7 @@ public class FieldsController : ControllerBase
 
     /// <summary>List all fields for a table.</summary>
     [HttpGet("tables/{tableId:guid}/fields")]
+    [RequirePermission(PermissionCodes.FieldsRead)]
     [ProducesResponseType(typeof(ApiListResponse<FieldResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

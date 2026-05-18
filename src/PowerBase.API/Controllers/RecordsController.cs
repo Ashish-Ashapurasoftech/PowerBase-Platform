@@ -9,11 +9,11 @@ using PowerBase.Application.Records.Commands.DeleteRecord;
 using PowerBase.Application.Records.Commands.UpdateRecord;
 using PowerBase.Application.Records.Queries.GetRecord;
 using PowerBase.Application.Records.Queries.ListRecords;
+using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
 
 [ApiController]
-[RequireAuth]
 public class RecordsController : ControllerBase
 {
     private readonly CreateRecordCommandHandler _createHandler;
@@ -38,6 +38,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Insert a new record into a table.</summary>
     [HttpPost("tables/{tableId:guid}/records")]
+    [RequirePermission(PermissionCodes.RecordsCreate)]
     [ProducesResponseType(typeof(ApiResponse<RecordResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -51,6 +52,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>List records for a table (paged).</summary>
     [HttpGet("tables/{tableId:guid}/records")]
+    [RequirePermission(PermissionCodes.RecordsRead)]
     [ProducesResponseType(typeof(ApiListResponse<RecordResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -67,6 +69,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Get a single record by its public ID.</summary>
     [HttpGet("tables/{tableId:guid}/records/{id:guid}")]
+    [RequirePermission(PermissionCodes.RecordsRead)]
     [ProducesResponseType(typeof(ApiResponse<RecordResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -78,6 +81,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Update specific fields on an existing record.</summary>
     [HttpPatch("tables/{tableId:guid}/records/{id:guid}")]
+    [RequirePermission(PermissionCodes.RecordsUpdate)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -91,6 +95,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Soft-delete a record.</summary>
     [HttpDelete("tables/{tableId:guid}/records/{id:guid}")]
+    [RequirePermission(PermissionCodes.RecordsDelete)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

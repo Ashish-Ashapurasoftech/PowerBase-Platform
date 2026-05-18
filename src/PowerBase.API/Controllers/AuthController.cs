@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Auth;
+using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
 using PowerBase.Application.Auth.Queries.Login;
@@ -15,45 +16,79 @@ public class AuthController : ControllerBase
     private readonly SignupCommandHandler _signupHandler;
     private readonly LoginQueryHandler _loginHandler;
     private readonly GetMeQueryHandler _getMeHandler;
+    private readonly SelectTenantCommandHandler _selectTenantHandler;
 
     public AuthController(
         SignupCommandHandler signupHandler,
         LoginQueryHandler loginHandler,
-        GetMeQueryHandler getMeHandler)
+        GetMeQueryHandler getMeHandler,
+        SelectTenantCommandHandler selectTenantHandler)
     {
         _signupHandler = signupHandler;
         _loginHandler = loginHandler;
         _getMeHandler = getMeHandler;
+        _selectTenantHandler = selectTenantHandler;
     }
 
-    /// <summary>Create a new user account and tenant. Returns a JWT on success.</summary>
+    /// <summary>Register a new user account. Returns an identity token (no tenant context yet).</summary>
     [HttpPost("signup")]
-    [ProducesResponseType(typeof(ApiResponse<AuthResponse>), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ApiResponse<IdentityResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Signup([FromBody] SignupRequest request, CancellationToken ct)
     {
-        var command = new SignupCommand(request.Email, request.Password, request.Name, request.TenantName);
+        var command = new SignupCommand(request.Email, request.Password, request.Name);
         var result = await _signupHandler.HandleAsync(command, ct);
-        var response = MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId, result.Email, result.Name);
-        return StatusCode(StatusCodes.Status201Created, new ApiResponse<AuthResponse>(response));
+        var response = new IdentityResponse
+        {
+            IdentityToken = result.IdentityToken,
+            ExpiresAt = result.ExpiresAt.ToString("o"),
+            User = new UserResponse { PublicId = result.UserPublicId, Email = result.Email, Name = result.Name },
+            Tenants = [],
+        };
+        return StatusCode(StatusCodes.Status201Created, new ApiResponse<IdentityResponse>(response));
     }
 
-    /// <summary>Authenticate with email and password. Returns a JWT on success.</summary>
+    /// <summary>Authenticate with email and password. Returns an identity token and the user's tenant list.</summary>
     [HttpPost("login")]
-    [ProducesResponseType(typeof(ApiResponse<AuthResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<IdentityResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Login([FromBody] LoginRequest request, CancellationToken ct)
     {
         var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
-        var query = new LoginQuery(request.Email, request.Password, ipAddress);
-        var result = await _loginHandler.HandleAsync(query, ct);
-        var response = MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId, result.Email, result.Name);
-        return Ok(new ApiResponse<AuthResponse>(response));
+        var result = await _loginHandler.HandleAsync(new LoginQuery(request.Email, request.Password, ipAddress), ct);
+        var response = new IdentityResponse
+        {
+            IdentityToken = result.IdentityToken,
+            ExpiresAt = result.ExpiresAt.ToString("o"),
+            User = new UserResponse { PublicId = result.UserPublicId, Email = result.Email, Name = result.Name },
+            Tenants = result.Tenants.Select(t => new TenantListItem
+            {
+                PublicId = t.PublicId,
+                Name = t.Name,
+                Slug = t.Slug,
+                IsOwner = t.IsOwner,
+            }).ToList(),
+        };
+        return Ok(new ApiResponse<IdentityResponse>(response));
     }
 
-    /// <summary>Get the currently authenticated user's profile.</summary>
+    /// <summary>Exchange an identity token for a tenant-scoped JWT. Send the identity token as Bearer.</summary>
+    [HttpPost("select-tenant")]
+    [RequireAuth]
+    [ProducesResponseType(typeof(ApiResponse<AuthResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SelectTenant([FromBody] SelectTenantRequest request, CancellationToken ct)
+    {
+        var result = await _selectTenantHandler.HandleAsync(new SelectTenantCommand(request.TenantPublicId), ct);
+        return Ok(new ApiResponse<AuthResponse>(MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId,
+            result.Email, result.Name, result.TenantPublicId, result.TenantName)));
+    }
+
+    /// <summary>Get the currently authenticated user's profile. Works with both identity and tenant tokens.</summary>
     [HttpGet("me")]
     [RequireAuth]
     [ProducesResponseType(typeof(ApiResponse<UserResponse>), StatusCodes.Status200OK)]
@@ -61,25 +96,22 @@ public class AuthController : ControllerBase
     public async Task<IActionResult> Me(CancellationToken ct)
     {
         var user = await _getMeHandler.HandleAsync(new GetMeQuery(), ct);
-        var response = new UserResponse
+        return Ok(new ApiResponse<UserResponse>(new UserResponse
         {
             PublicId = user.PublicId,
             Email = user.Email,
             Name = user.Name,
-        };
-        return Ok(new ApiResponse<UserResponse>(response));
+        }));
     }
 
-    private static AuthResponse MapToAuthResponse(string token, DateTime expiresAt, Guid publicId, string email, string name)
+    private static AuthResponse MapToAuthResponse(string token, DateTime expiresAt, Guid publicId,
+        string email, string name, Guid tenantPublicId, string tenantName)
         => new()
         {
             Token = token,
             ExpiresAt = expiresAt.ToString("o"),
-            User = new UserResponse
-            {
-                PublicId = publicId,
-                Email = email,
-                Name = name,
-            }
+            User = new UserResponse { PublicId = publicId, Email = email, Name = name },
+            TenantPublicId = tenantPublicId,
+            TenantName = tenantName,
         };
 }

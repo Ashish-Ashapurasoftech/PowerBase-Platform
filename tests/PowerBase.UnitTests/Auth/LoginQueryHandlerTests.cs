@@ -2,6 +2,7 @@ using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Auth.Queries.Login;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Tenants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -14,10 +15,8 @@ public class LoginQueryHandlerTests
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
     private readonly IJwtService _jwtService = Substitute.For<IJwtService>();
     private readonly IPasswordService _passwordService = Substitute.For<IPasswordService>();
-    private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
 
-    private LoginQueryHandler CreateSut() => new(
-        _userRepo, _tenantRepo, _auditRepo, _jwtService, _passwordService, _queryContext);
+    private LoginQueryHandler CreateSut() => new(_userRepo, _tenantRepo, _auditRepo, _jwtService, _passwordService);
 
     private static User MakeUser() => new()
     {
@@ -29,20 +28,24 @@ public class LoginQueryHandlerTests
     };
 
     [Fact]
-    public async Task HandleAsync_CorrectCredentials_ReturnsToken()
+    public async Task HandleAsync_CorrectCredentials_ReturnsIdentityTokenAndTenants()
     {
         var user = MakeUser();
         _userRepo.GetByEmailAsync("user@example.com").Returns(user);
         _passwordService.Verify("password123", "hash").Returns(true);
-        _tenantRepo.GetActiveTenantIdByUserIdAsync(user.Id).Returns(42L);
-        _jwtService.GenerateToken(user, 42L, out Arg.Any<Guid>()).Returns("token");
-        _queryContext.IpAddress.Returns("127.0.0.1");
+        _tenantRepo.ListTenantsForUserAsync(user.Id).Returns(new List<TenantItem>
+        {
+            new(Guid.NewGuid(), "Acme", "acme", true),
+        });
+        _jwtService.GenerateIdentityToken(user, out Arg.Any<Guid>(), out Arg.Any<DateTime>()).Returns("identity-token");
         var sut = CreateSut();
 
         var result = await sut.HandleAsync(new LoginQuery("user@example.com", "password123", "127.0.0.1"));
 
-        result.Token.Should().Be("token");
+        result.IdentityToken.Should().Be("identity-token");
         result.Email.Should().Be("user@example.com");
+        result.Tenants.Should().HaveCount(1);
+        result.Tenants[0].Name.Should().Be("Acme");
     }
 
     [Fact]
@@ -90,5 +93,22 @@ public class LoginQueryHandlerTests
 
         await sut.Invoking(s => s.HandleAsync(new LoginQuery("not-email", "pass", "127.0.0.1")))
             .Should().ThrowAsync<Domain.Exceptions.ValidationException>();
+    }
+
+    [Fact]
+    public async Task HandleAsync_CorrectCredentials_DoesNotCreateSession()
+    {
+        var user = MakeUser();
+        _userRepo.GetByEmailAsync("user@example.com").Returns(user);
+        _passwordService.Verify("password123", "hash").Returns(true);
+        _tenantRepo.ListTenantsForUserAsync(user.Id).Returns(new List<TenantItem>());
+        _jwtService.GenerateIdentityToken(user, out Arg.Any<Guid>(), out Arg.Any<DateTime>()).Returns("identity-token");
+        var sut = CreateSut();
+
+        await sut.HandleAsync(new LoginQuery("user@example.com", "password123", "127.0.0.1"));
+
+        await _auditRepo.DidNotReceive().CreateSessionAsync(
+            Arg.Any<long>(), Arg.Any<long>(), Arg.Any<Guid>(),
+            Arg.Any<string>(), Arg.Any<DateTime>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
     }
 }

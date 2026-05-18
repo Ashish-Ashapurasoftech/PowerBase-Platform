@@ -7,7 +7,7 @@ public class SignupCommandValidatorTests
 {
     private readonly SignupCommandValidator _sut = new();
 
-    private static SignupCommand Valid() => new("test@example.com", "password123", "Jane Doe", "Acme Corp");
+    private static SignupCommand Valid() => new("test@example.com", "password123", "Jane Doe");
 
     [Fact]
     public async Task Validate_ValidCommand_Passes()
@@ -29,7 +29,7 @@ public class SignupCommandValidatorTests
     [Fact]
     public async Task Validate_EmailTooLong_Fails()
     {
-        var longEmail = new string('a', 251) + "@x.com"; // 257 chars — exceeds MaximumLength(256)
+        var longEmail = new string('a', 251) + "@x.com";
         var result = await _sut.ValidateAsync(Valid() with { Email = longEmail });
         result.IsValid.Should().BeFalse();
     }
@@ -50,13 +50,5 @@ public class SignupCommandValidatorTests
         var result = await _sut.ValidateAsync(Valid() with { Name = "" });
         result.IsValid.Should().BeFalse();
         result.Errors.Should().Contain(e => e.PropertyName == "Name");
-    }
-
-    [Fact]
-    public async Task Validate_EmptyTenantName_Fails()
-    {
-        var result = await _sut.ValidateAsync(Valid() with { TenantName = "" });
-        result.IsValid.Should().BeFalse();
-        result.Errors.Should().Contain(e => e.PropertyName == "TenantName");
     }
 }

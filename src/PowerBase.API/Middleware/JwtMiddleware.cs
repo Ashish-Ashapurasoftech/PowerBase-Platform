@@ -9,7 +9,7 @@ public class JwtMiddleware
 
     public JwtMiddleware(RequestDelegate next) => _next = next;
 
-    public async Task InvokeAsync(HttpContext context, IJwtService jwtService, IQueryContext queryContext)
+    public async Task InvokeAsync(HttpContext context, IJwtService jwtService, IQueryContext queryContext, IUserPermissionRepository permissionRepo)
     {
         var token = context.Request.Headers["Authorization"]
             .FirstOrDefault()?.Split(" ").Last();
@@ -20,6 +20,8 @@ public class JwtMiddleware
             ctx.UserId = userId;
             ctx.TenantId = tenantId;
             ctx.IpAddress = context.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
+            if (tenantId > 0)
+                ctx.Permissions = await permissionRepo.GetPermissionsAsync(userId, tenantId);
         }
 
         await _next(context);

@@ -8,11 +8,11 @@ using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Application.Reports.Queries.GetReport;
 using PowerBase.Application.Reports.Queries.ListReports;
 using PowerBase.Application.Reports.Queries.RunReport;
+using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
 
 [ApiController]
-[RequireAuth]
 public class ReportsController : ControllerBase
 {
     private readonly CreateReportCommandHandler _createHandler;
@@ -34,6 +34,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Save a report definition for a table.</summary>
     [HttpPost("tables/{tableId:guid}/reports")]
+    [RequirePermission(PermissionCodes.ReportsCreate)]
     [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -54,6 +55,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>List all reports for an app.</summary>
     [HttpGet("apps/{appId:guid}/reports")]
+    [RequirePermission(PermissionCodes.ReportsRead)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<ReportResponse>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -66,6 +68,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Get a single report definition.</summary>
     [HttpGet("reports/{publicId:guid}")]
+    [RequirePermission(PermissionCodes.ReportsRead)]
     [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -77,6 +80,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Execute a report and return paged results.</summary>
     [HttpGet("reports/{publicId:guid}/run")]
+    [RequirePermission(PermissionCodes.ReportsRun)]
     [ProducesResponseType(typeof(ApiResponse<ReportRunResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

@@ -6,12 +6,12 @@ using PowerBase.Application.Apps.Commands.CreateApp;
 using PowerBase.Application.Apps.Commands.DeleteApp;
 using PowerBase.Application.Apps.Queries.GetApp;
 using PowerBase.Application.Apps.Queries.ListApps;
+using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
 
 [ApiController]
 [Route("apps")]
-[RequireAuth]
 public class AppsController : ControllerBase
 {
     private readonly CreateAppCommandHandler _createHandler;
@@ -33,6 +33,7 @@ public class AppsController : ControllerBase
 
     /// <summary>Create a new app for the current tenant.</summary>
     [HttpPost]
+    [RequirePermission(PermissionCodes.AppsCreate)]
     [ProducesResponseType(typeof(ApiResponse<AppResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -47,6 +48,7 @@ public class AppsController : ControllerBase
 
     /// <summary>List all apps for the current tenant.</summary>
     [HttpGet]
+    [RequirePermission(PermissionCodes.AppsRead)]
     [ProducesResponseType(typeof(ApiListResponse<AppResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> List([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default)
@@ -58,6 +60,7 @@ public class AppsController : ControllerBase
 
     /// <summary>Get a single app by its public ID.</summary>
     [HttpGet("{publicId:guid}")]
+    [RequirePermission(PermissionCodes.AppsRead)]
     [ProducesResponseType(typeof(ApiResponse<AppResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -69,6 +72,7 @@ public class AppsController : ControllerBase
 
     /// <summary>Soft-delete an app by its public ID.</summary>
     [HttpDelete("{publicId:guid}")]
+    [RequirePermission(PermissionCodes.AppsDelete)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
