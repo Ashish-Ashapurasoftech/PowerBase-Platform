@@ -11,6 +11,12 @@ namespace PowerBase.UnitTests.Apps;
 public class AppQueryHandlerTests
 {
     private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
+    private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+
+    public AppQueryHandlerTests()
+    {
+        _queryContext.UserId.Returns(1L);
+    }
 
     [Fact]
     public async Task GetApp_ReturnsAppFromRepo()
@@ -29,9 +35,9 @@ public class AppQueryHandlerTests
     public async Task ListApps_ReturnsPagedResult()
     {
         var apps = new List<App> { new() { Name = "A" }, new() { Name = "B" } };
-        _appRepo.ListAsync(1, 20).Returns(apps);
-        _appRepo.CountAsync().Returns(2);
-        var sut = new ListAppsQueryHandler(_appRepo);
+        _appRepo.ListByUserAsync(1L, 1, 20).Returns(apps);
+        _appRepo.CountByUserAsync(1L).Returns(2);
+        var sut = new ListAppsQueryHandler(_appRepo, _queryContext);
 
         var result = await sut.HandleAsync(new ListAppsQuery(1, 20));
 
@@ -46,9 +52,9 @@ public class AppQueryHandlerTests
     [InlineData(-5, 1)]
     public async Task ListApps_PageBelowOne_NormalizesToOne(int inputPage, int expectedPage)
     {
-        _appRepo.ListAsync(Arg.Any<int>(), Arg.Any<int>()).Returns(new List<App>());
-        _appRepo.CountAsync().Returns(0);
-        var sut = new ListAppsQueryHandler(_appRepo);
+        _appRepo.ListByUserAsync(Arg.Any<long>(), Arg.Any<int>(), Arg.Any<int>()).Returns(new List<App>());
+        _appRepo.CountByUserAsync(Arg.Any<long>()).Returns(0);
+        var sut = new ListAppsQueryHandler(_appRepo, _queryContext);
 
         var result = await sut.HandleAsync(new ListAppsQuery(inputPage, 20));
 
@@ -61,9 +67,9 @@ public class AppQueryHandlerTests
     [InlineData(-1, 20)]
     public async Task ListApps_InvalidPageSize_NormalizesToTwenty(int inputPageSize, int expectedPageSize)
     {
-        _appRepo.ListAsync(Arg.Any<int>(), Arg.Any<int>()).Returns(new List<App>());
-        _appRepo.CountAsync().Returns(0);
-        var sut = new ListAppsQueryHandler(_appRepo);
+        _appRepo.ListByUserAsync(Arg.Any<long>(), Arg.Any<int>(), Arg.Any<int>()).Returns(new List<App>());
+        _appRepo.CountByUserAsync(Arg.Any<long>()).Returns(0);
+        var sut = new ListAppsQueryHandler(_appRepo, _queryContext);
 
         var result = await sut.HandleAsync(new ListAppsQuery(1, inputPageSize));
 

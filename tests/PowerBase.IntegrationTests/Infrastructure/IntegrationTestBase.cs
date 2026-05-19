@@ -62,15 +62,24 @@ public abstract class IntegrationTestBase
     {
         var e = email ?? $"test-{Guid.NewGuid():N}@example.com";
         var p = password ?? "Password123!";
-        var r = await PostAsync("/auth/signup", new
+
+        // Step 1: create user, get identity token
+        var signupRes = await PostAsync("/auth/signup", new
         {
             email = e,
             password = p,
             name = "Test User",
-            tenantName = $"Tenant {Guid.NewGuid():N}",
         });
-        r.EnsureSuccessStatusCode();
-        var auth = await ReadData<MinimalAuth>(r);
+        signupRes.EnsureSuccessStatusCode();
+        var identity = await ReadData<MinimalIdentity>(signupRes);
+
+        // Step 2: create tenant with identity token → returns scoped JWT directly
+        var tenantRes = await PostAsync("/tenants",
+            new { name = $"Tenant {Guid.NewGuid():N}" },
+            identity.IdentityToken);
+        tenantRes.EnsureSuccessStatusCode();
+        var auth = await ReadData<MinimalAuth>(tenantRes);
+
         return (auth.Token, e);
     }
 
@@ -121,6 +130,7 @@ public abstract class IntegrationTestBase
     }
 
     private record MinimalAuth(string Token);
+    private record MinimalIdentity(string IdentityToken);
     private record MinimalPublicId(Guid PublicId);
     private record MinimalId(Guid Id);
     private record MinimalFieldId(long Id);
