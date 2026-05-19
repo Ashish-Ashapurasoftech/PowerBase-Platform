@@ -137,6 +137,107 @@ public class ReportsTests : IntegrationTestBase
         run.Columns.Should().ContainSingle(c => c.FieldId == fieldId);
     }
 
+    [Fact]
+    public async Task Update_ValidRequest_Returns204AndGetReflectsChange()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var reportId = await CreateReportAsync(token, tableId, name: "Old Name");
+
+        var patchResponse = await PatchAsync($"/reports/{reportId}", new
+        {
+            name = "New Name",
+            visibility = "Shared",
+            columns = new List<long>(),
+            sortDesc = false,
+        }, token);
+
+        patchResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        var getResponse = await GetAsync($"/reports/{reportId}", token);
+        var report = await ReadData<ReportDto>(getResponse);
+        report.Name.Should().Be("New Name");
+    }
+
+    [Fact]
+    public async Task Update_InvalidVisibility_Returns400()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var reportId = await CreateReportAsync(token, tableId);
+
+        var response = await PatchAsync($"/reports/{reportId}", new
+        {
+            name = "R",
+            visibility = "NotValid",
+            columns = new List<long>(),
+            sortDesc = false,
+        }, token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Update_WithoutAuth_Returns401()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var reportId = await CreateReportAsync(token, tableId);
+
+        var response = await PatchAsync($"/reports/{reportId}", new
+        {
+            name = "R",
+            visibility = "Personal",
+            columns = new List<long>(),
+            sortDesc = false,
+        });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Delete_ExistingReport_Returns204()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var reportId = await CreateReportAsync(token, tableId);
+
+        var response = await DeleteAsync($"/reports/{reportId}", token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+    }
+
+    [Fact]
+    public async Task Delete_ThenGet_Returns404()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var reportId = await CreateReportAsync(token, tableId);
+        await DeleteAsync($"/reports/{reportId}", token);
+
+        var response = await GetAsync($"/reports/{reportId}", token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task Delete_WithoutAuth_Returns401()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var reportId = await CreateReportAsync(token, tableId);
+
+        var response = await DeleteAsync($"/reports/{reportId}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
     private record ReportDto(Guid Id, string Name, ReportDefinitionDto Definition);
     private record ReportDefinitionDto(List<long> Columns, long? SortFieldId, bool SortDesc);
     private record ReportRunDto(List<ReportColumnDto> Columns, List<ReportRowDto> Rows, int TotalCount, int Page, int PageSize);

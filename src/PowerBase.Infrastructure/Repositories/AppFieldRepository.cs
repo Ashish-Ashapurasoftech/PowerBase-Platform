@@ -1,6 +1,7 @@
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
+using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
@@ -11,6 +12,16 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
         af.Id, af.PublicId, af.TenantId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName,
         af.DisplayOrder, af.IsRequired, af.IsReportable, af.IsSystem, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        """;
+
+    private const string GetByIdInTableSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.TenantId    = @tenantId
+          AND af.Id          = @fieldId
+          AND af.AppTableId  = @tableId
+          AND af.IsDeleted   = 0
         """;
 
     private const string ListByTableSql = $"""
@@ -41,8 +52,29 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
         UPDATE meta.AppField SET PhysicalColumnName = @physicalColumnName WHERE Id = @id
         """;
 
+    private const string UpdateSql = """
+        UPDATE meta.AppField
+        SET Label       = @label,
+            Description = @description,
+            IsRequired  = @isRequired,
+            ModifiedOn  = SYSUTCDATETIME(),
+            ModifiedBy  = @modifiedBy
+        WHERE TenantId   = @tenantId
+          AND Id         = @fieldId
+          AND AppTableId = @tableId
+          AND IsDeleted  = 0
+        """;
+
     public AppFieldRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
+
+    public async Task<AppField> GetByIdInTableAsync(long fieldId, long tableId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var field = await connection.QuerySingleOrDefaultAsync<AppField>(
+            new CommandDefinition(GetByIdInTableSql, new { tenantId = QueryContext.TenantId, fieldId, tableId }, cancellationToken: ct));
+        return field ?? throw new NotFoundException("Field", fieldId);
+    }
 
     public async Task<IReadOnlyList<AppField>> ListByTableAsync(long tableId, CancellationToken ct = default)
     {
@@ -82,5 +114,23 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePhysicalColumnNameSql, new { id, physicalColumnName }, cancellationToken: ct));
+    }
+
+    public async Task UpdateAsync(AppField field, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var affected = await connection.ExecuteAsync(
+            new CommandDefinition(UpdateSql, new
+            {
+                tenantId = QueryContext.TenantId,
+                fieldId = field.Id,
+                tableId = field.AppTableId,
+                label = field.Label,
+                description = field.Description,
+                isRequired = field.IsRequired,
+                modifiedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
+        if (affected == 0)
+            throw new NotFoundException("Field", field.Id);
     }
 }

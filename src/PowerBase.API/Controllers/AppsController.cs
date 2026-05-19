@@ -5,6 +5,7 @@ using PowerBase.API.Models;
 using PowerBase.API.Models.Apps;
 using PowerBase.Application.Apps.Commands.CreateApp;
 using PowerBase.Application.Apps.Commands.DeleteApp;
+using PowerBase.Application.Apps.Commands.UpdateApp;
 using PowerBase.Application.Apps.Queries.GetApp;
 using PowerBase.Application.Apps.Queries.ListApps;
 using PowerBase.Domain.Constants;
@@ -16,17 +17,20 @@ namespace PowerBase.API.Controllers;
 public class AppsController : ControllerBase
 {
     private readonly CreateAppCommandHandler _createHandler;
+    private readonly UpdateAppCommandHandler _updateHandler;
     private readonly DeleteAppCommandHandler _deleteHandler;
     private readonly GetAppQueryHandler _getHandler;
     private readonly ListAppsQueryHandler _listHandler;
 
     public AppsController(
         CreateAppCommandHandler createHandler,
+        UpdateAppCommandHandler updateHandler,
         DeleteAppCommandHandler deleteHandler,
         GetAppQueryHandler getHandler,
         ListAppsQueryHandler listHandler)
     {
         _createHandler = createHandler;
+        _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _getHandler = getHandler;
         _listHandler = listHandler;
@@ -70,6 +74,21 @@ public class AppsController : ControllerBase
     {
         var app = await _getHandler.HandleAsync(new GetAppQuery(publicId), ct);
         return Ok(new ApiResponse<AppResponse>(MapToAppResponse(app)));
+    }
+
+    /// <summary>Update an app's name and metadata.</summary>
+    [HttpPatch("{publicId:guid}")]
+    [RequirePermission(PermissionCodes.AppsUpdate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByAppPublicId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateAppRequest request, CancellationToken ct)
+    {
+        var command = new UpdateAppCommand(publicId, request.Name, request.Description, request.Icon, request.Color);
+        await _updateHandler.HandleAsync(command, ct);
+        return NoContent();
     }
 
     /// <summary>Soft-delete an app by its public ID.</summary>

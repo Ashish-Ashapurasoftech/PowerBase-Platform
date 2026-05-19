@@ -76,6 +76,19 @@ public class AppRepository : BaseRepository, IAppRepository
         VALUES (@tenantId, @ownerId, @name, @description, @icon, @color, @status, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
+    private const string UpdateSql = """
+        UPDATE meta.App
+        SET Name        = @name,
+            Description = @description,
+            Icon        = @icon,
+            Color       = @color,
+            ModifiedOn  = SYSUTCDATETIME(),
+            ModifiedBy  = @modifiedBy
+        WHERE TenantId = @tenantId
+          AND PublicId = @publicId
+          AND IsDeleted = 0
+        """;
+
     private const string SoftDeleteSql = """
         UPDATE meta.App
         SET IsDeleted = 1,
@@ -166,6 +179,24 @@ public class AppRepository : BaseRepository, IAppRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteScalarAsync<int>(
             new CommandDefinition(CountByUserSql, new { tenantId = QueryContext.TenantId, userId }, cancellationToken: ct));
+    }
+
+    public async Task UpdateAsync(App app, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var affected = await connection.ExecuteAsync(
+            new CommandDefinition(UpdateSql, new
+            {
+                tenantId = QueryContext.TenantId,
+                publicId = app.PublicId,
+                name = app.Name,
+                description = app.Description,
+                icon = app.Icon,
+                color = app.Color,
+                modifiedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
+        if (affected == 0)
+            throw new NotFoundException("App", app.PublicId);
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)

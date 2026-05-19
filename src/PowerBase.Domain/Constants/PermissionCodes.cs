@@ -9,10 +9,12 @@ public static class PermissionCodes
 
     public const string TablesCreate = "tables:create";
     public const string TablesRead   = "tables:read";
+    public const string TablesUpdate = "tables:update";
     public const string TablesDelete = "tables:delete";
 
     public const string FieldsCreate = "fields:create";
     public const string FieldsRead   = "fields:read";
+    public const string FieldsUpdate = "fields:update";
 
     public const string RecordsCreate = "records:create";
     public const string RecordsRead   = "records:read";
@@ -21,6 +23,8 @@ public static class PermissionCodes
 
     public const string ReportsCreate = "reports:create";
     public const string ReportsRead   = "reports:read";
+    public const string ReportsUpdate = "reports:update";
+    public const string ReportsDelete = "reports:delete";
     public const string ReportsRun    = "reports:run";
 
     public const string UsersInvite  = "users:invite";

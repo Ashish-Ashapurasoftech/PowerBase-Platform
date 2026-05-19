@@ -61,6 +61,20 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         UPDATE meta.AppTable SET PhysicalTableName = @physicalTableName WHERE Id = @id
         """;
 
+    private const string UpdateSql = """
+        UPDATE meta.AppTable
+        SET Name          = @name,
+            SingularLabel = @singularLabel,
+            PluralLabel   = @pluralLabel,
+            Description   = @description,
+            Icon          = @icon,
+            ModifiedOn    = SYSUTCDATETIME(),
+            ModifiedBy    = @modifiedBy
+        WHERE TenantId = @tenantId
+          AND PublicId = @publicId
+          AND IsDeleted = 0
+        """;
+
     private const string SoftDeleteSql = """
         UPDATE meta.AppTable
         SET IsDeleted = 1,
@@ -136,6 +150,25 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePhysicalNameSql, new { id, physicalTableName }, cancellationToken: ct));
+    }
+
+    public async Task UpdateAsync(AppTable table, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var affected = await connection.ExecuteAsync(
+            new CommandDefinition(UpdateSql, new
+            {
+                tenantId = QueryContext.TenantId,
+                publicId = table.PublicId,
+                name = table.Name,
+                singularLabel = table.SingularLabel,
+                pluralLabel = table.PluralLabel,
+                description = table.Description,
+                icon = table.Icon,
+                modifiedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
+        if (affected == 0)
+            throw new NotFoundException("Table", table.PublicId);
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)

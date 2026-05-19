@@ -6,6 +6,8 @@ using PowerBase.API.Models.Records;
 using PowerBase.API.Models.Reports;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Commands.CreateReport;
+using PowerBase.Application.Reports.Commands.DeleteReport;
+using PowerBase.Application.Reports.Commands.UpdateReport;
 using PowerBase.Application.Reports.Queries.GetReport;
 using PowerBase.Application.Reports.Queries.ListReports;
 using PowerBase.Application.Reports.Queries.RunReport;
@@ -17,17 +19,23 @@ namespace PowerBase.API.Controllers;
 public class ReportsController : ControllerBase
 {
     private readonly CreateReportCommandHandler _createHandler;
+    private readonly UpdateReportCommandHandler _updateHandler;
+    private readonly DeleteReportCommandHandler _deleteHandler;
     private readonly GetReportQueryHandler _getHandler;
     private readonly ListReportsQueryHandler _listHandler;
     private readonly RunReportQueryHandler _runHandler;
 
     public ReportsController(
         CreateReportCommandHandler createHandler,
+        UpdateReportCommandHandler updateHandler,
+        DeleteReportCommandHandler deleteHandler,
         GetReportQueryHandler getHandler,
         ListReportsQueryHandler listHandler,
         RunReportQueryHandler runHandler)
     {
         _createHandler = createHandler;
+        _updateHandler = updateHandler;
+        _deleteHandler = deleteHandler;
         _getHandler = getHandler;
         _listHandler = listHandler;
         _runHandler = runHandler;
@@ -80,6 +88,34 @@ public class ReportsController : ControllerBase
     {
         var result = await _getHandler.HandleAsync(new GetReportQuery(publicId), ct);
         return Ok(new ApiResponse<ReportResponse>(MapToResponse(result)));
+    }
+
+    /// <summary>Update a report's name, visibility, and column definition.</summary>
+    [HttpPatch("reports/{publicId:guid}")]
+    [RequirePermission(PermissionCodes.ReportsUpdate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateReportRequest request, CancellationToken ct)
+    {
+        var command = new UpdateReportCommand(publicId, request.Name, request.Description, request.Visibility, request.Columns, request.SortFieldId, request.SortDesc);
+        await _updateHandler.HandleAsync(command, ct);
+        return NoContent();
+    }
+
+    /// <summary>Soft-delete a report.</summary>
+    [HttpDelete("reports/{publicId:guid}")]
+    [RequirePermission(PermissionCodes.ReportsDelete)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Delete(Guid publicId, CancellationToken ct)
+    {
+        await _deleteHandler.HandleAsync(new DeleteReportCommand(publicId), ct);
+        return NoContent();
     }
 
     /// <summary>Execute a report and return paged results.</summary>

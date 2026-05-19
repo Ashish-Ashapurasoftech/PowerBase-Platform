@@ -108,5 +108,50 @@ public class FieldsTests : IntegrationTestBase
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
-    private record FieldDto(long Id, Guid PublicId, string Name, string TypeCode, string? PhysicalColumnName);
+    [Fact]
+    public async Task Update_ValidRequest_Returns204AndListReflectsChange()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var fieldId = await CreateFieldAsync(token, tableId, "Text", "OldLabel");
+
+        var patchResponse = await PatchAsync($"/tables/{tableId}/fields/{fieldId}",
+            new { label = "NewLabel", description = "A description", isRequired = true }, token);
+
+        patchResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        var listResponse = await GetAsync($"/tables/{tableId}/fields", token);
+        var fields = await ReadListData<FieldDto>(listResponse);
+        fields.Should().ContainSingle(f => f.Id == fieldId && f.Label == "NewLabel");
+    }
+
+    [Fact]
+    public async Task Update_UnknownField_Returns404()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+
+        var response = await PatchAsync($"/tables/{tableId}/fields/999999",
+            new { label = "X", isRequired = false }, token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task Update_WithoutAuth_Returns401()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var fieldId = await CreateFieldAsync(token, tableId, "Text", "MyField");
+
+        var response = await PatchAsync($"/tables/{tableId}/fields/{fieldId}",
+            new { label = "X", isRequired = false });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    private record FieldDto(long Id, Guid PublicId, string Name, string? Label, string TypeCode, string? PhysicalColumnName);
 }

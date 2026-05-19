@@ -4,6 +4,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Fields;
 using PowerBase.Application.Fields.Commands.CreateField;
+using PowerBase.Application.Fields.Commands.UpdateField;
 using PowerBase.Application.Fields.Queries.ListFields;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -14,11 +15,13 @@ namespace PowerBase.API.Controllers;
 public class FieldsController : ControllerBase
 {
     private readonly CreateFieldCommandHandler _createHandler;
+    private readonly UpdateFieldCommandHandler _updateHandler;
     private readonly ListFieldsQueryHandler _listHandler;
 
-    public FieldsController(CreateFieldCommandHandler createHandler, ListFieldsQueryHandler listHandler)
+    public FieldsController(CreateFieldCommandHandler createHandler, UpdateFieldCommandHandler updateHandler, ListFieldsQueryHandler listHandler)
     {
         _createHandler = createHandler;
+        _updateHandler = updateHandler;
         _listHandler = listHandler;
     }
 
@@ -36,6 +39,21 @@ public class FieldsController : ControllerBase
         var command = new CreateFieldCommand(tableId, request.TypeCode, request.Name, request.Label, request.Description, request.IsRequired);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<FieldResponse>(MapToResponse(result)));
+    }
+
+    /// <summary>Update a field's label, description, and required flag (no DDL).</summary>
+    [HttpPatch("tables/{tableId:guid}/fields/{fieldId:long}")]
+    [RequirePermission(PermissionCodes.FieldsUpdate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Update(Guid tableId, long fieldId, [FromBody] UpdateFieldRequest request, CancellationToken ct)
+    {
+        var command = new UpdateFieldCommand(tableId, fieldId, request.Label, request.Description, request.IsRequired);
+        await _updateHandler.HandleAsync(command, ct);
+        return NoContent();
     }
 
     /// <summary>List all fields for a table.</summary>

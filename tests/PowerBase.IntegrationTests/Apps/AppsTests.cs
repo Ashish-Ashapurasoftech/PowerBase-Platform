@@ -115,5 +115,43 @@ public class AppsTests : IntegrationTestBase
         response.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
+    [Fact]
+    public async Task Update_ValidRequest_Returns204AndGetReflectsChange()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token, "Original Name");
+
+        var patchResponse = await PatchAsync($"/apps/{appId}",
+            new { name = "Updated Name", description = "New desc" }, token);
+
+        patchResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        var getResponse = await GetAsync($"/apps/{appId}", token);
+        var app = await ReadData<AppDto>(getResponse);
+        app.Name.Should().Be("Updated Name");
+    }
+
+    [Fact]
+    public async Task Update_EmptyName_Returns400()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+
+        var response = await PatchAsync($"/apps/{appId}", new { name = "" }, token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Update_WithoutAuth_Returns401()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+
+        var response = await PatchAsync($"/apps/{appId}", new { name = "New Name" });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
     private record AppDto(Guid PublicId, string Name, string Status);
 }

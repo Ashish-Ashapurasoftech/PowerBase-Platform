@@ -103,6 +103,47 @@ public class TablesTests : IntegrationTestBase
         response.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
+    [Fact]
+    public async Task Update_ValidRequest_Returns204AndGetReflectsChange()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId, "OldName");
+
+        var patchResponse = await PatchAsync($"/tables/{tableId}",
+            new { name = "NewName", singularLabel = "Item", pluralLabel = "Items" }, token);
+
+        patchResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        var getResponse = await GetAsync($"/tables/{tableId}", token);
+        var table = await ReadData<TableWithFieldsDto>(getResponse);
+        table.Name.Should().Be("NewName");
+    }
+
+    [Fact]
+    public async Task Update_EmptyName_Returns400()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+
+        var response = await PatchAsync($"/tables/{tableId}", new { name = "" }, token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Update_WithoutAuth_Returns401()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+
+        var response = await PatchAsync($"/tables/{tableId}", new { name = "NewName" });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
     private record TableDto(Guid PublicId, string Name, string? PhysicalTableName);
     private record TableWithFieldsDto(Guid PublicId, string Name, List<FieldDto> Fields);
     private record FieldDto(long Id, string Name, string TypeCode);
