@@ -38,6 +38,7 @@ using PowerBase.Application.Roles.Commands.DeleteRole;
 using PowerBase.Application.Roles.Commands.UpdateRole;
 using PowerBase.Application.Roles.Commands.UpdateRolePermissions;
 using PowerBase.Application.Roles.Queries.GetRolePermissions;
+using PowerBase.Application.Roles.Queries.ListPermissions;
 using PowerBase.Application.Roles.Queries.ListRoles;
 using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
@@ -170,6 +171,7 @@ builder.Services.AddScoped<UpdateRoleCommandHandler>();
 builder.Services.AddScoped<DeleteRoleCommandHandler>();
 builder.Services.AddScoped<GetRolePermissionsQueryHandler>();
 builder.Services.AddScoped<UpdateRolePermissionsCommandHandler>();
+builder.Services.AddScoped<ListPermissionsQueryHandler>();
 
 var app = builder.Build();
 

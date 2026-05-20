@@ -8,6 +8,7 @@ using PowerBase.Application.Roles.Commands.DeleteRole;
 using PowerBase.Application.Roles.Commands.UpdateRole;
 using PowerBase.Application.Roles.Commands.UpdateRolePermissions;
 using PowerBase.Application.Roles.Queries.GetRolePermissions;
+using PowerBase.Application.Roles.Queries.ListPermissions;
 using PowerBase.Application.Roles.Queries.ListRoles;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -24,6 +25,7 @@ public class RolesController : ControllerBase
     private readonly DeleteRoleCommandHandler _deleteHandler;
     private readonly GetRolePermissionsQueryHandler _getPermsHandler;
     private readonly UpdateRolePermissionsCommandHandler _updatePermsHandler;
+    private readonly ListPermissionsQueryHandler _listAllPermsHandler;
 
     public RolesController(
         ListRolesQueryHandler listHandler,
@@ -31,7 +33,8 @@ public class RolesController : ControllerBase
         UpdateRoleCommandHandler updateHandler,
         DeleteRoleCommandHandler deleteHandler,
         GetRolePermissionsQueryHandler getPermsHandler,
-        UpdateRolePermissionsCommandHandler updatePermsHandler)
+        UpdateRolePermissionsCommandHandler updatePermsHandler,
+        ListPermissionsQueryHandler listAllPermsHandler)
     {
         _listHandler = listHandler;
         _createHandler = createHandler;
@@ -39,6 +42,7 @@ public class RolesController : ControllerBase
         _deleteHandler = deleteHandler;
         _getPermsHandler = getPermsHandler;
         _updatePermsHandler = updatePermsHandler;
+        _listAllPermsHandler = listAllPermsHandler;
     }
 
     /// <summary>List all roles for the current tenant.</summary>
@@ -109,6 +113,17 @@ public class RolesController : ControllerBase
         var perms = await _getPermsHandler.HandleAsync(new GetRolePermissionsQuery(publicId), ct);
         var items = perms.Select(MapPermissionToResponse).ToList();
         return Ok(new ApiResponse<IReadOnlyList<PermissionResponse>>(items));
+    }
+
+    /// <summary>List all permissions available in the system.</summary>
+    [HttpGet("/permissions")]
+    [RequireAuth]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<PermissionResponse>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> ListAllPermissions(CancellationToken ct)
+    {
+        var perms = await _listAllPermsHandler.HandleAsync(new ListPermissionsQuery(), ct);
+        return Ok(new ApiResponse<IReadOnlyList<PermissionResponse>>(perms.Select(MapPermissionToResponse).ToList()));
     }
 
     /// <summary>Replace the permissions assigned to a role.</summary>
