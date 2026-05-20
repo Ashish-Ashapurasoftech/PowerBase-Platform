@@ -72,6 +72,45 @@ public class AppsController : ControllerBase
         return Ok(new ApiListResponse<AppResponse>(items, result.Total, result.Page, result.PageSize));
     }
 
+    /// <summary>Search apps by name for the current tenant.</summary>
+    [HttpGet("search")]
+    [RequirePermission(PermissionCodes.AppsRead)]
+    [ProducesResponseType(typeof(ApiListResponse<AppResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> Search([FromQuery] string name = "", [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default)
+    {
+        var allItems = new List<PowerBase.Domain.Entities.App>();
+        int currentPage = 1;
+        int batchSize = 100;
+        
+        while (true)
+        {
+            var batchResult = await _listHandler.HandleAsync(new ListAppsQuery(currentPage, batchSize), ct);
+            if (batchResult.Items == null || batchResult.Items.Count == 0)
+            {
+                break;
+            }
+            allItems.AddRange(batchResult.Items);
+            if (batchResult.Items.Count < batchSize || allItems.Count >= batchResult.Total)
+            {
+                break;
+            }
+            currentPage++;
+        }
+
+        var filtered = allItems
+            .Where(a => string.IsNullOrEmpty(name) || a.Name.Contains(name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var paginated = filtered
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(MapToAppResponse)
+            .ToList();
+
+        return Ok(new ApiListResponse<AppResponse>(paginated, filtered.Count, page, pageSize));
+    }
+
     /// <summary>Get a single app by its public ID.</summary>
     [HttpGet("{publicId:guid}")]
     [RequirePermission(PermissionCodes.AppsRead)]
