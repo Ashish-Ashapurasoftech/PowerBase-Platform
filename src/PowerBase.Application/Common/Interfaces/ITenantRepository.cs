@@ -8,6 +8,7 @@ namespace PowerBase.Application.Common.Interfaces;
 public interface ITenantRepository
 {
     Task<bool> SlugExistsAsync(string slug, CancellationToken ct = default);
+    Task<string?> GetTenantNameByIdAsync(long tenantId, CancellationToken ct = default);
     Task<long> GetActiveTenantIdByUserIdAsync(long userId, CancellationToken ct = default);
     Task<IReadOnlyList<TenantItem>> ListTenantsForUserAsync(long userId, CancellationToken ct = default);
     Task<Tenant> GetTenantForUserAsync(Guid tenantPublicId, long userId, CancellationToken ct = default);
@@ -27,4 +28,7 @@ public interface ITenantRepository
     Task<TenantRole?> GetRoleByIdAsync(long id, CancellationToken ct = default);
     Task<TenantRole?> GetRoleByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<bool> RoleNameExistsAsync(string name, CancellationToken ct = default);
+    Task<int> UpdateRoleAsync(Guid publicId, string name, string? description, CancellationToken ct = default);
+    Task<int> DeleteRoleAsync(Guid publicId, CancellationToken ct = default);
+    Task<int> CountRoleMembersAsync(long roleId, CancellationToken ct = default);
 }

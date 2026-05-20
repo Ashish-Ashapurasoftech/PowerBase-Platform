@@ -34,6 +34,7 @@ public class ExceptionHandlingMiddleware
         {
             NotFoundException e => (StatusCodes.Status404NotFound, e.ErrorCode, e.Message, (object?)null),
             DuplicateException e => (StatusCodes.Status409Conflict, e.ErrorCode, e.Message, (object?)null),
+            ConflictException e => (StatusCodes.Status409Conflict, e.ErrorCode, e.Message, (object?)null),
             UnauthorizedActionException e => (StatusCodes.Status401Unauthorized, e.ErrorCode, e.Message, (object?)null),
             Domain.Exceptions.ValidationException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)e.Errors),
             _ => (StatusCodes.Status500InternalServerError, "INTERNAL_ERROR", "An unexpected error occurred.", (object?)null)

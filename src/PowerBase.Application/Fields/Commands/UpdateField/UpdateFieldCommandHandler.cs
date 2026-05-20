@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Fields.Commands.UpdateField;
 
@@ -6,22 +7,29 @@ public class UpdateFieldCommandHandler
 {
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
+    private readonly IAppAccessService _appAccessService;
 
-    public UpdateFieldCommandHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo)
+    public UpdateFieldCommandHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IAppAccessService appAccessService)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
+        _appAccessService = appAccessService;
     }
 
     public async Task HandleAsync(UpdateFieldCommand command, CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(command.Name))
+            throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name is required."] });
+
+        await _appAccessService.RequireByTablePublicIdAsync(command.TablePublicId, AppAccess.Admin, ct);
+
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
-        var field = await _fieldRepo.GetByIdInTableAsync(command.FieldId, table.Id, ct);
 
-        field.Label = command.Label;
-        field.Description = command.Description;
-        field.IsRequired = command.IsRequired;
+        var affected = await _fieldRepo.UpdateAsync(
+            command.FieldPublicId, table.Id,
+            command.Name, command.Label, command.Description, ct);
 
-        await _fieldRepo.UpdateAsync(field, ct);
+        if (affected == 0)
+            throw new NotFoundException("Field", command.FieldPublicId);
     }
 }

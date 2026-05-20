@@ -4,6 +4,7 @@ using PowerBase.API.Models;
 using PowerBase.API.Models.Apps;
 using PowerBase.Application.Apps.Commands.CreateAppRole;
 using PowerBase.Application.Apps.Commands.DeleteAppRole;
+using PowerBase.Application.Apps.Commands.UpdateAppRole;
 using PowerBase.Application.Apps.Queries.ListAppRoles;
 
 namespace PowerBase.API.Controllers;
@@ -15,15 +16,18 @@ public class AppRolesController : ControllerBase
 {
     private readonly ListAppRolesQueryHandler _listHandler;
     private readonly CreateAppRoleCommandHandler _createHandler;
+    private readonly UpdateAppRoleCommandHandler _updateHandler;
     private readonly DeleteAppRoleCommandHandler _deleteHandler;
 
     public AppRolesController(
         ListAppRolesQueryHandler listHandler,
         CreateAppRoleCommandHandler createHandler,
+        UpdateAppRoleCommandHandler updateHandler,
         DeleteAppRoleCommandHandler deleteHandler)
     {
         _listHandler = listHandler;
         _createHandler = createHandler;
+        _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
     }
 
@@ -39,6 +43,10 @@ public class AppRolesController : ControllerBase
             Name = r.Name,
             IsDefault = r.IsDefault,
             IsSystem = r.IsSystem,
+            CanViewRecords = r.CanViewRecords,
+            CanAddRecords = r.CanAddRecords,
+            CanEditRecords = r.CanEditRecords,
+            CanDeleteRecords = r.CanDeleteRecords,
         }).ToList();
         return Ok(new ApiResponse<IReadOnlyList<AppRoleResponse>>(response));
     }
@@ -57,7 +65,29 @@ public class AppRolesController : ControllerBase
             Name = result.Name,
             IsDefault = result.IsDefault,
             IsSystem = false,
+            CanViewRecords = true,
+            CanAddRecords = true,
+            CanEditRecords = true,
+            CanDeleteRecords = false,
         }));
+    }
+
+    /// <summary>Update the record permission flags for an app role.</summary>
+    [HttpPatch("{rolePublicId:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateRole(
+        [FromRoute] Guid appId,
+        [FromRoute] Guid rolePublicId,
+        [FromBody] UpdateAppRoleRequest request,
+        CancellationToken ct)
+    {
+        await _updateHandler.HandleAsync(new UpdateAppRoleCommand(
+            appId, rolePublicId,
+            request.CanViewRecords, request.CanAddRecords,
+            request.CanEditRecords, request.CanDeleteRecords), ct);
+        return NoContent();
     }
 
     /// <summary>Delete a custom role. System roles (Administrator, Viewer) cannot be deleted.</summary>

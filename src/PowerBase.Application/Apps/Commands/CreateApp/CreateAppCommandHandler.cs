@@ -82,10 +82,21 @@ public class CreateAppCommandHandler
             {
                 AppId = appId,
                 TenantId = _queryContext.TenantId,
+                Name = "Participant",
+                IsSystem = true,
+                IsDefault = false,
+            }, _uow.Transaction, ct);
+
+            var (viewerRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
+            {
+                AppId = appId,
+                TenantId = _queryContext.TenantId,
                 Name = "Viewer",
                 IsSystem = true,
                 IsDefault = true,
             }, _uow.Transaction, ct);
+
+            await _appRepo.SetDefaultRoleAsync(appId, viewerRoleId, _uow.Transaction, ct);
 
             await _appUserRepo.CreateAsync(new AppUser
             {

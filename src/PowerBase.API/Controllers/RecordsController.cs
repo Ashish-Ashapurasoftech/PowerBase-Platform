@@ -22,31 +22,38 @@ public class RecordsController : ControllerBase
     private readonly DeleteRecordCommandHandler _deleteHandler;
     private readonly ListRecordsQueryHandler _listHandler;
     private readonly GetRecordQueryHandler _getHandler;
+    private readonly IAppAccessService _appAccessService;
 
     public RecordsController(
         CreateRecordCommandHandler createHandler,
         UpdateRecordCommandHandler updateHandler,
         DeleteRecordCommandHandler deleteHandler,
         ListRecordsQueryHandler listHandler,
-        GetRecordQueryHandler getHandler)
+        GetRecordQueryHandler getHandler,
+        IAppAccessService appAccessService)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _listHandler = listHandler;
         _getHandler = getHandler;
+        _appAccessService = appAccessService;
     }
 
     /// <summary>Insert a new record into a table.</summary>
     [HttpPost("tables/{tableId:guid}/records")]
     [RequirePermission(PermissionCodes.RecordsCreate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<RecordResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Create(Guid tableId, [FromBody] CreateRecordRequest request, CancellationToken ct)
     {
+        var flags = await _appAccessService.GetPermissionFlagsByTablePublicIdAsync(tableId, ct);
+        if (!flags.CanAdd)
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = new { code = "FORBIDDEN", message = "Your role does not allow adding records." } });
+
         var command = new CreateRecordCommand(tableId, ParseFieldValues(request.Fields));
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<RecordResponse>(MapToResponse(result)));
@@ -86,13 +93,17 @@ public class RecordsController : ControllerBase
     /// <summary>Update specific fields on an existing record.</summary>
     [HttpPatch("tables/{tableId:guid}/records/{id:guid}")]
     [RequirePermission(PermissionCodes.RecordsUpdate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid tableId, Guid id, [FromBody] UpdateRecordRequest request, CancellationToken ct)
     {
+        var flags = await _appAccessService.GetPermissionFlagsByTablePublicIdAsync(tableId, ct);
+        if (!flags.CanEdit)
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = new { code = "FORBIDDEN", message = "Your role does not allow editing records." } });
+
         var command = new UpdateRecordCommand(tableId, id, ParseFieldValues(request.Fields));
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
@@ -101,12 +112,16 @@ public class RecordsController : ControllerBase
     /// <summary>Soft-delete a record.</summary>
     [HttpDelete("tables/{tableId:guid}/records/{id:guid}")]
     [RequirePermission(PermissionCodes.RecordsDelete)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete(Guid tableId, Guid id, CancellationToken ct)
     {
+        var flags = await _appAccessService.GetPermissionFlagsByTablePublicIdAsync(tableId, ct);
+        if (!flags.CanDelete)
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = new { code = "FORBIDDEN", message = "Your role does not allow deleting records." } });
+
         await _deleteHandler.HandleAsync(new DeleteRecordCommand(tableId, id), ct);
         return NoContent();
     }

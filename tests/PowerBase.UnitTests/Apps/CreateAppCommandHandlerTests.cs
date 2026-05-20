@@ -47,14 +47,14 @@ public class CreateAppCommandHandlerTests
     }
 
     [Fact]
-    public async Task HandleAsync_ValidCommand_SeedsAdministratorAndViewerRoles()
+    public async Task HandleAsync_ValidCommand_SeedsThreeBuiltInRoles()
     {
         SetupHappyPath(Guid.NewGuid());
         var sut = CreateSut();
 
         await sut.HandleAsync(new CreateAppCommand("My App", null, null, null));
 
-        await _appRoleRepo.Received(2).CreateAsync(Arg.Any<AppRole>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _appRoleRepo.Received(3).CreateAsync(Arg.Any<AppRole>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
         await _appUserRepo.Received(1).CreateAsync(Arg.Any<AppUser>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
     }
 

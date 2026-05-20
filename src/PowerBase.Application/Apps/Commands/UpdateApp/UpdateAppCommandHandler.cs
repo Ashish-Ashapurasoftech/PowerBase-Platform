@@ -6,25 +6,28 @@ namespace PowerBase.Application.Apps.Commands.UpdateApp;
 public class UpdateAppCommandHandler
 {
     private readonly IAppRepository _appRepo;
+    private readonly IAppAccessService _appAccessService;
 
-    public UpdateAppCommandHandler(IAppRepository appRepo)
+    public UpdateAppCommandHandler(IAppRepository appRepo, IAppAccessService appAccessService)
     {
         _appRepo = appRepo;
+        _appAccessService = appAccessService;
     }
 
     public async Task HandleAsync(UpdateAppCommand command, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(command.Name))
-            throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name is required."] });
-        if (command.Name.Length > 200)
-            throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name must be 200 characters or fewer."] });
+        var validator = new UpdateAppCommandValidator();
+        var validation = await validator.ValidateAsync(command, ct);
+        if (!validation.IsValid)
+            throw new ValidationException(
+                validation.Errors
+                    .GroupBy(e => e.PropertyName)
+                    .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
 
-        var app = await _appRepo.GetByPublicIdAsync(command.PublicId, ct);
-        app.Name = command.Name;
-        app.Description = command.Description;
-        app.Icon = command.Icon;
-        app.Color = command.Color;
+        await _appAccessService.RequireByAppPublicIdAsync(command.AppPublicId, AppAccess.Admin, ct);
 
-        await _appRepo.UpdateAsync(app, ct);
+        var affected = await _appRepo.UpdateAsync(command.AppPublicId, command.Name, command.Description, command.Icon, command.Color, ct);
+        if (affected == 0)
+            throw new NotFoundException("App", command.AppPublicId);
     }
 }

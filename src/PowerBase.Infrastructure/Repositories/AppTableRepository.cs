@@ -61,7 +61,7 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         UPDATE meta.AppTable SET PhysicalTableName = @physicalTableName WHERE Id = @id
         """;
 
-    private const string UpdateSql = """
+    private const string UpdateTableSql = """
         UPDATE meta.AppTable
         SET Name          = @name,
             SingularLabel = @singularLabel,
@@ -70,9 +70,7 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
             Icon          = @icon,
             ModifiedOn    = SYSUTCDATETIME(),
             ModifiedBy    = @modifiedBy
-        WHERE TenantId = @tenantId
-          AND PublicId = @publicId
-          AND IsDeleted = 0
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
         """;
 
     private const string SoftDeleteSql = """
@@ -152,23 +150,16 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
             new CommandDefinition(UpdatePhysicalNameSql, new { id, physicalTableName }, cancellationToken: ct));
     }
 
-    public async Task UpdateAsync(AppTable table, CancellationToken ct = default)
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        var affected = await connection.ExecuteAsync(
-            new CommandDefinition(UpdateSql, new
+        return await connection.ExecuteAsync(
+            new CommandDefinition(UpdateTableSql, new
             {
                 tenantId = QueryContext.TenantId,
-                publicId = table.PublicId,
-                name = table.Name,
-                singularLabel = table.SingularLabel,
-                pluralLabel = table.PluralLabel,
-                description = table.Description,
-                icon = table.Icon,
+                publicId, name, singularLabel, pluralLabel, description, icon,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
-        if (affected == 0)
-            throw new NotFoundException("Table", table.PublicId);
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)

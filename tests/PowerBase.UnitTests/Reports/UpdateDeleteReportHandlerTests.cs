@@ -3,7 +3,6 @@ using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Reports.Commands.DeleteReport;
 using PowerBase.Application.Reports.Commands.UpdateReport;
-using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.UnitTests.Reports;
@@ -11,22 +10,21 @@ namespace PowerBase.UnitTests.Reports;
 public class UpdateDeleteReportHandlerTests
 {
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
-    private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
+    private readonly IAppAccessService _appAccessService = Substitute.For<IAppAccessService>();
 
-    private UpdateReportCommandHandler CreateUpdateSut() => new(_reportRepo, _fieldRepo);
-    private DeleteReportCommandHandler CreateDeleteSut() => new(_reportRepo);
+    private UpdateReportCommandHandler CreateUpdateSut() => new(_reportRepo, _appAccessService);
+    private DeleteReportCommandHandler CreateDeleteSut() => new(_reportRepo, _appAccessService);
 
     [Fact]
     public async Task UpdateReport_ValidCommand_CallsUpdate()
     {
         var id = Guid.NewGuid();
-        _reportRepo.GetByPublicIdAsync(id).Returns(new Report { PublicId = id, AppTableId = 1, Definition = "{}" });
-        _fieldRepo.ListByTableAsync(1).Returns(new List<AppField> { new() { Id = 10 } });
+        _reportRepo.UpdateAsync(id, "New Name", null, Arg.Any<CancellationToken>()).Returns(1);
         var sut = CreateUpdateSut();
 
-        await sut.HandleAsync(new UpdateReportCommand(id, "New Name", null, "Shared", new List<long> { 10 }, null, false));
+        await sut.HandleAsync(new UpdateReportCommand(id, "New Name", null));
 
-        await _reportRepo.Received(1).UpdateAsync(Arg.Is<Report>(r => r.Name == "New Name" && r.Visibility == "Shared"));
+        await _reportRepo.Received(1).UpdateAsync(id, "New Name", null, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -34,39 +32,50 @@ public class UpdateDeleteReportHandlerTests
     {
         var sut = CreateUpdateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new UpdateReportCommand(Guid.NewGuid(), "", null, "Personal", [], null, false)))
+        await sut.Invoking(s => s.HandleAsync(new UpdateReportCommand(Guid.NewGuid(), "", null)))
             .Should().ThrowAsync<ValidationException>();
     }
 
     [Fact]
-    public async Task UpdateReport_InvalidVisibility_ThrowsValidationException()
+    public async Task UpdateReport_NameTooLong_ThrowsValidationException()
     {
         var sut = CreateUpdateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new UpdateReportCommand(Guid.NewGuid(), "R", null, "BadValue", [], null, false)))
+        await sut.Invoking(s => s.HandleAsync(new UpdateReportCommand(Guid.NewGuid(), new string('x', 201), null)))
             .Should().ThrowAsync<ValidationException>();
     }
 
     [Fact]
-    public async Task UpdateReport_UnknownColumnFieldId_ThrowsValidationException()
+    public async Task UpdateReport_NotFound_ThrowsNotFoundException()
     {
         var id = Guid.NewGuid();
-        _reportRepo.GetByPublicIdAsync(id).Returns(new Report { PublicId = id, AppTableId = 1, Definition = "{}" });
-        _fieldRepo.ListByTableAsync(1).Returns(new List<AppField> { new() { Id = 10 } });
+        _reportRepo.UpdateAsync(id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>()).Returns(0);
         var sut = CreateUpdateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new UpdateReportCommand(id, "R", null, "Personal", new List<long> { 999 }, null, false)))
-            .Should().ThrowAsync<ValidationException>();
+        await sut.Invoking(s => s.HandleAsync(new UpdateReportCommand(id, "Name", null)))
+            .Should().ThrowAsync<NotFoundException>();
     }
 
     [Fact]
     public async Task DeleteReport_CallsDeleteOnRepo()
     {
         var id = Guid.NewGuid();
+        _reportRepo.DeleteAsync(id, Arg.Any<CancellationToken>()).Returns(1);
         var sut = CreateDeleteSut();
 
         await sut.HandleAsync(new DeleteReportCommand(id));
 
         await _reportRepo.Received(1).DeleteAsync(id, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task DeleteReport_NotFound_ThrowsNotFoundException()
+    {
+        var id = Guid.NewGuid();
+        _reportRepo.DeleteAsync(id, Arg.Any<CancellationToken>()).Returns(0);
+        var sut = CreateDeleteSut();
+
+        await sut.Invoking(s => s.HandleAsync(new DeleteReportCommand(id)))
+            .Should().ThrowAsync<NotFoundException>();
     }
 }

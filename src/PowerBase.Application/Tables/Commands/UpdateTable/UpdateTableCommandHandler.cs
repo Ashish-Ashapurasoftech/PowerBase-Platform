@@ -6,10 +6,12 @@ namespace PowerBase.Application.Tables.Commands.UpdateTable;
 public class UpdateTableCommandHandler
 {
     private readonly IAppTableRepository _tableRepo;
+    private readonly IAppAccessService _appAccessService;
 
-    public UpdateTableCommandHandler(IAppTableRepository tableRepo)
+    public UpdateTableCommandHandler(IAppTableRepository tableRepo, IAppAccessService appAccessService)
     {
         _tableRepo = tableRepo;
+        _appAccessService = appAccessService;
     }
 
     public async Task HandleAsync(UpdateTableCommand command, CancellationToken ct = default)
@@ -19,13 +21,14 @@ public class UpdateTableCommandHandler
         if (command.Name.Length > 200)
             throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name must be 200 characters or fewer."] });
 
-        var table = await _tableRepo.GetByPublicIdAsync(command.PublicId, ct);
-        table.Name = command.Name;
-        table.SingularLabel = command.SingularLabel;
-        table.PluralLabel = command.PluralLabel;
-        table.Description = command.Description;
-        table.Icon = command.Icon;
+        await _appAccessService.RequireByTablePublicIdAsync(command.TablePublicId, AppAccess.Admin, ct);
 
-        await _tableRepo.UpdateAsync(table, ct);
+        var affected = await _tableRepo.UpdateAsync(
+            command.TablePublicId, command.Name,
+            command.SingularLabel, command.PluralLabel,
+            command.Description, command.Icon, ct);
+
+        if (affected == 0)
+            throw new NotFoundException("Table", command.TablePublicId);
     }
 }

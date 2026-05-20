@@ -77,20 +77,7 @@ public class ReportsController : ControllerBase
         return Ok(new ApiResponse<IReadOnlyList<ReportResponse>>(items));
     }
 
-    /// <summary>Get a single report definition.</summary>
-    [HttpGet("reports/{publicId:guid}")]
-    [RequirePermission(PermissionCodes.ReportsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
-    [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Get(Guid publicId, CancellationToken ct)
-    {
-        var result = await _getHandler.HandleAsync(new GetReportQuery(publicId), ct);
-        return Ok(new ApiResponse<ReportResponse>(MapToResponse(result)));
-    }
-
-    /// <summary>Update a report's name, visibility, and column definition.</summary>
+    /// <summary>Update a report's name or description.</summary>
     [HttpPatch("reports/{publicId:guid}")]
     [RequirePermission(PermissionCodes.ReportsUpdate)]
     [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByReportPublicId)]
@@ -100,8 +87,7 @@ public class ReportsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateReportRequest request, CancellationToken ct)
     {
-        var command = new UpdateReportCommand(publicId, request.Name, request.Description, request.Visibility, request.Columns, request.SortFieldId, request.SortDesc);
-        await _updateHandler.HandleAsync(command, ct);
+        await _updateHandler.HandleAsync(new UpdateReportCommand(publicId, request.Name, request.Description), ct);
         return NoContent();
     }
 
@@ -116,6 +102,19 @@ public class ReportsController : ControllerBase
     {
         await _deleteHandler.HandleAsync(new DeleteReportCommand(publicId), ct);
         return NoContent();
+    }
+
+    /// <summary>Get a single report definition.</summary>
+    [HttpGet("reports/{publicId:guid}")]
+    [RequirePermission(PermissionCodes.ReportsRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Get(Guid publicId, CancellationToken ct)
+    {
+        var result = await _getHandler.HandleAsync(new GetReportQuery(publicId), ct);
+        return Ok(new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
 
     /// <summary>Execute a report and return paged results.</summary>

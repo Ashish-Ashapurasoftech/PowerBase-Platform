@@ -1,3 +1,3 @@
 namespace PowerBase.Application.Reports.Commands.DeleteReport;
 
-public record DeleteReportCommand(Guid PublicId);
+public record DeleteReportCommand(Guid ReportPublicId);

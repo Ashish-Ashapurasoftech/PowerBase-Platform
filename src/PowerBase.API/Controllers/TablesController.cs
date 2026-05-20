@@ -80,9 +80,9 @@ public class TablesController : ControllerBase
         return Ok(new ApiResponse<TableResponse>(MapToResponse(result)));
     }
 
-    /// <summary>Update a table's name and metadata (no DDL).</summary>
+    /// <summary>Update a table's name, labels, description, or icon.</summary>
     [HttpPatch("tables/{publicId:guid}")]
-    [RequirePermission(PermissionCodes.TablesUpdate)]
+    [RequirePermission(PermissionCodes.TablesCreate)]
     [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTablePublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -90,8 +90,7 @@ public class TablesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateTableRequest request, CancellationToken ct)
     {
-        var command = new UpdateTableCommand(publicId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon);
-        await _updateHandler.HandleAsync(command, ct);
+        await _updateHandler.HandleAsync(new UpdateTableCommand(publicId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon), ct);
         return NoContent();
     }
 

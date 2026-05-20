@@ -76,6 +76,17 @@ public class AppRepository : BaseRepository, IAppRepository
         VALUES (@tenantId, @ownerId, @name, @description, @icon, @color, @status, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
+    private const string SetDefaultRoleSql = """
+        UPDATE meta.App
+        SET DefaultAppRoleId = @roleId
+        WHERE Id = @appId AND TenantId = @tenantId AND IsDeleted = 0
+        """;
+
+    private const string GetDefaultRoleIdSql = """
+        SELECT DefaultAppRoleId FROM meta.App
+        WHERE Id = @appId AND TenantId = @tenantId AND IsDeleted = 0
+        """;
+
     private const string UpdateSql = """
         UPDATE meta.App
         SET Name        = @name,
@@ -85,7 +96,7 @@ public class AppRepository : BaseRepository, IAppRepository
             ModifiedOn  = SYSUTCDATETIME(),
             ModifiedBy  = @modifiedBy
         WHERE TenantId = @tenantId
-          AND PublicId = @publicId
+          AND PublicId  = @publicId
           AND IsDeleted = 0
         """;
 
@@ -181,22 +192,39 @@ public class AppRepository : BaseRepository, IAppRepository
             new CommandDefinition(CountByUserSql, new { tenantId = QueryContext.TenantId, userId }, cancellationToken: ct));
     }
 
-    public async Task UpdateAsync(App app, CancellationToken ct = default)
+    public async Task SetDefaultRoleAsync(long appId, long roleId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var parameters = new { appId, roleId, tenantId = QueryContext.TenantId };
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(new CommandDefinition(SetDefaultRoleSql, parameters, transaction, cancellationToken: ct));
+            return;
+        }
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(new CommandDefinition(SetDefaultRoleSql, parameters, cancellationToken: ct));
+    }
+
+    public async Task<long?> GetDefaultRoleIdAsync(long appId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        var affected = await connection.ExecuteAsync(
+        return await connection.ExecuteScalarAsync<long?>(
+            new CommandDefinition(GetDefaultRoleIdSql, new { appId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+    }
+
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
             new CommandDefinition(UpdateSql, new
             {
                 tenantId = QueryContext.TenantId,
-                publicId = app.PublicId,
-                name = app.Name,
-                description = app.Description,
-                icon = app.Icon,
-                color = app.Color,
+                publicId,
+                name,
+                description,
+                icon,
+                color,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
-        if (affected == 0)
-            throw new NotFoundException("App", app.PublicId);
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)

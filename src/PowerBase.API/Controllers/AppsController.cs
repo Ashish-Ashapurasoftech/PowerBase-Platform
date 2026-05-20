@@ -76,7 +76,7 @@ public class AppsController : ControllerBase
         return Ok(new ApiResponse<AppResponse>(MapToAppResponse(app)));
     }
 
-    /// <summary>Update an app's name and metadata.</summary>
+    /// <summary>Update an app's name, description, icon, or color.</summary>
     [HttpPatch("{publicId:guid}")]
     [RequirePermission(PermissionCodes.AppsUpdate)]
     [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByAppPublicId)]
@@ -86,8 +86,7 @@ public class AppsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateAppRequest request, CancellationToken ct)
     {
-        var command = new UpdateAppCommand(publicId, request.Name, request.Description, request.Icon, request.Color);
-        await _updateHandler.HandleAsync(command, ct);
+        await _updateHandler.HandleAsync(new UpdateAppCommand(publicId, request.Name, request.Description, request.Icon, request.Color), ct);
         return NoContent();
     }
 

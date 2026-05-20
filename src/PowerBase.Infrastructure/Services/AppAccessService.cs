@@ -53,4 +53,13 @@ public class AppAccessService : IAppAccessService
         if (required == AppAccess.Admin && roleName != "Administrator")
             throw new UnauthorizedActionException("Administrator access is required for this action.");
     }
+
+    public async Task<AppPermissionFlags> GetPermissionFlagsByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        var appId = await _tableRepo.GetAppIdByPublicIdAsync(tablePublicId, ct);
+        var flags = await _appUserRepo.GetUserPermissionFlagsAsync(appId, _queryContext.UserId, ct);
+        if (flags is null)
+            throw new UnauthorizedActionException("You do not have access to this app.");
+        return new AppPermissionFlags(flags.Value.CanView, flags.Value.CanAdd, flags.Value.CanEdit, flags.Value.CanDelete);
+    }
 }
