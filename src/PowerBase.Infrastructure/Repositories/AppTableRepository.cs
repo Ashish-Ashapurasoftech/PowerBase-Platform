@@ -61,6 +61,18 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         UPDATE meta.AppTable SET PhysicalTableName = @physicalTableName WHERE Id = @id
         """;
 
+    private const string UpdateTableSql = """
+        UPDATE meta.AppTable
+        SET Name          = @name,
+            SingularLabel = @singularLabel,
+            PluralLabel   = @pluralLabel,
+            Description   = @description,
+            Icon          = @icon,
+            ModifiedOn    = SYSUTCDATETIME(),
+            ModifiedBy    = @modifiedBy
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+        """;
+
     private const string SoftDeleteSql = """
         UPDATE meta.AppTable
         SET IsDeleted = 1,
@@ -136,6 +148,18 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePhysicalNameSql, new { id, physicalTableName }, cancellationToken: ct));
+    }
+
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
+            new CommandDefinition(UpdateTableSql, new
+            {
+                tenantId = QueryContext.TenantId,
+                publicId, name, singularLabel, pluralLabel, description, icon,
+                modifiedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)

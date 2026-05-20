@@ -6,6 +6,7 @@ using PowerBase.API.Models.Fields;
 using PowerBase.API.Models.Tables;
 using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
+using PowerBase.Application.Tables.Commands.UpdateTable;
 using PowerBase.Application.Tables.Queries.GetTable;
 using PowerBase.Application.Tables.Queries.ListTables;
 using PowerBase.Domain.Constants;
@@ -17,17 +18,20 @@ namespace PowerBase.API.Controllers;
 public class TablesController : ControllerBase
 {
     private readonly CreateTableCommandHandler _createHandler;
+    private readonly UpdateTableCommandHandler _updateHandler;
     private readonly DeleteTableCommandHandler _deleteHandler;
     private readonly GetTableQueryHandler _getHandler;
     private readonly ListTablesQueryHandler _listHandler;
 
     public TablesController(
         CreateTableCommandHandler createHandler,
+        UpdateTableCommandHandler updateHandler,
         DeleteTableCommandHandler deleteHandler,
         GetTableQueryHandler getHandler,
         ListTablesQueryHandler listHandler)
     {
         _createHandler = createHandler;
+        _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _getHandler = getHandler;
         _listHandler = listHandler;
@@ -74,6 +78,20 @@ public class TablesController : ControllerBase
     {
         var result = await _getHandler.HandleAsync(new GetTableQuery(publicId), ct);
         return Ok(new ApiResponse<TableResponse>(MapToResponse(result)));
+    }
+
+    /// <summary>Update a table's name, labels, description, or icon.</summary>
+    [HttpPatch("tables/{publicId:guid}")]
+    [RequirePermission(PermissionCodes.TablesCreate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTablePublicId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateTableRequest request, CancellationToken ct)
+    {
+        await _updateHandler.HandleAsync(new UpdateTableCommand(publicId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon), ct);
+        return NoContent();
     }
 
     /// <summary>Soft-delete a table by its public ID (does not drop the physical table).</summary>

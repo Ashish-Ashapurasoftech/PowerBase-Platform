@@ -4,6 +4,8 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Fields;
 using PowerBase.Application.Fields.Commands.CreateField;
+using PowerBase.Application.Fields.Commands.DeleteField;
+using PowerBase.Application.Fields.Commands.UpdateField;
 using PowerBase.Application.Fields.Queries.ListFields;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -14,11 +16,19 @@ namespace PowerBase.API.Controllers;
 public class FieldsController : ControllerBase
 {
     private readonly CreateFieldCommandHandler _createHandler;
+    private readonly UpdateFieldCommandHandler _updateHandler;
+    private readonly DeleteFieldCommandHandler _deleteHandler;
     private readonly ListFieldsQueryHandler _listHandler;
 
-    public FieldsController(CreateFieldCommandHandler createHandler, ListFieldsQueryHandler listHandler)
+    public FieldsController(
+        CreateFieldCommandHandler createHandler,
+        UpdateFieldCommandHandler updateHandler,
+        DeleteFieldCommandHandler deleteHandler,
+        ListFieldsQueryHandler listHandler)
     {
         _createHandler = createHandler;
+        _updateHandler = updateHandler;
+        _deleteHandler = deleteHandler;
         _listHandler = listHandler;
     }
 
@@ -50,6 +60,33 @@ public class FieldsController : ControllerBase
         var fields = await _listHandler.HandleAsync(new ListFieldsQuery(tableId), ct);
         var items = fields.Select(MapToResponse).ToList();
         return Ok(new ApiListResponse<FieldResponse>(items, items.Count, 1, items.Count));
+    }
+
+    /// <summary>Update a field's name, label, or description.</summary>
+    [HttpPatch("tables/{tableId:guid}/fields/{fieldId:guid}")]
+    [RequirePermission(PermissionCodes.FieldsCreate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Update(Guid tableId, Guid fieldId, [FromBody] UpdateFieldRequest request, CancellationToken ct)
+    {
+        await _updateHandler.HandleAsync(new UpdateFieldCommand(tableId, fieldId, request.Name, request.Label, request.Description), ct);
+        return NoContent();
+    }
+
+    /// <summary>Soft-delete a field (does not run DROP COLUMN).</summary>
+    [HttpDelete("tables/{tableId:guid}/fields/{fieldId:guid}")]
+    [RequirePermission(PermissionCodes.FieldsCreate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Delete(Guid tableId, Guid fieldId, CancellationToken ct)
+    {
+        await _deleteHandler.HandleAsync(new DeleteFieldCommand(tableId, fieldId), ct);
+        return NoContent();
     }
 
     private static FieldResponse MapToResponse(CreateFieldResult r) => new()

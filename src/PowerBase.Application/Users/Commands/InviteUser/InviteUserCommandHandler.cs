@@ -8,12 +8,18 @@ public class InviteUserCommandHandler
 {
     private readonly IUserRepository _userRepo;
     private readonly ITenantRepository _tenantRepo;
+    private readonly IEmailService _emailService;
     private readonly IQueryContext _queryContext;
 
-    public InviteUserCommandHandler(IUserRepository userRepo, ITenantRepository tenantRepo, IQueryContext queryContext)
+    public InviteUserCommandHandler(
+        IUserRepository userRepo,
+        ITenantRepository tenantRepo,
+        IEmailService emailService,
+        IQueryContext queryContext)
     {
         _userRepo = userRepo;
         _tenantRepo = tenantRepo;
+        _emailService = emailService;
         _queryContext = queryContext;
     }
 
@@ -40,6 +46,10 @@ public class InviteUserCommandHandler
             IsActive = true,
             InvitedBy = _queryContext.UserId,
         }, ct: ct);
+
+        var inviter = await _userRepo.GetByIdAsync(_queryContext.UserId, ct);
+        var tenantName = await _tenantRepo.GetTenantNameByIdAsync(_queryContext.TenantId, ct) ?? "PowerBase";
+        await _emailService.SendInvitationEmailAsync(command.Email, tenantName, inviter.Name, ct);
 
         var users = await _tenantRepo.ListUsersAsync(ct);
         return users.First(u => u.UserPublicId == user.PublicId);

@@ -11,5 +11,6 @@ public interface IAppTableRepository
     Task<bool> NameExistsInAppAsync(long appId, string name, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> CreateAsync(AppTable table, CancellationToken ct = default);
     Task UpdatePhysicalNameAsync(long id, string physicalTableName, CancellationToken ct = default);
+    Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, CancellationToken ct = default);
     Task DeleteAsync(Guid publicId, CancellationToken ct = default);
 }

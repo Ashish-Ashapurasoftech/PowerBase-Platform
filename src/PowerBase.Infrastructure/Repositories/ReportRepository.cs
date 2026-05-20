@@ -49,6 +49,18 @@ public class ReportRepository : BaseRepository, IReportRepository
              @definition, @isDefault, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
+    private const string UpdateReportSql = """
+        UPDATE meta.Report
+        SET Name = @name, Description = @description, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+        """;
+
+    private const string SoftDeleteReportSql = """
+        UPDATE meta.Report
+        SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+        """;
+
     public ReportRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
@@ -99,5 +111,19 @@ public class ReportRepository : BaseRepository, IReportRepository
                 createdBy = QueryContext.UserId,
             }, cancellationToken: ct));
         return ((long)row.Id, (Guid)row.PublicId);
+    }
+
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? description, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
+            new CommandDefinition(UpdateReportSql, new { tenantId = QueryContext.TenantId, publicId, name, description, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    public async Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
+            new CommandDefinition(SoftDeleteReportSql, new { tenantId = QueryContext.TenantId, publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 }

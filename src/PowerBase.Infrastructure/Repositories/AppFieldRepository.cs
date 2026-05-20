@@ -41,6 +41,25 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
         UPDATE meta.AppField SET PhysicalColumnName = @physicalColumnName WHERE Id = @id
         """;
 
+    private const string GetByPublicIdSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.TenantId = @tenantId AND af.PublicId = @publicId AND af.IsDeleted = 0
+        """;
+
+    private const string UpdateFieldSql = """
+        UPDATE meta.AppField
+        SET Name = @name, Label = @label, Description = @description, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
+        """;
+
+    private const string SoftDeleteFieldSql = """
+        UPDATE meta.AppField
+        SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
+        """;
+
     public AppFieldRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
@@ -82,5 +101,36 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePhysicalColumnNameSql, new { id, physicalColumnName }, cancellationToken: ct));
+    }
+
+    public async Task<AppField?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<AppField>(
+            new CommandDefinition(GetByPublicIdSql, new { tenantId = QueryContext.TenantId, publicId }, cancellationToken: ct));
+    }
+
+    public async Task<int> UpdateAsync(Guid publicId, long tableId, string name, string? label, string? description, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
+            new CommandDefinition(UpdateFieldSql, new
+            {
+                tenantId = QueryContext.TenantId,
+                publicId, tableId, name, label, description,
+                modifiedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
+    }
+
+    public async Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
+            new CommandDefinition(SoftDeleteFieldSql, new
+            {
+                tenantId = QueryContext.TenantId,
+                publicId, tableId,
+                deletedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
     }
 }

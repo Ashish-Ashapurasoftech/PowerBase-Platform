@@ -17,6 +17,10 @@ public class TenantRepository : BaseRepository, ITenantRepository
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
+    private const string GetTenantNameByIdSql = """
+        SELECT Name FROM meta.Tenant WHERE Id = @tenantId AND IsDeleted = 0
+        """;
+
     private const string GetActiveTenantIdByUserIdSql = """
         SELECT TOP 1 tu.TenantId
         FROM meta.TenantUser tu
@@ -139,8 +143,32 @@ public class TenantRepository : BaseRepository, ITenantRepository
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
+    private const string UpdateRoleSql = """
+        UPDATE meta.TenantRole
+        SET Name = @name, Description = @description, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsSystem = 0 AND IsDeleted = 0
+        """;
+
+    private const string SoftDeleteRoleSql = """
+        UPDATE meta.TenantRole
+        SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsSystem = 0 AND IsDeleted = 0
+        """;
+
+    private const string CountRoleMembersSql = """
+        SELECT COUNT(1) FROM meta.TenantUser
+        WHERE TenantId = @tenantId AND TenantRoleId = @roleId AND IsDeleted = 0
+        """;
+
     public TenantRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
+
+    public async Task<string?> GetTenantNameByIdAsync(long tenantId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<string?>(
+            new CommandDefinition(GetTenantNameByIdSql, new { tenantId }, cancellationToken: ct));
+    }
 
     public async Task<bool> SlugExistsAsync(string slug, CancellationToken ct = default)
     {
@@ -285,6 +313,27 @@ public class TenantRepository : BaseRepository, ITenantRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(RoleNameExistsSql, new { tenantId = QueryContext.TenantId, name }, cancellationToken: ct));
+    }
+
+    public async Task<int> UpdateRoleAsync(Guid publicId, string name, string? description, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
+            new CommandDefinition(UpdateRoleSql, new { publicId, name, description, tenantId = QueryContext.TenantId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    public async Task<int> DeleteRoleAsync(Guid publicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
+            new CommandDefinition(SoftDeleteRoleSql, new { publicId, tenantId = QueryContext.TenantId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    public async Task<int> CountRoleMembersAsync(long roleId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(CountRoleMembersSql, new { tenantId = QueryContext.TenantId, roleId }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<TenantItem>> ListTenantsForUserAsync(long userId, CancellationToken ct = default)

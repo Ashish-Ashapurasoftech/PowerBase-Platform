@@ -2,7 +2,15 @@ using PowerBase.Application.Common.Interfaces;
 
 namespace PowerBase.Application.Apps.Queries.ListAppRoles;
 
-public record AppRoleResult(Guid PublicId, string Name, bool IsDefault, bool IsSystem);
+public record AppRoleResult(
+    Guid PublicId,
+    string Name,
+    bool IsDefault,
+    bool IsSystem,
+    bool CanViewRecords,
+    bool CanAddRecords,
+    bool CanEditRecords,
+    bool CanDeleteRecords);
 
 public class ListAppRolesQueryHandler
 {
@@ -19,6 +27,8 @@ public class ListAppRolesQueryHandler
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
         var roles = await _appRoleRepo.ListByAppIdAsync(appId, ct);
-        return roles.Select(r => new AppRoleResult(r.PublicId, r.Name, r.IsDefault, r.IsSystem)).ToList();
+        return roles.Select(r => new AppRoleResult(
+            r.PublicId, r.Name, r.IsDefault, r.IsSystem,
+            r.CanViewRecords, r.CanAddRecords, r.CanEditRecords, r.CanDeleteRecords)).ToList();
     }
 }

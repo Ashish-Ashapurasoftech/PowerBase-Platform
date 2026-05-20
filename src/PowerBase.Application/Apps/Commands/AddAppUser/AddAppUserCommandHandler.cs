@@ -37,8 +37,20 @@ public class AddAppUserCommandHandler
         if (existing is not null)
             throw new DuplicateException("AppUser", "userId", user.Id.ToString());
 
-        var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId, ct)
-            ?? throw new NotFoundException("AppRole", command.RolePublicId);
+        AppRole role;
+        if (command.RolePublicId.HasValue)
+        {
+            role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId.Value, ct)
+                ?? throw new NotFoundException("AppRole", command.RolePublicId.Value);
+        }
+        else
+        {
+            var defaultRoleId = await _appRepo.GetDefaultRoleIdAsync(appId, ct)
+                ?? throw new NotFoundException("DefaultAppRole", appId);
+            var allRoles = await _appRoleRepo.ListByAppIdAsync(appId, ct);
+            role = allRoles.FirstOrDefault(r => r.Id == defaultRoleId)
+                ?? throw new NotFoundException("DefaultAppRole", appId);
+        }
 
         await _appUserRepo.CreateAsync(new AppUser
         {

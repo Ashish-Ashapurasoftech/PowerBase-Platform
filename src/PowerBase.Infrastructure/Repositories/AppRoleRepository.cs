@@ -8,7 +8,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class AppRoleRepository : BaseRepository, IAppRoleRepository
 {
-    private const string SelectColumns = "Id, PublicId, AppId, TenantId, Name, IsDefault, IsSystem, CreatedOn, CreatedBy, IsDeleted";
+    private const string SelectColumns = "Id, PublicId, AppId, TenantId, Name, IsDefault, IsSystem, CanViewRecords, CanAddRecords, CanEditRecords, CanDeleteRecords, CreatedOn, CreatedBy, IsDeleted";
 
     private const string ListByAppIdSql = $"""
         SELECT {SelectColumns}
@@ -34,6 +34,15 @@ public class AppRoleRepository : BaseRepository, IAppRoleRepository
         INSERT INTO meta.AppRole (AppId, TenantId, Name, IsDefault, IsSystem, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES (@appId, @tenantId, @name, @isDefault, @isSystem, SYSUTCDATETIME(), @createdBy)
+        """;
+
+    private const string UpdateFlagsSql = """
+        UPDATE meta.AppRole
+        SET CanViewRecords   = @canViewRecords,
+            CanAddRecords    = @canAddRecords,
+            CanEditRecords   = @canEditRecords,
+            CanDeleteRecords = @canDeleteRecords
+        WHERE PublicId = @publicId AND TenantId = @tenantId AND IsDeleted = 0
         """;
 
     private const string SoftDeleteSql = """
@@ -78,6 +87,21 @@ public class AppRoleRepository : BaseRepository, IAppRoleRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.QuerySingleAsync<(long Id, Guid PublicId)>(
             new CommandDefinition(InsertSql, parameters, cancellationToken: ct));
+    }
+
+    public async Task<int> UpdateFlagsAsync(Guid publicId, bool canViewRecords, bool canAddRecords, bool canEditRecords, bool canDeleteRecords, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
+            new CommandDefinition(UpdateFlagsSql, new
+            {
+                publicId,
+                tenantId = QueryContext.TenantId,
+                canViewRecords,
+                canAddRecords,
+                canEditRecords,
+                canDeleteRecords,
+            }, cancellationToken: ct));
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)
