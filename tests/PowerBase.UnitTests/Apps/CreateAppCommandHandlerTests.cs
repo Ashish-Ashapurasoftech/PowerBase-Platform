@@ -14,8 +14,10 @@ public class CreateAppCommandHandlerTests
     private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
     private readonly IUnitOfWork _uow = Substitute.For<IUnitOfWork>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
+    private readonly ISchemaEngineService _schemaEngine = Substitute.For<ISchemaEngineService>();
 
-    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext);
+    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine);
 
     public CreateAppCommandHandlerTests()
     {
@@ -29,6 +31,10 @@ public class CreateAppCommandHandlerTests
         _appRepo.CreateAsync(Arg.Any<App>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
             .Returns((publicId, appId));
         _appRoleRepo.CreateAsync(Arg.Any<AppRole>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+            .Returns((1L, Guid.NewGuid()));
+        _tableRepo.NameExistsInAppAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(false);
+        _tableRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<CancellationToken>())
             .Returns((1L, Guid.NewGuid()));
     }
 

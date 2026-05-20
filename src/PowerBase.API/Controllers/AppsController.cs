@@ -45,7 +45,16 @@ public class AppsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Create([FromBody] CreateAppRequest request, CancellationToken ct)
     {
-        var command = new CreateAppCommand(request.Name, request.Description, request.Icon, request.Color);
+        var command = new CreateAppCommand(
+            request.Name,
+            request.Description,
+            request.Icon,
+            request.Color,
+            request.TableName,
+            request.TableSingularLabel,
+            request.TablePluralLabel,
+            request.TableIcon,
+            request.TableDescription);
         var result = await _createHandler.HandleAsync(command, ct);
         var response = MapToAppResponse(result);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<AppResponse>(response));

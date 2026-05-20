@@ -1,6 +1,7 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.Constants;
 
 namespace PowerBase.Application.Apps.Commands.CreateApp;
 
@@ -22,19 +23,25 @@ public class CreateAppCommandHandler
     private readonly IAppUserRepository _appUserRepo;
     private readonly IUnitOfWork _uow;
     private readonly IQueryContext _queryContext;
+    private readonly IAppTableRepository _tableRepo;
+    private readonly ISchemaEngineService _schemaEngine;
 
     public CreateAppCommandHandler(
         IAppRepository appRepo,
         IAppRoleRepository appRoleRepo,
         IAppUserRepository appUserRepo,
         IUnitOfWork uow,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAppTableRepository tableRepo,
+        ISchemaEngineService schemaEngine)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
         _appUserRepo = appUserRepo;
         _uow = uow;
         _queryContext = queryContext;
+        _tableRepo = tableRepo;
+        _schemaEngine = schemaEngine;
     }
 
     public async Task<CreateAppResult> HandleAsync(CreateAppCommand command, CancellationToken ct = default)
@@ -108,6 +115,32 @@ public class CreateAppCommandHandler
             }, _uow.Transaction, ct);
 
             await _uow.CommitAsync(ct);
+
+            // Create the first table associated with the new app
+            if (await _tableRepo.NameExistsInAppAsync(appId, command.TableName, ct))
+                throw new DuplicateException("Table", "name", command.TableName);
+
+            var table = new AppTable
+            {
+                TenantId = _queryContext.TenantId,
+                AppId = appId,
+                Name = command.TableName,
+                SingularLabel = command.TableSingularLabel,
+                PluralLabel = command.TablePluralLabel,
+                Description = command.TableDescription,
+                Icon = command.TableIcon,
+                CreatedBy = _queryContext.UserId,
+            };
+
+            var (tableId, tablePublicId) = await _tableRepo.CreateAsync(table, ct);
+            table.Id = tableId;
+            table.PublicId = tablePublicId;
+
+            var physicalName = PhysicalNaming.TableName(tableId);
+            await _tableRepo.UpdatePhysicalNameAsync(tableId, physicalName, ct);
+            table.PhysicalTableName = physicalName;
+
+            await _schemaEngine.CreateTableAsync(table, ct);
 
             return new CreateAppResult
             {
