@@ -9,6 +9,7 @@ public class ChangeAppUserRoleCommandHandler
     private readonly IAppRoleRepository _appRoleRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IUserRepository _userRepo;
+    private readonly IAppAccessService _appAccessService;
     private readonly IQueryContext _queryContext;
 
     public ChangeAppUserRoleCommandHandler(
@@ -16,17 +17,21 @@ public class ChangeAppUserRoleCommandHandler
         IAppRoleRepository appRoleRepo,
         IAppUserRepository appUserRepo,
         IUserRepository userRepo,
+        IAppAccessService appAccessService,
         IQueryContext queryContext)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
         _appUserRepo = appUserRepo;
         _userRepo = userRepo;
+        _appAccessService = appAccessService;
         _queryContext = queryContext;
     }
 
     public async Task HandleAsync(ChangeAppUserRoleCommand command, CancellationToken ct = default)
     {
+        await _appAccessService.RequireByAppPublicIdAsync(command.AppPublicId, AppAccess.Admin, ct);
+
         var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
 
         var user = await _userRepo.GetByPublicIdAsync(command.UserPublicId, ct)
