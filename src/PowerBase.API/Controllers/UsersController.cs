@@ -42,11 +42,56 @@ public class UsersController : ControllerBase
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<TenantUserResponse>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    public async Task<IActionResult> List(CancellationToken ct)
+    public async Task<IActionResult> List([FromQuery] string? searchTerm, [FromQuery] string? roleName, [FromQuery] string? status, CancellationToken ct)
     {
-        var users = await _listHandler.HandleAsync(new ListUsersQuery(), ct);
+        var users = await _listHandler.HandleAsync(new ListUsersQuery(searchTerm, roleName, status), ct);
         var items = users.Select(MapToResponse).ToList();
         return Ok(new ApiResponse<IReadOnlyList<TenantUserResponse>>(items));
+    }
+
+    /// <summary>Export all users in the current tenant to CSV.</summary>
+    [HttpGet("export")]
+    [RequirePermission(PermissionCodes.UsersManage)]
+    [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> Export([FromQuery] string? searchTerm, [FromQuery] string? roleName, [FromQuery] string? status, CancellationToken ct)
+    {
+        var users = await _listHandler.HandleAsync(new ListUsersQuery(searchTerm, roleName, status), ct);
+
+        var csvBuilder = new System.Text.StringBuilder();
+        csvBuilder.AppendLine("Name,Email,Role,IsOwner,Status,JoinedOn");
+
+        foreach (var user in users)
+        {
+            csvBuilder.AppendLine(string.Join(",",
+                EscapeCsvField(user.Name),
+                EscapeCsvField(user.Email),
+                EscapeCsvField(user.RoleName),
+                EscapeCsvField(user.IsOwner ? "Yes" : "No"),
+                EscapeCsvField(user.IsActive ? "Active" : "Pending"),
+                EscapeCsvField(user.JoinedOn.ToString("yyyy-MM-dd HH:mm:ss"))
+            ));
+        }
+
+        var bytes = System.Text.Encoding.UTF8.GetBytes(csvBuilder.ToString());
+        return File(bytes, "text/csv", "tenant_users.csv");
+    }
+
+    private static string EscapeCsvField(string? field)
+    {
+        if (string.IsNullOrEmpty(field))
+        {
+            return string.Empty;
+        }
+
+        bool mustQuote = field.Contains(',') || field.Contains('"') || field.Contains('\n') || field.Contains('\r');
+        if (mustQuote)
+        {
+            return $"\"{field.Replace("\"", "\"\"")}\"";
+        }
+
+        return field;
     }
 
     /// <summary>Invite an existing user to the current tenant.</summary>

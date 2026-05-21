@@ -9,5 +9,5 @@ public class ListUsersQueryHandler
     public ListUsersQueryHandler(ITenantRepository tenantRepo) => _tenantRepo = tenantRepo;
 
     public Task<IReadOnlyList<TenantUserDetail>> HandleAsync(ListUsersQuery query, CancellationToken ct = default)
-        => _tenantRepo.ListUsersAsync(ct);
+        => _tenantRepo.ListUsersAsync(query.SearchTerm, query.RoleName, query.Status, ct);
 }

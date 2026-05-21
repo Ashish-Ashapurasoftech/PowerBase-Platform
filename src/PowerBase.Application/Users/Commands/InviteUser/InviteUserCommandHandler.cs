@@ -51,7 +51,7 @@ public class InviteUserCommandHandler
             }, ct: ct);
             user = await _userRepo.GetByIdAsync(userId, ct);
         }
-        else if (await _tenantRepo.IsUserInTenantAsync(user!.Id, ct))
+        else if (await _tenantRepo.IsActiveMemberAsync(user!.Id, ct))
         {
             throw new DuplicateException("TenantUser", "email", command.Email);
         }
@@ -92,7 +92,7 @@ public class InviteUserCommandHandler
             await _emailService.SendInvitationEmailAsync(command.Email, tenantName, inviter.Name, ct);
         }
 
-        var users = await _tenantRepo.ListUsersAsync(ct);
+        var users = await _tenantRepo.ListUsersAsync(ct: ct);
         return users.First(u => u.UserPublicId == user.PublicId);
     }
 

@@ -72,6 +72,7 @@ public class TenantRepository : BaseRepository, ITenantRepository
         VALUES (@tenantId, @userId, @tenantRoleId, @isOwner, @isActive, 0, SYSUTCDATETIME(), @invitedBy, SYSUTCDATETIME(), @createdBy)
         """;
 
+
     private const string ListUsersSql = """
         SELECT u.PublicId AS UserPublicId, u.Email, u.Name,
                r.PublicId AS RolePublicId, r.Name AS RoleName,
@@ -81,9 +82,7 @@ public class TenantRepository : BaseRepository, ITenantRepository
         LEFT JOIN meta.TenantRole r ON r.Id = tu.TenantRoleId AND r.IsDeleted = 0
         WHERE tu.TenantId = @tenantId
           AND tu.IsDeleted = 0
-        ORDER BY tu.JoinedOn
         """;
-
     private const string GetTenantUserByUserPublicIdSql = """
         SELECT tu.Id, tu.TenantId, tu.UserId, tu.TenantRoleId, tu.IsOwner, tu.IsActive, tu.IsDeleted,
                tu.JoinedOn, tu.InvitedBy, tu.CreatedOn, tu.CreatedBy, tu.ModifiedOn, tu.ModifiedBy,
@@ -99,6 +98,13 @@ public class TenantRepository : BaseRepository, ITenantRepository
         SELECT CAST(CASE WHEN EXISTS (
             SELECT 1 FROM meta.TenantUser
             WHERE UserId = @userId AND TenantId = @tenantId AND IsDeleted = 0
+        ) THEN 1 ELSE 0 END AS BIT)
+        """;
+
+    private const string IsActiveMemberSql = """
+        SELECT CAST(CASE WHEN EXISTS (
+            SELECT 1 FROM meta.TenantUser
+            WHERE UserId = @userId AND TenantId = @tenantId AND IsActive = 1 AND IsDeleted = 0
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
@@ -286,11 +292,43 @@ public class TenantRepository : BaseRepository, ITenantRepository
             }, cancellationToken: ct));
     }
 
-    public async Task<IReadOnlyList<TenantUserDetail>> ListUsersAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<TenantUserDetail>> ListUsersAsync(string? searchTerm = null, string? roleName = null, string? status = null, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
+
+        var sql = new System.Text.StringBuilder(ListUsersSql);
+
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", QueryContext.TenantId);
+
+        if (!string.IsNullOrWhiteSpace(searchTerm))
+        {
+            sql.Append(" AND (u.Name LIKE @SearchTerm OR u.Email LIKE @SearchTerm)");
+            parameters.Add("SearchTerm", $"%{searchTerm}%");
+        }
+
+        if (!string.IsNullOrWhiteSpace(roleName))
+        {
+            sql.Append(" AND r.Name = @RoleName");
+            parameters.Add("RoleName", roleName);
+        }
+
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            if (status.Equals("active", StringComparison.OrdinalIgnoreCase))
+            {
+                sql.Append(" AND tu.IsActive = 1");
+            }
+            else if (status.Equals("pending", StringComparison.OrdinalIgnoreCase))
+            {
+                sql.Append(" AND tu.IsActive = 0");
+            }
+        }
+
+        sql.Append(" ORDER BY tu.JoinedOn");
+
         var rows = await connection.QueryAsync<TenantUserDetail>(
-            new CommandDefinition(ListUsersSql, new { tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(sql.ToString(), parameters, cancellationToken: ct));
         return rows.ToList();
     }
 
@@ -306,6 +344,13 @@ public class TenantRepository : BaseRepository, ITenantRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(IsUserInTenantSql, new { userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+    }
+
+    public async Task<bool> IsActiveMemberAsync(long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(IsActiveMemberSql, new { userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
     }
 
     public async Task UpdateTenantUserRoleAsync(long tenantUserId, long tenantRoleId, CancellationToken ct = default)
