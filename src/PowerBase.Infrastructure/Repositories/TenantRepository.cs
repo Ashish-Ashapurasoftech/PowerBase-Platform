@@ -102,6 +102,13 @@ public class TenantRepository : BaseRepository, ITenantRepository
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
+    private const string IsActiveMemberSql = """
+        SELECT CAST(CASE WHEN EXISTS (
+            SELECT 1 FROM meta.TenantUser
+            WHERE UserId = @userId AND TenantId = @tenantId AND IsActive = 1 AND IsDeleted = 0
+        ) THEN 1 ELSE 0 END AS BIT)
+        """;
+
     private const string UpdateTenantUserRoleSql = """
         UPDATE meta.TenantUser
         SET TenantRoleId = @tenantRoleId, ModifiedOn = SYSUTCDATETIME()
@@ -306,6 +313,13 @@ public class TenantRepository : BaseRepository, ITenantRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(IsUserInTenantSql, new { userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+    }
+
+    public async Task<bool> IsActiveMemberAsync(long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(IsActiveMemberSql, new { userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
     }
 
     public async Task UpdateTenantUserRoleAsync(long tenantUserId, long tenantRoleId, CancellationToken ct = default)

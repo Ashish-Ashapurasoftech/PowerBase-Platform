@@ -51,7 +51,7 @@ public class InviteUserCommandHandler
             }, ct: ct);
             user = await _userRepo.GetByIdAsync(userId, ct);
         }
-        else if (await _tenantRepo.IsUserInTenantAsync(user!.Id, ct))
+        else if (await _tenantRepo.IsActiveMemberAsync(user!.Id, ct))
         {
             throw new DuplicateException("TenantUser", "email", command.Email);
         }
