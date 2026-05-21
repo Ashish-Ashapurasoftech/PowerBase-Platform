@@ -15,6 +15,7 @@ public interface ITenantRepository
     Task<long> CreateAsync(Tenant tenant, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<long> CreateRoleAsync(TenantRole role, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task CreateTenantUserAsync(TenantUser tenantUser, IDbTransaction? transaction = null, CancellationToken ct = default);
+    Task UpsertTenantUserAsync(TenantUser tenantUser, CancellationToken ct = default);
 
     // User management
     Task<IReadOnlyList<TenantUserDetail>> ListUsersAsync(CancellationToken ct = default);
@@ -22,6 +23,7 @@ public interface ITenantRepository
     Task<bool> IsUserInTenantAsync(long userId, CancellationToken ct = default);
     Task UpdateTenantUserRoleAsync(long tenantUserId, long tenantRoleId, CancellationToken ct = default);
     Task RemoveTenantUserAsync(long tenantUserId, CancellationToken ct = default);
+    Task ActivateTenantUserAsync(long userId, long tenantId, CancellationToken ct = default);
 
     // Role management
     Task<IReadOnlyList<TenantRole>> ListRolesAsync(CancellationToken ct = default);

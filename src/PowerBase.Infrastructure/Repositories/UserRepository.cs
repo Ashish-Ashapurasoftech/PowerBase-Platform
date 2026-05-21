@@ -35,7 +35,13 @@ public class UserRepository : BaseRepository, IUserRepository
     private const string InsertSql = """
         INSERT INTO core.[User] (Email, EmailNormalized, HashedPassword, Name, IsEmailVerified, IsActive, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
-        VALUES (@email, @emailNormalized, @hashedPassword, @name, 0, 1, 0, SYSUTCDATETIME(), 0)
+        VALUES (@email, @emailNormalized, @hashedPassword, @name, 0, @isActive, 0, SYSUTCDATETIME(), 0)
+        """;
+
+    private const string ActivateSql = """
+        UPDATE core.[User]
+        SET Name = @name, HashedPassword = @hashedPassword, IsActive = 1, ModifiedOn = SYSUTCDATETIME()
+        WHERE Id = @userId AND IsActive = 0 AND IsDeleted = 0
         """;
 
     public UserRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -77,12 +83,20 @@ public class UserRepository : BaseRepository, IUserRepository
                     emailNormalized = user.Email.ToUpperInvariant(),
                     hashedPassword = user.HashedPassword,
                     name = user.Name,
+                    isActive = user.IsActive,
                 }, transaction, cancellationToken: ct));
         }
         finally
         {
             if (ownConnection) connection.Dispose();
         }
+    }
+
+    public async Task ActivateAsync(long userId, string name, string hashedPassword, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(ActivateSql, new { userId, name, hashedPassword }, cancellationToken: ct));
     }
 
     private async Task<IDbConnection> OpenNewConnectionAsync(CancellationToken ct)

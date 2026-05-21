@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Auth;
+using PowerBase.Application.Auth.Commands.AcceptInvite;
 using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
@@ -17,17 +18,20 @@ public class AuthController : ControllerBase
     private readonly LoginQueryHandler _loginHandler;
     private readonly GetMeQueryHandler _getMeHandler;
     private readonly SelectTenantCommandHandler _selectTenantHandler;
+    private readonly AcceptInviteCommandHandler _acceptInviteHandler;
 
     public AuthController(
         SignupCommandHandler signupHandler,
         LoginQueryHandler loginHandler,
         GetMeQueryHandler getMeHandler,
-        SelectTenantCommandHandler selectTenantHandler)
+        SelectTenantCommandHandler selectTenantHandler,
+        AcceptInviteCommandHandler acceptInviteHandler)
     {
         _signupHandler = signupHandler;
         _loginHandler = loginHandler;
         _getMeHandler = getMeHandler;
         _selectTenantHandler = selectTenantHandler;
+        _acceptInviteHandler = acceptInviteHandler;
     }
 
     /// <summary>Register a new user account. Returns an identity token (no tenant context yet).</summary>
@@ -86,6 +90,31 @@ public class AuthController : ControllerBase
         var result = await _selectTenantHandler.HandleAsync(new SelectTenantCommand(request.TenantPublicId), ct);
         return Ok(new ApiResponse<AuthResponse>(MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId,
             result.Email, result.Name, result.TenantPublicId, result.TenantName)));
+    }
+
+    /// <summary>Accept an invitation and complete account setup (name + password). Returns an identity token.</summary>
+    [HttpPost("accept-invite")]
+    [ProducesResponseType(typeof(ApiResponse<IdentityResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> AcceptInvite([FromBody] AcceptInviteRequest request, CancellationToken ct)
+    {
+        var result = await _acceptInviteHandler.HandleAsync(
+            new AcceptInviteCommand(request.Token, request.Name, request.Password), ct);
+        var response = new IdentityResponse
+        {
+            IdentityToken = result.IdentityToken,
+            ExpiresAt = result.ExpiresAt.ToString("o"),
+            User = new UserResponse { PublicId = result.UserPublicId, Email = result.Email, Name = result.Name },
+            Tenants = result.Tenants.Select(t => new TenantListItem
+            {
+                PublicId = t.PublicId,
+                Name = t.Name,
+                Slug = t.Slug,
+                IsOwner = t.IsOwner,
+            }).ToList(),
+        };
+        return Ok(new ApiResponse<IdentityResponse>(response));
     }
 
     /// <summary>Get the currently authenticated user's profile. Works with both identity and tenant tokens.</summary>

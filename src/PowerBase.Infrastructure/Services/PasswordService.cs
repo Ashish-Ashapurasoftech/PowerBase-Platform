@@ -6,5 +6,10 @@ public class PasswordService : IPasswordService
 {
     public string Hash(string plainText) => BCrypt.Net.BCrypt.HashPassword(plainText);
 
-    public bool Verify(string plainText, string hash) => BCrypt.Net.BCrypt.Verify(plainText, hash);
+    public bool Verify(string plainText, string hash)
+    {
+        if (string.IsNullOrEmpty(hash)) return false;
+        try { return BCrypt.Net.BCrypt.Verify(plainText, hash); }
+        catch { return false; }
+    }
 }

@@ -12,6 +12,7 @@ using PowerBase.Application.Apps.Queries.GetApp;
 using PowerBase.Application.Apps.Queries.ListAppRoles;
 using PowerBase.Application.Apps.Queries.ListApps;
 using PowerBase.Application.Apps.Queries.ListAppUsers;
+using PowerBase.Application.Auth.Commands.AcceptInvite;
 using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
@@ -124,6 +125,7 @@ builder.Services.AddScoped<IUserPermissionRepository, UserPermissionRepository>(
 
 // Handlers
 builder.Services.AddScoped<SignupCommandHandler>();
+builder.Services.AddScoped<AcceptInviteCommandHandler>();
 builder.Services.AddScoped<LoginQueryHandler>();
 builder.Services.AddScoped<GetMeQueryHandler>();
 builder.Services.AddScoped<SelectTenantCommandHandler>();

@@ -114,6 +114,26 @@ public class TenantRepository : BaseRepository, ITenantRepository
         WHERE Id = @id
         """;
 
+    private const string ActivateTenantUserSql = """
+        UPDATE meta.TenantUser
+        SET IsActive = 1, ModifiedOn = SYSUTCDATETIME()
+        WHERE UserId = @userId AND TenantId = @tenantId AND IsDeleted = 0
+        """;
+
+    private const string UpsertTenantUserSql = """
+        MERGE meta.TenantUser AS target
+        USING (VALUES (@tenantId, @userId)) AS source (TenantId, UserId)
+        ON target.TenantId = source.TenantId AND target.UserId = source.UserId
+        WHEN MATCHED THEN
+            UPDATE SET IsDeleted = 0, DeletedOn = NULL, DeletedBy = NULL,
+                       TenantRoleId = @tenantRoleId, IsOwner = @isOwner,
+                       IsActive = @isActive, InvitedBy = @invitedBy,
+                       ModifiedOn = SYSUTCDATETIME()
+        WHEN NOT MATCHED THEN
+            INSERT (TenantId, UserId, TenantRoleId, IsOwner, IsActive, IsDeleted, JoinedOn, InvitedBy, CreatedOn, CreatedBy)
+            VALUES (@tenantId, @userId, @tenantRoleId, @isOwner, @isActive, 0, SYSUTCDATETIME(), @invitedBy, SYSUTCDATETIME(), @createdBy);
+        """;
+
     private const string ListRolesSql = """
         SELECT Id, PublicId, TenantId, Name, Description, IsDefault, IsSystem, IsDeleted,
                CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy
@@ -250,6 +270,22 @@ public class TenantRepository : BaseRepository, ITenantRepository
         }
     }
 
+    public async Task UpsertTenantUserAsync(TenantUser tenantUser, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpsertTenantUserSql, new
+            {
+                tenantId = tenantUser.TenantId,
+                userId = tenantUser.UserId,
+                tenantRoleId = tenantUser.TenantRoleId,
+                isOwner = tenantUser.IsOwner,
+                isActive = tenantUser.IsActive,
+                invitedBy = tenantUser.InvitedBy,
+                createdBy = tenantUser.CreatedBy,
+            }, cancellationToken: ct));
+    }
+
     public async Task<IReadOnlyList<TenantUserDetail>> ListUsersAsync(CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
@@ -284,6 +320,13 @@ public class TenantRepository : BaseRepository, ITenantRepository
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(RemoveTenantUserSql, new { id = tenantUserId }, cancellationToken: ct));
+    }
+
+    public async Task ActivateTenantUserAsync(long userId, long tenantId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(ActivateTenantUserSql, new { userId, tenantId }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<TenantRole>> ListRolesAsync(CancellationToken ct = default)

@@ -9,4 +9,5 @@ public interface IUserRepository
     Task<User> GetByIdAsync(long id, CancellationToken ct = default);
     Task<User> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<long> CreateAsync(User user, IDbTransaction? transaction = null, CancellationToken ct = default);
+    Task ActivateAsync(long userId, string name, string hashedPassword, CancellationToken ct = default);
 }

@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 using PowerBase.API.Attributes;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Users;
@@ -19,17 +20,20 @@ public class UsersController : ControllerBase
     private readonly InviteUserCommandHandler _inviteHandler;
     private readonly ChangeUserRoleCommandHandler _changeRoleHandler;
     private readonly RemoveUserCommandHandler _removeHandler;
+    private readonly string _frontendBaseUrl;
 
     public UsersController(
         ListUsersQueryHandler listHandler,
         InviteUserCommandHandler inviteHandler,
         ChangeUserRoleCommandHandler changeRoleHandler,
-        RemoveUserCommandHandler removeHandler)
+        RemoveUserCommandHandler removeHandler,
+        IConfiguration config)
     {
         _listHandler = listHandler;
         _inviteHandler = inviteHandler;
         _changeRoleHandler = changeRoleHandler;
         _removeHandler = removeHandler;
+        _frontendBaseUrl = config["Frontend:BaseUrl"] ?? "http://localhost:4200";
     }
 
     /// <summary>List all users in the current tenant.</summary>
@@ -56,7 +60,7 @@ public class UsersController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Invite([FromBody] InviteUserRequest request, CancellationToken ct)
     {
-        var result = await _inviteHandler.HandleAsync(new InviteUserCommand(request.Email, request.RolePublicId), ct);
+        var result = await _inviteHandler.HandleAsync(new InviteUserCommand(request.Email, request.RolePublicId, _frontendBaseUrl), ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<TenantUserResponse>(MapToResponse(result)));
     }
 

@@ -1,5 +1,6 @@
 using System.Data;
 using Dapper;
+using PowerBase.Application.Auth;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Infrastructure.Persistence;
 
@@ -15,6 +16,21 @@ public class AuditRepository : BaseRepository, IAuditRepository
     private const string InsertSessionSql = """
         INSERT INTO audit.UserSession (UserId, TenantId, JwtId, IpAddress, ExpiresOn, IssuedOn)
         VALUES (@userId, @tenantId, @jwtId, @ipAddress, @expiresOn, SYSUTCDATETIME())
+        """;
+
+    private const string InsertInviteTokenSql = """
+        INSERT INTO audit.InviteToken (UserId, TenantId, TenantRoleId, TokenHash, InvitedBy, ExpiresOn, CreatedOn)
+        VALUES (@userId, @tenantId, @tenantRoleId, @tokenHash, @invitedBy, @expiresOn, SYSUTCDATETIME())
+        """;
+
+    private const string GetInviteTokenByHashSql = """
+        SELECT Id, UserId, TenantId, TenantRoleId, TokenHash, InvitedBy, ExpiresOn, UsedOn, CreatedOn
+        FROM audit.InviteToken
+        WHERE TokenHash = @tokenHash
+        """;
+
+    private const string ConsumeInviteTokenSql = """
+        UPDATE audit.InviteToken SET UsedOn = SYSUTCDATETIME() WHERE Id = @id
         """;
 
     public AuditRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -38,5 +54,26 @@ public class AuditRepository : BaseRepository, IAuditRepository
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(InsertSessionSql, new { userId, tenantId, jwtId, ipAddress, expiresOn }, cancellationToken: ct));
+    }
+
+    public async Task CreateInviteTokenAsync(long userId, long tenantId, long tenantRoleId, string tokenHash, DateTime expiresOn, long invitedBy, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(InsertInviteTokenSql, new { userId, tenantId, tenantRoleId, tokenHash, invitedBy, expiresOn }, cancellationToken: ct));
+    }
+
+    public async Task<InviteTokenRecord?> GetInviteTokenByHashAsync(string tokenHash, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<InviteTokenRecord>(
+            new CommandDefinition(GetInviteTokenByHashSql, new { tokenHash }, cancellationToken: ct));
+    }
+
+    public async Task ConsumeInviteTokenAsync(long tokenId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(ConsumeInviteTokenSql, new { id = tokenId }, cancellationToken: ct));
     }
 }
