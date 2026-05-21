@@ -51,6 +51,47 @@ public class AppUsersController : ControllerBase
         return Ok(new ApiResponse<IReadOnlyList<AppUserResponse>>(response));
     }
 
+    /// <summary>Export all users of this app to CSV.</summary>
+    [HttpGet("export")]
+    [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
+    public async Task<IActionResult> Export([FromRoute] Guid appId, CancellationToken ct)
+    {
+        var users = await _listHandler.HandleAsync(new ListAppUsersQuery(appId), ct);
+
+        var csvBuilder = new System.Text.StringBuilder();
+        csvBuilder.AppendLine("Name,Email,AppRole,AddedOn");
+
+        foreach (var user in users)
+        {
+            csvBuilder.AppendLine(string.Join(",",
+                EscapeCsvField(user.UserName),
+                EscapeCsvField(user.UserEmail),
+                EscapeCsvField(user.RoleName),
+                EscapeCsvField(user.AddedOn.ToString("o"))
+            ));
+        }
+
+        var bytes = System.Text.Encoding.UTF8.GetBytes(csvBuilder.ToString());
+        return File(bytes, "text/csv", "users.csv");
+    }
+
+    private static string EscapeCsvField(string? field)
+    {
+        if (string.IsNullOrEmpty(field))
+        {
+            return string.Empty;
+        }
+
+        bool mustQuote = field.Contains(',') || field.Contains('"') || field.Contains('\n') || field.Contains('\r');
+        if (mustQuote)
+        {
+            return $"\"{field.Replace("\"", "\"\"")}\"";
+        }
+
+        return field;
+    }
+
+
     /// <summary>Add a user to this app by email.</summary>
     [HttpPost]
     [ProducesResponseType(StatusCodes.Status204NoContent)]

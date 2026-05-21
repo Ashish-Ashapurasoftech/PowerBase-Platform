@@ -58,6 +58,19 @@ public class AppRepository : BaseRepository, IAppRepository
           AND a.IsDeleted  = 0
         """;
 
+    private const string ListAllByUserSql = """
+        SELECT a.Id, a.PublicId, a.TenantId, a.OwnerId, a.Name, a.Description, a.Icon, a.Color,
+               a.Status, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
+               a.DeletedOn, a.DeletedBy, a.RowVersion
+        FROM meta.App a
+        JOIN meta.AppUser au ON au.AppId = a.Id
+        WHERE a.TenantId  = @tenantId
+          AND au.UserId   = @userId
+          AND au.IsDeleted = 0
+          AND a.IsDeleted  = 0
+        ORDER BY a.Name
+        """;
+
     private const string NameExistsSql = """
         SELECT CAST(CASE WHEN EXISTS (
             SELECT 1 FROM meta.App
@@ -190,6 +203,14 @@ public class AppRepository : BaseRepository, IAppRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteScalarAsync<int>(
             new CommandDefinition(CountByUserSql, new { tenantId = QueryContext.TenantId, userId }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<App>> ListAllByUserAsync(long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<App>(
+            new CommandDefinition(ListAllByUserSql, new { tenantId = QueryContext.TenantId, userId }, cancellationToken: ct));
+        return results.AsList();
     }
 
     public async Task SetDefaultRoleAsync(long appId, long roleId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)

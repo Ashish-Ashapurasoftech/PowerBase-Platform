@@ -21,19 +21,25 @@ public class AppsController : ControllerBase
     private readonly DeleteAppCommandHandler _deleteHandler;
     private readonly GetAppQueryHandler _getHandler;
     private readonly ListAppsQueryHandler _listHandler;
+    private readonly IAppRepository _appRepo;
+    private readonly IQueryContext _queryContext;
 
     public AppsController(
         CreateAppCommandHandler createHandler,
         UpdateAppCommandHandler updateHandler,
         DeleteAppCommandHandler deleteHandler,
         GetAppQueryHandler getHandler,
-        ListAppsQueryHandler listHandler)
+        ListAppsQueryHandler listHandler,
+        IAppRepository appRepo,
+        IQueryContext queryContext)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _getHandler = getHandler;
         _listHandler = listHandler;
+        _appRepo = appRepo;
+        _queryContext = queryContext;
     }
 
     /// <summary>Create a new app for the current tenant.</summary>
@@ -110,6 +116,52 @@ public class AppsController : ControllerBase
 
         return Ok(new ApiListResponse<AppResponse>(paginated, filtered.Count, page, pageSize));
     }
+
+    /// <summary>Export all apps for the current tenant to CSV.</summary>
+    [HttpGet("export")]
+    [RequirePermission(PermissionCodes.AppsRead)]
+    [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> Export(CancellationToken ct = default)
+    {
+        var allItems = await _appRepo.ListAllByUserAsync(_queryContext.UserId, ct);
+
+        var csvBuilder = new System.Text.StringBuilder();
+        csvBuilder.AppendLine("PublicId,Name,Description,Color,Icon,Status,CreatedOn");
+
+        foreach (var app in allItems)
+        {
+            csvBuilder.AppendLine(string.Join(",",
+                EscapeCsvField(app.PublicId.ToString()),
+                EscapeCsvField(app.Name),
+                EscapeCsvField(app.Description),
+                EscapeCsvField(app.Color),
+                EscapeCsvField(app.Icon),
+                EscapeCsvField(app.Status),
+                EscapeCsvField(app.CreatedOn.ToString("o"))
+            ));
+        }
+
+        var bytes = System.Text.Encoding.UTF8.GetBytes(csvBuilder.ToString());
+        return File(bytes, "text/csv", "apps.csv");
+    }
+
+    private static string EscapeCsvField(string? field)
+    {
+        if (string.IsNullOrEmpty(field))
+        {
+            return string.Empty;
+        }
+
+        bool mustQuote = field.Contains(',') || field.Contains('"') || field.Contains('\n') || field.Contains('\r');
+        if (mustQuote)
+        {
+            return $"\"{field.Replace("\"", "\"\"")}\"";
+        }
+
+        return field;
+    }
+
 
     /// <summary>Get a single app by its public ID.</summary>
     [HttpGet("{publicId:guid}")]
