@@ -18,7 +18,7 @@ public interface ITenantRepository
     Task UpsertTenantUserAsync(TenantUser tenantUser, CancellationToken ct = default);
 
     // User management
-    Task<IReadOnlyList<TenantUserDetail>> ListUsersAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<TenantUserDetail>> ListUsersAsync(string? searchTerm = null, string? roleName = null, string? status = null, CancellationToken ct = default);
     Task<TenantUser?> GetTenantUserByUserPublicIdAsync(Guid userPublicId, CancellationToken ct = default);
     Task<bool> IsUserInTenantAsync(long userId, CancellationToken ct = default);
     Task<bool> IsActiveMemberAsync(long userId, CancellationToken ct = default);

@@ -92,7 +92,7 @@ public class InviteUserCommandHandler
             await _emailService.SendInvitationEmailAsync(command.Email, tenantName, inviter.Name, ct);
         }
 
-        var users = await _tenantRepo.ListUsersAsync(ct);
+        var users = await _tenantRepo.ListUsersAsync(ct: ct);
         return users.First(u => u.UserPublicId == user.PublicId);
     }
 
