@@ -6,6 +6,7 @@ using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
 using PowerBase.Application.Auth.Queries.Login;
+using PowerBase.Application.Common.Interfaces;
 
 namespace PowerBase.API.Controllers;
 
@@ -102,6 +103,16 @@ public class AuthController : ControllerBase
             Email = user.Email,
             Name = user.Name,
         }));
+    }
+
+    /// <summary>Get the current user's active permissions for the selected tenant context.</summary>
+    [HttpGet("permissions")]
+    [RequireAuth]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlySet<string>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public IActionResult GetPermissions([FromServices] IQueryContext queryContext)
+    {
+        return Ok(new ApiResponse<IReadOnlySet<string>>(queryContext.Permissions));
     }
 
     private static AuthResponse MapToAuthResponse(string token, DateTime expiresAt, Guid publicId,
