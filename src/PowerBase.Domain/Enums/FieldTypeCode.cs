@@ -5,5 +5,10 @@ public enum FieldTypeCode
     Text,
     Number,
     Date,
-    Boolean
+    Boolean,
+    DateTime,
+    Email,
+    Phone,
+    Url,
+    Duration
 }
