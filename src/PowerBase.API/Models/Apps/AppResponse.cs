@@ -9,4 +9,5 @@ public class AppResponse
     public string? Color { get; init; }
     public string Status { get; init; } = string.Empty;
     public DateTime CreatedOn { get; init; }
+    public string? OwnerName { get; init; }
 }

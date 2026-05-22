@@ -4,6 +4,7 @@ using PowerBase.Application.Apps.Commands.DeleteApp;
 using PowerBase.Application.Apps.Queries.GetApp;
 using PowerBase.Application.Apps.Queries.ListApps;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.UnitTests.Apps;
@@ -34,7 +35,7 @@ public class AppQueryHandlerTests
     [Fact]
     public async Task ListApps_ReturnsPagedResult()
     {
-        var apps = new List<App> { new() { Name = "A" }, new() { Name = "B" } };
+        var apps = new List<AppListItemDto> { new() { Name = "A" }, new() { Name = "B" } };
         _appRepo.ListByUserAsync(1L, 1, 20).Returns(apps);
         _appRepo.CountByUserAsync(1L).Returns(2);
         var sut = new ListAppsQueryHandler(_appRepo, _queryContext);
@@ -52,7 +53,7 @@ public class AppQueryHandlerTests
     [InlineData(-5, 1)]
     public async Task ListApps_PageBelowOne_NormalizesToOne(int inputPage, int expectedPage)
     {
-        _appRepo.ListByUserAsync(Arg.Any<long>(), Arg.Any<int>(), Arg.Any<int>()).Returns(new List<App>());
+        _appRepo.ListByUserAsync(Arg.Any<long>(), Arg.Any<int>(), Arg.Any<int>()).Returns(new List<AppListItemDto>());
         _appRepo.CountByUserAsync(Arg.Any<long>()).Returns(0);
         var sut = new ListAppsQueryHandler(_appRepo, _queryContext);
 
@@ -67,7 +68,7 @@ public class AppQueryHandlerTests
     [InlineData(-1, 20)]
     public async Task ListApps_InvalidPageSize_NormalizesToTwenty(int inputPageSize, int expectedPageSize)
     {
-        _appRepo.ListByUserAsync(Arg.Any<long>(), Arg.Any<int>(), Arg.Any<int>()).Returns(new List<App>());
+        _appRepo.ListByUserAsync(Arg.Any<long>(), Arg.Any<int>(), Arg.Any<int>()).Returns(new List<AppListItemDto>());
         _appRepo.CountByUserAsync(Arg.Any<long>()).Returns(0);
         var sut = new ListAppsQueryHandler(_appRepo, _queryContext);
 

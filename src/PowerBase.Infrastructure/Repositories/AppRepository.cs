@@ -1,6 +1,7 @@
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
 
@@ -37,9 +38,10 @@ public class AppRepository : BaseRepository, IAppRepository
     private const string ListByUserSql = """
         SELECT a.Id, a.PublicId, a.TenantId, a.OwnerId, a.Name, a.Description, a.Icon, a.Color,
                a.Status, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
-               a.DeletedOn, a.DeletedBy, a.RowVersion
+               a.DeletedOn, a.DeletedBy, a.RowVersion, u.Name AS OwnerName
         FROM meta.App a
         JOIN meta.AppUser au ON au.AppId = a.Id
+        LEFT JOIN core.[User] u ON u.Id = a.OwnerId
         WHERE a.TenantId  = @tenantId
           AND au.UserId   = @userId
           AND au.IsDeleted = 0
@@ -190,10 +192,10 @@ public class AppRepository : BaseRepository, IAppRepository
             new CommandDefinition(InsertSql, parameters, cancellationToken: ct));
     }
 
-    public async Task<IReadOnlyList<App>> ListByUserAsync(long userId, int page, int pageSize, CancellationToken ct = default)
+    public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        var results = await connection.QueryAsync<App>(
+        var results = await connection.QueryAsync<AppListItemDto>(
             new CommandDefinition(ListByUserSql, new { tenantId = QueryContext.TenantId, userId, offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
         return results.AsList();
     }

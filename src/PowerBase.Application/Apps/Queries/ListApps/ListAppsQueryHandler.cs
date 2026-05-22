@@ -1,11 +1,12 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Apps.Queries.ListApps;
 
 public class ListAppsResult
 {
-    public IReadOnlyList<App> Items { get; init; } = Array.Empty<App>();
+    public IReadOnlyList<AppListItemDto> Items { get; init; } = Array.Empty<AppListItemDto>();
     public int Total { get; init; }
     public int Page { get; init; }
     public int PageSize { get; init; }

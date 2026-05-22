@@ -8,6 +8,7 @@ using PowerBase.Application.Apps.Commands.DeleteApp;
 using PowerBase.Application.Apps.Commands.UpdateApp;
 using PowerBase.Application.Apps.Queries.GetApp;
 using PowerBase.Application.Apps.Queries.ListApps;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
@@ -223,5 +224,17 @@ public class AppsController : ControllerBase
         Color = app.Color,
         Status = app.Status,
         CreatedOn = app.CreatedOn,
+    };
+
+    private static AppResponse MapToAppResponse(AppListItemDto app) => new()
+    {
+        PublicId = app.PublicId,
+        Name = app.Name,
+        Description = app.Description,
+        Icon = app.Icon,
+        Color = app.Color,
+        Status = app.Status,
+        CreatedOn = app.CreatedOn,
+        OwnerName = app.OwnerName,
     };
 }

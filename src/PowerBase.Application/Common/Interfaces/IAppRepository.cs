@@ -1,5 +1,6 @@
 using System.Data;
 using PowerBase.Domain.Entities;
+using PowerBase.Application.Common.Models;
 
 namespace PowerBase.Application.Common.Interfaces;
 
@@ -9,7 +10,7 @@ public interface IAppRepository
     Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<App>> ListAsync(int page, int pageSize, CancellationToken ct = default);
     Task<int> CountAsync(CancellationToken ct = default);
-    Task<IReadOnlyList<App>> ListByUserAsync(long userId, int page, int pageSize, CancellationToken ct = default);
+    Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, CancellationToken ct = default);
     Task<int> CountByUserAsync(long userId, CancellationToken ct = default);
     Task<IReadOnlyList<App>> ListAllByUserAsync(long userId, CancellationToken ct = default);
     Task<bool> NameExistsAsync(string name, CancellationToken ct = default);
