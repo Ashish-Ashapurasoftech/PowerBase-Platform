@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Tables.Queries.ListTables;
@@ -14,7 +15,7 @@ public class ListTablesQueryHandler
         _tableRepo = tableRepo;
     }
 
-    public async Task<IReadOnlyList<AppTable>> HandleAsync(ListTablesQuery query, CancellationToken ct = default)
+    public async Task<IReadOnlyList<AppTableListItemDto>> HandleAsync(ListTablesQuery query, CancellationToken ct = default)
     {
         var app = await _appRepo.GetByPublicIdAsync(query.AppPublicId, ct);
         return await _tableRepo.ListByAppAsync(app.Id, ct);

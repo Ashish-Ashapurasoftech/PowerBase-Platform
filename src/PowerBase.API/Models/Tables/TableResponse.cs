@@ -12,6 +12,7 @@ public class TableResponse
     public string? Icon { get; init; }
     public string? PhysicalTableName { get; init; }
     public int RecordCount { get; init; }
+    public int? FieldCount { get; init; }
     public DateTime CreatedOn { get; init; }
     public IReadOnlyList<FieldResponse> Fields { get; init; } = [];
 }

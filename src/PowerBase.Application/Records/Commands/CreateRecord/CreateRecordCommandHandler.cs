@@ -33,6 +33,8 @@ public class CreateRecordCommandHandler
 
         var publicId = await _recordRepo.CreateAsync(table, fields, command.FieldValues, ct);
 
+        await _tableRepo.IncrementRecordCountAsync(table.Id, ct);
+
         var fieldData = new Dictionary<string, object?>();
         foreach (var field in fields.Where(f => command.FieldValues.ContainsKey(f.Id)))
             fieldData[field.Id.ToString()] = command.FieldValues[field.Id];

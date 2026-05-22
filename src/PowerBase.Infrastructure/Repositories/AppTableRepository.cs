@@ -1,5 +1,6 @@
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
@@ -36,12 +37,15 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         """;
 
     private const string ListByAppSql = $"""
-        SELECT {SelectColumns}
-        FROM meta.AppTable
-        WHERE TenantId = @tenantId
-          AND AppId = @appId
-          AND IsDeleted = 0
-        ORDER BY DisplayOrder, Name
+        SELECT t.Id, t.PublicId, t.TenantId, t.AppId, t.Name, t.SingularLabel, t.PluralLabel, t.Description,
+               t.PhysicalTableName, t.DisplayFieldId, t.RecordCount, t.IsSystem, t.DisplayOrder,
+               t.IsDeleted, t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy, t.RowVersion, t.Icon,
+               (SELECT COUNT(*) FROM meta.AppField f WHERE f.AppTableId = t.Id AND f.IsDeleted = 0) AS FieldCount
+        FROM meta.AppTable t
+        WHERE t.TenantId = @tenantId
+          AND t.AppId = @appId
+          AND t.IsDeleted = 0
+        ORDER BY t.DisplayOrder, t.Name
         """;
 
     private const string NameExistsSql = """
@@ -83,6 +87,18 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
           AND IsDeleted = 0
         """;
 
+    private const string IncrementRecordCountSql = """
+        UPDATE meta.AppTable
+        SET RecordCount = RecordCount + 1
+        WHERE Id = @id
+        """;
+
+    private const string DecrementRecordCountSql = """
+        UPDATE meta.AppTable
+        SET RecordCount = RecordCount - 1
+        WHERE Id = @id AND RecordCount > 0
+        """;
+
     public AppTableRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
@@ -110,10 +126,10 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         return appId ?? throw new NotFoundException("Table", tablePublicId);
     }
 
-    public async Task<IReadOnlyList<AppTable>> ListByAppAsync(long appId, CancellationToken ct = default)
+    public async Task<IReadOnlyList<AppTableListItemDto>> ListByAppAsync(long appId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        var results = await connection.QueryAsync<AppTable>(
+        var results = await connection.QueryAsync<AppTableListItemDto>(
             new CommandDefinition(ListByAppSql, new { tenantId = QueryContext.TenantId, appId }, cancellationToken: ct));
         return results.AsList();
     }
@@ -169,5 +185,19 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
             new CommandDefinition(SoftDeleteSql, new { tenantId = QueryContext.TenantId, publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
         if (affected == 0)
             throw new NotFoundException("Table", publicId);
+    }
+
+    public async Task IncrementRecordCountAsync(long id, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(IncrementRecordCountSql, new { id }, cancellationToken: ct));
+    }
+
+    public async Task DecrementRecordCountAsync(long id, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(DecrementRecordCountSql, new { id }, cancellationToken: ct));
     }
 }

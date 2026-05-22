@@ -17,5 +17,6 @@ public class DeleteRecordCommandHandler
     {
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
         await _recordRepo.DeleteAsync(table, command.RecordPublicId, ct);
+        await _tableRepo.DecrementRecordCountAsync(table.Id, ct);
     }
 }

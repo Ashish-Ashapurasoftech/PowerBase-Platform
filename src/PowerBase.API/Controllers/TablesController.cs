@@ -4,6 +4,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Fields;
 using PowerBase.API.Models.Tables;
+using PowerBase.Application.Common.Models;
 using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
 using PowerBase.Application.Tables.Commands.UpdateTable;
@@ -121,7 +122,7 @@ public class TablesController : ControllerBase
         Fields = [],
     };
 
-    private static TableResponse MapToResponse(AppTable t) => new()
+    private static TableResponse MapToResponse(AppTableListItemDto t) => new()
     {
         PublicId = t.PublicId,
         Name = t.Name,
@@ -131,6 +132,7 @@ public class TablesController : ControllerBase
         Icon = t.Icon,
         PhysicalTableName = t.PhysicalTableName,
         RecordCount = t.RecordCount,
+        FieldCount = t.FieldCount,
         CreatedOn = t.CreatedOn,
         Fields = [],
     };
