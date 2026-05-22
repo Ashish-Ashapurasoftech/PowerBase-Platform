@@ -18,4 +18,20 @@ public class ReportDefinitionDto
     public List<long> Columns { get; init; } = [];
     public long? SortFieldId { get; init; }
     public bool SortDesc { get; init; }
+    public List<ReportFilterDto> Filters { get; init; } = [];
+    public long? GroupByFieldId { get; init; }
+    public List<SummaryAggregationDto> Aggregations { get; init; } = [];
+}
+
+public class ReportFilterDto
+{
+    public long FieldId { get; init; }
+    public string Operator { get; init; } = "eq";
+    public string? Value { get; init; }
+}
+
+public class SummaryAggregationDto
+{
+    public long FieldId { get; init; }
+    public string Function { get; init; } = "Count";
 }

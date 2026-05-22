@@ -35,17 +35,25 @@ public class ReportHandlerTests
         Id = id, Name = $"Field{id}", TypeCode = "Text", IsReportable = reportable,
     };
 
-    private static Report MakeReport(long tableId, List<long>? columns = null) => new()
+    private static Report MakeReport(long tableId, List<long>? columns = null, string reportType = "Table") => new()
     {
         Id = 10,
         PublicId = Guid.NewGuid(),
         AppTableId = tableId,
         Name = "My Report",
-        ReportType = "Table",
+        ReportType = reportType,
         Visibility = "Personal",
         Definition = JsonSerializer.Serialize(new ReportDefinition { Columns = columns ?? [] }),
         CreatedOn = DateTime.UtcNow,
     };
+
+    // Helper to build a CreateReportCommand with all required new fields defaulted
+    private static CreateReportCommand MakeCreateCommand(
+        Guid tableId, string name = "My Report", string visibility = "Personal",
+        string reportType = "Table", List<long>? columns = null)
+        => new(tableId, name, null, visibility, reportType,
+            columns ?? [], null, false,
+            [], null, []);
 
     public ReportHandlerTests()
     {
@@ -63,8 +71,7 @@ public class ReportHandlerTests
         _reportRepo.CreateAsync(Arg.Any<Report>()).Returns((1L, Guid.NewGuid()));
         var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
 
-        var result = await sut.HandleAsync(new CreateReportCommand(
-            table.PublicId, "My Report", null, "Personal", [], null, false));
+        var result = await sut.HandleAsync(MakeCreateCommand(table.PublicId));
 
         result.Name.Should().Be("My Report");
         result.Visibility.Should().Be("Personal");
@@ -79,8 +86,7 @@ public class ReportHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
         var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
 
-        await sut.Invoking(s => s.HandleAsync(new CreateReportCommand(
-                table.PublicId, "Bad", null, "Personal", [999L], null, false)))
+        await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(table.PublicId, columns: [999L])))
             .Should().ThrowAsync<ValidationException>();
     }
 
@@ -89,8 +95,7 @@ public class ReportHandlerTests
     {
         var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
 
-        await sut.Invoking(s => s.HandleAsync(new CreateReportCommand(
-                Guid.NewGuid(), "R", null, "Invalid", [], null, false)))
+        await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), visibility: "Invalid")))
             .Should().ThrowAsync<ValidationException>();
     }
 
@@ -99,8 +104,16 @@ public class ReportHandlerTests
     {
         var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
 
-        await sut.Invoking(s => s.HandleAsync(new CreateReportCommand(
-                Guid.NewGuid(), "", null, "Personal", [], null, false)))
+        await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), name: "")))
+            .Should().ThrowAsync<ValidationException>();
+    }
+
+    [Fact]
+    public async Task CreateReport_InvalidReportType_ThrowsValidationException()
+    {
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
+
+        await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), reportType: "Chart")))
             .Should().ThrowAsync<ValidationException>();
     }
 
@@ -157,9 +170,10 @@ public class ReportHandlerTests
         _reportRepo.GetByPublicIdAsync(report.PublicId).Returns(report);
         _tableRepo.GetByIdAsync(table.Id).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field1, field2 });
-        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20)
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Any<IReadOnlyList<ReportFilter>?>())
             .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
-        _recordRepo.CountAsync(Arg.Any<AppTable>()).Returns(1);
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<ReportFilter>?>()).Returns(1);
         var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
@@ -185,9 +199,10 @@ public class ReportHandlerTests
         _reportRepo.GetByPublicIdAsync(report.PublicId).Returns(report);
         _tableRepo.GetByIdAsync(table.Id).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { reportableField, nonReportableField });
-        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20)
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Any<IReadOnlyList<ReportFilter>?>())
             .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
-        _recordRepo.CountAsync(Arg.Any<AppTable>()).Returns(1);
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<ReportFilter>?>()).Returns(1);
         var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));

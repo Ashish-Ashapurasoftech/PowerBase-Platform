@@ -9,7 +9,13 @@ public class FieldResponse
     public string? Description { get; init; }
     public string TypeCode { get; init; } = string.Empty;
     public string? PhysicalColumnName { get; init; }
+    public string? DefaultValue { get; init; }
     public bool IsRequired { get; init; }
+    public bool IsSearchable { get; init; }
+    public bool IsSortable { get; init; }
+    public bool IsFilterable { get; init; }
+    public bool IsReportable { get; init; }
+    public bool IsUnique { get; init; }
     public bool IsSystem { get; init; }
     public DateTime CreatedOn { get; init; }
 }

@@ -62,7 +62,7 @@ public class FieldsController : ControllerBase
         return Ok(new ApiListResponse<FieldResponse>(items, items.Count, 1, items.Count));
     }
 
-    /// <summary>Update a field's name, label, or description.</summary>
+    /// <summary>Update a field's properties (name, label, required, searchable, reportable, etc.).</summary>
     [HttpPatch("tables/{tableId:guid}/fields/{fieldId:guid}")]
     [RequirePermission(PermissionCodes.FieldsCreate)]
     [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
@@ -72,7 +72,12 @@ public class FieldsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid tableId, Guid fieldId, [FromBody] UpdateFieldRequest request, CancellationToken ct)
     {
-        await _updateHandler.HandleAsync(new UpdateFieldCommand(tableId, fieldId, request.Name, request.Label, request.Description), ct);
+        await _updateHandler.HandleAsync(new UpdateFieldCommand(
+            tableId, fieldId,
+            request.Name, request.Label, request.Description,
+            request.IsRequired, request.DefaultValue,
+            request.IsSearchable, request.IsSortable,
+            request.IsFilterable, request.IsReportable), ct);
         return NoContent();
     }
 
@@ -112,7 +117,13 @@ public class FieldsController : ControllerBase
         Description = f.Description,
         TypeCode = f.TypeCode,
         PhysicalColumnName = f.PhysicalColumnName,
+        DefaultValue = f.DefaultValue,
         IsRequired = f.IsRequired,
+        IsSearchable = f.IsSearchable,
+        IsSortable = f.IsSortable,
+        IsFilterable = f.IsFilterable,
+        IsReportable = f.IsReportable,
+        IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
         CreatedOn = f.CreatedOn,
     };

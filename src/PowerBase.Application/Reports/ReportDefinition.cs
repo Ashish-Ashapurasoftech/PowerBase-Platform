@@ -5,4 +5,23 @@ public class ReportDefinition
     public List<long> Columns { get; set; } = [];
     public long? SortFieldId { get; set; }
     public bool SortDesc { get; set; }
+    public List<ReportFilter> Filters { get; set; } = [];
+    // Summary-only
+    public long? GroupByFieldId { get; set; }
+    public List<SummaryAggregation> Aggregations { get; set; } = [];
+}
+
+public class ReportFilter
+{
+    public long FieldId { get; set; }
+    /// <summary>eq, ne, contains, startsWith, gt, gte, lt, lte</summary>
+    public string Operator { get; set; } = "eq";
+    public string? Value { get; set; }
+}
+
+public class SummaryAggregation
+{
+    public long FieldId { get; set; }
+    /// <summary>Count, Sum, Avg, Min, Max</summary>
+    public string Function { get; set; } = "Count";
 }

@@ -158,7 +158,13 @@ public class TablesController : ControllerBase
         Description = f.Description,
         TypeCode = f.TypeCode,
         PhysicalColumnName = f.PhysicalColumnName,
+        DefaultValue = f.DefaultValue,
         IsRequired = f.IsRequired,
+        IsSearchable = f.IsSearchable,
+        IsSortable = f.IsSortable,
+        IsFilterable = f.IsFilterable,
+        IsReportable = f.IsReportable,
+        IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
         CreatedOn = f.CreatedOn,
     };

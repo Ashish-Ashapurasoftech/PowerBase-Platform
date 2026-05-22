@@ -56,9 +56,13 @@ public class ReportsController : ControllerBase
             request.Name,
             request.Description,
             request.Visibility,
+            request.ReportType,
             request.Columns,
             request.SortFieldId,
-            request.SortDesc);
+            request.SortDesc,
+            request.Filters.Select(f => new ReportFilterCommand(f.FieldId, f.Operator, f.Value)).ToList(),
+            request.GroupByFieldId,
+            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function)).ToList());
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
@@ -165,6 +169,18 @@ public class ReportsController : ControllerBase
             Columns = r.Definition.Columns,
             SortFieldId = r.Definition.SortFieldId,
             SortDesc = r.Definition.SortDesc,
+            Filters = r.Definition.Filters.Select(f => new ReportFilterDto
+            {
+                FieldId = f.FieldId,
+                Operator = f.Operator,
+                Value = f.Value,
+            }).ToList(),
+            GroupByFieldId = r.Definition.GroupByFieldId,
+            Aggregations = r.Definition.Aggregations.Select(a => new SummaryAggregationDto
+            {
+                FieldId = a.FieldId,
+                Function = a.Function,
+            }).ToList(),
         },
         IsDefault = r.IsDefault,
         DisplayOrder = r.DisplayOrder,

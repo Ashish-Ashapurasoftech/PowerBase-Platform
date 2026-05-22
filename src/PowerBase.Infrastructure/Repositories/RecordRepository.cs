@@ -1,5 +1,6 @@
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -13,30 +14,42 @@ public class RecordRepository : BaseRepository, IRecordRepository
         : base(connectionFactory, queryContext) { }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
-        AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize, CancellationToken ct = default)
+        AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
+        IReadOnlyList<ReportFilter>? filters = null,
+        CancellationToken ct = default)
     {
         var fieldCols = BuildFieldColumnList(fields);
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", QueryContext.TenantId);
+        parameters.Add("offset", (page - 1) * pageSize);
+        parameters.Add("pageSize", pageSize);
+
+        var filterWhere = BuildFilterWhere(filters, parameters);
+
         var sql = $"""
             SELECT Id, PublicId, TenantId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
             FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE TenantId = @tenantId AND IsDeleted = 0
+            WHERE TenantId = @tenantId AND IsDeleted = 0{filterWhere}
             ORDER BY Id
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;
 
-        var offset = (page - 1) * pageSize;
         await using var connection = ConnectionFactory.Create();
         var rows = await connection.QueryAsync(
-            new CommandDefinition(sql, new { tenantId = QueryContext.TenantId, offset, pageSize }, cancellationToken: ct));
+            new CommandDefinition(sql, parameters, cancellationToken: ct));
         return rows.Select(ToDictionary).ToList();
     }
 
-    public async Task<int> CountAsync(AppTable table, CancellationToken ct = default)
+    public async Task<int> CountAsync(AppTable table, IReadOnlyList<ReportFilter>? filters = null, CancellationToken ct = default)
     {
-        var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE TenantId = @tenantId AND IsDeleted = 0";
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", QueryContext.TenantId);
+        var filterWhere = BuildFilterWhere(filters, parameters);
+
+        var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE TenantId = @tenantId AND IsDeleted = 0{filterWhere}";
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteScalarAsync<int>(
-            new CommandDefinition(sql, new { tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
@@ -141,10 +154,115 @@ public class RecordRepository : BaseRepository, IRecordRepository
             throw new NotFoundException("Record", publicId);
     }
 
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
+        AppTable table,
+        AppField groupByField,
+        IReadOnlyList<SummaryAggregation> aggregations,
+        IReadOnlyList<AppField> allFields,
+        CancellationToken ct = default)
+    {
+        var groupCol = PhysicalNaming.ColumnName(groupByField.Id);
+        var fieldMap = allFields.ToDictionary(f => f.Id);
+
+        var aggClauses = new List<string> { "COUNT(*) AS [Count]" };
+        foreach (var agg in aggregations)
+        {
+            if (!fieldMap.TryGetValue(agg.FieldId, out var aggField))
+                continue;
+
+            var col = PhysicalNaming.ColumnName(agg.FieldId);
+            var alias = $"[{agg.Function}_{aggField.Name.Replace(" ", "_")}]";
+            var clause = agg.Function switch
+            {
+                "Sum" => $"SUM(CAST({col} AS DECIMAL(18,4))) AS {alias}",
+                "Avg" => $"AVG(CAST({col} AS DECIMAL(18,4))) AS {alias}",
+                "Min" => $"MIN({col}) AS {alias}",
+                "Max" => $"MAX({col}) AS {alias}",
+                _ => null,
+            };
+            if (clause is not null)
+                aggClauses.Add(clause);
+        }
+
+        var aggSql = string.Join(", ", aggClauses);
+        var sql = $"""
+            SELECT {groupCol} AS GroupValue, {aggSql}
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE TenantId = @tenantId AND IsDeleted = 0
+            GROUP BY {groupCol}
+            ORDER BY {groupCol}
+            """;
+
+        await using var connection = ConnectionFactory.Create();
+        var rows = await connection.QueryAsync(
+            new CommandDefinition(sql, new { tenantId = QueryContext.TenantId }, cancellationToken: ct));
+        return rows.Select(ToDictionary).ToList();
+    }
+
+    // --- Helpers ---
+
     private static string BuildFieldColumnList(IReadOnlyList<AppField> fields) =>
         fields.Count > 0
             ? ", " + string.Join(", ", fields.Select(f => PhysicalNaming.ColumnName(f.Id)))
             : string.Empty;
+
+    /// <summary>
+    /// Builds a SQL WHERE fragment from report filters.
+    /// Column names are derived from integer field IDs (safe — no user input enters the SQL string).
+    /// Values are passed as numbered Dapper parameters (@fv0, @fv1, …).
+    /// </summary>
+    private static string BuildFilterWhere(IReadOnlyList<ReportFilter>? filters, DynamicParameters parameters)
+    {
+        if (filters is null || filters.Count == 0)
+            return string.Empty;
+
+        var clauses = new List<string>();
+        for (var i = 0; i < filters.Count; i++)
+        {
+            var filter = filters[i];
+            var col = PhysicalNaming.ColumnName(filter.FieldId); // safe: integer field ID
+            var paramName = $"fv{i}";
+
+            switch (filter.Operator)
+            {
+                case "eq":
+                    clauses.Add($"{col} = @{paramName}");
+                    parameters.Add(paramName, filter.Value);
+                    break;
+                case "ne":
+                    clauses.Add($"{col} <> @{paramName}");
+                    parameters.Add(paramName, filter.Value);
+                    break;
+                case "gt":
+                    clauses.Add($"{col} > @{paramName}");
+                    parameters.Add(paramName, filter.Value);
+                    break;
+                case "gte":
+                    clauses.Add($"{col} >= @{paramName}");
+                    parameters.Add(paramName, filter.Value);
+                    break;
+                case "lt":
+                    clauses.Add($"{col} < @{paramName}");
+                    parameters.Add(paramName, filter.Value);
+                    break;
+                case "lte":
+                    clauses.Add($"{col} <= @{paramName}");
+                    parameters.Add(paramName, filter.Value);
+                    break;
+                case "contains":
+                    clauses.Add($"{col} LIKE @{paramName}");
+                    parameters.Add(paramName, $"%{filter.Value}%");
+                    break;
+                case "startsWith":
+                    clauses.Add($"{col} LIKE @{paramName}");
+                    parameters.Add(paramName, $"{filter.Value}%");
+                    break;
+                // Unknown operators are skipped (validated in command handler)
+            }
+        }
+
+        return clauses.Count > 0 ? " AND " + string.Join(" AND ", clauses) : string.Empty;
+    }
 
     private static IReadOnlyDictionary<string, object?> ToDictionary(dynamic row)
     {

@@ -1,3 +1,4 @@
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Common.Interfaces;
@@ -5,9 +6,11 @@ namespace PowerBase.Application.Common.Interfaces;
 public interface IRecordRepository
 {
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
-        AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize, CancellationToken ct = default);
+        AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
+        IReadOnlyList<ReportFilter>? filters = null,
+        CancellationToken ct = default);
 
-    Task<int> CountAsync(AppTable table, CancellationToken ct = default);
+    Task<int> CountAsync(AppTable table, IReadOnlyList<ReportFilter>? filters = null, CancellationToken ct = default);
 
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default);
@@ -20,4 +23,12 @@ public interface IRecordRepository
         IReadOnlyDictionary<long, object?> values, CancellationToken ct = default);
 
     Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default);
+
+    /// <summary>Run a GROUP BY aggregation query for Summary reports.</summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
+        AppTable table,
+        AppField groupByField,
+        IReadOnlyList<SummaryAggregation> aggregations,
+        IReadOnlyList<AppField> allFields,
+        CancellationToken ct = default);
 }

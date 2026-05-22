@@ -15,18 +15,24 @@ public class UpdateFieldCommandHandlerTests
 
     private UpdateFieldCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _appAccessService);
 
+    private static UpdateFieldCommand MakeCommand(Guid tableId, Guid fieldId, string name = "New Name")
+        => new(tableId, fieldId, name, "lbl", "desc", false, null, false, false, false, true);
+
     [Fact]
     public async Task HandleAsync_ValidCommand_CallsUpdate()
     {
         var tablePublicId = Guid.NewGuid();
         var fieldPublicId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(tablePublicId).Returns(new AppTable { Id = 5, PublicId = tablePublicId });
-        _fieldRepo.UpdateAsync(fieldPublicId, 5, "New Name", "lbl", "desc", Arg.Any<CancellationToken>()).Returns(1);
+        _fieldRepo.UpdateAsync(fieldPublicId, 5, "New Name", "lbl", "desc",
+            false, null, false, false, false, true, Arg.Any<CancellationToken>()).Returns(1);
         var sut = CreateSut();
 
-        await sut.HandleAsync(new UpdateFieldCommand(tablePublicId, fieldPublicId, "New Name", "lbl", "desc"));
+        await sut.HandleAsync(MakeCommand(tablePublicId, fieldPublicId));
 
-        await _fieldRepo.Received(1).UpdateAsync(fieldPublicId, 5, "New Name", "lbl", "desc", Arg.Any<CancellationToken>());
+        await _fieldRepo.Received(1).UpdateAsync(
+            fieldPublicId, 5, "New Name", "lbl", "desc",
+            false, null, false, false, false, true, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -34,7 +40,7 @@ public class UpdateFieldCommandHandlerTests
     {
         var sut = CreateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new UpdateFieldCommand(Guid.NewGuid(), Guid.NewGuid(), "", null, null)))
+        await sut.Invoking(s => s.HandleAsync(MakeCommand(Guid.NewGuid(), Guid.NewGuid(), "")))
             .Should().ThrowAsync<ValidationException>();
     }
 
@@ -44,10 +50,13 @@ public class UpdateFieldCommandHandlerTests
         var tablePublicId = Guid.NewGuid();
         var fieldPublicId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(tablePublicId).Returns(new AppTable { Id = 5, PublicId = tablePublicId });
-        _fieldRepo.UpdateAsync(fieldPublicId, 5, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>()).Returns(0);
+        _fieldRepo.UpdateAsync(fieldPublicId, 5,
+            Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string?>(),
+            Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
+            Arg.Any<CancellationToken>()).Returns(0);
         var sut = CreateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new UpdateFieldCommand(tablePublicId, fieldPublicId, "Name", null, null)))
+        await sut.Invoking(s => s.HandleAsync(MakeCommand(tablePublicId, fieldPublicId)))
             .Should().ThrowAsync<NotFoundException>();
     }
 }

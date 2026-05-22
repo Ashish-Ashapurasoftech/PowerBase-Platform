@@ -34,8 +34,8 @@ public class ListRecordsQueryHandler
         var table = await _tableRepo.GetByPublicIdAsync(query.TablePublicId, ct);
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 
-        var rows = await _recordRepo.ListAsync(table, fields, page, pageSize, ct);
-        var total = await _recordRepo.CountAsync(table, ct);
+        var rows = await _recordRepo.ListAsync(table, fields, page, pageSize, null, ct);
+        var total = await _recordRepo.CountAsync(table, null, ct);
 
         return new PagedRecordResult
         {

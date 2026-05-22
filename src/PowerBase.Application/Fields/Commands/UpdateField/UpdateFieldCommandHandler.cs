@@ -27,7 +27,11 @@ public class UpdateFieldCommandHandler
 
         var affected = await _fieldRepo.UpdateAsync(
             command.FieldPublicId, table.Id,
-            command.Name, command.Label, command.Description, ct);
+            command.Name, command.Label, command.Description,
+            command.IsRequired, command.DefaultValue,
+            command.IsSearchable, command.IsSortable,
+            command.IsFilterable, command.IsReportable,
+            ct);
 
         if (affected == 0)
             throw new NotFoundException("Field", command.FieldPublicId);

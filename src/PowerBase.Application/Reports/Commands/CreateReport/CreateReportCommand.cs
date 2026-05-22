@@ -5,6 +5,13 @@ public record CreateReportCommand(
     string Name,
     string? Description,
     string Visibility,
+    string ReportType,
     List<long> Columns,
     long? SortFieldId,
-    bool SortDesc);
+    bool SortDesc,
+    List<ReportFilterCommand> Filters,
+    long? GroupByFieldId,
+    List<SummaryAggregationCommand> Aggregations);
+
+public record ReportFilterCommand(long FieldId, string Operator, string? Value);
+public record SummaryAggregationCommand(long FieldId, string Function);

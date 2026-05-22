@@ -1,5 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Records;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -12,6 +14,10 @@ public class CreateReportCommandHandler
     private readonly IReportRepository _reportRepo;
     private readonly IQueryContext _queryContext;
     private readonly CreateReportCommandValidator _validator;
+
+    private static readonly HashSet<string> AllowedReportTypes = ["Table", "Summary"];
+    private static readonly HashSet<string> AllowedOperators = ["eq", "ne", "contains", "startsWith", "gt", "gte", "lt", "lte"];
+    private static readonly HashSet<string> AllowedFunctions = ["Count", "Sum", "Avg", "Min", "Max"];
 
     public CreateReportCommandHandler(
         IAppTableRepository tableRepo,
@@ -35,16 +41,41 @@ public class CreateReportCommandHandler
                     .GroupBy(e => e.PropertyName)
                     .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
 
+        if (!AllowedReportTypes.Contains(command.ReportType))
+            throw new ValidationException(new Dictionary<string, string[]>
+                { ["ReportType"] = [$"Report type must be one of: {string.Join(", ", AllowedReportTypes)}"] });
+
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
+
+        IReadOnlyList<AppField> tableFields = [];
+        if (command.Columns.Count > 0 || command.Filters.Count > 0 || command.GroupByFieldId.HasValue || command.Aggregations.Count > 0)
+        {
+            tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+        }
 
         if (command.Columns.Count > 0)
         {
-            var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
-            var validIds = fields.Select(f => f.Id).ToHashSet();
+            var validIds = tableFields.Select(f => f.Id).ToHashSet();
             var invalid = command.Columns.Where(id => !validIds.Contains(id)).ToList();
             if (invalid.Count > 0)
                 throw new ValidationException(
                     new Dictionary<string, string[]> { ["columns"] = [$"Unknown field IDs: {string.Join(", ", invalid)}"] });
+        }
+
+        // Validate filters
+        foreach (var filter in command.Filters)
+        {
+            if (!AllowedOperators.Contains(filter.Operator))
+                throw new ValidationException(new Dictionary<string, string[]>
+                    { ["filters"] = [$"Invalid operator '{filter.Operator}'. Allowed: {string.Join(", ", AllowedOperators)}"] });
+        }
+
+        // Validate aggregations
+        foreach (var agg in command.Aggregations)
+        {
+            if (!AllowedFunctions.Contains(agg.Function))
+                throw new ValidationException(new Dictionary<string, string[]>
+                    { ["aggregations"] = [$"Invalid function '{agg.Function}'. Allowed: {string.Join(", ", AllowedFunctions)}"] });
         }
 
         var definition = new ReportDefinition
@@ -52,6 +83,18 @@ public class CreateReportCommandHandler
             Columns = command.Columns,
             SortFieldId = command.SortFieldId,
             SortDesc = command.SortDesc,
+            Filters = command.Filters.Select(f => new ReportFilter
+            {
+                FieldId = f.FieldId,
+                Operator = f.Operator,
+                Value = f.Value,
+            }).ToList(),
+            GroupByFieldId = command.GroupByFieldId,
+            Aggregations = command.Aggregations.Select(a => new SummaryAggregation
+            {
+                FieldId = a.FieldId,
+                Function = a.Function,
+            }).ToList(),
         };
 
         var report = new Report
@@ -61,7 +104,7 @@ public class CreateReportCommandHandler
             OwnerId = _queryContext.UserId,
             Name = command.Name,
             Description = command.Description,
-            ReportType = "Table",
+            ReportType = command.ReportType,
             Visibility = command.Visibility,
             Definition = JsonSerializer.Serialize(definition),
             IsDefault = false,

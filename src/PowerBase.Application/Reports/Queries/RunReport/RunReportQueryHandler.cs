@@ -52,6 +52,19 @@ public class RunReportQueryHandler
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
+        if (report.ReportType == "Summary")
+            return await RunSummaryAsync(table, allFields, definition, page, pageSize, ct);
+
+        return await RunTableAsync(table, allFields, definition, page, pageSize, ct);
+    }
+
+    private async Task<PagedReportRunResult> RunTableAsync(
+        AppTable table,
+        IReadOnlyList<AppField> allFields,
+        ReportDefinition definition,
+        int page, int pageSize,
+        CancellationToken ct)
+    {
         IReadOnlyList<AppField> selectedFields;
         if (definition.Columns.Count > 0)
         {
@@ -66,8 +79,9 @@ public class RunReportQueryHandler
             selectedFields = allFields.Where(f => f.IsReportable).ToList();
         }
 
-        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, ct);
-        var total = await _recordRepo.CountAsync(table, ct);
+        var filters = definition.Filters.Count > 0 ? definition.Filters : null;
+        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filters, ct);
+        var total = await _recordRepo.CountAsync(table, filters, ct);
 
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo
@@ -84,6 +98,64 @@ public class RunReportQueryHandler
             TotalCount = total,
             Page = page,
             PageSize = pageSize,
+        };
+    }
+
+    private async Task<PagedReportRunResult> RunSummaryAsync(
+        AppTable table,
+        IReadOnlyList<AppField> allFields,
+        ReportDefinition definition,
+        int page, int pageSize,
+        CancellationToken ct)
+    {
+        if (!definition.GroupByFieldId.HasValue)
+        {
+            // No group-by configured — return empty result
+            return new PagedReportRunResult { Page = page, PageSize = pageSize };
+        }
+
+        var fieldMap = allFields.ToDictionary(f => f.Id);
+        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField))
+        {
+            return new PagedReportRunResult { Page = page, PageSize = pageSize };
+        }
+
+        var rows = await _recordRepo.SummarizeAsync(table, groupByField, definition.Aggregations, allFields, ct);
+
+        // Treat summary rows as record-like dictionaries; map them to RecordResult
+        var items = rows.Select(row => new RecordResult
+        {
+            Id = Guid.Empty,
+            CreatedOn = DateTime.UtcNow,
+            Fields = row.ToDictionary(kvp => kvp.Key, kvp => kvp.Value),
+        }).ToList();
+
+        // Build synthetic columns: GroupValue + one per aggregation
+        var columns = new List<ReportColumnInfo>
+        {
+            new() { FieldId = groupByField.Id, Name = groupByField.Name + " (Group)", TypeCode = groupByField.TypeCode },
+            new() { FieldId = 0, Name = "Count", TypeCode = "Number" },
+        };
+        foreach (var agg in definition.Aggregations)
+        {
+            if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
+            {
+                columns.Add(new ReportColumnInfo
+                {
+                    FieldId = aggField.Id,
+                    Name = $"{agg.Function} of {aggField.Name}",
+                    TypeCode = "Number",
+                });
+            }
+        }
+
+        return new PagedReportRunResult
+        {
+            Items = items,
+            Columns = columns,
+            TotalCount = rows.Count,
+            Page = 1,
+            PageSize = rows.Count > 0 ? rows.Count : pageSize,
         };
     }
 }
