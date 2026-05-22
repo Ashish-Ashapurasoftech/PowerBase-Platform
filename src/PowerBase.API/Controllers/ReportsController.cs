@@ -7,9 +7,11 @@ using PowerBase.API.Models.Reports;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Application.Reports.Commands.DeleteReport;
+using PowerBase.Application.Reports.Commands.SetDefaultReport;
 using PowerBase.Application.Reports.Commands.UpdateReport;
 using PowerBase.Application.Reports.Queries.GetReport;
 using PowerBase.Application.Reports.Queries.ListReports;
+using PowerBase.Application.Reports.Queries.ListReportsByTable;
 using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Domain.Constants;
 
@@ -21,23 +23,29 @@ public class ReportsController : ControllerBase
     private readonly CreateReportCommandHandler _createHandler;
     private readonly UpdateReportCommandHandler _updateHandler;
     private readonly DeleteReportCommandHandler _deleteHandler;
+    private readonly SetDefaultReportCommandHandler _setDefaultHandler;
     private readonly GetReportQueryHandler _getHandler;
     private readonly ListReportsQueryHandler _listHandler;
+    private readonly ListReportsByTableQueryHandler _listByTableHandler;
     private readonly RunReportQueryHandler _runHandler;
 
     public ReportsController(
         CreateReportCommandHandler createHandler,
         UpdateReportCommandHandler updateHandler,
         DeleteReportCommandHandler deleteHandler,
+        SetDefaultReportCommandHandler setDefaultHandler,
         GetReportQueryHandler getHandler,
         ListReportsQueryHandler listHandler,
+        ListReportsByTableQueryHandler listByTableHandler,
         RunReportQueryHandler runHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
+        _setDefaultHandler = setDefaultHandler;
         _getHandler = getHandler;
         _listHandler = listHandler;
+        _listByTableHandler = listByTableHandler;
         _runHandler = runHandler;
     }
 
@@ -67,6 +75,20 @@ public class ReportsController : ControllerBase
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
 
+    /// <summary>List all reports for a specific table.</summary>
+    [HttpGet("tables/{tableId:guid}/reports")]
+    [RequirePermission(PermissionCodes.ReportsRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<ReportResponse>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListByTable(Guid tableId, CancellationToken ct)
+    {
+        var results = await _listByTableHandler.HandleAsync(new ListReportsByTableQuery(tableId), ct);
+        var items = results.Select(MapToResponse).ToList();
+        return Ok(new ApiResponse<IReadOnlyList<ReportResponse>>(items));
+    }
+
     /// <summary>List all reports for an app.</summary>
     [HttpGet("apps/{appId:guid}/reports")]
     [RequirePermission(PermissionCodes.ReportsRead)]
@@ -81,7 +103,7 @@ public class ReportsController : ControllerBase
         return Ok(new ApiResponse<IReadOnlyList<ReportResponse>>(items));
     }
 
-    /// <summary>Update a report's name or description.</summary>
+    /// <summary>Update a report's definition (name, description, columns, filters, sort, grouping, aggregations).</summary>
     [HttpPatch("reports/{publicId:guid}")]
     [RequirePermission(PermissionCodes.ReportsUpdate)]
     [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByReportPublicId)]
@@ -91,7 +113,31 @@ public class ReportsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateReportRequest request, CancellationToken ct)
     {
-        await _updateHandler.HandleAsync(new UpdateReportCommand(publicId, request.Name, request.Description), ct);
+        var command = new UpdateReportCommand(
+            publicId,
+            request.Name,
+            request.Description,
+            request.Visibility,
+            request.Columns,
+            request.SortFieldId,
+            request.SortDesc,
+            request.Filters.Select(f => new ReportFilterCommand(f.FieldId, f.Operator, f.Value)).ToList(),
+            request.GroupByFieldId,
+            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function)).ToList());
+        await _updateHandler.HandleAsync(command, ct);
+        return NoContent();
+    }
+
+    /// <summary>Set a report as the default for its table. Clears any previously set default.</summary>
+    [HttpPatch("tables/{tableId:guid}/reports/{reportId:guid}/set-default")]
+    [RequirePermission(PermissionCodes.ReportsUpdate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SetDefault(Guid tableId, Guid reportId, CancellationToken ct)
+    {
+        await _setDefaultHandler.HandleAsync(new SetDefaultReportCommand(tableId, reportId), ct);
         return NoContent();
     }
 

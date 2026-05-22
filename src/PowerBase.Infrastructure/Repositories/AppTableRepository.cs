@@ -11,7 +11,7 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
     private const string SelectColumns = """
         Id, PublicId, TenantId, AppId, Name, SingularLabel, PluralLabel, Description,
         PhysicalTableName, DisplayFieldId, RecordCount, IsSystem, DisplayOrder,
-        IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion
+        IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion, Icon
         """;
 
     private const string GetByIdSql = $"""
