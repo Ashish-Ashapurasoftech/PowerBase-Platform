@@ -11,6 +11,5 @@ public class FieldResponse
     public string? PhysicalColumnName { get; init; }
     public bool IsRequired { get; init; }
     public bool IsSystem { get; init; }
-    public int DisplayOrder { get; init; }
     public DateTime CreatedOn { get; init; }
 }

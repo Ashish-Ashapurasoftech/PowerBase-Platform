@@ -100,7 +100,6 @@ public class FieldsController : ControllerBase
         PhysicalColumnName = r.PhysicalColumnName,
         IsRequired = r.IsRequired,
         IsSystem = false,
-        DisplayOrder = r.DisplayOrder,
         CreatedOn = r.CreatedOn,
     };
 
@@ -115,7 +114,6 @@ public class FieldsController : ControllerBase
         PhysicalColumnName = f.PhysicalColumnName,
         IsRequired = f.IsRequired,
         IsSystem = f.IsSystem,
-        DisplayOrder = f.DisplayOrder,
         CreatedOn = f.CreatedOn,
     };
 }

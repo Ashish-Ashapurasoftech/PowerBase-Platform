@@ -11,7 +11,7 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
     private const string SelectColumns = """
         af.Id, af.PublicId, af.TenantId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName,
-        af.DisplayOrder, af.IsRequired, af.IsReportable, af.IsSystem, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        af.IsRequired, af.IsReportable, af.IsSystem, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
     private const string GetByIdInTableSql = $"""
@@ -31,7 +31,7 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
         WHERE af.TenantId = @tenantId
           AND af.AppTableId = @tableId
           AND af.IsDeleted = 0
-        ORDER BY af.DisplayOrder, af.Name
+        ORDER BY af.Id
         """;
 
     private const string NameExistsSql = """
@@ -43,9 +43,9 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
 
     private const string InsertSql = """
         INSERT INTO meta.AppField
-            (TenantId, AppTableId, FieldTypeId, Name, Label, Description, IsRequired, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
+            (TenantId, AppTableId, FieldTypeId, Name, Label, Description, IsRequired, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
-        VALUES (@tenantId, @tableId, @fieldTypeId, @name, @label, @description, @isRequired, 0, 0, SYSUTCDATETIME(), @createdBy)
+        VALUES (@tenantId, @tableId, @fieldTypeId, @name, @label, @description, @isRequired, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string UpdatePhysicalColumnNameSql = """

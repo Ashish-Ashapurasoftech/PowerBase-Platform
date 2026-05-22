@@ -15,7 +15,6 @@ public class CreateFieldResult
     public string TypeCode { get; init; } = string.Empty;
     public string PhysicalColumnName { get; init; } = string.Empty;
     public bool IsRequired { get; init; }
-    public int DisplayOrder { get; init; }
     public DateTime CreatedOn { get; init; }
 }
 
@@ -91,7 +90,6 @@ public class CreateFieldCommandHandler
             TypeCode = command.TypeCode,
             PhysicalColumnName = physicalColumn,
             IsRequired = field.IsRequired,
-            DisplayOrder = 0,
             CreatedOn = DateTime.UtcNow,
         };
     }

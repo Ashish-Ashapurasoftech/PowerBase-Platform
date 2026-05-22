@@ -160,7 +160,6 @@ public class TablesController : ControllerBase
         PhysicalColumnName = f.PhysicalColumnName,
         IsRequired = f.IsRequired,
         IsSystem = f.IsSystem,
-        DisplayOrder = f.DisplayOrder,
         CreatedOn = f.CreatedOn,
     };
 }
