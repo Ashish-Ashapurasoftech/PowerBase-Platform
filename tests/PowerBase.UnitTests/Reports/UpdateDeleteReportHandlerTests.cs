@@ -1,6 +1,7 @@
 using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Application.Reports.Commands.DeleteReport;
 using PowerBase.Application.Reports.Commands.UpdateReport;
 using PowerBase.Domain.Exceptions;
@@ -15,16 +16,20 @@ public class UpdateDeleteReportHandlerTests
     private UpdateReportCommandHandler CreateUpdateSut() => new(_reportRepo, _appAccessService);
     private DeleteReportCommandHandler CreateDeleteSut() => new(_reportRepo, _appAccessService);
 
+    private static UpdateReportCommand ValidCommand(Guid id, string name = "New Name") =>
+        new(id, name, null, "Shared", [], null, false, [], null, []);
+
     [Fact]
     public async Task UpdateReport_ValidCommand_CallsUpdate()
     {
         var id = Guid.NewGuid();
-        _reportRepo.UpdateAsync(id, "New Name", null, Arg.Any<CancellationToken>()).Returns(1);
+        _reportRepo.UpdateAsync(id, "New Name", null, Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(1);
         var sut = CreateUpdateSut();
 
-        await sut.HandleAsync(new UpdateReportCommand(id, "New Name", null));
+        await sut.HandleAsync(ValidCommand(id));
 
-        await _reportRepo.Received(1).UpdateAsync(id, "New Name", null, Arg.Any<CancellationToken>());
+        await _reportRepo.Received(1).UpdateAsync(
+            id, "New Name", null, Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -32,7 +37,7 @@ public class UpdateDeleteReportHandlerTests
     {
         var sut = CreateUpdateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new UpdateReportCommand(Guid.NewGuid(), "", null)))
+        await sut.Invoking(s => s.HandleAsync(ValidCommand(Guid.NewGuid(), "")))
             .Should().ThrowAsync<ValidationException>();
     }
 
@@ -41,7 +46,7 @@ public class UpdateDeleteReportHandlerTests
     {
         var sut = CreateUpdateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new UpdateReportCommand(Guid.NewGuid(), new string('x', 201), null)))
+        await sut.Invoking(s => s.HandleAsync(ValidCommand(Guid.NewGuid(), new string('x', 201))))
             .Should().ThrowAsync<ValidationException>();
     }
 
@@ -49,10 +54,10 @@ public class UpdateDeleteReportHandlerTests
     public async Task UpdateReport_NotFound_ThrowsNotFoundException()
     {
         var id = Guid.NewGuid();
-        _reportRepo.UpdateAsync(id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>()).Returns(0);
+        _reportRepo.UpdateAsync(id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(0);
         var sut = CreateUpdateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new UpdateReportCommand(id, "Name", null)))
+        await sut.Invoking(s => s.HandleAsync(ValidCommand(id)))
             .Should().ThrowAsync<NotFoundException>();
     }
 

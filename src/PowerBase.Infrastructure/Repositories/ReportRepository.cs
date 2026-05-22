@@ -29,6 +29,18 @@ public class ReportRepository : BaseRepository, IReportRepository
         WHERE r.TenantId = @tenantId AND r.PublicId = @publicId AND r.IsDeleted = 0
         """;
 
+    private const string ListByTableSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.Report r
+        WHERE r.TenantId = @tenantId
+          AND r.AppTableId = (SELECT Id FROM meta.AppTable
+                              WHERE PublicId = @tablePublicId
+                                AND TenantId = @tenantId
+                                AND IsDeleted = 0)
+          AND r.IsDeleted = 0
+        ORDER BY r.DisplayOrder, r.Name
+        """;
+
     private const string ListByAppSql = $"""
         SELECT {SelectColumns}
         FROM meta.Report r
@@ -51,8 +63,22 @@ public class ReportRepository : BaseRepository, IReportRepository
 
     private const string UpdateReportSql = """
         UPDATE meta.Report
-        SET Name = @name, Description = @description, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        SET Name = @name, Description = @description, Visibility = @visibility,
+            Definition = @definition, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+        """;
+
+    private const string UnsetDefaultSql = """
+        UPDATE meta.Report
+        SET IsDefault = 0, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND TenantId = @tenantId AND IsDeleted = 0)
+          AND TenantId = @tenantId AND IsDeleted = 0
+        """;
+
+    private const string SetDefaultSql = """
+        UPDATE meta.Report
+        SET IsDefault = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE TenantId = @tenantId AND PublicId = @reportPublicId AND IsDeleted = 0
         """;
 
     private const string SoftDeleteReportSql = """
@@ -92,6 +118,16 @@ public class ReportRepository : BaseRepository, IReportRepository
         return results.AsList();
     }
 
+    public async Task<IReadOnlyList<Report>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<Report>(
+            new CommandDefinition(ListByTableSql,
+                new { tenantId = QueryContext.TenantId, tablePublicId },
+                cancellationToken: ct));
+        return results.AsList();
+    }
+
     public async Task<(long Id, Guid PublicId)> CreateAsync(Report report, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
@@ -113,11 +149,40 @@ public class ReportRepository : BaseRepository, IReportRepository
         return ((long)row.Id, (Guid)row.PublicId);
     }
 
-    public async Task<int> UpdateAsync(Guid publicId, string name, string? description, CancellationToken ct = default)
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? description,
+        string visibility, string definition, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteAsync(
-            new CommandDefinition(UpdateReportSql, new { tenantId = QueryContext.TenantId, publicId, name, description, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+            new CommandDefinition(UpdateReportSql,
+                new { tenantId = QueryContext.TenantId, publicId, name, description, visibility, definition, modifiedBy = QueryContext.UserId },
+                cancellationToken: ct));
+    }
+
+    public async Task SetDefaultAsync(Guid tablePublicId, Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            await connection.ExecuteAsync(
+                new CommandDefinition(UnsetDefaultSql,
+                    new { tenantId = QueryContext.TenantId, tablePublicId, modifiedBy = QueryContext.UserId },
+                    transaction: transaction, cancellationToken: ct));
+
+            await connection.ExecuteAsync(
+                new CommandDefinition(SetDefaultSql,
+                    new { tenantId = QueryContext.TenantId, reportPublicId, modifiedBy = QueryContext.UserId },
+                    transaction: transaction, cancellationToken: ct));
+
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
     }
 
     public async Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default)
