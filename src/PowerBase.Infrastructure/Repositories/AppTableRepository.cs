@@ -1,7 +1,9 @@
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.Enums;
 using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
@@ -35,13 +37,20 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
         """;
 
-    private const string ListByAppSql = $"""
-        SELECT {SelectColumns}
-        FROM meta.AppTable
-        WHERE TenantId = @tenantId
-          AND AppId = @appId
-          AND IsDeleted = 0
-        ORDER BY DisplayOrder, Name
+    private const string ListByAppSql = """
+        SELECT t.Id, t.PublicId, t.TenantId, t.AppId, t.Name, t.SingularLabel, t.PluralLabel, t.Description,
+               t.PhysicalTableName, t.DisplayFieldId, t.RecordCount, t.IsSystem, t.DisplayOrder,
+               t.IsDeleted, t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy, t.RowVersion, t.Icon,
+               f.Id, f.PublicId, f.TenantId, f.AppTableId, f.FieldTypeId,
+               f.Name, f.Label, f.Description, f.PhysicalColumnName, f.DefaultValue,
+               f.IsRequired, f.IsSearchable, f.IsSortable, f.IsFilterable, f.IsReportable,
+               f.IsUnique, f.IsSystem, f.IsDeleted, f.CreatedOn, f.CreatedBy
+        FROM meta.AppTable t
+        LEFT JOIN meta.AppField f ON t.Id = f.AppTableId AND f.IsDeleted = 0
+        WHERE t.TenantId = @tenantId
+          AND t.AppId = @appId
+          AND t.IsDeleted = 0
+        ORDER BY t.DisplayOrder, t.Name, f.Id
         """;
 
     private const string NameExistsSql = """
@@ -83,6 +92,18 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
           AND IsDeleted = 0
         """;
 
+    private const string IncrementRecordCountSql = """
+        UPDATE meta.AppTable
+        SET RecordCount = RecordCount + 1
+        WHERE Id = @id
+        """;
+
+    private const string DecrementRecordCountSql = """
+        UPDATE meta.AppTable
+        SET RecordCount = RecordCount - 1
+        WHERE Id = @id AND RecordCount > 0
+        """;
+
     public AppTableRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
@@ -113,9 +134,30 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
     public async Task<IReadOnlyList<AppTable>> ListByAppAsync(long appId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        var results = await connection.QueryAsync<AppTable>(
-            new CommandDefinition(ListByAppSql, new { tenantId = QueryContext.TenantId, appId }, cancellationToken: ct));
-        return results.AsList();
+        var lookup = new Dictionary<long, AppTable>();
+
+        await connection.QueryAsync<AppTable, AppField, AppTable>(
+            new CommandDefinition(ListByAppSql, new { tenantId = QueryContext.TenantId, appId }, cancellationToken: ct),
+            (table, field) =>
+            {
+                if (!lookup.TryGetValue(table.Id, out var currentTable))
+                {
+                    currentTable = table;
+                    currentTable.Fields = new List<AppField>();
+                    lookup.Add(currentTable.Id, currentTable);
+                }
+
+                if (field != null)
+                {
+                    field.TypeCode = ((FieldTypeCode)field.FieldTypeId).ToString();
+                    currentTable.Fields.Add(field);
+                }
+
+                return currentTable;
+            },
+            splitOn: "Id");
+
+        return lookup.Values.OrderBy(t => t.DisplayOrder).ThenBy(t => t.Name).ToList();
     }
 
     public async Task<bool> NameExistsInAppAsync(long appId, string name, CancellationToken ct = default)
@@ -169,5 +211,19 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
             new CommandDefinition(SoftDeleteSql, new { tenantId = QueryContext.TenantId, publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
         if (affected == 0)
             throw new NotFoundException("Table", publicId);
+    }
+
+    public async Task IncrementRecordCountAsync(long id, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(IncrementRecordCountSql, new { id }, cancellationToken: ct));
+    }
+
+    public async Task DecrementRecordCountAsync(long id, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(DecrementRecordCountSql, new { id }, cancellationToken: ct));
     }
 }

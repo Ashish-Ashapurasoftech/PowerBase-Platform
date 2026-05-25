@@ -20,6 +20,7 @@ public class DeleteRecordCommandHandler
     {
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
         await _recordRepo.DeleteAsync(table, command.RecordPublicId, ct);
+        await _tableRepo.DecrementRecordCountAsync(table.Id, ct);
         await _auditRepo.LogActivityAsync(
             AuditActions.Deleted, AuditEntityTypes.Record, command.RecordPublicId.ToString(), appId: table.AppId, ct: ct);
     }

@@ -25,4 +25,5 @@ public class AppTable
     public DateTime? DeletedOn { get; set; }
     public long? DeletedBy { get; set; }
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
+    public List<AppField> Fields { get; set; } = new();
 }

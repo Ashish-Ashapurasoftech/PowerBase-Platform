@@ -4,6 +4,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Fields;
 using PowerBase.API.Models.Tables;
+using PowerBase.Application.Common.Models;
 using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
 using PowerBase.Application.Tables.Commands.UpdateTable;
@@ -132,7 +133,7 @@ public class TablesController : ControllerBase
         PhysicalTableName = t.PhysicalTableName,
         RecordCount = t.RecordCount,
         CreatedOn = t.CreatedOn,
-        Fields = [],
+        Fields = t.Fields.Select(MapFieldToResponse).ToList(),
     };
 
     private static TableResponse MapToResponse(GetTableResult r) => new()

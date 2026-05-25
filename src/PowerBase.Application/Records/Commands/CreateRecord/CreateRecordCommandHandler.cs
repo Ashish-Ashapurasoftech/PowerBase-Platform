@@ -39,6 +39,8 @@ public class CreateRecordCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), appId: table.AppId, ct: ct);
 
+        await _tableRepo.IncrementRecordCountAsync(table.Id, ct);
+
         var fieldData = new Dictionary<string, object?>();
         foreach (var field in fields.Where(f => command.FieldValues.ContainsKey(f.Id)))
             fieldData[field.Id.ToString()] = command.FieldValues[field.Id];
