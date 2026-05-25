@@ -99,6 +99,9 @@ public class CreateReportCommandHandler
                 FieldId = a.FieldId,
                 Function = a.Function,
             }).ToList(),
+            DynamicFilterType = string.IsNullOrWhiteSpace(command.DynamicFilterType) ? "Default" : command.DynamicFilterType,
+            CustomDynamicFilterFields = command.CustomDynamicFilterFields ?? [],
+            AllowQuickSearch = command.AllowQuickSearch,
         };
 
         var report = new Report

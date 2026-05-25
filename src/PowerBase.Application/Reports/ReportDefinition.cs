@@ -9,6 +9,11 @@ public class ReportDefinition
     // Summary-only
     public long? GroupByFieldId { get; set; }
     public List<SummaryAggregation> Aggregations { get; set; } = [];
+
+    // Dynamic Filters
+    public string DynamicFilterType { get; set; } = "Default"; // Default, Custom, None
+    public List<long> CustomDynamicFilterFields { get; set; } = [];
+    public bool AllowQuickSearch { get; set; } = true;
 }
 
 public class ReportFilter

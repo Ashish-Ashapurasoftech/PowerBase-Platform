@@ -11,7 +11,10 @@ public record CreateReportCommand(
     bool SortDesc,
     List<ReportFilterCommand> Filters,
     long? GroupByFieldId,
-    List<SummaryAggregationCommand> Aggregations);
+    List<SummaryAggregationCommand> Aggregations,
+    string DynamicFilterType,
+    List<long> CustomDynamicFilterFields,
+    bool AllowQuickSearch);
 
 public record ReportFilterCommand(long FieldId, string Operator, string? Value);
 public record SummaryAggregationCommand(long FieldId, string Function);

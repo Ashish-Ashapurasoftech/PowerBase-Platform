@@ -12,6 +12,7 @@ public class AppTable
     public string? Description { get; set; }
     public string? Icon { get; set; }
     public string? PhysicalTableName { get; set; }
+    public string DefaultReportSettings { get; set; } = "{}";
     public long? DisplayFieldId { get; set; }
     public int RecordCount { get; set; }
     public bool IsSystem { get; set; }

@@ -70,7 +70,10 @@ public class ReportsController : ControllerBase
             request.SortDesc,
             request.Filters.Select(f => new ReportFilterCommand(f.FieldId, f.Operator, f.Value)).ToList(),
             request.GroupByFieldId,
-            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function)).ToList());
+            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function)).ToList(),
+            request.DynamicFilterType,
+            request.CustomDynamicFilterFields,
+            request.AllowQuickSearch);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
@@ -123,7 +126,10 @@ public class ReportsController : ControllerBase
             request.SortDesc,
             request.Filters.Select(f => new ReportFilterCommand(f.FieldId, f.Operator, f.Value)).ToList(),
             request.GroupByFieldId,
-            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function)).ToList());
+            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function)).ToList(),
+            request.DynamicFilterType,
+            request.CustomDynamicFilterFields,
+            request.AllowQuickSearch);
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
     }

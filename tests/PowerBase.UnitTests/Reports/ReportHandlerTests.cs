@@ -54,7 +54,7 @@ public class ReportHandlerTests
         string reportType = "Table", List<long>? columns = null)
         => new(tableId, name, null, visibility, reportType,
             columns ?? [], null, false,
-            [], null, []);
+            [], null, [], "Default", [], true);
 
     public ReportHandlerTests()
     {
