@@ -1,5 +1,7 @@
 using System.Data;
 using PowerBase.Application.Auth;
+using PowerBase.Application.AuditLogs;
+using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Common.Interfaces;
 
@@ -11,4 +13,21 @@ public interface IAuditRepository
     Task CreateInviteTokenAsync(long userId, long tenantId, long tenantRoleId, string tokenHash, DateTime expiresOn, long invitedBy, CancellationToken ct = default);
     Task<InviteTokenRecord?> GetInviteTokenByHashAsync(string tokenHash, CancellationToken ct = default);
     Task ConsumeInviteTokenAsync(long tokenId, CancellationToken ct = default);
+
+    Task LogActivityAsync(
+        string action,
+        string entityType,
+        string entityId,
+        long? appId = null,
+        string? oldValues = null,
+        string? newValues = null,
+        CancellationToken ct = default);
+
+    Task<(IReadOnlyList<ActivityLog> Items, int Total)> QueryActivityLogsAsync(
+        ActivityLogFilter filter,
+        CancellationToken ct = default);
+
+    Task<IReadOnlyList<ActivityLog>> ExportActivityLogsAsync(
+        ActivityLogFilter filter,
+        CancellationToken ct = default);
 }

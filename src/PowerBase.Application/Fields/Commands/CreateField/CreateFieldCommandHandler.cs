@@ -25,19 +25,22 @@ public class CreateFieldCommandHandler
     private readonly IFieldTypeRepository _fieldTypeRepo;
     private readonly ISchemaEngineService _schemaEngine;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
     public CreateFieldCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IFieldTypeRepository fieldTypeRepo,
         ISchemaEngineService schemaEngine,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAuditRepository auditRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _fieldTypeRepo = fieldTypeRepo;
         _schemaEngine = schemaEngine;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task<CreateFieldResult> HandleAsync(CreateFieldCommand command, CancellationToken ct = default)
@@ -79,6 +82,9 @@ public class CreateFieldCommandHandler
         field.PhysicalColumnName = physicalColumn;
 
         await _schemaEngine.AddColumnAsync(table, field, ct);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), appId: table.AppId, ct: ct);
 
         return new CreateFieldResult
         {

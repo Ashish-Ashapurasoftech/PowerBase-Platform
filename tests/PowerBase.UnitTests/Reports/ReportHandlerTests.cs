@@ -21,6 +21,7 @@ public class ReportHandlerTests
     private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
 
     private static AppTable MakeTable(long id = 5) => new()
     {
@@ -69,7 +70,7 @@ public class ReportHandlerTests
         var table = MakeTable();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _reportRepo.CreateAsync(Arg.Any<Report>()).Returns((1L, Guid.NewGuid()));
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext, _auditRepo);
 
         var result = await sut.HandleAsync(MakeCreateCommand(table.PublicId));
 
@@ -84,7 +85,7 @@ public class ReportHandlerTests
         var table = MakeTable();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext, _auditRepo);
 
         await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(table.PublicId, columns: [999L])))
             .Should().ThrowAsync<ValidationException>();
@@ -93,7 +94,7 @@ public class ReportHandlerTests
     [Fact]
     public async Task CreateReport_InvalidVisibility_ThrowsValidationException()
     {
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext, _auditRepo);
 
         await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), visibility: "Invalid")))
             .Should().ThrowAsync<ValidationException>();
@@ -102,7 +103,7 @@ public class ReportHandlerTests
     [Fact]
     public async Task CreateReport_EmptyName_ThrowsValidationException()
     {
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext, _auditRepo);
 
         await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), name: "")))
             .Should().ThrowAsync<ValidationException>();
@@ -111,7 +112,7 @@ public class ReportHandlerTests
     [Fact]
     public async Task CreateReport_InvalidReportType_ThrowsValidationException()
     {
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, _queryContext, _auditRepo);
 
         await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), reportType: "Chart")))
             .Should().ThrowAsync<ValidationException>();

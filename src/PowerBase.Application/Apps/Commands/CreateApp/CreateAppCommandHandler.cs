@@ -1,7 +1,7 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
-using PowerBase.Domain.Constants;
 
 namespace PowerBase.Application.Apps.Commands.CreateApp;
 
@@ -25,6 +25,7 @@ public class CreateAppCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAppTableRepository _tableRepo;
     private readonly ISchemaEngineService _schemaEngine;
+    private readonly IAuditRepository _auditRepo;
 
     public CreateAppCommandHandler(
         IAppRepository appRepo,
@@ -33,7 +34,8 @@ public class CreateAppCommandHandler
         IUnitOfWork uow,
         IQueryContext queryContext,
         IAppTableRepository tableRepo,
-        ISchemaEngineService schemaEngine)
+        ISchemaEngineService schemaEngine,
+        IAuditRepository auditRepo)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
@@ -42,6 +44,7 @@ public class CreateAppCommandHandler
         _queryContext = queryContext;
         _tableRepo = tableRepo;
         _schemaEngine = schemaEngine;
+        _auditRepo = auditRepo;
     }
 
     public async Task<CreateAppResult> HandleAsync(CreateAppCommand command, CancellationToken ct = default)
@@ -141,6 +144,9 @@ public class CreateAppCommandHandler
             table.PhysicalTableName = physicalName;
 
             await _schemaEngine.CreateTableAsync(table, ct);
+
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), appId: appId, ct: ct);
 
             return new CreateAppResult
             {

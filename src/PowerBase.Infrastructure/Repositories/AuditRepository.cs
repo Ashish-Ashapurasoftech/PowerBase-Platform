@@ -1,7 +1,10 @@
 using System.Data;
+using System.Text;
 using Dapper;
 using PowerBase.Application.Auth;
+using PowerBase.Application.AuditLogs;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Entities;
 using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
@@ -31,6 +34,11 @@ public class AuditRepository : BaseRepository, IAuditRepository
 
     private const string ConsumeInviteTokenSql = """
         UPDATE audit.InviteToken SET UsedOn = SYSUTCDATETIME() WHERE Id = @id
+        """;
+
+    private const string InsertActivityLogSql = """
+        INSERT INTO audit.ActivityLog (TenantId, UserId, Action, EntityType, EntityId, AppId, OldValues, NewValues, IpAddress, OccurredOn)
+        VALUES (@tenantId, @userId, @action, @entityType, @entityId, @appId, @oldValues, @newValues, @ipAddress, SYSUTCDATETIME())
         """;
 
     public AuditRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -75,5 +83,105 @@ public class AuditRepository : BaseRepository, IAuditRepository
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(ConsumeInviteTokenSql, new { id = tokenId }, cancellationToken: ct));
+    }
+
+    public async Task LogActivityAsync(
+        string action,
+        string entityType,
+        string entityId,
+        long? appId = null,
+        string? oldValues = null,
+        string? newValues = null,
+        CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(new CommandDefinition(InsertActivityLogSql, new
+        {
+            tenantId = QueryContext.TenantId,
+            userId = QueryContext.UserId,
+            action,
+            entityType,
+            entityId,
+            appId,
+            oldValues,
+            newValues,
+            ipAddress = QueryContext.IpAddress,
+        }, cancellationToken: ct));
+    }
+
+    public async Task<(IReadOnlyList<ActivityLog> Items, int Total)> QueryActivityLogsAsync(
+        ActivityLogFilter filter,
+        CancellationToken ct = default)
+    {
+        var (where, parameters) = BuildWhereClause(filter);
+        var offset = (filter.Page - 1) * filter.PageSize;
+
+        var countSql = $"""
+            SELECT COUNT(*)
+            FROM audit.ActivityLog a
+            LEFT JOIN core.[User] u ON u.Id = a.UserId
+            {where}
+            """;
+
+        var dataSql = $"""
+            SELECT a.Id, a.TenantId, a.UserId, u.Email AS UserEmail, u.Name AS UserName,
+                   a.Action, a.EntityType, a.EntityId, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
+            FROM audit.ActivityLog a
+            LEFT JOIN core.[User] u ON u.Id = a.UserId
+            {where}
+            ORDER BY a.OccurredOn DESC
+            OFFSET {offset} ROWS FETCH NEXT {filter.PageSize} ROWS ONLY
+            """;
+
+        await using var connection = ConnectionFactory.Create();
+        var total = await connection.ExecuteScalarAsync<int>(new CommandDefinition(countSql, parameters, cancellationToken: ct));
+        var items = (await connection.QueryAsync<ActivityLog>(new CommandDefinition(dataSql, parameters, cancellationToken: ct))).AsList();
+
+        return (items, total);
+    }
+
+    public async Task<IReadOnlyList<ActivityLog>> ExportActivityLogsAsync(
+        ActivityLogFilter filter,
+        CancellationToken ct = default)
+    {
+        var (where, parameters) = BuildWhereClause(filter);
+
+        var sql = $"""
+            SELECT a.Id, a.TenantId, a.UserId, u.Email AS UserEmail, u.Name AS UserName,
+                   a.Action, a.EntityType, a.EntityId, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
+            FROM audit.ActivityLog a
+            LEFT JOIN core.[User] u ON u.Id = a.UserId
+            {where}
+            ORDER BY a.OccurredOn DESC
+            """;
+
+        await using var connection = ConnectionFactory.Create();
+        return (await connection.QueryAsync<ActivityLog>(new CommandDefinition(sql, parameters, cancellationToken: ct))).AsList();
+    }
+
+    private (string Clause, object Parameters) BuildWhereClause(ActivityLogFilter filter)
+    {
+        var conditions = new List<string> { "a.TenantId = @tenantId" };
+        if (filter.From.HasValue) conditions.Add("a.OccurredOn >= @from");
+        if (filter.To.HasValue) conditions.Add("a.OccurredOn <= @to");
+        if (filter.AppId.HasValue) conditions.Add("a.AppId = @appId");
+        if (!string.IsNullOrWhiteSpace(filter.Email)) conditions.Add("u.Email = @email");
+        if (!string.IsNullOrWhiteSpace(filter.EntityType)) conditions.Add("a.EntityType = @entityType");
+        if (!string.IsNullOrWhiteSpace(filter.Action)) conditions.Add("a.Action = @action");
+
+        var clause = "WHERE " + string.Join(" AND ", conditions);
+
+        var parameters = new
+        {
+            tenantId = QueryContext.TenantId,
+            from = filter.From,
+            to = filter.To,
+            appId = filter.AppId,
+            email = filter.Email,
+            entityType = filter.EntityType,
+            action = filter.Action,
+        };
+
+        return (clause, parameters);
     }
 }

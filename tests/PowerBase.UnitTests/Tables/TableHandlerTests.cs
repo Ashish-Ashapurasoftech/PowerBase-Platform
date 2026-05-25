@@ -18,6 +18,7 @@ public class TableHandlerTests
     private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
     private readonly ISchemaEngineService _schemaEngine = Substitute.For<ISchemaEngineService>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
 
     private static App MakeApp(long id = 10) => new() { Id = id, PublicId = Guid.NewGuid(), Name = "App" };
 
@@ -41,7 +42,7 @@ public class TableHandlerTests
         _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
         _tableRepo.NameExistsInAppAsync(app.Id, "Contacts").Returns(false);
         _tableRepo.CreateAsync(Arg.Any<AppTable>()).Returns((20L, Guid.NewGuid()));
-        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext);
+        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext, _auditRepo);
 
         var result = await sut.HandleAsync(new CreateTableCommand(app.PublicId, "Contacts", null, null, null, null));
 
@@ -56,7 +57,7 @@ public class TableHandlerTests
         var app = MakeApp();
         _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
         _tableRepo.NameExistsInAppAsync(app.Id, "Contacts").Returns(true);
-        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext);
+        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext, _auditRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreateTableCommand(app.PublicId, "Contacts", null, null, null, null)))
             .Should().ThrowAsync<DuplicateException>();
@@ -65,7 +66,7 @@ public class TableHandlerTests
     [Fact]
     public async Task CreateTable_EmptyName_ThrowsValidationException()
     {
-        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext);
+        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext, _auditRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreateTableCommand(Guid.NewGuid(), "", null, null, null, null)))
             .Should().ThrowAsync<ValidationException>();
@@ -77,7 +78,7 @@ public class TableHandlerTests
     public async Task DeleteTable_CallsDeleteOnRepo()
     {
         var id = Guid.NewGuid();
-        var sut = new DeleteTableCommandHandler(_tableRepo);
+        var sut = new DeleteTableCommandHandler(_tableRepo, _auditRepo);
 
         await sut.HandleAsync(new DeleteTableCommand(id));
 
