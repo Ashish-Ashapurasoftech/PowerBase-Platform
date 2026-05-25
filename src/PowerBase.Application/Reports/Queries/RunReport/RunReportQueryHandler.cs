@@ -55,7 +55,7 @@ public class RunReportQueryHandler
         if (report.ReportType == "Summary")
             return await RunSummaryAsync(table, allFields, definition, page, pageSize, ct);
 
-        return await RunTableAsync(table, allFields, definition, page, pageSize, ct);
+        return await RunTableAsync(table, allFields, definition, page, pageSize, query.RuntimeFilters, ct);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -63,6 +63,7 @@ public class RunReportQueryHandler
         IReadOnlyList<AppField> allFields,
         ReportDefinition definition,
         int page, int pageSize,
+        IReadOnlyList<(long FieldId, string Value)>? runtimeFilters,
         CancellationToken ct)
     {
         IReadOnlyList<AppField> selectedFields;
@@ -79,9 +80,20 @@ public class RunReportQueryHandler
             selectedFields = allFields.Where(f => f.IsReportable).ToList();
         }
 
-        var filters = definition.Filters.Count > 0 ? definition.Filters : null;
-        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filters, ct);
-        var total = await _recordRepo.CountAsync(table, filters, ct);
+        var filters = definition.Filters.ToList();
+        if (runtimeFilters?.Count > 0)
+        {
+            filters.AddRange(runtimeFilters.Select(rf => new ReportFilter
+            {
+                FieldId = rf.FieldId,
+                Operator = "contains",
+                Value = rf.Value,
+            }));
+        }
+        var filterList = filters.Count > 0 ? filters : null;
+
+        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterList, ct);
+        var total = await _recordRepo.CountAsync(table, filterList, ct);
 
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo

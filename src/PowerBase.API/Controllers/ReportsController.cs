@@ -173,7 +173,7 @@ public class ReportsController : ControllerBase
         return Ok(new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
 
-    /// <summary>Execute a report and return paged results.</summary>
+    /// <summary>Execute a report and return paged results. Pass dynamic filter values as dynamicFilters=fieldId:value (repeatable).</summary>
     [HttpGet("reports/{publicId:guid}/run")]
     [RequirePermission(PermissionCodes.ReportsRun)]
     [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
@@ -184,9 +184,11 @@ public class ReportsController : ControllerBase
         Guid publicId,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
+        [FromQuery] List<string>? dynamicFilters = null,
         CancellationToken ct = default)
     {
-        var result = await _runHandler.HandleAsync(new RunReportQuery(publicId, page, pageSize), ct);
+        var runtimeFilters = ParseDynamicFilters(dynamicFilters);
+        var result = await _runHandler.HandleAsync(new RunReportQuery(publicId, page, pageSize, runtimeFilters), ct);
         var response = new ReportRunResponse
         {
             Columns = result.Columns.Select(c => new ReportColumnDto
@@ -207,6 +209,19 @@ public class ReportsController : ControllerBase
             PageSize = result.PageSize,
         };
         return Ok(new ApiResponse<ReportRunResponse>(response));
+    }
+
+    private static IReadOnlyList<(long FieldId, string Value)>? ParseDynamicFilters(List<string>? raw)
+    {
+        if (raw is null or { Count: 0 }) return null;
+        var result = new List<(long, string)>();
+        foreach (var item in raw)
+        {
+            var idx = item.IndexOf(':');
+            if (idx > 0 && long.TryParse(item[..idx], out var fid))
+                result.Add((fid, item[(idx + 1)..]));
+        }
+        return result.Count > 0 ? result : null;
     }
 
     private static ReportResponse MapToResponse(ReportDetailResult r) => new()
@@ -233,6 +248,9 @@ public class ReportsController : ControllerBase
                 FieldId = a.FieldId,
                 Function = a.Function,
             }).ToList(),
+            DynamicFilterType = r.Definition.DynamicFilterType,
+            CustomDynamicFilterFields = r.Definition.CustomDynamicFilterFields,
+            AllowQuickSearch = r.Definition.AllowQuickSearch,
         },
         IsDefault = r.IsDefault,
         DisplayOrder = r.DisplayOrder,

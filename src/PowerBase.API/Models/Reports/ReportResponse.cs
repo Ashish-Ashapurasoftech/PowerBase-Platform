@@ -21,6 +21,9 @@ public class ReportDefinitionDto
     public List<ReportFilterDto> Filters { get; init; } = [];
     public long? GroupByFieldId { get; init; }
     public List<SummaryAggregationDto> Aggregations { get; init; } = [];
+    public string DynamicFilterType { get; init; } = "Default";
+    public List<long> CustomDynamicFilterFields { get; init; } = [];
+    public bool AllowQuickSearch { get; init; } = true;
 }
 
 public class ReportFilterDto
