@@ -131,7 +131,7 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         return appId ?? throw new NotFoundException("Table", tablePublicId);
     }
 
-    public async Task<IReadOnlyList<AppTableListItemDto>> ListByAppAsync(long appId, CancellationToken ct = default)
+    public async Task<IReadOnlyList<AppTable>> ListByAppAsync(long appId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
         var lookup = new Dictionary<long, AppTable>();

@@ -122,7 +122,7 @@ public class TablesController : ControllerBase
         Fields = [],
     };
 
-    private static TableResponse MapToResponse(AppTableListItemDto t) => new()
+    private static TableResponse MapToResponse(AppTable t) => new()
     {
         PublicId = t.PublicId,
         Name = t.Name,
@@ -132,7 +132,6 @@ public class TablesController : ControllerBase
         Icon = t.Icon,
         PhysicalTableName = t.PhysicalTableName,
         RecordCount = t.RecordCount,
-        FieldCount = t.FieldCount,
         CreatedOn = t.CreatedOn,
         Fields = t.Fields.Select(MapFieldToResponse).ToList(),
     };
