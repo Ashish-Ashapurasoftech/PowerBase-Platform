@@ -16,6 +16,7 @@ public class RecordRepository : BaseRepository, IRecordRepository
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
         IReadOnlyList<ReportFilter>? filters = null,
+        long? sortFieldId = null, bool sortDesc = false,
         CancellationToken ct = default)
     {
         var fieldCols = BuildFieldColumnList(fields);
@@ -25,12 +26,15 @@ public class RecordRepository : BaseRepository, IRecordRepository
         parameters.Add("pageSize", pageSize);
 
         var filterWhere = BuildFilterWhere(filters, parameters);
+        var orderBy = sortFieldId.HasValue
+            ? $"{PhysicalNaming.ColumnName(sortFieldId.Value)} {(sortDesc ? "DESC" : "ASC")}"
+            : "Id";
 
         var sql = $"""
             SELECT Id, PublicId, TenantId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
             FROM {PhysicalNaming.FullTableName(table.Id)}
             WHERE TenantId = @tenantId AND IsDeleted = 0{filterWhere}
-            ORDER BY Id
+            ORDER BY {orderBy}
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;
 

@@ -8,6 +8,7 @@ public interface IRecordRepository
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
         IReadOnlyList<ReportFilter>? filters = null,
+        long? sortFieldId = null, bool sortDesc = false,
         CancellationToken ct = default);
 
     Task<int> CountAsync(AppTable table, IReadOnlyList<ReportFilter>? filters = null, CancellationToken ct = default);

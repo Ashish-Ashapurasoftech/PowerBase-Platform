@@ -92,7 +92,8 @@ public class RunReportQueryHandler
         }
         var filterList = filters.Count > 0 ? filters : null;
 
-        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterList, ct);
+        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterList,
+            definition.SortFieldId, definition.SortDesc, ct);
         var total = await _recordRepo.CountAsync(table, filterList, ct);
 
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
