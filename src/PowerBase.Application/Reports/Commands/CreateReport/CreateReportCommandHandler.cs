@@ -2,6 +2,7 @@ using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -13,6 +14,7 @@ public class CreateReportCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IReportRepository _reportRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
     private readonly CreateReportCommandValidator _validator;
 
     private static readonly HashSet<string> AllowedReportTypes = ["Table", "Summary"];
@@ -23,12 +25,14 @@ public class CreateReportCommandHandler
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IReportRepository reportRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAuditRepository auditRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _reportRepo = reportRepo;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
         _validator = new CreateReportCommandValidator();
     }
 
@@ -95,6 +99,9 @@ public class CreateReportCommandHandler
                 FieldId = a.FieldId,
                 Function = a.Function,
             }).ToList(),
+            DynamicFilterType = string.IsNullOrWhiteSpace(command.DynamicFilterType) ? "Default" : command.DynamicFilterType,
+            CustomDynamicFilterFields = command.CustomDynamicFilterFields ?? [],
+            AllowQuickSearch = command.AllowQuickSearch,
         };
 
         var report = new Report
@@ -112,6 +119,9 @@ public class CreateReportCommandHandler
         };
 
         var (_, publicId) = await _reportRepo.CreateAsync(report, ct);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Created, AuditEntityTypes.Report, publicId.ToString(), appId: table.AppId, ct: ct);
 
         return new ReportDetailResult
         {

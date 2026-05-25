@@ -9,15 +9,18 @@ public class CreateRecordCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IAuditRepository _auditRepo;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
-        IRecordRepository recordRepo)
+        IRecordRepository recordRepo,
+        IAuditRepository auditRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
+        _auditRepo = auditRepo;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -32,6 +35,9 @@ public class CreateRecordCommandHandler
                 new Dictionary<string, string[]> { ["fields"] = [$"Unknown field IDs: {string.Join(", ", unknownIds)}"] });
 
         var publicId = await _recordRepo.CreateAsync(table, fields, command.FieldValues, ct);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), appId: table.AppId, ct: ct);
 
         await _tableRepo.IncrementRecordCountAsync(table.Id, ct);
 

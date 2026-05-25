@@ -134,7 +134,7 @@ public class TablesController : ControllerBase
         RecordCount = t.RecordCount,
         FieldCount = t.FieldCount,
         CreatedOn = t.CreatedOn,
-        Fields = [],
+        Fields = t.Fields.Select(MapFieldToResponse).ToList(),
     };
 
     private static TableResponse MapToResponse(GetTableResult r) => new()

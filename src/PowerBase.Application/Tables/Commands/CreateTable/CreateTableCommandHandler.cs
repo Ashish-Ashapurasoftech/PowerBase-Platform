@@ -24,17 +24,20 @@ public class CreateTableCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly ISchemaEngineService _schemaEngine;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
     public CreateTableCommandHandler(
         IAppRepository appRepo,
         IAppTableRepository tableRepo,
         ISchemaEngineService schemaEngine,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAuditRepository auditRepo)
     {
         _appRepo = appRepo;
         _tableRepo = tableRepo;
         _schemaEngine = schemaEngine;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task<CreateTableResult> HandleAsync(CreateTableCommand command, CancellationToken ct = default)
@@ -73,6 +76,9 @@ public class CreateTableCommandHandler
         table.PhysicalTableName = physicalName;
 
         await _schemaEngine.CreateTableAsync(table, ct);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.SchemaChanged, AuditEntityTypes.AppTable, publicId.ToString(), appId: app.Id, ct: ct);
 
         return new CreateTableResult
         {

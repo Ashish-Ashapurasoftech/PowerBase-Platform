@@ -31,6 +31,8 @@ public static class PermissionCodes
     public const string UsersManage  = "users:manage";
     public const string RolesManage  = "roles:manage";
 
+    public const string AuditLogsRead = "audit:read";
+
     public static readonly IReadOnlySet<string> DefaultUserPermissions = new HashSet<string>
     {
         AppsRead,

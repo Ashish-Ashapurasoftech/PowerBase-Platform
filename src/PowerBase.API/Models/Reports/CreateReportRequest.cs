@@ -14,6 +14,9 @@ public class CreateReportRequest
     // Summary-only
     public long? GroupByFieldId { get; set; }
     public List<SummaryAggregationRequest> Aggregations { get; set; } = [];
+    public string DynamicFilterType { get; set; } = "Default";
+    public List<long> CustomDynamicFilterFields { get; set; } = [];
+    public bool AllowQuickSearch { get; set; } = true;
 }
 
 public class ReportFilterRequest

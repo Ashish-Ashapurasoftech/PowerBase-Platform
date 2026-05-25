@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.Enums;
 using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
@@ -11,7 +12,7 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
 {
     private const string SelectColumns = """
         Id, PublicId, TenantId, AppId, Name, SingularLabel, PluralLabel, Description,
-        PhysicalTableName, DisplayFieldId, RecordCount, IsSystem, DisplayOrder,
+        PhysicalTableName, DefaultReportSettings, DisplayFieldId, RecordCount, IsSystem, DisplayOrder,
         IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion, Icon
         """;
 
@@ -36,16 +37,20 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
         """;
 
-    private const string ListByAppSql = $"""
+    private const string ListByAppSql = """
         SELECT t.Id, t.PublicId, t.TenantId, t.AppId, t.Name, t.SingularLabel, t.PluralLabel, t.Description,
                t.PhysicalTableName, t.DisplayFieldId, t.RecordCount, t.IsSystem, t.DisplayOrder,
                t.IsDeleted, t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy, t.RowVersion, t.Icon,
-               (SELECT COUNT(*) FROM meta.AppField f WHERE f.AppTableId = t.Id AND f.IsDeleted = 0) AS FieldCount
+               f.Id, f.PublicId, f.TenantId, f.AppTableId, f.FieldTypeId,
+               f.Name, f.Label, f.Description, f.PhysicalColumnName, f.DefaultValue,
+               f.IsRequired, f.IsSearchable, f.IsSortable, f.IsFilterable, f.IsReportable,
+               f.IsUnique, f.IsSystem, f.IsDeleted, f.CreatedOn, f.CreatedBy
         FROM meta.AppTable t
+        LEFT JOIN meta.AppField f ON t.Id = f.AppTableId AND f.IsDeleted = 0
         WHERE t.TenantId = @tenantId
           AND t.AppId = @appId
           AND t.IsDeleted = 0
-        ORDER BY t.DisplayOrder, t.Name
+        ORDER BY t.DisplayOrder, t.Name, f.Id
         """;
 
     private const string NameExistsSql = """
@@ -129,9 +134,30 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
     public async Task<IReadOnlyList<AppTableListItemDto>> ListByAppAsync(long appId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        var results = await connection.QueryAsync<AppTableListItemDto>(
-            new CommandDefinition(ListByAppSql, new { tenantId = QueryContext.TenantId, appId }, cancellationToken: ct));
-        return results.AsList();
+        var lookup = new Dictionary<long, AppTable>();
+
+        await connection.QueryAsync<AppTable, AppField, AppTable>(
+            new CommandDefinition(ListByAppSql, new { tenantId = QueryContext.TenantId, appId }, cancellationToken: ct),
+            (table, field) =>
+            {
+                if (!lookup.TryGetValue(table.Id, out var currentTable))
+                {
+                    currentTable = table;
+                    currentTable.Fields = new List<AppField>();
+                    lookup.Add(currentTable.Id, currentTable);
+                }
+
+                if (field != null)
+                {
+                    field.TypeCode = ((FieldTypeCode)field.FieldTypeId).ToString();
+                    currentTable.Fields.Add(field);
+                }
+
+                return currentTable;
+            },
+            splitOn: "Id");
+
+        return lookup.Values.OrderBy(t => t.DisplayOrder).ThenBy(t => t.Name).ToList();
     }
 
     public async Task<bool> NameExistsInAppAsync(long appId, string name, CancellationToken ct = default)

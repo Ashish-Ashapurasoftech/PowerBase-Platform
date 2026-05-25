@@ -13,6 +13,7 @@ public class AppQueryHandlerTests
 {
     private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
 
     public AppQueryHandlerTests()
     {
@@ -81,7 +82,7 @@ public class AppQueryHandlerTests
     public async Task DeleteApp_CallsDeleteOnRepo()
     {
         var id = Guid.NewGuid();
-        var sut = new DeleteAppCommandHandler(_appRepo);
+        var sut = new DeleteAppCommandHandler(_appRepo, _auditRepo);
 
         await sut.HandleAsync(new DeleteAppCommand(id));
 

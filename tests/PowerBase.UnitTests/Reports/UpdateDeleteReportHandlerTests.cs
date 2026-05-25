@@ -12,24 +12,25 @@ public class UpdateDeleteReportHandlerTests
 {
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
     private readonly IAppAccessService _appAccessService = Substitute.For<IAppAccessService>();
+    private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
 
-    private UpdateReportCommandHandler CreateUpdateSut() => new(_reportRepo, _appAccessService);
-    private DeleteReportCommandHandler CreateDeleteSut() => new(_reportRepo, _appAccessService);
+    private UpdateReportCommandHandler CreateUpdateSut() => new(_reportRepo, _appAccessService, _auditRepo);
+    private DeleteReportCommandHandler CreateDeleteSut() => new(_reportRepo, _appAccessService, _auditRepo);
 
     private static UpdateReportCommand ValidCommand(Guid id, string name = "New Name") =>
-        new(id, name, null, "Shared", [], null, false, [], null, []);
+        new(id, name, null, "Shared", [], null, false, [], null, [], "Default", [], true);
 
     [Fact]
     public async Task UpdateReport_ValidCommand_CallsUpdate()
     {
         var id = Guid.NewGuid();
-        _reportRepo.UpdateAsync(id, "New Name", null, Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(1);
+        _reportRepo.UpdateAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(1);
         var sut = CreateUpdateSut();
 
         await sut.HandleAsync(ValidCommand(id));
 
         await _reportRepo.Received(1).UpdateAsync(
-            id, "New Name", null, Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

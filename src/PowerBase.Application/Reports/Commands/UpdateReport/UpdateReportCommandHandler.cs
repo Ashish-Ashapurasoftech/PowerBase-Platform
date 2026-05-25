@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Reports;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -10,15 +11,17 @@ public class UpdateReportCommandHandler
 {
     private readonly IReportRepository _reportRepo;
     private readonly IAppAccessService _appAccessService;
+    private readonly IAuditRepository _auditRepo;
 
     private static readonly HashSet<string> AllowedOperators = ["eq", "ne", "contains", "startsWith", "gt", "gte", "lt", "lte"];
     private static readonly HashSet<string> AllowedFunctions = ["Count", "Sum", "Avg", "Min", "Max"];
     private static readonly HashSet<string> AllowedVisibilities = ["Personal", "Shared", "RoleScoped"];
 
-    public UpdateReportCommandHandler(IReportRepository reportRepo, IAppAccessService appAccessService)
+    public UpdateReportCommandHandler(IReportRepository reportRepo, IAppAccessService appAccessService, IAuditRepository auditRepo)
     {
         _reportRepo = reportRepo;
         _appAccessService = appAccessService;
+        _auditRepo = auditRepo;
     }
 
     public async Task HandleAsync(UpdateReportCommand command, CancellationToken ct = default)
@@ -66,6 +69,9 @@ public class UpdateReportCommandHandler
                 FieldId = a.FieldId,
                 Function = a.Function,
             }).ToList(),
+            DynamicFilterType = string.IsNullOrWhiteSpace(command.DynamicFilterType) ? "Default" : command.DynamicFilterType,
+            CustomDynamicFilterFields = command.CustomDynamicFilterFields ?? [],
+            AllowQuickSearch = command.AllowQuickSearch,
         };
 
         var definitionJson = JsonSerializer.Serialize(definition);
@@ -76,5 +82,8 @@ public class UpdateReportCommandHandler
 
         if (affected == 0)
             throw new NotFoundException("Report", command.ReportPublicId);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), ct: ct);
     }
 }

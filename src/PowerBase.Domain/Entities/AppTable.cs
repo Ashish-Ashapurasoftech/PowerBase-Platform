@@ -12,6 +12,7 @@ public class AppTable
     public string? Description { get; set; }
     public string? Icon { get; set; }
     public string? PhysicalTableName { get; set; }
+    public string DefaultReportSettings { get; set; } = "{}";
     public long? DisplayFieldId { get; set; }
     public int RecordCount { get; set; }
     public bool IsSystem { get; set; }
@@ -24,4 +25,5 @@ public class AppTable
     public DateTime? DeletedOn { get; set; }
     public long? DeletedBy { get; set; }
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
+    public List<AppField> Fields { get; set; } = new();
 }

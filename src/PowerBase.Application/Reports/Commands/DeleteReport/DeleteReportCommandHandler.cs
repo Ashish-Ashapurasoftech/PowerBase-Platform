@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Reports.Commands.DeleteReport;
@@ -7,11 +8,13 @@ public class DeleteReportCommandHandler
 {
     private readonly IReportRepository _reportRepo;
     private readonly IAppAccessService _appAccessService;
+    private readonly IAuditRepository _auditRepo;
 
-    public DeleteReportCommandHandler(IReportRepository reportRepo, IAppAccessService appAccessService)
+    public DeleteReportCommandHandler(IReportRepository reportRepo, IAppAccessService appAccessService, IAuditRepository auditRepo)
     {
         _reportRepo = reportRepo;
         _appAccessService = appAccessService;
+        _auditRepo = auditRepo;
     }
 
     public async Task HandleAsync(DeleteReportCommand command, CancellationToken ct = default)
@@ -21,5 +24,8 @@ public class DeleteReportCommandHandler
         var affected = await _reportRepo.DeleteAsync(command.ReportPublicId, ct);
         if (affected == 0)
             throw new NotFoundException("Report", command.ReportPublicId);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Deleted, AuditEntityTypes.Report, command.ReportPublicId.ToString(), ct: ct);
     }
 }

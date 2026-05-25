@@ -12,4 +12,7 @@ public record UpdateReportCommand(
     bool SortDesc,
     List<ReportFilterCommand> Filters,
     long? GroupByFieldId,
-    List<SummaryAggregationCommand> Aggregations);
+    List<SummaryAggregationCommand> Aggregations,
+    string DynamicFilterType,
+    List<long> CustomDynamicFilterFields,
+    bool AllowQuickSearch);

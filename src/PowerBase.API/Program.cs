@@ -52,6 +52,8 @@ using PowerBase.Application.Tables.Commands.DeleteTable;
 using PowerBase.Application.Tables.Commands.UpdateTable;
 using PowerBase.Application.Tables.Queries.GetTable;
 using PowerBase.Application.Tables.Queries.ListTables;
+using PowerBase.Application.AuditLogs.Queries.ExportAuditLogsCsv;
+using PowerBase.Application.AuditLogs.Queries.ListAuditLogs;
 using PowerBase.Application.Users.Commands.ChangeUserRole;
 using PowerBase.Application.Users.Commands.InviteUser;
 using PowerBase.Application.Users.Commands.RemoveUser;
@@ -187,6 +189,8 @@ builder.Services.AddScoped<DeleteRoleCommandHandler>();
 builder.Services.AddScoped<GetRolePermissionsQueryHandler>();
 builder.Services.AddScoped<UpdateRolePermissionsCommandHandler>();
 builder.Services.AddScoped<ListPermissionsQueryHandler>();
+builder.Services.AddScoped<ListAuditLogsQueryHandler>();
+builder.Services.AddScoped<ExportAuditLogsCsvQueryHandler>();
 
 var app = builder.Build();
 
