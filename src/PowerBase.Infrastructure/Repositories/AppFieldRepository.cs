@@ -44,9 +44,13 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
 
     private const string InsertSql = """
         INSERT INTO meta.AppField
-            (TenantId, AppTableId, FieldTypeId, Name, Label, Description, IsRequired, IsDeleted, CreatedOn, CreatedBy)
+            (TenantId, AppTableId, FieldTypeId, Name, Label, Description, IsRequired,
+             IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable,
+             DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
-        VALUES (@tenantId, @tableId, @fieldTypeId, @name, @label, @description, @isRequired, 0, SYSUTCDATETIME(), @createdBy)
+        VALUES (@tenantId, @tableId, @fieldTypeId, @name, @label, @description, @isRequired,
+                @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable,
+                @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string UpdatePhysicalColumnNameSql = """
@@ -115,6 +119,13 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
                 label = field.Label,
                 description = field.Description,
                 isRequired = field.IsRequired,
+                isSystem = field.IsSystem,
+                physicalColumnName = field.PhysicalColumnName,
+                isSearchable = field.IsSearchable,
+                isSortable = field.IsSortable,
+                isFilterable = field.IsFilterable,
+                isReportable = field.IsReportable,
+                displayOrder = field.DisplayOrder,
                 createdBy = QueryContext.UserId,
             }, cancellationToken: ct));
         return ((long)row.Id, (Guid)row.PublicId);

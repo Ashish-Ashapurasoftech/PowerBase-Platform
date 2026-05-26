@@ -15,7 +15,9 @@ public class RecordResult
         var fieldData = new Dictionary<string, object?>();
         foreach (var field in fields)
         {
-            var col = PhysicalNaming.ColumnName(field.Id);
+            var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
+                ? field.PhysicalColumnName
+                : PhysicalNaming.ColumnName(field.Id);
             if (row.TryGetValue(col, out var val))
                 fieldData[field.Id.ToString()] = val;
         }
