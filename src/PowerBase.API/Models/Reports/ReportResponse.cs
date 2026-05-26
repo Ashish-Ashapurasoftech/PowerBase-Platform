@@ -26,6 +26,7 @@ public class ReportDefinitionDto
     public long? GroupByFieldId { get; init; }
     public string GroupByMode { get; init; } = "EqualValues";
     public bool HideTotals { get; init; }
+    public bool GroupDefaultCollapsed { get; init; }
     public List<SummaryAggregationDto> Aggregations { get; init; } = [];
     public string DynamicFilterType { get; init; } = "Default";
     public List<long> CustomDynamicFilterFields { get; init; } = [];

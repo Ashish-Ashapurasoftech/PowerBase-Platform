@@ -73,6 +73,21 @@ public class RunReportQueryHandler
                 ? [new SortSpec { FieldId = definition.SortFieldId.Value, Desc = definition.SortDesc }]
                 : []);
 
+        // For grouped Table reports: prepend group field as primary sort key so records
+        // of the same group are contiguous — the frontend groups the flat result visually.
+        if (report.ReportType != "Summary" && definition.GroupByFieldId.HasValue)
+        {
+            var gfId = definition.GroupByFieldId.Value;
+            var list = sortFields.ToList();
+            if (list.Count == 0 || list[0].FieldId != gfId)
+            {
+                var without = list.Where(s => s.FieldId != gfId).ToList();
+                sortFields = new[] { new SortSpec { FieldId = gfId, Desc = false } }
+                    .Concat(without)
+                    .ToArray();
+            }
+        }
+
         if (report.ReportType == "Summary")
             return await RunSummaryAsync(table, allFields, definition, page, pageSize, ct);
 

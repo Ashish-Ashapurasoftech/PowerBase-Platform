@@ -15,6 +15,7 @@ public class ReportDefinition
     /// <summary>EqualValues (default), FirstWord, FirstLetter</summary>
     public string GroupByMode { get; set; } = "EqualValues";
     public bool HideTotals { get; set; }
+    public bool GroupDefaultCollapsed { get; set; }
     public List<SummaryAggregation> Aggregations { get; set; } = [];
 
     // Dynamic Filters

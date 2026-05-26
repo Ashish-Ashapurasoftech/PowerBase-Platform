@@ -87,6 +87,7 @@ public class CreateReportCommandHandler
             GroupByFieldId = command.GroupByFieldId,
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
             HideTotals = command.HideTotals,
+            GroupDefaultCollapsed = command.GroupDefaultCollapsed,
             Aggregations = command.Aggregations.Select(a => new SummaryAggregation
             {
                 FieldId = a.FieldId,

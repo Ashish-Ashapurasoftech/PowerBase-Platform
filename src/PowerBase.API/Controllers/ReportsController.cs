@@ -71,6 +71,7 @@ public class ReportsController : ControllerBase
             request.GroupByFieldId,
             request.GroupByMode,
             request.HideTotals,
+            request.GroupDefaultCollapsed,
             request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function, a.DisplayAs)).ToList(),
             request.DynamicFilterType,
             request.CustomDynamicFilterFields,
@@ -128,6 +129,7 @@ public class ReportsController : ControllerBase
             request.GroupByFieldId,
             request.GroupByMode,
             request.HideTotals,
+            request.GroupDefaultCollapsed,
             request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function, a.DisplayAs)).ToList(),
             request.DynamicFilterType,
             request.CustomDynamicFilterFields,
@@ -250,6 +252,7 @@ public class ReportsController : ControllerBase
             GroupByFieldId = r.Definition.GroupByFieldId,
             GroupByMode = r.Definition.GroupByMode,
             HideTotals = r.Definition.HideTotals,
+            GroupDefaultCollapsed = r.Definition.GroupDefaultCollapsed,
             Aggregations = r.Definition.Aggregations.Select(a => new SummaryAggregationDto
             {
                 FieldId = a.FieldId,

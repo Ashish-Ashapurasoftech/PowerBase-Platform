@@ -12,6 +12,7 @@ public record CreateReportCommand(
     long? GroupByFieldId,
     string GroupByMode,
     bool HideTotals,
+    bool GroupDefaultCollapsed,
     List<SummaryAggregationCommand> Aggregations,
     string DynamicFilterType,
     List<long> CustomDynamicFilterFields,
