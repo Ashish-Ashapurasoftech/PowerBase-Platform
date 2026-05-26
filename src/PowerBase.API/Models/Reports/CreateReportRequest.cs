@@ -5,7 +5,6 @@ public class CreateReportRequest
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string Visibility { get; set; } = "Personal";
-    /// <summary>Table or Summary (M1 only — Chart/Kanban/Map etc. are out of scope)</summary>
     public string ReportType { get; set; } = "Table";
     public List<long> Columns { get; set; } = [];
     public long? SortFieldId { get; set; }
@@ -13,6 +12,8 @@ public class CreateReportRequest
     public List<ReportFilterRequest> Filters { get; set; } = [];
     // Summary-only
     public long? GroupByFieldId { get; set; }
+    public string GroupByMode { get; set; } = "EqualValues";
+    public bool HideTotals { get; set; }
     public List<SummaryAggregationRequest> Aggregations { get; set; } = [];
     public string DynamicFilterType { get; set; } = "Default";
     public List<long> CustomDynamicFilterFields { get; set; } = [];
@@ -29,5 +30,6 @@ public class ReportFilterRequest
 public class SummaryAggregationRequest
 {
     public long FieldId { get; set; }
-    public string Function { get; set; } = "Count";
+    public string Function { get; set; } = "Sum";
+    public string DisplayAs { get; set; } = "Normal";
 }

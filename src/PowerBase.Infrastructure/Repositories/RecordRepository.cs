@@ -163,9 +163,11 @@ public class RecordRepository : BaseRepository, IRecordRepository
         AppField groupByField,
         IReadOnlyList<SummaryAggregation> aggregations,
         IReadOnlyList<AppField> allFields,
+        string groupByMode = "EqualValues",
         CancellationToken ct = default)
     {
         var groupCol = PhysicalNaming.ColumnName(groupByField.Id);
+        var groupExpr = BuildGroupByExpr(groupCol, groupByMode);
         var fieldMap = allFields.ToDictionary(f => f.Id);
 
         var aggClauses = new List<string> { "COUNT(*) AS [Count]" };
@@ -190,11 +192,11 @@ public class RecordRepository : BaseRepository, IRecordRepository
 
         var aggSql = string.Join(", ", aggClauses);
         var sql = $"""
-            SELECT {groupCol} AS GroupValue, {aggSql}
+            SELECT {groupExpr} AS GroupValue, {aggSql}
             FROM {PhysicalNaming.FullTableName(table.Id)}
             WHERE TenantId = @tenantId AND IsDeleted = 0
-            GROUP BY {groupCol}
-            ORDER BY {groupCol}
+            GROUP BY {groupExpr}
+            ORDER BY {groupExpr}
             """;
 
         await using var connection = ConnectionFactory.Create();
@@ -202,6 +204,13 @@ public class RecordRepository : BaseRepository, IRecordRepository
             new CommandDefinition(sql, new { tenantId = QueryContext.TenantId }, cancellationToken: ct));
         return rows.Select(ToDictionary).ToList();
     }
+
+    private static string BuildGroupByExpr(string col, string mode) => mode switch
+    {
+        "FirstWord" => $"LEFT({col}, CASE WHEN CHARINDEX(' ', {col}) > 0 THEN CHARINDEX(' ', {col}) - 1 ELSE LEN({col}) END)",
+        "FirstLetter" => $"LEFT({col}, 1)",
+        _ => col,
+    };
 
     // --- Helpers ---
 

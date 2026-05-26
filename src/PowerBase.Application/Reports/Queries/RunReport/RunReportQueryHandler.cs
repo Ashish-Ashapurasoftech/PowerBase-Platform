@@ -133,32 +133,58 @@ public class RunReportQueryHandler
             return new PagedReportRunResult { Page = page, PageSize = pageSize };
         }
 
-        var rows = await _recordRepo.SummarizeAsync(table, groupByField, definition.Aggregations, allFields, ct);
+        var rows = await _recordRepo.SummarizeAsync(
+            table, groupByField, definition.Aggregations, allFields, definition.GroupByMode, ct);
 
-        // Treat summary rows as record-like dictionaries; map them to RecordResult
-        var items = rows.Select(row => new RecordResult
+        // Build alias→fieldId map. Identify columns displayed as percent-of-total and compute their totals.
+        var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var percentAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var columnTotals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var agg in definition.Aggregations)
         {
-            Id = Guid.Empty,
-            CreatedOn = DateTime.UtcNow,
-            Fields = row.ToDictionary(kvp => kvp.Key, kvp => kvp.Value),
+            if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
+            var alias = $"{agg.Function}_{aggField.Name.Replace(" ", "_")}";
+            aggAliasToFieldId[alias] = agg.FieldId.ToString();
+            if (agg.DisplayAs == "PercentOfColumnTotal")
+            {
+                percentAliases.Add(alias);
+                columnTotals[alias] = rows.Sum(row =>
+                    row.TryGetValue(alias, out var v) ? Convert.ToDouble(v ?? 0) : 0.0);
+            }
+        }
+
+        // Remap SQL alias keys to field-ID string keys; apply percent transform where configured
+        var items = rows.Select(row =>
+        {
+            var fields = new Dictionary<string, object?>();
+            fields[groupByField.Id.ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
+            fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
+            foreach (var (alias, fieldId) in aggAliasToFieldId)
+            {
+                if (!row.TryGetValue(alias, out var val)) continue;
+                if (percentAliases.Contains(alias) && columnTotals.TryGetValue(alias, out var total) && total != 0)
+                    fields[fieldId] = Math.Round(Convert.ToDouble(val ?? 0) / total * 100, 2);
+                else
+                    fields[fieldId] = val;
+            }
+            return new RecordResult { Id = Guid.Empty, CreatedOn = DateTime.UtcNow, Fields = fields };
         }).ToList();
 
-        // Build synthetic columns: GroupValue + one per aggregation
+        // Synthetic columns: group-by field + Count + one per aggregation
         var columns = new List<ReportColumnInfo>
         {
-            new() { FieldId = groupByField.Id, Name = groupByField.Name + " (Group)", TypeCode = groupByField.TypeCode },
+            new() { FieldId = groupByField.Id, Name = groupByField.Name, TypeCode = groupByField.TypeCode },
             new() { FieldId = 0, Name = "Count", TypeCode = "Number" },
         };
         foreach (var agg in definition.Aggregations)
         {
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
             {
-                columns.Add(new ReportColumnInfo
-                {
-                    FieldId = aggField.Id,
-                    Name = $"{agg.Function} of {aggField.Name}",
-                    TypeCode = "Number",
-                });
+                var label = agg.DisplayAs == "PercentOfColumnTotal"
+                    ? $"{agg.Function} of {aggField.Name} (%)"
+                    : $"{agg.Function} of {aggField.Name}";
+                columns.Add(new ReportColumnInfo { FieldId = aggField.Id, Name = label, TypeCode = "Number" });
             }
         }
 

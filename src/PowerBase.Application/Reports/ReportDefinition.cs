@@ -8,6 +8,9 @@ public class ReportDefinition
     public List<ReportFilter> Filters { get; set; } = [];
     // Summary-only
     public long? GroupByFieldId { get; set; }
+    /// <summary>EqualValues (default), FirstWord, FirstLetter</summary>
+    public string GroupByMode { get; set; } = "EqualValues";
+    public bool HideTotals { get; set; }
     public List<SummaryAggregation> Aggregations { get; set; } = [];
 
     // Dynamic Filters
@@ -27,6 +30,8 @@ public class ReportFilter
 public class SummaryAggregation
 {
     public long FieldId { get; set; }
-    /// <summary>Count, Sum, Avg, Min, Max</summary>
-    public string Function { get; set; } = "Count";
+    /// <summary>Sum, Avg, Min, Max</summary>
+    public string Function { get; set; } = "Sum";
+    /// <summary>Normal (default) or PercentOfColumnTotal</summary>
+    public string DisplayAs { get; set; } = "Normal";
 }

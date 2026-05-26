@@ -64,10 +64,13 @@ public class UpdateReportCommandHandler
                 Value = f.Value,
             }).ToList(),
             GroupByFieldId = command.GroupByFieldId,
+            GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
+            HideTotals = command.HideTotals,
             Aggregations = command.Aggregations.Select(a => new SummaryAggregation
             {
                 FieldId = a.FieldId,
                 Function = a.Function,
+                DisplayAs = string.IsNullOrWhiteSpace(a.DisplayAs) ? "Normal" : a.DisplayAs,
             }).ToList(),
             DynamicFilterType = string.IsNullOrWhiteSpace(command.DynamicFilterType) ? "Default" : command.DynamicFilterType,
             CustomDynamicFilterFields = command.CustomDynamicFilterFields ?? [],

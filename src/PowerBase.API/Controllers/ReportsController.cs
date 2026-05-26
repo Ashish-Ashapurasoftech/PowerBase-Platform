@@ -70,7 +70,9 @@ public class ReportsController : ControllerBase
             request.SortDesc,
             request.Filters.Select(f => new ReportFilterCommand(f.FieldId, f.Operator, f.Value)).ToList(),
             request.GroupByFieldId,
-            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function)).ToList(),
+            request.GroupByMode,
+            request.HideTotals,
+            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function, a.DisplayAs)).ToList(),
             request.DynamicFilterType,
             request.CustomDynamicFilterFields,
             request.AllowQuickSearch);
@@ -126,7 +128,9 @@ public class ReportsController : ControllerBase
             request.SortDesc,
             request.Filters.Select(f => new ReportFilterCommand(f.FieldId, f.Operator, f.Value)).ToList(),
             request.GroupByFieldId,
-            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function)).ToList(),
+            request.GroupByMode,
+            request.HideTotals,
+            request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function, a.DisplayAs)).ToList(),
             request.DynamicFilterType,
             request.CustomDynamicFilterFields,
             request.AllowQuickSearch);
@@ -243,10 +247,13 @@ public class ReportsController : ControllerBase
                 Value = f.Value,
             }).ToList(),
             GroupByFieldId = r.Definition.GroupByFieldId,
+            GroupByMode = r.Definition.GroupByMode,
+            HideTotals = r.Definition.HideTotals,
             Aggregations = r.Definition.Aggregations.Select(a => new SummaryAggregationDto
             {
                 FieldId = a.FieldId,
                 Function = a.Function,
+                DisplayAs = a.DisplayAs,
             }).ToList(),
             DynamicFilterType = r.Definition.DynamicFilterType,
             CustomDynamicFilterFields = r.Definition.CustomDynamicFilterFields,

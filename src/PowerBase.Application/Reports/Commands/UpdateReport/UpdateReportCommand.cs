@@ -12,6 +12,8 @@ public record UpdateReportCommand(
     bool SortDesc,
     List<ReportFilterCommand> Filters,
     long? GroupByFieldId,
+    string GroupByMode,
+    bool HideTotals,
     List<SummaryAggregationCommand> Aggregations,
     string DynamicFilterType,
     List<long> CustomDynamicFilterFields,

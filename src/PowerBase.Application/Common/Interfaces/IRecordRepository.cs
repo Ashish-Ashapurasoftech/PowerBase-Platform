@@ -31,5 +31,6 @@ public interface IRecordRepository
         AppField groupByField,
         IReadOnlyList<SummaryAggregation> aggregations,
         IReadOnlyList<AppField> allFields,
+        string groupByMode = "EqualValues",
         CancellationToken ct = default);
 }

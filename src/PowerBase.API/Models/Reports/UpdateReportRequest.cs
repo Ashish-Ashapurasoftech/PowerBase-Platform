@@ -9,7 +9,10 @@ public class UpdateReportRequest
     public long? SortFieldId { get; set; }
     public bool SortDesc { get; set; }
     public List<ReportFilterRequest> Filters { get; set; } = [];
+    // Summary-only
     public long? GroupByFieldId { get; set; }
+    public string GroupByMode { get; set; } = "EqualValues";
+    public bool HideTotals { get; set; }
     public List<SummaryAggregationRequest> Aggregations { get; set; } = [];
     public string DynamicFilterType { get; set; } = "Default";
     public List<long> CustomDynamicFilterFields { get; set; } = [];

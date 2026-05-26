@@ -20,6 +20,8 @@ public class ReportDefinitionDto
     public bool SortDesc { get; init; }
     public List<ReportFilterDto> Filters { get; init; } = [];
     public long? GroupByFieldId { get; init; }
+    public string GroupByMode { get; init; } = "EqualValues";
+    public bool HideTotals { get; init; }
     public List<SummaryAggregationDto> Aggregations { get; init; } = [];
     public string DynamicFilterType { get; init; } = "Default";
     public List<long> CustomDynamicFilterFields { get; init; } = [];
@@ -36,5 +38,6 @@ public class ReportFilterDto
 public class SummaryAggregationDto
 {
     public long FieldId { get; init; }
-    public string Function { get; init; } = "Count";
+    public string Function { get; init; } = "Sum";
+    public string DisplayAs { get; init; } = "Normal";
 }
