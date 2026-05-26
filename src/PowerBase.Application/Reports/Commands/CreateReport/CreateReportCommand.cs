@@ -7,9 +7,8 @@ public record CreateReportCommand(
     string Visibility,
     string ReportType,
     List<long> Columns,
-    long? SortFieldId,
-    bool SortDesc,
-    List<ReportFilterCommand> Filters,
+    List<SortSpec> SortFields,
+    FilterGroup? FilterTree,
     long? GroupByFieldId,
     string GroupByMode,
     bool HideTotals,
@@ -18,5 +17,4 @@ public record CreateReportCommand(
     List<long> CustomDynamicFilterFields,
     bool AllowQuickSearch);
 
-public record ReportFilterCommand(long FieldId, string Operator, string? Value);
 public record SummaryAggregationCommand(long FieldId, string Function, string DisplayAs = "Normal");

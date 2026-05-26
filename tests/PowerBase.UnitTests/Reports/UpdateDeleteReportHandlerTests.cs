@@ -18,7 +18,7 @@ public class UpdateDeleteReportHandlerTests
     private DeleteReportCommandHandler CreateDeleteSut() => new(_reportRepo, _appAccessService, _auditRepo);
 
     private static UpdateReportCommand ValidCommand(Guid id, string name = "New Name") =>
-        new(id, name, null, "Shared", [], null, false, [], null, "EqualValues", false, [], "Default", [], true);
+        new(id, name, null, "Shared", [], [], null, null, "EqualValues", false, [], "Default", [], true);
 
     [Fact]
     public async Task UpdateReport_ValidCommand_CallsUpdate()

@@ -36,13 +36,9 @@ public class UpdateReportCommandHandler
 
         await _appAccessService.RequireByReportPublicIdAsync(command.ReportPublicId, AppAccess.Admin, ct);
 
-        // Validate filters
-        foreach (var filter in command.Filters)
-        {
-            if (!AllowedOperators.Contains(filter.Operator))
-                throw new ValidationException(new Dictionary<string, string[]>
-                    { ["filters"] = [$"Invalid operator '{filter.Operator}'. Allowed: {string.Join(", ", AllowedOperators)}"] });
-        }
+        // Validate filter tree operators
+        if (command.FilterTree is not null)
+            ValidateFilterGroup(command.FilterTree, AllowedOperators);
 
         // Validate aggregations
         foreach (var agg in command.Aggregations)
@@ -55,14 +51,8 @@ public class UpdateReportCommandHandler
         var definition = new ReportDefinition
         {
             Columns = command.Columns,
-            SortFieldId = command.SortFieldId,
-            SortDesc = command.SortDesc,
-            Filters = command.Filters.Select(f => new ReportFilter
-            {
-                FieldId = f.FieldId,
-                Operator = f.Operator,
-                Value = f.Value,
-            }).ToList(),
+            SortFields = command.SortFields ?? [],
+            FilterTree = command.FilterTree,
             GroupByFieldId = command.GroupByFieldId,
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
             HideTotals = command.HideTotals,
@@ -88,5 +78,18 @@ public class UpdateReportCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), ct: ct);
+    }
+
+    private static void ValidateFilterGroup(FilterGroup group, HashSet<string> allowedOperators)
+    {
+        foreach (var node in group.Nodes)
+        {
+            if (node.Condition is { } cond && !allowedOperators.Contains(cond.Operator))
+                throw new ValidationException(new Dictionary<string, string[]>
+                    { ["filterTree"] = [$"Invalid operator '{cond.Operator}'. Allowed: {string.Join(", ", allowedOperators)}"] });
+
+            if (node.Group is { } sub)
+                ValidateFilterGroup(sub, allowedOperators);
+        }
     }
 }

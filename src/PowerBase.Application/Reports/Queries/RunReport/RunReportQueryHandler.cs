@@ -52,10 +52,31 @@ public class RunReportQueryHandler
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
+        // Resolve filter tree — support legacy flat Filters list
+        var filterTree = definition.FilterTree;
+        if (filterTree == null && definition.Filters.Count > 0)
+        {
+            filterTree = new FilterGroup
+            {
+                Logic = "and",
+                Nodes = definition.Filters.Select(f => new FilterNode
+                {
+                    Condition = new FilterCondition { FieldId = f.FieldId, Operator = f.Operator, Value = f.Value }
+                }).ToList()
+            };
+        }
+
+        // Resolve sort fields — support legacy SortFieldId/SortDesc
+        IReadOnlyList<SortSpec> sortFields = definition.SortFields.Count > 0
+            ? definition.SortFields
+            : (definition.SortFieldId.HasValue
+                ? [new SortSpec { FieldId = definition.SortFieldId.Value, Desc = definition.SortDesc }]
+                : []);
+
         if (report.ReportType == "Summary")
             return await RunSummaryAsync(table, allFields, definition, page, pageSize, ct);
 
-        return await RunTableAsync(table, allFields, definition, page, pageSize, query.RuntimeFilters, ct);
+        return await RunTableAsync(table, allFields, definition, page, pageSize, filterTree, sortFields, query.RuntimeFilters, ct);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -63,6 +84,8 @@ public class RunReportQueryHandler
         IReadOnlyList<AppField> allFields,
         ReportDefinition definition,
         int page, int pageSize,
+        FilterGroup? filterTree,
+        IReadOnlyList<SortSpec> sortFields,
         IReadOnlyList<(long FieldId, string Value)>? runtimeFilters,
         CancellationToken ct)
     {
@@ -80,21 +103,25 @@ public class RunReportQueryHandler
             selectedFields = allFields.Where(f => f.IsReportable).ToList();
         }
 
-        var filters = definition.Filters.ToList();
+        // Merge runtime filters (dynamic/quick-search) into the filter tree
         if (runtimeFilters?.Count > 0)
         {
-            filters.AddRange(runtimeFilters.Select(rf => new ReportFilter
+            var runtimeNodes = runtimeFilters.Select(rf => new FilterNode
             {
-                FieldId = rf.FieldId,
-                Operator = "contains",
-                Value = rf.Value,
-            }));
-        }
-        var filterList = filters.Count > 0 ? filters : null;
+                Condition = new FilterCondition { FieldId = rf.FieldId, Operator = "contains", Value = rf.Value }
+            }).ToList();
 
-        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterList,
-            definition.SortFieldId, definition.SortDesc, ct);
-        var total = await _recordRepo.CountAsync(table, filterList, ct);
+            filterTree = filterTree == null
+                ? new FilterGroup { Logic = "and", Nodes = runtimeNodes }
+                : new FilterGroup
+                {
+                    Logic = "and",
+                    Nodes = [new FilterNode { Group = filterTree }, .. runtimeNodes]
+                };
+        }
+
+        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterTree, sortFields, ct);
+        var total = await _recordRepo.CountAsync(table, filterTree, ct);
 
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo

@@ -53,8 +53,8 @@ public class ReportHandlerTests
         Guid tableId, string name = "My Report", string visibility = "Personal",
         string reportType = "Table", List<long>? columns = null)
         => new(tableId, name, null, visibility, reportType,
-            columns ?? [], null, false,
-            [], null, "EqualValues", false, [], "Default", [], true);
+            columns ?? [], [], null,
+            null, "EqualValues", false, [], "Default", [], true);
 
     public ReportHandlerTests()
     {
@@ -172,9 +172,9 @@ public class ReportHandlerTests
         _tableRepo.GetByIdAsync(table.Id).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field1, field2 });
         _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
-            Arg.Any<IReadOnlyList<ReportFilter>?>())
+            Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>())
             .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
-        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<ReportFilter>?>()).Returns(1);
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<FilterGroup?>()).Returns(1);
         var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
@@ -201,9 +201,9 @@ public class ReportHandlerTests
         _tableRepo.GetByIdAsync(table.Id).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { reportableField, nonReportableField });
         _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
-            Arg.Any<IReadOnlyList<ReportFilter>?>())
+            Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>())
             .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
-        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<ReportFilter>?>()).Returns(1);
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<FilterGroup?>()).Returns(1);
         var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));

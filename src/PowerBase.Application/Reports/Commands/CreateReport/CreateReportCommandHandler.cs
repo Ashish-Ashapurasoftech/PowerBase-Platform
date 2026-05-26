@@ -17,7 +17,7 @@ public class CreateReportCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly CreateReportCommandValidator _validator;
 
-    private static readonly HashSet<string> AllowedReportTypes = ["Table", "Summary"];
+    private static readonly HashSet<string> AllowedReportTypes = ["Table", "Summary", "GridEdit"];
     private static readonly HashSet<string> AllowedOperators = ["eq", "ne", "contains", "startsWith", "gt", "gte", "lt", "lte"];
     private static readonly HashSet<string> AllowedFunctions = ["Count", "Sum", "Avg", "Min", "Max"];
 
@@ -52,7 +52,8 @@ public class CreateReportCommandHandler
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
         IReadOnlyList<AppField> tableFields = [];
-        if (command.Columns.Count > 0 || command.Filters.Count > 0 || command.GroupByFieldId.HasValue || command.Aggregations.Count > 0)
+        var hasFilterTree = command.FilterTree?.Nodes.Count > 0;
+        if (command.Columns.Count > 0 || hasFilterTree || command.GroupByFieldId.HasValue || command.Aggregations.Count > 0)
         {
             tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         }
@@ -66,13 +67,9 @@ public class CreateReportCommandHandler
                     new Dictionary<string, string[]> { ["columns"] = [$"Unknown field IDs: {string.Join(", ", invalid)}"] });
         }
 
-        // Validate filters
-        foreach (var filter in command.Filters)
-        {
-            if (!AllowedOperators.Contains(filter.Operator))
-                throw new ValidationException(new Dictionary<string, string[]>
-                    { ["filters"] = [$"Invalid operator '{filter.Operator}'. Allowed: {string.Join(", ", AllowedOperators)}"] });
-        }
+        // Validate filter tree operators (two-level walk)
+        if (command.FilterTree is not null)
+            ValidateFilterGroup(command.FilterTree, AllowedOperators);
 
         // Validate aggregations
         foreach (var agg in command.Aggregations)
@@ -85,14 +82,8 @@ public class CreateReportCommandHandler
         var definition = new ReportDefinition
         {
             Columns = command.Columns,
-            SortFieldId = command.SortFieldId,
-            SortDesc = command.SortDesc,
-            Filters = command.Filters.Select(f => new ReportFilter
-            {
-                FieldId = f.FieldId,
-                Operator = f.Operator,
-                Value = f.Value,
-            }).ToList(),
+            SortFields = command.SortFields ?? [],
+            FilterTree = command.FilterTree,
             GroupByFieldId = command.GroupByFieldId,
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
             HideTotals = command.HideTotals,
@@ -138,5 +129,18 @@ public class CreateReportCommandHandler
             DisplayOrder = report.DisplayOrder,
             CreatedOn = DateTime.UtcNow,
         };
+    }
+
+    private static void ValidateFilterGroup(FilterGroup group, HashSet<string> allowedOperators)
+    {
+        foreach (var node in group.Nodes)
+        {
+            if (node.Condition is { } cond && !allowedOperators.Contains(cond.Operator))
+                throw new ValidationException(new Dictionary<string, string[]>
+                    { ["filterTree"] = [$"Invalid operator '{cond.Operator}'. Allowed: {string.Join(", ", allowedOperators)}"] });
+
+            if (node.Group is { } sub)
+                ValidateFilterGroup(sub, allowedOperators);
+        }
     }
 }

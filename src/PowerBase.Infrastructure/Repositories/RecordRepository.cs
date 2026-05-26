@@ -15,8 +15,8 @@ public class RecordRepository : BaseRepository, IRecordRepository
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
-        IReadOnlyList<ReportFilter>? filters = null,
-        long? sortFieldId = null, bool sortDesc = false,
+        FilterGroup? filterTree = null,
+        IReadOnlyList<SortSpec>? sortFields = null,
         CancellationToken ct = default)
     {
         var fieldCols = BuildFieldColumnList(fields);
@@ -25,9 +25,10 @@ public class RecordRepository : BaseRepository, IRecordRepository
         parameters.Add("offset", (page - 1) * pageSize);
         parameters.Add("pageSize", pageSize);
 
-        var filterWhere = BuildFilterWhere(filters, parameters);
-        var orderBy = sortFieldId.HasValue
-            ? $"{PhysicalNaming.ColumnName(sortFieldId.Value)} {(sortDesc ? "DESC" : "ASC")}"
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
+        var orderBy = sortFields?.Count > 0
+            ? string.Join(", ", sortFields.Select(s =>
+                $"{PhysicalNaming.ColumnName(s.FieldId)} {(s.Desc ? "DESC" : "ASC")}"))
             : "Id";
 
         var sql = $"""
@@ -44,11 +45,11 @@ public class RecordRepository : BaseRepository, IRecordRepository
         return rows.Select(ToDictionary).ToList();
     }
 
-    public async Task<int> CountAsync(AppTable table, IReadOnlyList<ReportFilter>? filters = null, CancellationToken ct = default)
+    public async Task<int> CountAsync(AppTable table, FilterGroup? filterTree = null, CancellationToken ct = default)
     {
         var parameters = new DynamicParameters();
         parameters.Add("tenantId", QueryContext.TenantId);
-        var filterWhere = BuildFilterWhere(filters, parameters);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
 
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE TenantId = @tenantId AND IsDeleted = 0{filterWhere}";
         await using var connection = ConnectionFactory.Create();
@@ -220,61 +221,60 @@ public class RecordRepository : BaseRepository, IRecordRepository
             : string.Empty;
 
     /// <summary>
-    /// Builds a SQL WHERE fragment from report filters.
-    /// Column names are derived from integer field IDs (safe — no user input enters the SQL string).
-    /// Values are passed as numbered Dapper parameters (@fv0, @fv1, …).
+    /// Wraps the tree SQL fragment into a WHERE clause suffix.
+    /// Returns " AND (...)" when there are conditions, empty string otherwise.
     /// </summary>
-    private static string BuildFilterWhere(IReadOnlyList<ReportFilter>? filters, DynamicParameters parameters)
+    private static string BuildFilterTreeWhere(FilterGroup? group, DynamicParameters parameters)
     {
-        if (filters is null || filters.Count == 0)
-            return string.Empty;
+        if (group is null || group.Nodes.Count == 0) return string.Empty;
+        var paramIdx = 0;
+        var fragment = BuildTreeFragment(group, parameters, ref paramIdx);
+        return string.IsNullOrEmpty(fragment) ? string.Empty : $" AND ({fragment})";
+    }
 
-        var clauses = new List<string>();
-        for (var i = 0; i < filters.Count; i++)
+    /// <summary>
+    /// Recursively builds a SQL fragment (no outer parentheses) for a filter group.
+    /// Column names come from integer field IDs only — no user input enters the SQL string.
+    /// Values are Dapper parameters (@fv0, @fv1, …).
+    /// </summary>
+    private static string BuildTreeFragment(FilterGroup group, DynamicParameters parameters, ref int paramIdx)
+    {
+        var parts = new List<string>();
+        foreach (var node in group.Nodes)
         {
-            var filter = filters[i];
-            var col = PhysicalNaming.ColumnName(filter.FieldId); // safe: integer field ID
-            var paramName = $"fv{i}";
-
-            switch (filter.Operator)
+            if (node.Condition is { } cond)
             {
-                case "eq":
-                    clauses.Add($"{col} = @{paramName}");
-                    parameters.Add(paramName, filter.Value);
-                    break;
-                case "ne":
-                    clauses.Add($"{col} <> @{paramName}");
-                    parameters.Add(paramName, filter.Value);
-                    break;
-                case "gt":
-                    clauses.Add($"{col} > @{paramName}");
-                    parameters.Add(paramName, filter.Value);
-                    break;
-                case "gte":
-                    clauses.Add($"{col} >= @{paramName}");
-                    parameters.Add(paramName, filter.Value);
-                    break;
-                case "lt":
-                    clauses.Add($"{col} < @{paramName}");
-                    parameters.Add(paramName, filter.Value);
-                    break;
-                case "lte":
-                    clauses.Add($"{col} <= @{paramName}");
-                    parameters.Add(paramName, filter.Value);
-                    break;
-                case "contains":
-                    clauses.Add($"{col} LIKE @{paramName}");
-                    parameters.Add(paramName, $"%{filter.Value}%");
-                    break;
-                case "startsWith":
-                    clauses.Add($"{col} LIKE @{paramName}");
-                    parameters.Add(paramName, $"{filter.Value}%");
-                    break;
-                // Unknown operators are skipped (validated in command handler)
+                var clause = BuildConditionClause(cond, parameters, ref paramIdx);
+                if (clause is not null) parts.Add(clause);
+            }
+            else if (node.Group is { } sub && sub.Nodes.Count > 0)
+            {
+                var subSql = BuildTreeFragment(sub, parameters, ref paramIdx);
+                if (!string.IsNullOrEmpty(subSql)) parts.Add($"({subSql})");
             }
         }
 
-        return clauses.Count > 0 ? " AND " + string.Join(" AND ", clauses) : string.Empty;
+        if (parts.Count == 0) return string.Empty;
+        var joiner = group.Logic?.ToLowerInvariant() == "or" ? " OR " : " AND ";
+        return string.Join(joiner, parts);
+    }
+
+    private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i)
+    {
+        var col = PhysicalNaming.ColumnName(cond.FieldId); // safe: integer field ID
+        var pname = $"fv{i++}";
+        switch (cond.Operator)
+        {
+            case "eq":        p.Add(pname, cond.Value);             return $"{col} = @{pname}";
+            case "ne":        p.Add(pname, cond.Value);             return $"{col} <> @{pname}";
+            case "gt":        p.Add(pname, cond.Value);             return $"{col} > @{pname}";
+            case "gte":       p.Add(pname, cond.Value);             return $"{col} >= @{pname}";
+            case "lt":        p.Add(pname, cond.Value);             return $"{col} < @{pname}";
+            case "lte":       p.Add(pname, cond.Value);             return $"{col} <= @{pname}";
+            case "contains":  p.Add(pname, $"%{cond.Value}%");      return $"{col} LIKE @{pname}";
+            case "startsWith":p.Add(pname, $"{cond.Value}%");       return $"{col} LIKE @{pname}";
+            default: i--; return null; // unknown operator skipped; undo param counter
+        }
     }
 
     private static IReadOnlyDictionary<string, object?> ToDictionary(dynamic row)

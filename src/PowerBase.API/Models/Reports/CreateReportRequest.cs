@@ -7,9 +7,13 @@ public class CreateReportRequest
     public string Visibility { get; set; } = "Personal";
     public string ReportType { get; set; } = "Table";
     public List<long> Columns { get; set; } = [];
-    public long? SortFieldId { get; set; }
-    public bool SortDesc { get; set; }
-    public List<ReportFilterRequest> Filters { get; set; } = [];
+
+    // New multi-sort
+    public List<SortSpecRequest> SortFields { get; set; } = [];
+
+    // New filter tree
+    public FilterGroupRequest? FilterTree { get; set; }
+
     // Summary-only
     public long? GroupByFieldId { get; set; }
     public string GroupByMode { get; set; } = "EqualValues";
@@ -20,12 +24,36 @@ public class CreateReportRequest
     public bool AllowQuickSearch { get; set; } = true;
 }
 
-public class ReportFilterRequest
+// ── Filter tree request models ────────────────────────────────────────────────
+
+public class FilterGroupRequest
+{
+    public string Logic { get; set; } = "and";
+    public List<FilterNodeRequest> Nodes { get; set; } = [];
+}
+
+public class FilterNodeRequest
+{
+    public FilterConditionRequest? Condition { get; set; }
+    public FilterGroupRequest? Group { get; set; }
+}
+
+public class FilterConditionRequest
 {
     public long FieldId { get; set; }
     public string Operator { get; set; } = "eq";
     public string? Value { get; set; }
 }
+
+// ── Sort request model ────────────────────────────────────────────────────────
+
+public class SortSpecRequest
+{
+    public long FieldId { get; set; }
+    public bool Desc { get; set; }
+}
+
+// ── Aggregation request model ─────────────────────────────────────────────────
 
 public class SummaryAggregationRequest
 {

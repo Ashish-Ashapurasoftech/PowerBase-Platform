@@ -66,9 +66,8 @@ public class ReportsController : ControllerBase
             request.Visibility,
             request.ReportType,
             request.Columns,
-            request.SortFieldId,
-            request.SortDesc,
-            request.Filters.Select(f => new ReportFilterCommand(f.FieldId, f.Operator, f.Value)).ToList(),
+            request.SortFields.Select(s => new SortSpec { FieldId = s.FieldId, Desc = s.Desc }).ToList(),
+            MapFilterGroup(request.FilterTree),
             request.GroupByFieldId,
             request.GroupByMode,
             request.HideTotals,
@@ -124,9 +123,8 @@ public class ReportsController : ControllerBase
             request.Description,
             request.Visibility,
             request.Columns,
-            request.SortFieldId,
-            request.SortDesc,
-            request.Filters.Select(f => new ReportFilterCommand(f.FieldId, f.Operator, f.Value)).ToList(),
+            request.SortFields.Select(s => new SortSpec { FieldId = s.FieldId, Desc = s.Desc }).ToList(),
+            MapFilterGroup(request.FilterTree),
             request.GroupByFieldId,
             request.GroupByMode,
             request.HideTotals,
@@ -238,6 +236,9 @@ public class ReportsController : ControllerBase
         Definition = new ReportDefinitionDto
         {
             Columns = r.Definition.Columns,
+            SortFields = r.Definition.SortFields.Select(s => new SortSpecDto { FieldId = s.FieldId, Desc = s.Desc }).ToList(),
+            FilterTree = MapFilterGroupDto(r.Definition.FilterTree),
+            // Legacy compat fields
             SortFieldId = r.Definition.SortFieldId,
             SortDesc = r.Definition.SortDesc,
             Filters = r.Definition.Filters.Select(f => new ReportFilterDto
@@ -263,4 +264,44 @@ public class ReportsController : ControllerBase
         DisplayOrder = r.DisplayOrder,
         CreatedOn = r.CreatedOn,
     };
+
+    // ── Filter group mapping helpers ──────────────────────────────────────────
+
+    private static FilterGroup? MapFilterGroup(FilterGroupRequest? req)
+    {
+        if (req is null) return null;
+        return new FilterGroup
+        {
+            Logic = req.Logic,
+            Nodes = req.Nodes.Select(n => new FilterNode
+            {
+                Condition = n.Condition is null ? null : new FilterCondition
+                {
+                    FieldId = n.Condition.FieldId,
+                    Operator = n.Condition.Operator,
+                    Value = n.Condition.Value,
+                },
+                Group = MapFilterGroup(n.Group),
+            }).ToList(),
+        };
+    }
+
+    private static FilterGroupDto? MapFilterGroupDto(FilterGroup? group)
+    {
+        if (group is null) return null;
+        return new FilterGroupDto
+        {
+            Logic = group.Logic,
+            Nodes = group.Nodes.Select(n => new FilterNodeDto
+            {
+                Condition = n.Condition is null ? null : new FilterConditionDto
+                {
+                    FieldId = n.Condition.FieldId,
+                    Operator = n.Condition.Operator,
+                    Value = n.Condition.Value,
+                },
+                Group = MapFilterGroupDto(n.Group),
+            }).ToList(),
+        };
+    }
 }

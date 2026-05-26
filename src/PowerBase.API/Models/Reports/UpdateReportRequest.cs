@@ -6,9 +6,13 @@ public class UpdateReportRequest
     public string? Description { get; set; }
     public string Visibility { get; set; } = "Personal";
     public List<long> Columns { get; set; } = [];
-    public long? SortFieldId { get; set; }
-    public bool SortDesc { get; set; }
-    public List<ReportFilterRequest> Filters { get; set; } = [];
+
+    // New multi-sort
+    public List<SortSpecRequest> SortFields { get; set; } = [];
+
+    // New filter tree
+    public FilterGroupRequest? FilterTree { get; set; }
+
     // Summary-only
     public long? GroupByFieldId { get; set; }
     public string GroupByMode { get; set; } = "EqualValues";

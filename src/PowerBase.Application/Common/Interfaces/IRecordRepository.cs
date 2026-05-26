@@ -7,11 +7,11 @@ public interface IRecordRepository
 {
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
-        IReadOnlyList<ReportFilter>? filters = null,
-        long? sortFieldId = null, bool sortDesc = false,
+        FilterGroup? filterTree = null,
+        IReadOnlyList<SortSpec>? sortFields = null,
         CancellationToken ct = default);
 
-    Task<int> CountAsync(AppTable table, IReadOnlyList<ReportFilter>? filters = null, CancellationToken ct = default);
+    Task<int> CountAsync(AppTable table, FilterGroup? filterTree = null, CancellationToken ct = default);
 
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default);
