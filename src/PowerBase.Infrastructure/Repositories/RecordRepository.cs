@@ -159,6 +159,20 @@ public class RecordRepository : BaseRepository, IRecordRepository
             throw new NotFoundException("Record", publicId);
     }
 
+    public async Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
+    {
+        var sql = $"""
+            UPDATE {PhysicalNaming.FullTableName(table.Id)}
+            SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+            WHERE TenantId = @tenantId AND PublicId IN @publicIds AND IsDeleted = 0
+            """;
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(sql,
+                new { tenantId = QueryContext.TenantId, publicIds, modifiedBy = QueryContext.UserId },
+                cancellationToken: ct));
+    }
+
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table,
         AppField groupByField,

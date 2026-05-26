@@ -5,6 +5,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Records;
 using PowerBase.Application.Records;
+using PowerBase.Application.Records.Commands.BulkDeleteRecords;
 using PowerBase.Application.Records.Commands.CreateRecord;
 using PowerBase.Application.Records.Commands.DeleteRecord;
 using PowerBase.Application.Records.Commands.UpdateRecord;
@@ -20,6 +21,7 @@ public class RecordsController : ControllerBase
     private readonly CreateRecordCommandHandler _createHandler;
     private readonly UpdateRecordCommandHandler _updateHandler;
     private readonly DeleteRecordCommandHandler _deleteHandler;
+    private readonly BulkDeleteRecordsCommandHandler _bulkDeleteHandler;
     private readonly ListRecordsQueryHandler _listHandler;
     private readonly GetRecordQueryHandler _getHandler;
     private readonly IAppAccessService _appAccessService;
@@ -28,6 +30,7 @@ public class RecordsController : ControllerBase
         CreateRecordCommandHandler createHandler,
         UpdateRecordCommandHandler updateHandler,
         DeleteRecordCommandHandler deleteHandler,
+        BulkDeleteRecordsCommandHandler bulkDeleteHandler,
         ListRecordsQueryHandler listHandler,
         GetRecordQueryHandler getHandler,
         IAppAccessService appAccessService)
@@ -35,6 +38,7 @@ public class RecordsController : ControllerBase
         _createHandler = createHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
+        _bulkDeleteHandler = bulkDeleteHandler;
         _listHandler = listHandler;
         _getHandler = getHandler;
         _appAccessService = appAccessService;
@@ -109,6 +113,24 @@ public class RecordsController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Bulk soft-delete up to 500 records by public ID.</summary>
+    [HttpPost("tables/{tableId:guid}/records/bulk-delete")]
+    [RequirePermission(PermissionCodes.RecordsDelete)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> BulkDelete(Guid tableId, [FromBody] BulkDeleteRequest request, CancellationToken ct)
+    {
+        var flags = await _appAccessService.GetPermissionFlagsByTablePublicIdAsync(tableId, ct);
+        if (!flags.CanDelete)
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = new { code = "FORBIDDEN", message = "Your role does not allow deleting records." } });
+
+        await _bulkDeleteHandler.HandleAsync(new BulkDeleteRecordsCommand(tableId, request.Ids), ct);
+        return NoContent();
+    }
+
     /// <summary>Soft-delete a record.</summary>
     [HttpDelete("tables/{tableId:guid}/records/{id:guid}")]
     [RequirePermission(PermissionCodes.RecordsDelete)]
@@ -125,6 +147,8 @@ public class RecordsController : ControllerBase
         await _deleteHandler.HandleAsync(new DeleteRecordCommand(tableId, id), ct);
         return NoContent();
     }
+
+    public record BulkDeleteRequest(List<Guid> Ids);
 
     private static IReadOnlyDictionary<long, object?> ParseFieldValues(Dictionary<string, JsonElement> fields)
     {

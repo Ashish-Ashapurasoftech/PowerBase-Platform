@@ -12,6 +12,7 @@ using PowerBase.Application.Reports.Commands.UpdateReport;
 using PowerBase.Application.Reports.Queries.GetReport;
 using PowerBase.Application.Reports.Queries.ListReports;
 using PowerBase.Application.Reports.Queries.ListReportsByTable;
+using PowerBase.Application.Reports.Queries.ExportReport;
 using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Domain.Constants;
 
@@ -28,6 +29,7 @@ public class ReportsController : ControllerBase
     private readonly ListReportsQueryHandler _listHandler;
     private readonly ListReportsByTableQueryHandler _listByTableHandler;
     private readonly RunReportQueryHandler _runHandler;
+    private readonly ExportReportQueryHandler _exportHandler;
 
     public ReportsController(
         CreateReportCommandHandler createHandler,
@@ -37,7 +39,8 @@ public class ReportsController : ControllerBase
         GetReportQueryHandler getHandler,
         ListReportsQueryHandler listHandler,
         ListReportsByTableQueryHandler listByTableHandler,
-        RunReportQueryHandler runHandler)
+        RunReportQueryHandler runHandler,
+        ExportReportQueryHandler exportHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -47,6 +50,7 @@ public class ReportsController : ControllerBase
         _listHandler = listHandler;
         _listByTableHandler = listByTableHandler;
         _runHandler = runHandler;
+        _exportHandler = exportHandler;
     }
 
     /// <summary>Save a report definition for a table.</summary>
@@ -215,6 +219,32 @@ public class ReportsController : ControllerBase
             PageSize = result.PageSize,
         };
         return Ok(new ApiResponse<ReportRunResponse>(response));
+    }
+
+    /// <summary>Export report results as CSV.</summary>
+    [HttpGet("reports/{publicId:guid}/export/csv")]
+    [RequirePermission(PermissionCodes.ReportsRun)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ExportCsv(Guid publicId, CancellationToken ct)
+    {
+        var result = await _exportHandler.HandleAsync(new ExportReportQuery(publicId, "csv"), ct);
+        return File(result.Content, result.ContentType, result.FileName);
+    }
+
+    /// <summary>Export report results as Excel (.xlsx).</summary>
+    [HttpGet("reports/{publicId:guid}/export/xlsx")]
+    [RequirePermission(PermissionCodes.ReportsRun)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ExportXlsx(Guid publicId, CancellationToken ct)
+    {
+        var result = await _exportHandler.HandleAsync(new ExportReportQuery(publicId, "xlsx"), ct);
+        return File(result.Content, result.ContentType, result.FileName);
     }
 
     private static IReadOnlyList<(long FieldId, string Value)>? ParseDynamicFilters(List<string>? raw)
