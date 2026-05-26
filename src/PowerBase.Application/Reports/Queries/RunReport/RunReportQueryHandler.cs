@@ -82,7 +82,7 @@ public class RunReportQueryHandler
             if (list.Count == 0 || list[0].FieldId != gfId)
             {
                 var without = list.Where(s => s.FieldId != gfId).ToList();
-                sortFields = new[] { new SortSpec { FieldId = gfId, Desc = false } }
+                sortFields = new[] { new SortSpec { FieldId = gfId, Desc = definition.GroupByDescending } }
                     .Concat(without)
                     .ToArray();
             }

@@ -14,6 +14,7 @@ public record UpdateReportCommand(
     string GroupByMode,
     bool HideTotals,
     bool GroupDefaultCollapsed,
+    bool GroupByDescending,
     List<SummaryAggregationCommand> Aggregations,
     string DynamicFilterType,
     List<long> CustomDynamicFilterFields,

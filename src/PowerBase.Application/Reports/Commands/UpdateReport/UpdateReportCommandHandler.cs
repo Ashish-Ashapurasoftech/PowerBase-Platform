@@ -57,6 +57,7 @@ public class UpdateReportCommandHandler
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
             HideTotals = command.HideTotals,
             GroupDefaultCollapsed = command.GroupDefaultCollapsed,
+            GroupByDescending = command.GroupByDescending,
             Aggregations = command.Aggregations.Select(a => new SummaryAggregation
             {
                 FieldId = a.FieldId,

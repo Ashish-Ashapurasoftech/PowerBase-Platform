@@ -16,6 +16,7 @@ public class ReportDefinition
     public string GroupByMode { get; set; } = "EqualValues";
     public bool HideTotals { get; set; }
     public bool GroupDefaultCollapsed { get; set; }
+    public bool GroupByDescending { get; set; }
     public List<SummaryAggregation> Aggregations { get; set; } = [];
 
     // Dynamic Filters
