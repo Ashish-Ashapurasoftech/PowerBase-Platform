@@ -13,6 +13,7 @@ public interface IAppTableRepository
     Task<(long Id, Guid PublicId)> CreateAsync(AppTable table, CancellationToken ct = default);
     Task UpdatePhysicalNameAsync(long id, string physicalTableName, CancellationToken ct = default);
     Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, CancellationToken ct = default);
+    Task UpdateDefaultReportSettingsAsync(Guid publicId, string defaultReportSettings, CancellationToken ct = default);
     Task DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task IncrementRecordCountAsync(long id, CancellationToken ct = default);
     Task DecrementRecordCountAsync(long id, CancellationToken ct = default);

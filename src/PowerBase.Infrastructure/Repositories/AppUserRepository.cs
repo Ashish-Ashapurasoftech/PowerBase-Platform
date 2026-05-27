@@ -51,6 +51,13 @@ public class AppUserRepository : BaseRepository, IAppUserRepository
         WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
         """;
 
+    private const string GetUserRolePublicIdSql = """
+        SELECT ar.PublicId
+        FROM meta.AppUser au
+        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+        """;
+
     private const string GetPermissionFlagsSql = """
         SELECT ar.CanViewRecords, ar.CanAddRecords, ar.CanEditRecords, ar.CanDeleteRecords
         FROM meta.AppUser au
@@ -117,6 +124,13 @@ public class AppUserRepository : BaseRepository, IAppUserRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteScalarAsync<string?>(
             new CommandDefinition(GetUserRoleNameSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+    }
+
+    public async Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<Guid?>(
+            new CommandDefinition(GetUserRolePublicIdSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
     }
 
     public async Task<(bool CanView, bool CanAdd, bool CanEdit, bool CanDelete)?> GetUserPermissionFlagsAsync(long appId, long userId, CancellationToken ct = default)

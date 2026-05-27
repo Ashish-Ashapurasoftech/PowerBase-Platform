@@ -21,5 +21,6 @@ public interface IAppUserRepository
     Task UpdateRoleAsync(long appId, long userId, long newRoleId, CancellationToken ct = default);
     Task RemoveAsync(long appId, long userId, CancellationToken ct = default);
     Task<string?> GetUserRoleNameAsync(long appId, long userId, CancellationToken ct = default);
+    Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default);
     Task<(bool CanView, bool CanAdd, bool CanEdit, bool CanDelete)?> GetUserPermissionFlagsAsync(long appId, long userId, CancellationToken ct = default);
 }

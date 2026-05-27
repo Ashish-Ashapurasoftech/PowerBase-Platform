@@ -25,6 +25,9 @@ public abstract class IntegrationTestBase
     protected async Task<HttpResponseMessage> PatchAsync(string url, object body, string? token = null) =>
         await SendAsync(HttpMethod.Patch, url, Serialize(body), token);
 
+    protected async Task<HttpResponseMessage> PutAsync(string url, object body, string? token = null) =>
+        await SendAsync(HttpMethod.Put, url, Serialize(body), token);
+
     protected async Task<HttpResponseMessage> DeleteAsync(string url, string? token = null) =>
         await SendAsync(HttpMethod.Delete, url, null, token);
 

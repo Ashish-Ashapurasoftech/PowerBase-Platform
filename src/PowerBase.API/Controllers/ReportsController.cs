@@ -8,11 +8,14 @@ using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Application.Reports.Commands.DeleteReport;
 using PowerBase.Application.Reports.Commands.SetDefaultReport;
+using PowerBase.Application.Reports.Commands.UpdateDefaultReportSettings;
 using PowerBase.Application.Reports.Commands.UpdateReport;
 using PowerBase.Application.Reports.Queries.GetReport;
+using PowerBase.Application.Reports.Queries.GetDefaultReportSettings;
 using PowerBase.Application.Reports.Queries.ListReports;
 using PowerBase.Application.Reports.Queries.ListReportsByTable;
 using PowerBase.Application.Reports.Queries.ExportReport;
+using PowerBase.Application.Reports.Queries.ResolveDefaultReport;
 using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Domain.Constants;
 
@@ -30,6 +33,9 @@ public class ReportsController : ControllerBase
     private readonly ListReportsByTableQueryHandler _listByTableHandler;
     private readonly RunReportQueryHandler _runHandler;
     private readonly ExportReportQueryHandler _exportHandler;
+    private readonly GetDefaultReportSettingsQueryHandler _getDefaultSettingsHandler;
+    private readonly UpdateDefaultReportSettingsCommandHandler _updateDefaultSettingsHandler;
+    private readonly ResolveDefaultReportQueryHandler _resolveDefaultReportHandler;
 
     public ReportsController(
         CreateReportCommandHandler createHandler,
@@ -40,7 +46,10 @@ public class ReportsController : ControllerBase
         ListReportsQueryHandler listHandler,
         ListReportsByTableQueryHandler listByTableHandler,
         RunReportQueryHandler runHandler,
-        ExportReportQueryHandler exportHandler)
+        ExportReportQueryHandler exportHandler,
+        GetDefaultReportSettingsQueryHandler getDefaultSettingsHandler,
+        UpdateDefaultReportSettingsCommandHandler updateDefaultSettingsHandler,
+        ResolveDefaultReportQueryHandler resolveDefaultReportHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -51,6 +60,9 @@ public class ReportsController : ControllerBase
         _listByTableHandler = listByTableHandler;
         _runHandler = runHandler;
         _exportHandler = exportHandler;
+        _getDefaultSettingsHandler = getDefaultSettingsHandler;
+        _updateDefaultSettingsHandler = updateDefaultSettingsHandler;
+        _resolveDefaultReportHandler = resolveDefaultReportHandler;
     }
 
     /// <summary>Save a report definition for a table.</summary>
@@ -155,6 +167,50 @@ public class ReportsController : ControllerBase
     {
         await _setDefaultHandler.HandleAsync(new SetDefaultReportCommand(tableId, reportId), ct);
         return NoContent();
+    }
+
+    /// <summary>Get default report settings for a table, including app roles and selectable reports.</summary>
+    [HttpGet("tables/{tableId:guid}/default-report-settings")]
+    [RequirePermission(PermissionCodes.ReportsRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<DefaultReportSettingsResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetDefaultReportSettings(Guid tableId, CancellationToken ct)
+    {
+        var result = await _getDefaultSettingsHandler.HandleAsync(new GetDefaultReportSettingsQuery(tableId), ct);
+        return Ok(new ApiResponse<DefaultReportSettingsResponse>(MapToDefaultSettingsResponse(result)));
+    }
+
+    /// <summary>Update default report settings for a table.</summary>
+    [HttpPut("tables/{tableId:guid}/default-report-settings")]
+    [RequirePermission(PermissionCodes.ReportsUpdate)]
+    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateDefaultReportSettings(Guid tableId, [FromBody] UpdateDefaultReportSettingsRequest request, CancellationToken ct)
+    {
+        await _updateDefaultSettingsHandler.HandleAsync(new UpdateDefaultReportSettingsCommand(
+            tableId,
+            request.Mode,
+            request.EveryoneReportId,
+            request.RoleDefaults), ct);
+        return NoContent();
+    }
+
+    /// <summary>Resolve the effective default report for the current user and table.</summary>
+    [HttpGet("tables/{tableId:guid}/default-report")]
+    [RequirePermission(PermissionCodes.ReportsRead)]
+    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetDefaultReport(Guid tableId, CancellationToken ct)
+    {
+        var result = await _resolveDefaultReportHandler.HandleAsync(new ResolveDefaultReportQuery(tableId), ct);
+        return Ok(new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
 
     /// <summary>Soft-delete a report.</summary>
@@ -299,6 +355,24 @@ public class ReportsController : ControllerBase
         IsDefault = r.IsDefault,
         DisplayOrder = r.DisplayOrder,
         CreatedOn = r.CreatedOn,
+    };
+
+    private static DefaultReportSettingsResponse MapToDefaultSettingsResponse(DefaultReportSettingsResult r) => new()
+    {
+        Mode = r.Mode,
+        EveryoneReportId = r.EveryoneReportId,
+        Roles = r.Roles.Select(role => new RoleDefaultResponse
+        {
+            RoleId = role.RoleId,
+            RoleName = role.RoleName,
+            ReportId = role.ReportId,
+        }).ToList(),
+        Reports = r.Reports.Select(report => new DefaultReportListItemResponse
+        {
+            Id = report.Id,
+            Name = report.Name,
+            IsDefault = report.IsDefault,
+        }).ToList(),
     };
 
     // ── Filter group mapping helpers ──────────────────────────────────────────
