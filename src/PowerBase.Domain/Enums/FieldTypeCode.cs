@@ -3,12 +3,24 @@ namespace PowerBase.Domain.Enums;
 public enum FieldTypeCode
 {
     Text,
+    TextMultiLine,
+    RichText,
+    SingleSelect,
+    MultiSelect,
     Number,
+    Currency,
+    Percent,
+    Rating,
     Date,
-    Boolean,
     DateTime,
+    Time,
+    Duration,
+    Boolean,
     Email,
     Phone,
     Url,
-    Duration
+    File,
+    Address,
+    User,
+    MultiUser
 }
