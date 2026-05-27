@@ -25,6 +25,8 @@ public interface IRecordRepository
 
     Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default);
 
+    Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
+
     /// <summary>Run a GROUP BY aggregation query for Summary reports.</summary>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table,

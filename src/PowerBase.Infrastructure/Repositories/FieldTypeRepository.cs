@@ -26,4 +26,11 @@ public class FieldTypeRepository : IFieldTypeRepository
         return await connection.QuerySingleOrDefaultAsync<FieldType>(
             new CommandDefinition(GetByCodeSql, new { code }, cancellationToken: ct));
     }
+
+    public async Task<int> GetIdByCodeAsync(string code, CancellationToken ct = default)
+    {
+        const string sql = "SELECT Id FROM core.FieldType WHERE Code = @code AND IsActive = 1";
+        await using var connection = _connectionFactory.Create();
+        return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, new { code }, cancellationToken: ct));
+    }
 }

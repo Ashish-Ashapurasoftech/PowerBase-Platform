@@ -26,9 +26,15 @@ public class RecordRepository : BaseRepository, IRecordRepository
         parameters.Add("pageSize", pageSize);
 
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
+        var fieldLookup = fields.ToDictionary(f => f.Id);
         var orderBy = sortFields?.Count > 0
             ? string.Join(", ", sortFields.Select(s =>
-                $"{PhysicalNaming.ColumnName(s.FieldId)} {(s.Desc ? "DESC" : "ASC")}"))
+            {
+                var colName = fieldLookup.TryGetValue(s.FieldId, out var sf) && sf.IsSystem
+                    ? sf.PhysicalColumnName!
+                    : PhysicalNaming.ColumnName(s.FieldId);
+                return $"{colName} {(s.Desc ? "DESC" : "ASC")}";
+            }))
             : "Id";
 
         var sql = $"""
@@ -159,6 +165,20 @@ public class RecordRepository : BaseRepository, IRecordRepository
             throw new NotFoundException("Record", publicId);
     }
 
+    public async Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
+    {
+        var sql = $"""
+            UPDATE {PhysicalNaming.FullTableName(table.Id)}
+            SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+            WHERE TenantId = @tenantId AND PublicId IN @publicIds AND IsDeleted = 0
+            """;
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(sql,
+                new { tenantId = QueryContext.TenantId, publicIds, modifiedBy = QueryContext.UserId },
+                cancellationToken: ct));
+    }
+
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table,
         AppField groupByField,
@@ -217,7 +237,9 @@ public class RecordRepository : BaseRepository, IRecordRepository
 
     private static string BuildFieldColumnList(IReadOnlyList<AppField> fields) =>
         fields.Count > 0
-            ? ", " + string.Join(", ", fields.Select(f => PhysicalNaming.ColumnName(f.Id)))
+            ? ", " + string.Join(", ", fields
+                .Where(f => !f.IsSystem)  // system fields already exist in base SELECT (Id, CreatedOn, etc.)
+                .Select(f => PhysicalNaming.ColumnName(f.Id)))
             : string.Empty;
 
     /// <summary>

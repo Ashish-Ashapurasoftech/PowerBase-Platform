@@ -19,6 +19,7 @@ public class CreateReportRequest
     public string GroupByMode { get; set; } = "EqualValues";
     public bool HideTotals { get; set; }
     public bool GroupDefaultCollapsed { get; set; }
+    public bool GroupByDescending { get; set; }
     public List<SummaryAggregationRequest> Aggregations { get; set; } = [];
     public string DynamicFilterType { get; set; } = "Default";
     public List<long> CustomDynamicFilterFields { get; set; } = [];

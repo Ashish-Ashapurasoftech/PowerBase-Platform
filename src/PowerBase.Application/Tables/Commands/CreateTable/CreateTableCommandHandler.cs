@@ -1,4 +1,6 @@
+using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -25,19 +27,28 @@ public class CreateTableCommandHandler
     private readonly ISchemaEngineService _schemaEngine;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly IAppFieldRepository _fieldRepo;
+    private readonly IReportRepository _reportRepo;
+    private readonly IFieldTypeRepository _fieldTypeRepo;
 
     public CreateTableCommandHandler(
         IAppRepository appRepo,
         IAppTableRepository tableRepo,
         ISchemaEngineService schemaEngine,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IAppFieldRepository fieldRepo,
+        IReportRepository reportRepo,
+        IFieldTypeRepository fieldTypeRepo)
     {
         _appRepo = appRepo;
         _tableRepo = tableRepo;
         _schemaEngine = schemaEngine;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
+        _fieldRepo = fieldRepo;
+        _reportRepo = reportRepo;
+        _fieldTypeRepo = fieldTypeRepo;
     }
 
     public async Task<CreateTableResult> HandleAsync(CreateTableCommand command, CancellationToken ct = default)
@@ -76,6 +87,73 @@ public class CreateTableCommandHandler
         table.PhysicalTableName = physicalName;
 
         await _schemaEngine.CreateTableAsync(table, ct);
+
+        // Seed system fields (Quickbase FID equivalents)
+        var userTypeId = await _fieldTypeRepo.GetIdByCodeAsync("User", ct);
+        const int numberTypeId = 2;   // Number (seeded in 007_seed_fieldtypes)
+        const int dateTimeTypeId = 5; // DateTime (seeded in 017_seed_extended_fieldtypes)
+
+        (string Name, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order)[] systemFieldDefs =
+        [
+            ("Record ID#",       numberTypeId,   "Id",         true,  false, 1),
+            ("Date Created",     dateTimeTypeId, "CreatedOn",  true,  true,  2),
+            ("Date Modified",    dateTimeTypeId, "ModifiedOn", true,  true,  3),
+            ("Record Owner",     userTypeId,     "CreatedBy",  false, false, 4),
+            ("Last Modified By", userTypeId,     "ModifiedBy", false, false, 5),
+        ];
+
+        var seededIds = new Dictionary<string, long>();
+        foreach (var (name, typeId, physCol, sortable, filterable, order) in systemFieldDefs)
+        {
+            var f = new AppField
+            {
+                TenantId = table.TenantId,
+                AppTableId = table.Id,
+                FieldTypeId = typeId,
+                Name = name,
+                PhysicalColumnName = physCol,
+                IsSystem = true,
+                IsReportable = true,
+                IsSortable = sortable,
+                IsFilterable = filterable,
+                IsSearchable = false,
+                DisplayOrder = order,
+            };
+            var (fieldId, _) = await _fieldRepo.CreateAsync(f, ct);
+            seededIds[name] = fieldId;
+        }
+
+        // Seed default reports
+        var dateModifiedFieldId = seededIds["Date Modified"];
+
+        await _reportRepo.CreateAsync(new Report
+        {
+            TenantId = table.TenantId,
+            AppTableId = table.Id,
+            OwnerId = _queryContext.UserId,
+            Name = "List All",
+            ReportType = "Table",
+            Visibility = "Shared",
+            Definition = JsonSerializer.Serialize(new ReportDefinition()),
+            IsDefault = true,
+            DisplayOrder = 1,
+        }, ct);
+
+        await _reportRepo.CreateAsync(new Report
+        {
+            TenantId = table.TenantId,
+            AppTableId = table.Id,
+            OwnerId = _queryContext.UserId,
+            Name = "List Changes",
+            ReportType = "Table",
+            Visibility = "Shared",
+            Definition = JsonSerializer.Serialize(new ReportDefinition
+            {
+                SortFields = [new SortSpec { FieldId = dateModifiedFieldId, Desc = true }],
+            }),
+            IsDefault = false,
+            DisplayOrder = 2,
+        }, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppTable, publicId.ToString(), appId: app.Id, ct: ct);

@@ -38,6 +38,7 @@ public class ReportRepository : BaseRepository, IReportRepository
                                 AND TenantId = @tenantId
                                 AND IsDeleted = 0)
           AND r.IsDeleted = 0
+          AND (r.Visibility != 'Personal' OR r.OwnerId = @userId)
         ORDER BY r.DisplayOrder, r.Name
         """;
 
@@ -48,6 +49,7 @@ public class ReportRepository : BaseRepository, IReportRepository
         WHERE r.TenantId = @tenantId
           AND t.AppId = @appId
           AND r.IsDeleted = 0
+          AND (r.Visibility != 'Personal' OR r.OwnerId = @userId)
         ORDER BY r.DisplayOrder, r.Name
         """;
 
@@ -113,7 +115,7 @@ public class ReportRepository : BaseRepository, IReportRepository
         await using var connection = ConnectionFactory.Create();
         var results = await connection.QueryAsync<Report>(
             new CommandDefinition(ListByAppSql,
-                new { tenantId = QueryContext.TenantId, appId },
+                new { tenantId = QueryContext.TenantId, appId, userId = QueryContext.UserId },
                 cancellationToken: ct));
         return results.AsList();
     }
@@ -123,7 +125,7 @@ public class ReportRepository : BaseRepository, IReportRepository
         await using var connection = ConnectionFactory.Create();
         var results = await connection.QueryAsync<Report>(
             new CommandDefinition(ListByTableSql,
-                new { tenantId = QueryContext.TenantId, tablePublicId },
+                new { tenantId = QueryContext.TenantId, tablePublicId, userId = QueryContext.UserId },
                 cancellationToken: ct));
         return results.AsList();
     }

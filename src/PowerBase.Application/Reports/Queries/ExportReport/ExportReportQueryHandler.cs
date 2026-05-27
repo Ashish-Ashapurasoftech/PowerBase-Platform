@@ -1,35 +1,21 @@
+using System.Text;
 using System.Text.Json;
+using ClosedXML.Excel;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 
-namespace PowerBase.Application.Reports.Queries.RunReport;
+namespace PowerBase.Application.Reports.Queries.ExportReport;
 
-public class ReportColumnInfo
-{
-    public long FieldId { get; init; }
-    public string Name { get; init; } = string.Empty;
-    public string TypeCode { get; init; } = string.Empty;
-}
-
-public class PagedReportRunResult
-{
-    public IReadOnlyList<RecordResult> Items { get; init; } = [];
-    public IReadOnlyList<ReportColumnInfo> Columns { get; init; } = [];
-    public int TotalCount { get; init; }
-    public int Page { get; init; }
-    public int PageSize { get; init; }
-}
-
-public class RunReportQueryHandler
+public class ExportReportQueryHandler
 {
     private readonly IReportRepository _reportRepo;
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
 
-    public RunReportQueryHandler(
+    public ExportReportQueryHandler(
         IReportRepository reportRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
@@ -41,18 +27,14 @@ public class RunReportQueryHandler
         _recordRepo = recordRepo;
     }
 
-    public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
+    public async Task<ExportResult> HandleAsync(ExportReportQuery query, CancellationToken ct = default)
     {
-        var page = Math.Max(1, query.Page);
-        var pageSize = Math.Clamp(query.PageSize, 1, 200);
-
         var report = await _reportRepo.GetByPublicIdAsync(query.ReportPublicId, ct);
         var table = await _tableRepo.GetByIdAsync(report.AppTableId, ct);
         var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
-        // Resolve filter tree — support legacy flat Filters list
         var filterTree = definition.FilterTree;
         if (filterTree == null && definition.Filters.Count > 0)
         {
@@ -66,15 +48,12 @@ public class RunReportQueryHandler
             };
         }
 
-        // Resolve sort fields — support legacy SortFieldId/SortDesc
         IReadOnlyList<SortSpec> sortFields = definition.SortFields.Count > 0
             ? definition.SortFields
             : (definition.SortFieldId.HasValue
                 ? [new SortSpec { FieldId = definition.SortFieldId.Value, Desc = definition.SortDesc }]
                 : []);
 
-        // For grouped Table reports: prepend group field as primary sort key so records
-        // of the same group are contiguous — the frontend groups the flat result visually.
         if (report.ReportType != "Summary" && definition.GroupByFieldId.HasValue)
         {
             var gfId = definition.GroupByFieldId.Value;
@@ -88,20 +67,22 @@ public class RunReportQueryHandler
             }
         }
 
-        if (report.ReportType == "Summary")
-            return await RunSummaryAsync(table, allFields, definition, page, pageSize, ct);
+        var safeName = string.Concat(report.Name.Split(Path.GetInvalidFileNameChars()));
 
-        return await RunTableAsync(table, allFields, definition, page, pageSize, filterTree, sortFields, query.RuntimeFilters, ct);
+        if (report.ReportType == "Summary")
+            return await ExportSummaryAsync(table, allFields, definition, safeName, query.Format, ct);
+
+        return await ExportTableAsync(table, allFields, definition, safeName, query.Format, filterTree, sortFields, ct);
     }
 
-    private async Task<PagedReportRunResult> RunTableAsync(
+    private async Task<ExportResult> ExportTableAsync(
         AppTable table,
         IReadOnlyList<AppField> allFields,
         ReportDefinition definition,
-        int page, int pageSize,
+        string safeName,
+        string format,
         FilterGroup? filterTree,
         IReadOnlyList<SortSpec> sortFields,
-        IReadOnlyList<(long FieldId, string Value)>? runtimeFilters,
         CancellationToken ct)
     {
         IReadOnlyList<AppField> selectedFields;
@@ -118,67 +99,32 @@ public class RunReportQueryHandler
             selectedFields = allFields.Where(f => f.IsReportable).ToList();
         }
 
-        // Merge runtime filters (dynamic/quick-search) into the filter tree
-        if (runtimeFilters?.Count > 0)
-        {
-            var runtimeNodes = runtimeFilters.Select(rf => new FilterNode
-            {
-                Condition = new FilterCondition { FieldId = rf.FieldId, Operator = "contains", Value = rf.Value }
-            }).ToList();
-
-            filterTree = filterTree == null
-                ? new FilterGroup { Logic = "and", Nodes = runtimeNodes }
-                : new FilterGroup
-                {
-                    Logic = "and",
-                    Nodes = [new FilterNode { Group = filterTree }, .. runtimeNodes]
-                };
-        }
-
-        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterTree, sortFields, ct);
-        var total = await _recordRepo.CountAsync(table, filterTree, ct);
-
+        var rows = await _recordRepo.ListAsync(table, selectedFields, 1, 50_000, filterTree, sortFields, ct);
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
-        var columns = selectedFields.Select(f => new ReportColumnInfo
-        {
-            FieldId = f.Id,
-            Name = f.Name,
-            TypeCode = f.TypeCode,
-        }).ToList();
 
-        return new PagedReportRunResult
-        {
-            Items = items,
-            Columns = columns,
-            TotalCount = total,
-            Page = page,
-            PageSize = pageSize,
-        };
+        var columns = selectedFields.Select(f => new ColumnInfo(f.Id, f.Name)).ToList();
+        return BuildExport(columns, items.Select(r => r.Fields).ToList(), safeName, format);
     }
 
-    private async Task<PagedReportRunResult> RunSummaryAsync(
+    private async Task<ExportResult> ExportSummaryAsync(
         AppTable table,
         IReadOnlyList<AppField> allFields,
         ReportDefinition definition,
-        int page, int pageSize,
+        string safeName,
+        string format,
         CancellationToken ct)
     {
         if (!definition.GroupByFieldId.HasValue)
-        {
-            // No group-by configured — return empty result
-            return new PagedReportRunResult { Page = page, PageSize = pageSize };
-        }
+            return BuildExport([], [], safeName, format);
 
         var fieldMap = allFields.ToDictionary(f => f.Id);
         if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField))
-        {
-            return new PagedReportRunResult { Page = page, PageSize = pageSize };
-        }
+            return BuildExport([], [], safeName, format);
 
         var rows = await _recordRepo.SummarizeAsync(
             table, groupByField, definition.Aggregations, allFields, definition.GroupByMode, ct);
 
-        // Build alias→fieldId map. Identify columns displayed as percent-of-total and compute their totals.
+        // Build alias→fieldId map and percent set (same logic as RunSummaryAsync)
         var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var percentAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var columnTotals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
@@ -196,8 +142,23 @@ public class RunReportQueryHandler
             }
         }
 
-        // Remap SQL alias keys to field-ID string keys; apply percent transform where configured
-        var items = rows.Select(row =>
+        var columns = new List<ColumnInfo>
+        {
+            new(groupByField.Id, groupByField.Name),
+            new(0, "Count"),
+        };
+        foreach (var agg in definition.Aggregations)
+        {
+            if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
+            {
+                var label = agg.DisplayAs == "PercentOfColumnTotal"
+                    ? $"{agg.Function} of {aggField.Name} (%)"
+                    : $"{agg.Function} of {aggField.Name}";
+                columns.Add(new ColumnInfo(aggField.Id, label));
+            }
+        }
+
+        var dataRows = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
             fields[groupByField.Id.ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
@@ -210,33 +171,89 @@ public class RunReportQueryHandler
                 else
                     fields[fieldId] = val;
             }
-            return new RecordResult { Id = Guid.Empty, CreatedOn = DateTime.UtcNow, Fields = fields };
+            return fields;
         }).ToList();
 
-        // Synthetic columns: group-by field + Count + one per aggregation
-        var columns = new List<ReportColumnInfo>
+        return BuildExport(columns, dataRows, safeName, format);
+    }
+
+    private static ExportResult BuildExport(
+        List<ColumnInfo> columns,
+        List<Dictionary<string, object?>> rows,
+        string safeName,
+        string format)
+    {
+        return format == "xlsx"
+            ? BuildXlsx(columns, rows, safeName)
+            : BuildCsv(columns, rows, safeName);
+    }
+
+    private static ExportResult BuildCsv(
+        List<ColumnInfo> columns,
+        List<Dictionary<string, object?>> rows,
+        string safeName)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(string.Join(",", columns.Select(c => EscapeCsvField(c.Name))));
+        foreach (var row in rows)
         {
-            new() { FieldId = groupByField.Id, Name = groupByField.Name, TypeCode = groupByField.TypeCode },
-            new() { FieldId = 0, Name = "Count", TypeCode = "Number" },
+            sb.AppendLine(string.Join(",", columns.Select(c =>
+                EscapeCsvField(row.TryGetValue(c.Key, out var v) ? v?.ToString() : null))));
+        }
+        return new ExportResult
+        {
+            Content = Encoding.UTF8.GetBytes(sb.ToString()),
+            ContentType = "text/csv",
+            FileName = $"{safeName}.csv",
         };
-        foreach (var agg in definition.Aggregations)
+    }
+
+    private static ExportResult BuildXlsx(
+        List<ColumnInfo> columns,
+        List<Dictionary<string, object?>> rows,
+        string safeName)
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Report");
+
+        for (var ci = 0; ci < columns.Count; ci++)
         {
-            if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
+            var cell = ws.Cell(1, ci + 1);
+            cell.Value = columns[ci].Name;
+            cell.Style.Font.Bold = true;
+        }
+
+        for (var ri = 0; ri < rows.Count; ri++)
+        {
+            for (var ci = 0; ci < columns.Count; ci++)
             {
-                var label = agg.DisplayAs == "PercentOfColumnTotal"
-                    ? $"{agg.Function} of {aggField.Name} (%)"
-                    : $"{agg.Function} of {aggField.Name}";
-                columns.Add(new ReportColumnInfo { FieldId = aggField.Id, Name = label, TypeCode = "Number" });
+                var raw = rows[ri].TryGetValue(columns[ci].Key, out var v) ? v : null;
+                ws.Cell(ri + 2, ci + 1).Value = raw is null ? XLCellValue.FromObject(string.Empty) : XLCellValue.FromObject(raw);
             }
         }
 
-        return new PagedReportRunResult
+        ws.Columns().AdjustToContents();
+
+        using var ms = new MemoryStream();
+        wb.SaveAs(ms);
+        return new ExportResult
         {
-            Items = items,
-            Columns = columns,
-            TotalCount = rows.Count,
-            Page = 1,
-            PageSize = rows.Count > 0 ? rows.Count : pageSize,
+            Content = ms.ToArray(),
+            ContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            FileName = $"{safeName}.xlsx",
         };
+    }
+
+    private static string EscapeCsvField(string? value)
+    {
+        if (value is null) return string.Empty;
+        if (value.Contains(',') || value.Contains('"') || value.Contains('\n'))
+            return $"\"{value.Replace("\"", "\"\"")}\"";
+        return value;
+    }
+
+    private record ColumnInfo(long Id, string Name)
+    {
+        public string Key => Id.ToString();
     }
 }
