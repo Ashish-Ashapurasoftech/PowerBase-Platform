@@ -46,6 +46,7 @@ public class AppRepository : BaseRepository, IAppRepository
           AND au.UserId   = @userId
           AND au.IsDeleted = 0
           AND a.IsDeleted  = 0
+          AND a.Status = @Status
         ORDER BY a.Name
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
         """;
@@ -140,7 +141,7 @@ public class AppRepository : BaseRepository, IAppRepository
     {
         await using var connection = ConnectionFactory.Create();
         var results = await connection.QueryAsync<App>(
-            new CommandDefinition(ListSql, new { tenantId = QueryContext.TenantId, offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
+            new CommandDefinition(ListSql, new { tenantId = QueryContext.TenantId, offset = (page - 1) * pageSize, pageSize, }, cancellationToken: ct));
         return results.AsList();
     }
 
@@ -196,7 +197,7 @@ public class AppRepository : BaseRepository, IAppRepository
     {
         await using var connection = ConnectionFactory.Create();
         var results = await connection.QueryAsync<AppListItemDto>(
-            new CommandDefinition(ListByUserSql, new { tenantId = QueryContext.TenantId, userId, offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
+            new CommandDefinition(ListByUserSql, new { tenantId = QueryContext.TenantId, userId,Status = "Active", offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
         return results.AsList();
     }
 

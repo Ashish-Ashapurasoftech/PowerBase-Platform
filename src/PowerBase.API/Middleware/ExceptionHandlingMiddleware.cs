@@ -37,6 +37,8 @@ public class ExceptionHandlingMiddleware
             ConflictException e => (StatusCodes.Status409Conflict, e.ErrorCode, e.Message, (object?)null),
             UnauthorizedActionException e => (StatusCodes.Status401Unauthorized, e.ErrorCode, e.Message, (object?)null),
             Domain.Exceptions.ValidationException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)e.Errors),
+            BadRequestException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)null),
+            InternalServerException e => (StatusCodes.Status500InternalServerError, e.ErrorCode, e.Message, (object?)null),
             _ => (StatusCodes.Status500InternalServerError, "INTERNAL_ERROR", "An unexpected error occurred.", (object?)null)
         };
 
@@ -47,9 +49,11 @@ public class ExceptionHandlingMiddleware
         context.Response.StatusCode = statusCode;
 
         object body;
-        if (statusCode == StatusCodes.Status500InternalServerError && _env.IsDevelopment())
+        if (statusCode == StatusCodes.Status500InternalServerError && _env.IsDevelopment() && exception is not InternalServerException)
         {
-            body = new { error = new { code, message = exception.Message, detail = exception.ToString() } };
+            // Even in development, keep the main message user-friendly so the frontend toast doesn't show raw C# errors.
+            // We put the technical exception message in the 'detail' field for debugging in the network tab.
+            body = new { error = new { code, message = "An unexpected error occurred on the server.", detail = exception.Message + "\n" + exception.ToString() } };
         }
         else if (errors is not null)
         {
