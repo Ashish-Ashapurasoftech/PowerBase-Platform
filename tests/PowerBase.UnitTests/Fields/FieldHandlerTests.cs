@@ -17,6 +17,7 @@ public class FieldHandlerTests
     private readonly ISchemaEngineService _schemaEngine = Substitute.For<ISchemaEngineService>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
+    private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
 
     private static AppTable MakeTable(long id = 5) => new() { Id = id, PublicId = Guid.NewGuid(), Name = "T" };
     private static FieldType MakeFieldType() => new() { Id = 1, Code = "Text", SqlDataType = "NVARCHAR(500)" };
@@ -25,6 +26,7 @@ public class FieldHandlerTests
     {
         _queryContext.TenantId.Returns(1L);
         _queryContext.UserId.Returns(1L);
+        _formRepo.ListByTableAsync(Arg.Any<Guid>()).Returns(Array.Empty<Form>());
     }
 
     // --- CreateFieldCommandHandler ---
@@ -37,7 +39,7 @@ public class FieldHandlerTests
         _fieldRepo.NameExistsInTableAsync(table.Id, "Email").Returns(false);
         _fieldTypeRepo.GetByCodeAsync("Text").Returns(MakeFieldType());
         _fieldRepo.CreateAsync(Arg.Any<AppField>()).Returns((100L, Guid.NewGuid()));
-        var sut = new CreateFieldCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo);
+        var sut = new CreateFieldCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo, _formRepo);
 
         var result = await sut.HandleAsync(new CreateFieldCommand(table.PublicId, "Text", "Email", null, null, false));
 
@@ -55,7 +57,7 @@ public class FieldHandlerTests
         var table = MakeTable();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.NameExistsInTableAsync(table.Id, "Email").Returns(true);
-        var sut = new CreateFieldCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo);
+        var sut = new CreateFieldCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo, _formRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreateFieldCommand(table.PublicId, "Text", "Email", null, null, false)))
             .Should().ThrowAsync<DuplicateException>();
@@ -64,7 +66,7 @@ public class FieldHandlerTests
     [Fact]
     public async Task CreateField_InvalidTypeCode_ThrowsValidationException()
     {
-        var sut = new CreateFieldCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo);
+        var sut = new CreateFieldCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo, _formRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreateFieldCommand(Guid.NewGuid(), "Blob", "File", null, null, false)))
             .Should().ThrowAsync<ValidationException>();
@@ -73,7 +75,7 @@ public class FieldHandlerTests
     [Fact]
     public async Task CreateField_EmptyName_ThrowsValidationException()
     {
-        var sut = new CreateFieldCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo);
+        var sut = new CreateFieldCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo, _formRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreateFieldCommand(Guid.NewGuid(), "Text", "", null, null, false)))
             .Should().ThrowAsync<ValidationException>();

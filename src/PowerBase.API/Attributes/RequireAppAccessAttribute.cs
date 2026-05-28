@@ -5,7 +5,7 @@ using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.API.Attributes;
 
-public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId }
+public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId }
 
 [AttributeUsage(AttributeTargets.Method)]
 public class RequireAppPermissionAttribute : Attribute, IFilterFactory
@@ -69,6 +69,16 @@ internal class AppPermissionFilter : IAsyncActionFilter
                 case AppAccessResolver.ByReportPublicId:
                     var reportPubId = Guid.Parse(route["publicId"]!.ToString()!);
                     await _accessService.RequirePermissionByReportPublicIdAsync(reportPubId, _permissionCode, context.HttpContext.RequestAborted);
+                    break;
+
+                case AppAccessResolver.ByFormPublicId:
+                    var formPubId = Guid.Parse(route["publicId"]!.ToString()!);
+                    await _accessService.RequireByFormPublicIdAsync(formPubId, _required, context.HttpContext.RequestAborted);
+                    break;
+
+                case AppAccessResolver.ByFormRulePublicId:
+                    var rulePubId = Guid.Parse(route["ruleId"]!.ToString()!);
+                    await _accessService.RequireByFormRulePublicIdAsync(rulePubId, _required, context.HttpContext.RequestAborted);
                     break;
             }
         }

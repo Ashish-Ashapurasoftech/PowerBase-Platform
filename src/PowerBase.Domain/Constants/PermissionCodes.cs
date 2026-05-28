@@ -34,6 +34,12 @@ public static class PermissionCodes
 
     public const string AuditLogsRead = "audit:read";
 
+    public const string FormsCreate      = "forms:create";
+    public const string FormsRead        = "forms:read";
+    public const string FormsUpdate      = "forms:update";
+    public const string FormsDelete      = "forms:delete";
+    public const string FormsRulesManage = "forms:rules:manage";
+
     public static readonly IReadOnlySet<string> DefaultUserPermissions = new HashSet<string>
     {
         AppsRead,
@@ -41,5 +47,6 @@ public static class PermissionCodes
         FieldsRead,
         RecordsCreate, RecordsRead, RecordsUpdate, RecordsDelete,
         ReportsRead, ReportsRun,
+        FormsRead,
     };
 }

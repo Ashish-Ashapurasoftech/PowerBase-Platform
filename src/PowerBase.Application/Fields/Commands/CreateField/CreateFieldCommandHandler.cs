@@ -26,6 +26,7 @@ public class CreateFieldCommandHandler
     private readonly ISchemaEngineService _schemaEngine;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFormRepository _formRepo;
 
     public CreateFieldCommandHandler(
         IAppTableRepository tableRepo,
@@ -33,7 +34,8 @@ public class CreateFieldCommandHandler
         IFieldTypeRepository fieldTypeRepo,
         ISchemaEngineService schemaEngine,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFormRepository formRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -41,6 +43,7 @@ public class CreateFieldCommandHandler
         _schemaEngine = schemaEngine;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
+        _formRepo = formRepo;
     }
 
     public async Task<CreateFieldResult> HandleAsync(CreateFieldCommand command, CancellationToken ct = default)
@@ -82,6 +85,13 @@ public class CreateFieldCommandHandler
         field.PhysicalColumnName = physicalColumn;
 
         await _schemaEngine.AddColumnAsync(table, field, ct);
+
+        // Auto-append the new field to all forms on this table where AutoAddNewFields=true
+        var formsForTable = await _formRepo.ListByTableAsync(table.PublicId, ct);
+        foreach (var form in formsForTable.Where(f => f.AutoAddNewFields))
+        {
+            await _formRepo.AppendFieldToLastSectionAsync(form.Id, id, _queryContext.TenantId, ct);
+        }
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), appId: table.AppId, ct: ct);

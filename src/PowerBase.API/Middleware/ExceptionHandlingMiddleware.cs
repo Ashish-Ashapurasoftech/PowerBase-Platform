@@ -35,6 +35,7 @@ public class ExceptionHandlingMiddleware
             NotFoundException e => (StatusCodes.Status404NotFound, e.ErrorCode, e.Message, (object?)null),
             DuplicateException e => (StatusCodes.Status409Conflict, e.ErrorCode, e.Message, (object?)null),
             ConflictException e => (StatusCodes.Status409Conflict, e.ErrorCode, e.Message, (object?)null),
+            ConcurrencyException e => (StatusCodes.Status409Conflict, e.ErrorCode, e.Message, (object?)null),
             UnauthorizedActionException e => (StatusCodes.Status401Unauthorized, e.ErrorCode, e.Message, (object?)null),
             Domain.Exceptions.ValidationException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)e.Errors),
             BadRequestException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)null),
