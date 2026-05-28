@@ -51,14 +51,29 @@ public class AppUserRepository : BaseRepository, IAppUserRepository
         WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
         """;
 
-    private const string GetAppPermissionsSql = """
-        SELECT p.Code
+    private const string GetUserRolePublicIdSql = """
+        SELECT ar.PublicId
+        FROM meta.AppUser au
+        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+        """;
+
+    private const string GetPermissionFlagsSql = """
+        SELECT ar.CanViewRecords, ar.CanAddRecords, ar.CanEditRecords, ar.CanDeleteRecords
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
         JOIN meta.AppRolePermission arp ON arp.AppRoleId = ar.Id
         JOIN meta.Permission p ON p.Id = arp.PermissionId
         WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
         """;
+    private const string GetAppPermissionsSql = """
+    SELECT p.Code
+    FROM meta.AppUser au
+    JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+    JOIN meta.AppRolePermission arp ON arp.AppRoleId = ar.Id
+    JOIN meta.Permission p ON p.Id = arp.PermissionId
+    WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+    """;
 
     private const string RemoveSql = """
         UPDATE meta.AppUser
@@ -121,6 +136,20 @@ public class AppUserRepository : BaseRepository, IAppUserRepository
             new CommandDefinition(GetUserRoleNameSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
     }
 
+    public async Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<Guid?>(
+            new CommandDefinition(GetUserRolePublicIdSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+    }
+
+    public async Task<(bool CanView, bool CanAdd, bool CanEdit, bool CanDelete)?> GetUserPermissionFlagsAsync(long appId, long userId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var result = await connection.QueryAsync<string>(
+            new CommandDefinition(GetAppPermissionsSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+        return result.ToHashSet();
+    }
     public async Task<IReadOnlySet<string>> GetUserAppPermissionsAsync(long appId, long userId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
