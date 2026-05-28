@@ -10,6 +10,7 @@ public class FormSectionLayoutRequest
     public Guid? PublicId { get; init; }
     public string Name { get; init; } = string.Empty;
     public int ColumnCount { get; init; }
+    public string? ColumnWidths { get; init; }
     public bool IsCollapsed { get; init; }
     public List<FormElementLayoutRequest> Elements { get; init; } = [];
 }
@@ -17,7 +18,9 @@ public class FormSectionLayoutRequest
 public class FormElementLayoutRequest
 {
     public Guid? PublicId { get; init; }
-    public long AppFieldId { get; init; }
+    public long? AppFieldId { get; init; }
+    public string ElementType { get; init; } = "Field";
+    public string? ElementContent { get; init; }
     public string LabelMode { get; init; } = "Default";
     public string? CustomLabel { get; init; }
     public bool ShowOnAdd { get; init; } = true;

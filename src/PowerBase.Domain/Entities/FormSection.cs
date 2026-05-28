@@ -10,5 +10,6 @@ public class FormSection
     public int ColumnCount { get; set; } = 2;
     public bool IsCollapsed { get; set; }
     public int DisplayOrder { get; set; }
+    public string? ColumnWidths { get; set; }
     public List<FormElement> Elements { get; set; } = new();
 }

@@ -8,12 +8,15 @@ public record FormSectionLayout(
     Guid? PublicId,
     string Name,
     int ColumnCount,
+    string? ColumnWidths,
     bool IsCollapsed,
     IReadOnlyList<FormElementLayout> Elements);
 
 public record FormElementLayout(
     Guid? PublicId,
-    long AppFieldId,
+    long? AppFieldId,
+    string ElementType,
+    string? ElementContent,
     string LabelMode,
     string? CustomLabel,
     bool ShowOnAdd,

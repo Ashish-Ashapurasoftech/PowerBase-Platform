@@ -12,6 +12,7 @@ public class FormSectionResponse
     public Guid Id { get; init; }
     public string Name { get; init; } = string.Empty;
     public int ColumnCount { get; init; }
+    public string? ColumnWidths { get; init; }
     public bool IsCollapsed { get; init; }
     public int DisplayOrder { get; init; }
     public List<FormElementResponse> Elements { get; init; } = [];
@@ -21,7 +22,9 @@ public class FormElementResponse
 {
     public long DbId { get; init; }
     public Guid Id { get; init; }
-    public long AppFieldId { get; init; }
+    public long? AppFieldId { get; init; }
+    public string ElementType { get; init; } = "Field";
+    public string? ElementContent { get; init; }
     public string LabelMode { get; init; } = string.Empty;
     public string? CustomLabel { get; init; }
     public bool ShowOnAdd { get; init; }
