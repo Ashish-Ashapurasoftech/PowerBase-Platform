@@ -10,5 +10,7 @@ public interface IAppAccessService
     Task RequireByTablePublicIdAsync(Guid tablePublicId, AppAccess required, CancellationToken ct = default);
     Task RequireByReportPublicIdAsync(Guid reportPublicId, AppAccess required, CancellationToken ct = default);
     Task RequireByAppIdAsync(long appId, AppAccess required, CancellationToken ct = default);
+    Task RequireByFormPublicIdAsync(Guid formPublicId, AppAccess required, CancellationToken ct = default);
+    Task RequireByFormRulePublicIdAsync(Guid rulePublicId, AppAccess required, CancellationToken ct = default);
     Task<AppPermissionFlags> GetPermissionFlagsByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default);
 }

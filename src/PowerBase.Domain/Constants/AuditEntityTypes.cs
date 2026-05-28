@@ -10,5 +10,7 @@ public static class AuditEntityTypes
     public const string TenantRole = "TenantRole";
     public const string AppRole = "AppRole";
     public const string TenantUser = "TenantUser";
-    public const string AppUser = "AppUser";
+    public const string AppUser  = "AppUser";
+    public const string Form     = "Form";
+    public const string FormRule = "FormRule";
 }

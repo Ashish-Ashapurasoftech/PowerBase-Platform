@@ -8,6 +8,8 @@ public class AppAccessService : IAppAccessService
     private readonly IAppRepository _appRepo;
     private readonly IAppTableRepository _tableRepo;
     private readonly IReportRepository _reportRepo;
+    private readonly IFormRepository _formRepo;
+    private readonly IFormRuleRepository _formRuleRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IQueryContext _queryContext;
 
@@ -15,12 +17,16 @@ public class AppAccessService : IAppAccessService
         IAppRepository appRepo,
         IAppTableRepository tableRepo,
         IReportRepository reportRepo,
+        IFormRepository formRepo,
+        IFormRuleRepository formRuleRepo,
         IAppUserRepository appUserRepo,
         IQueryContext queryContext)
     {
         _appRepo = appRepo;
         _tableRepo = tableRepo;
         _reportRepo = reportRepo;
+        _formRepo = formRepo;
+        _formRuleRepo = formRuleRepo;
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
     }
@@ -40,6 +46,18 @@ public class AppAccessService : IAppAccessService
     public async Task RequireByReportPublicIdAsync(Guid reportPublicId, AppAccess required, CancellationToken ct = default)
     {
         var appId = await _reportRepo.GetAppIdByPublicIdAsync(reportPublicId, ct);
+        await RequireByAppIdAsync(appId, required, ct);
+    }
+
+    public async Task RequireByFormPublicIdAsync(Guid formPublicId, AppAccess required, CancellationToken ct = default)
+    {
+        var appId = await _formRepo.GetAppIdByPublicIdAsync(formPublicId, ct);
+        await RequireByAppIdAsync(appId, required, ct);
+    }
+
+    public async Task RequireByFormRulePublicIdAsync(Guid rulePublicId, AppAccess required, CancellationToken ct = default)
+    {
+        var appId = await _formRuleRepo.GetAppIdByPublicIdAsync(rulePublicId, ct);
         await RequireByAppIdAsync(appId, required, ct);
     }
 
