@@ -49,26 +49,18 @@ public class AppAccessService : IAppAccessService
         await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
     }
 
-    public async Task RequireByFormPublicIdAsync(Guid formPublicId, AppAccess required, CancellationToken ct = default)
+    public async Task RequirePermissionByFormPublicIdAsync(Guid formPublicId, string permissionCode, CancellationToken ct = default)
     {
         var appId = await _formRepo.GetAppIdByPublicIdAsync(formPublicId, ct);
-        await RequireByAppIdAsync(appId, required, ct);
+        await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
     }
 
-    public async Task RequireByFormRulePublicIdAsync(Guid rulePublicId, AppAccess required, CancellationToken ct = default)
+    public async Task RequirePermissionByFormRulePublicIdAsync(Guid rulePublicId, string permissionCode, CancellationToken ct = default)
     {
         var appId = await _formRuleRepo.GetAppIdByPublicIdAsync(rulePublicId, ct);
-        await RequireByAppIdAsync(appId, required, ct);
+        await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
     }
 
-    public async Task RequireByAppIdAsync(long appId, AppAccess required, CancellationToken ct = default)
-    {
-        var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
-        if (!permissions.Contains(permissionCode))
-        {
-            throw new UnauthorizedActionException("You do not have permission to perform this action in this app.");
-        }
-    }
     public async Task RequirePermissionByAppIdAsync(long appId, string permissionCode, CancellationToken ct = default)
     {
         var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);

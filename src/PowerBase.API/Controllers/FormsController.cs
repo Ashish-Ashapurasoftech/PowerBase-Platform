@@ -84,8 +84,7 @@ public class FormsController : ControllerBase
 
     /// <summary>List all forms for a table.</summary>
     [HttpGet("tables/{tableId:guid}/forms")]
-    [RequirePermission(PermissionCodes.FormsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.FormsRead, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<FormListItemResponse>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -98,8 +97,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Create a new form for a table.</summary>
     [HttpPost("tables/{tableId:guid}/forms")]
-    [RequirePermission(PermissionCodes.FormsCreate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.FormsCreate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<FormDetailResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -112,8 +110,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Get a single form.</summary>
     [HttpGet("forms/{publicId:guid}")]
-    [RequirePermission(PermissionCodes.FormsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByFormPublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRead, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(typeof(ApiResponse<FormDetailResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -125,8 +122,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Update form settings (name, auto-add, show built-in, save options).</summary>
     [HttpPatch("forms/{publicId:guid}/settings")]
-    [RequirePermission(PermissionCodes.FormsUpdate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormPublicId)]
+    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -143,8 +139,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Soft-delete a form. Default forms cannot be deleted.</summary>
     [HttpDelete("forms/{publicId:guid}")]
-    [RequirePermission(PermissionCodes.FormsDelete)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormPublicId)]
+    [RequireAppPermission(PermissionCodes.FormsDelete, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -157,8 +152,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Duplicate a form (and its layout) under a new name.</summary>
     [HttpPost("forms/{publicId:guid}/duplicate")]
-    [RequirePermission(PermissionCodes.FormsCreate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormPublicId)]
+    [RequireAppPermission(PermissionCodes.FormsCreate, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(typeof(ApiResponse<FormDetailResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -172,8 +166,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Get the full section/element layout of a form.</summary>
     [HttpGet("forms/{publicId:guid}/layout")]
-    [RequirePermission(PermissionCodes.FormsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByFormPublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRead, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(typeof(ApiResponse<FormLayoutResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -185,8 +178,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Replace the entire form layout (sections + elements) atomically.</summary>
     [HttpPut("forms/{publicId:guid}/layout")]
-    [RequirePermission(PermissionCodes.FormsUpdate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormPublicId)]
+    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -222,8 +214,7 @@ public class FormsController : ControllerBase
 
     /// <summary>List all rules for a form.</summary>
     [HttpGet("forms/{publicId:guid}/rules")]
-    [RequirePermission(PermissionCodes.FormsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByFormPublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRead, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<FormRuleListItemResponse>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -236,8 +227,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Create a new (empty) form rule.</summary>
     [HttpPost("forms/{publicId:guid}/rules")]
-    [RequirePermission(PermissionCodes.FormsRulesManage)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormPublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRulesManage, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(typeof(ApiResponse<FormRuleDetailResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -251,8 +241,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Get a single form rule with all conditions and actions.</summary>
     [HttpGet("forms/rules/{ruleId:guid}")]
-    [RequirePermission(PermissionCodes.FormsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByFormRulePublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRead, AppAccessResolver.ByFormRulePublicId)]
     [ProducesResponseType(typeof(ApiResponse<FormRuleDetailResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -264,8 +253,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Replace a rule's body (header + conditions + actions) atomically.</summary>
     [HttpPut("forms/rules/{ruleId:guid}")]
-    [RequirePermission(PermissionCodes.FormsRulesManage)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormRulePublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRulesManage, AppAccessResolver.ByFormRulePublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -288,8 +276,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Soft-delete a form rule.</summary>
     [HttpDelete("forms/rules/{ruleId:guid}")]
-    [RequirePermission(PermissionCodes.FormsRulesManage)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormRulePublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRulesManage, AppAccessResolver.ByFormRulePublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -301,8 +288,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Duplicate a form rule.</summary>
     [HttpPost("forms/rules/{ruleId:guid}/duplicate")]
-    [RequirePermission(PermissionCodes.FormsRulesManage)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormRulePublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRulesManage, AppAccessResolver.ByFormRulePublicId)]
     [ProducesResponseType(typeof(ApiResponse<FormRuleDetailResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -314,8 +300,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Toggle a rule's active/inactive state.</summary>
     [HttpPatch("forms/rules/{ruleId:guid}/toggle")]
-    [RequirePermission(PermissionCodes.FormsRulesManage)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormRulePublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRulesManage, AppAccessResolver.ByFormRulePublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -327,8 +312,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Reorder rules within a form by supplying the ordered list of rule GUIDs.</summary>
     [HttpPut("forms/{publicId:guid}/rules/reorder")]
-    [RequirePermission(PermissionCodes.FormsRulesManage)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByFormPublicId)]
+    [RequireAppPermission(PermissionCodes.FormsRulesManage, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -438,3 +422,4 @@ public class FormsController : ControllerBase
         }).ToList(),
     };
 }
+

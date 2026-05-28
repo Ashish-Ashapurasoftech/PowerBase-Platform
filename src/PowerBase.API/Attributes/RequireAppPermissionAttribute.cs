@@ -73,12 +73,12 @@ internal class AppPermissionFilter : IAsyncActionFilter
 
                 case AppAccessResolver.ByFormPublicId:
                     var formPubId = Guid.Parse(route["publicId"]!.ToString()!);
-                    await _accessService.RequireByFormPublicIdAsync(formPubId, _required, context.HttpContext.RequestAborted);
+                    await _accessService.RequirePermissionByFormPublicIdAsync(formPubId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
 
                 case AppAccessResolver.ByFormRulePublicId:
                     var rulePubId = Guid.Parse(route["ruleId"]!.ToString()!);
-                    await _accessService.RequireByFormRulePublicIdAsync(rulePubId, _required, context.HttpContext.RequestAborted);
+                    await _accessService.RequirePermissionByFormRulePublicIdAsync(rulePubId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
             }
         }
