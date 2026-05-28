@@ -8,6 +8,8 @@ public interface IReportRepository
     Task<long> GetAppIdByPublicIdAsync(Guid reportPublicId, CancellationToken ct = default);
     Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Report>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default);
+    Task<Report?> GetDefaultByTableAsync(Guid tablePublicId, CancellationToken ct = default);
+    Task<bool> BelongsToTableAsync(Guid tablePublicId, Guid reportPublicId, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> CreateAsync(Report report, CancellationToken ct = default);
     Task<int> UpdateAsync(Guid publicId, string name, string? description,
         string visibility, string definition, CancellationToken ct = default);

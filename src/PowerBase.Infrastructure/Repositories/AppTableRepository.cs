@@ -82,6 +82,14 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
         WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
         """;
 
+    private const string UpdateDefaultReportSettingsSql = """
+        UPDATE meta.AppTable
+        SET DefaultReportSettings = @defaultReportSettings,
+            ModifiedOn            = SYSUTCDATETIME(),
+            ModifiedBy            = @modifiedBy
+        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+        """;
+
     private const string SoftDeleteSql = """
         UPDATE meta.AppTable
         SET IsDeleted = 1,
@@ -202,6 +210,21 @@ public class AppTableRepository : BaseRepository, IAppTableRepository
                 publicId, name, singularLabel, pluralLabel, description, icon,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
+    }
+
+    public async Task UpdateDefaultReportSettingsAsync(Guid publicId, string defaultReportSettings, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var affected = await connection.ExecuteAsync(
+            new CommandDefinition(UpdateDefaultReportSettingsSql, new
+            {
+                tenantId = QueryContext.TenantId,
+                publicId,
+                defaultReportSettings,
+                modifiedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
+        if (affected == 0)
+            throw new NotFoundException("Table", publicId);
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)

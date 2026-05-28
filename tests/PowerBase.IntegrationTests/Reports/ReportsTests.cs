@@ -285,6 +285,76 @@ public class ReportsTests : IntegrationTestBase
         response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
+    // --- Default report settings ---
+
+    [Fact]
+    public async Task GetDefaultReportSettings_ReturnsSeededDefaultAndAppRoles()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+
+        var response = await GetAsync($"/tables/{tableId}/default-report-settings", token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var settings = await ReadData<DefaultReportSettingsDto>(response);
+        settings.Mode.Should().Be("Everyone");
+        settings.EveryoneReportId.Should().NotBeEmpty();
+        settings.Roles.Should().NotBeEmpty();
+        settings.Reports.Should().Contain(r => r.IsDefault);
+    }
+
+    [Fact]
+    public async Task UpdateDefaultReportSettings_PersistsRoleBasedMode()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var reportId = await CreateReportAsync(token, tableId, name: "Role Default");
+        var rolesResponse = await GetAsync($"/apps/{appId}/roles", token);
+        var roles = await ReadListData<AppRoleDto>(rolesResponse);
+        var adminRoleId = roles.Single(r => r.Name == "Administrator").PublicId;
+
+        var putResponse = await PutAsync($"/tables/{tableId}/default-report-settings", new
+        {
+            mode = "RoleBased",
+            everyoneReportId = reportId,
+            roleDefaults = new Dictionary<Guid, Guid?> { [adminRoleId] = reportId },
+        }, token);
+
+        putResponse.StatusCode.Should().Be(HttpStatusCode.NoContent);
+        var getResponse = await GetAsync($"/tables/{tableId}/default-report-settings", token);
+        var settings = await ReadData<DefaultReportSettingsDto>(getResponse);
+        settings.Mode.Should().Be("RoleBased");
+        settings.EveryoneReportId.Should().Be(reportId);
+        settings.Roles.Single(r => r.RoleId == adminRoleId).ReportId.Should().Be(reportId);
+    }
+
+    [Fact]
+    public async Task GetDefaultReport_ReturnsRoleSpecificReport_WhenConfigured()
+    {
+        var (token, _) = await SignupAsync();
+        var appId = await CreateAppAsync(token);
+        var tableId = await CreateTableAsync(token, appId);
+        var roleReportId = await CreateReportAsync(token, tableId, name: "Admin Home");
+        var rolesResponse = await GetAsync($"/apps/{appId}/roles", token);
+        var roles = await ReadListData<AppRoleDto>(rolesResponse);
+        var adminRoleId = roles.Single(r => r.Name == "Administrator").PublicId;
+        await PutAsync($"/tables/{tableId}/default-report-settings", new
+        {
+            mode = "RoleBased",
+            everyoneReportId = roleReportId,
+            roleDefaults = new Dictionary<Guid, Guid?> { [adminRoleId] = roleReportId },
+        }, token);
+
+        var response = await GetAsync($"/tables/{tableId}/default-report", token);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var report = await ReadData<ReportDto>(response);
+        report.Id.Should().Be(roleReportId);
+        report.Name.Should().Be("Admin Home");
+    }
+
     // --- ListByTable ---
 
     [Fact]
@@ -323,4 +393,8 @@ public class ReportsTests : IntegrationTestBase
     private record ReportColumnDto(long FieldId, string Name, string TypeCode);
     private record ReportRowDto(Guid Id);
     private record ReportListItemDto(Guid Id, string Name, bool IsDefault);
+    private record AppRoleDto(Guid PublicId, string Name);
+    private record DefaultReportSettingsDto(string Mode, Guid EveryoneReportId, List<RoleDefaultDto> Roles, List<DefaultReportItemDto> Reports);
+    private record RoleDefaultDto(Guid RoleId, string RoleName, Guid? ReportId);
+    private record DefaultReportItemDto(Guid Id, string Name, bool IsDefault);
 }

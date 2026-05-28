@@ -53,6 +53,32 @@ public class ReportRepository : BaseRepository, IReportRepository
         ORDER BY r.DisplayOrder, r.Name
         """;
 
+    private const string GetDefaultByTableSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.Report r
+        WHERE r.TenantId = @tenantId
+          AND r.AppTableId = (SELECT Id FROM meta.AppTable
+                              WHERE PublicId = @tablePublicId
+                                AND TenantId = @tenantId
+                                AND IsDeleted = 0)
+          AND r.IsDefault = 1
+          AND r.IsDeleted = 0
+        """;
+
+    private const string BelongsToTableSql = """
+        SELECT CAST(CASE WHEN EXISTS (
+            SELECT 1
+            FROM meta.Report r
+            JOIN meta.AppTable t ON t.Id = r.AppTableId
+            WHERE r.TenantId = @tenantId
+              AND t.TenantId = @tenantId
+              AND t.PublicId = @tablePublicId
+              AND r.PublicId = @reportPublicId
+              AND r.IsDeleted = 0
+              AND t.IsDeleted = 0
+        ) THEN 1 ELSE 0 END AS BIT)
+        """;
+
     private const string InsertSql = """
         INSERT INTO meta.Report
             (TenantId, AppTableId, OwnerId, Name, Description, ReportType, Visibility,
@@ -128,6 +154,24 @@ public class ReportRepository : BaseRepository, IReportRepository
                 new { tenantId = QueryContext.TenantId, tablePublicId, userId = QueryContext.UserId },
                 cancellationToken: ct));
         return results.AsList();
+    }
+
+    public async Task<Report?> GetDefaultByTableAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<Report>(
+            new CommandDefinition(GetDefaultByTableSql,
+                new { tenantId = QueryContext.TenantId, tablePublicId },
+                cancellationToken: ct));
+    }
+
+    public async Task<bool> BelongsToTableAsync(Guid tablePublicId, Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(BelongsToTableSql,
+                new { tenantId = QueryContext.TenantId, tablePublicId, reportPublicId },
+                cancellationToken: ct));
     }
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(Report report, CancellationToken ct = default)
