@@ -6,7 +6,9 @@ public class FormElement
     public Guid PublicId { get; set; }
     public long TenantId { get; set; }
     public long FormSectionId { get; set; }
-    public long AppFieldId { get; set; }
+    public long? AppFieldId { get; set; }
+    public string ElementType { get; set; } = "Field";
+    public string? ElementContent { get; set; }
     public string LabelMode { get; set; } = "Default";
     public string? CustomLabel { get; set; }
     public bool ShowOnAdd { get; set; } = true;

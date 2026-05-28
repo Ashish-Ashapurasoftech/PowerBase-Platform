@@ -41,12 +41,13 @@ public class SaveFormLayoutCommandHandler
         var tableFields = await _fieldRepo.ListByTableAsync(form.AppTableId, ct);
         var validFieldIds = tableFields.Select(f => f.Id).ToHashSet();
 
-        var allElementFieldIds = command.Sections
+        var fieldElementIds = command.Sections
             .SelectMany(s => s.Elements)
-            .Select(e => e.AppFieldId)
+            .Where(e => e.ElementType == "Field" && e.AppFieldId.HasValue)
+            .Select(e => e.AppFieldId!.Value)
             .ToList();
 
-        var invalidIds = allElementFieldIds.Except(validFieldIds).ToList();
+        var invalidIds = fieldElementIds.Except(validFieldIds).ToList();
         if (invalidIds.Count > 0)
             throw new ValidationException(new Dictionary<string, string[]>
             {
@@ -55,15 +56,18 @@ public class SaveFormLayoutCommandHandler
 
         var sections = command.Sections.Select(s => new FormSection
         {
-            TenantId    = _queryContext.TenantId,
-            FormId      = form.Id,
-            Name        = s.Name,
-            ColumnCount = s.ColumnCount,
-            IsCollapsed = s.IsCollapsed,
-            Elements    = s.Elements.Select(e => new FormElement
+            TenantId     = _queryContext.TenantId,
+            FormId       = form.Id,
+            Name         = s.Name,
+            ColumnCount  = s.ColumnCount,
+            ColumnWidths = s.ColumnWidths,
+            IsCollapsed  = s.IsCollapsed,
+            Elements     = s.Elements.Select(e => new FormElement
             {
                 TenantId         = _queryContext.TenantId,
-                AppFieldId       = e.AppFieldId,
+                AppFieldId       = e.ElementType == "Field" ? e.AppFieldId : null,
+                ElementType      = e.ElementType,
+                ElementContent   = e.ElementContent,
                 LabelMode        = e.LabelMode,
                 CustomLabel      = e.CustomLabel,
                 ShowOnAdd        = e.ShowOnAdd,

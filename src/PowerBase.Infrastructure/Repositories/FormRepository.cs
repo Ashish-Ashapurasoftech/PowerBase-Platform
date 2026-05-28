@@ -84,7 +84,7 @@ public class FormRepository : BaseRepository, IFormRepository
         """;
 
     private const string GetSectionsSql = """
-        SELECT Id, PublicId, TenantId, FormId, Name, ColumnCount, IsCollapsed, DisplayOrder
+        SELECT Id, PublicId, TenantId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder
         FROM meta.FormSection
         WHERE FormId = @formId
         ORDER BY DisplayOrder
@@ -92,6 +92,7 @@ public class FormRepository : BaseRepository, IFormRepository
 
     private const string GetElementsSql = """
         SELECT fe.Id, fe.PublicId, fe.TenantId, fe.FormSectionId, fe.AppFieldId,
+               fe.ElementType, fe.ElementContent,
                fe.LabelMode, fe.CustomLabel, fe.ShowOnAdd, fe.ShowOnEdit, fe.ShowOnView,
                fe.WidthMode, fe.WidthValue, fe.HelpTextOverride, fe.IsReadOnly,
                fe.IsRequired, fe.DisplayAs, fe.DisplayOrder
@@ -113,20 +114,20 @@ public class FormRepository : BaseRepository, IFormRepository
         """;
 
     private const string InsertSectionSql = """
-        INSERT INTO meta.FormSection (TenantId, FormId, Name, ColumnCount, IsCollapsed, DisplayOrder)
+        INSERT INTO meta.FormSection (TenantId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder)
         OUTPUT INSERTED.Id
-        VALUES (@tenantId, @formId, @name, @columnCount, @isCollapsed, @displayOrder)
+        VALUES (@tenantId, @formId, @name, @columnCount, @columnWidths, @isCollapsed, @displayOrder)
         """;
 
     private const string InsertElementSql = """
         INSERT INTO meta.FormElement
-            (TenantId, FormSectionId, AppFieldId, LabelMode, CustomLabel,
-             ShowOnAdd, ShowOnEdit, ShowOnView, WidthMode, WidthValue,
-             HelpTextOverride, IsReadOnly, IsRequired, DisplayAs, DisplayOrder)
+            (TenantId, FormSectionId, AppFieldId, ElementType, ElementContent,
+             LabelMode, CustomLabel, ShowOnAdd, ShowOnEdit, ShowOnView,
+             WidthMode, WidthValue, HelpTextOverride, IsReadOnly, IsRequired, DisplayAs, DisplayOrder)
         VALUES
-            (@tenantId, @formSectionId, @appFieldId, @labelMode, @customLabel,
-             @showOnAdd, @showOnEdit, @showOnView, @widthMode, @widthValue,
-             @helpTextOverride, @isReadOnly, @isRequired, @displayAs, @displayOrder)
+            (@tenantId, @formSectionId, @appFieldId, @elementType, @elementContent,
+             @labelMode, @customLabel, @showOnAdd, @showOnEdit, @showOnView,
+             @widthMode, @widthValue, @helpTextOverride, @isReadOnly, @isRequired, @displayAs, @displayOrder)
         """;
 
     private const string AppendFieldSql = """
@@ -271,9 +272,10 @@ public class FormRepository : BaseRepository, IFormRepository
                 {
                     tenantId,
                     formId,
-                    name        = section.Name,
-                    columnCount = section.ColumnCount,
-                    isCollapsed = section.IsCollapsed,
+                    name         = section.Name,
+                    columnCount  = section.ColumnCount,
+                    columnWidths = section.ColumnWidths,
+                    isCollapsed  = section.IsCollapsed,
                     displayOrder = si + 1,
                 }, tx, cancellationToken: ct));
 
@@ -286,6 +288,8 @@ public class FormRepository : BaseRepository, IFormRepository
                         tenantId,
                         formSectionId    = sectionId,
                         appFieldId       = el.AppFieldId,
+                        elementType      = el.ElementType,
+                        elementContent   = el.ElementContent,
                         labelMode        = el.LabelMode,
                         customLabel      = el.CustomLabel,
                         showOnAdd        = el.ShowOnAdd,

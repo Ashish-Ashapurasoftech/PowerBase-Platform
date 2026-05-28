@@ -18,17 +18,20 @@ public class GetFormLayoutQueryHandler
             FormId = form.PublicId,
             Sections = sections.Select(s => new FormSectionDetail
             {
-                DbId        = s.Id,
-                Id          = s.PublicId,
-                Name        = s.Name,
-                ColumnCount = s.ColumnCount,
-                IsCollapsed = s.IsCollapsed,
+                DbId         = s.Id,
+                Id           = s.PublicId,
+                Name         = s.Name,
+                ColumnCount  = s.ColumnCount,
+                ColumnWidths = s.ColumnWidths,
+                IsCollapsed  = s.IsCollapsed,
                 DisplayOrder = s.DisplayOrder,
                 Elements    = s.Elements.Select(e => new FormElementDetail
                 {
                     DbId             = e.Id,
                     Id               = e.PublicId,
                     AppFieldId       = e.AppFieldId,
+                    ElementType      = e.ElementType,
+                    ElementContent   = e.ElementContent,
                     LabelMode        = e.LabelMode,
                     CustomLabel      = e.CustomLabel,
                     ShowOnAdd        = e.ShowOnAdd,
