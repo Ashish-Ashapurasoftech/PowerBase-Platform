@@ -21,8 +21,6 @@ public class UpdateTableCommandHandler
         if (command.Name.Length > 200)
             throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name must be 200 characters or fewer."] });
 
-        await _appAccessService.RequireByTablePublicIdAsync(command.TablePublicId, AppAccess.Admin, ct);
-
         var affected = await _tableRepo.UpdateAsync(
             command.TablePublicId, command.Name,
             command.SingularLabel, command.PluralLabel,

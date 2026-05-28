@@ -5,7 +5,9 @@ using PowerBase.API.Models.Apps;
 using PowerBase.Application.Apps.Commands.CreateAppRole;
 using PowerBase.Application.Apps.Commands.DeleteAppRole;
 using PowerBase.Application.Apps.Commands.UpdateAppRole;
+
 using PowerBase.Application.Apps.Queries.ListAppRoles;
+using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
 
@@ -33,6 +35,7 @@ public class AppRolesController : ControllerBase
 
     /// <summary>List all roles defined for this app.</summary>
     [HttpGet]
+
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<AppRoleResponse>>), StatusCodes.Status200OK)]
     public async Task<IActionResult> List([FromRoute] Guid appId, CancellationToken ct)
     {
@@ -43,16 +46,14 @@ public class AppRolesController : ControllerBase
             Name = r.Name,
             IsDefault = r.IsDefault,
             IsSystem = r.IsSystem,
-            CanViewRecords = r.CanViewRecords,
-            CanAddRecords = r.CanAddRecords,
-            CanEditRecords = r.CanEditRecords,
-            CanDeleteRecords = r.CanDeleteRecords,
+            Permissions = r.Permissions,
         }).ToList();
         return Ok(new ApiResponse<IReadOnlyList<AppRoleResponse>>(response));
     }
 
     /// <summary>Create a custom role for this app.</summary>
     [HttpPost]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppId)]
     [ProducesResponseType(typeof(ApiResponse<AppRoleResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
@@ -65,15 +66,13 @@ public class AppRolesController : ControllerBase
             Name = result.Name,
             IsDefault = result.IsDefault,
             IsSystem = false,
-            CanViewRecords = true,
-            CanAddRecords = true,
-            CanEditRecords = true,
-            CanDeleteRecords = false,
+            Permissions = new[] { PermissionCodes.RecordsRead, PermissionCodes.RecordsCreate, PermissionCodes.RecordsUpdate },
         }));
     }
 
     /// <summary>Update the record permission flags for an app role.</summary>
     [HttpPatch("{rolePublicId:guid}")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -83,15 +82,13 @@ public class AppRolesController : ControllerBase
         [FromBody] UpdateAppRoleRequest request,
         CancellationToken ct)
     {
-        await _updateHandler.HandleAsync(new UpdateAppRoleCommand(
-            appId, rolePublicId,
-            request.CanViewRecords, request.CanAddRecords,
-            request.CanEditRecords, request.CanDeleteRecords), ct);
+        await _updateHandler.HandleAsync(new UpdateAppRoleCommand(appId, rolePublicId, request.Permissions), ct);
         return NoContent();
     }
 
     /// <summary>Delete a custom role. System roles (Administrator, Viewer) cannot be deleted.</summary>
     [HttpDelete("{rolePublicId:guid}")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete([FromRoute] Guid appId, [FromRoute] Guid rolePublicId, CancellationToken ct)

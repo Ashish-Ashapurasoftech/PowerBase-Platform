@@ -88,13 +88,30 @@ public class CreateAppCommandHandler
                 IsDefault = false,
             }, _uow.Transaction, ct);
 
-            await _appRoleRepo.CreateAsync(new AppRole
+            await _appRoleRepo.SetPermissionsAsync(adminRoleId, new[]
+            {
+                PermissionCodes.TablesCreate, PermissionCodes.TablesRead, PermissionCodes.TablesUpdate, PermissionCodes.TablesDelete,
+                PermissionCodes.FieldsCreate, PermissionCodes.FieldsRead, PermissionCodes.FieldsUpdate, PermissionCodes.FieldsDelete,
+                PermissionCodes.RecordsCreate, PermissionCodes.RecordsRead, PermissionCodes.RecordsUpdate, PermissionCodes.RecordsDelete,
+                PermissionCodes.ReportsCreate, PermissionCodes.ReportsRead, PermissionCodes.ReportsUpdate, PermissionCodes.ReportsDelete, PermissionCodes.ReportsRun,
+                PermissionCodes.UsersInvite, PermissionCodes.UsersManage, PermissionCodes.RolesManage
+            }, _uow.Transaction, ct);
+
+            var (participantRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
             {
                 AppId = appId,
                 TenantId = _queryContext.TenantId,
                 Name = "Participant",
                 IsSystem = true,
                 IsDefault = false,
+            }, _uow.Transaction, ct);
+
+            await _appRoleRepo.SetPermissionsAsync(participantRoleId, new[]
+            {
+                PermissionCodes.TablesCreate, PermissionCodes.TablesRead,
+                PermissionCodes.FieldsCreate, PermissionCodes.FieldsRead,
+                PermissionCodes.RecordsCreate, PermissionCodes.RecordsRead,
+                PermissionCodes.ReportsCreate, PermissionCodes.ReportsRead, PermissionCodes.ReportsRun
             }, _uow.Transaction, ct);
 
             var (viewerRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
@@ -104,6 +121,13 @@ public class CreateAppCommandHandler
                 Name = "Viewer",
                 IsSystem = true,
                 IsDefault = true,
+            }, _uow.Transaction, ct);
+
+            await _appRoleRepo.SetPermissionsAsync(viewerRoleId, new[]
+            {
+                PermissionCodes.TablesRead, PermissionCodes.FieldsRead,
+                PermissionCodes.RecordsRead,
+                PermissionCodes.ReportsRead, PermissionCodes.ReportsRun
             }, _uow.Transaction, ct);
 
             await _appRepo.SetDefaultRoleAsync(appId, viewerRoleId, _uow.Transaction, ct);

@@ -21,8 +21,6 @@ public class ListAppVariablesQueryHandler
 
     public async Task<IReadOnlyList<AppVariable>> HandleAsync(ListAppVariablesQuery query, CancellationToken ct = default)
     {
-        await _appAccessService.RequireByAppPublicIdAsync(query.AppPublicId, AppAccess.Read, ct);
-
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
 
         return await _variableRepo.ListAsync(appId, ct);

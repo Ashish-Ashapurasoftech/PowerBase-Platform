@@ -55,8 +55,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Save a report definition for a table.</summary>
     [HttpPost("tables/{tableId:guid}/reports")]
-    [RequirePermission(PermissionCodes.ReportsCreate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.ReportsCreate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -87,8 +86,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>List all reports for a specific table.</summary>
     [HttpGet("tables/{tableId:guid}/reports")]
-    [RequirePermission(PermissionCodes.ReportsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<ReportResponse>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -101,8 +99,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>List all reports for an app.</summary>
     [HttpGet("apps/{appId:guid}/reports")]
-    [RequirePermission(PermissionCodes.ReportsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByAppId)]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByAppId)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<ReportResponse>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -115,8 +112,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Update a report's definition (name, description, columns, filters, sort, grouping, aggregations).</summary>
     [HttpPatch("reports/{publicId:guid}")]
-    [RequirePermission(PermissionCodes.ReportsUpdate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByReportPublicId)]
+    [RequireAppPermission(PermissionCodes.ReportsUpdate, AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -146,8 +142,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Set a report as the default for its table. Clears any previously set default.</summary>
     [HttpPatch("tables/{tableId:guid}/reports/{reportId:guid}/set-default")]
-    [RequirePermission(PermissionCodes.ReportsUpdate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.ReportsUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -159,8 +154,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Soft-delete a report.</summary>
     [HttpDelete("reports/{publicId:guid}")]
-    [RequirePermission(PermissionCodes.ReportsDelete)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByReportPublicId)]
+    [RequireAppPermission(PermissionCodes.ReportsDelete, AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -172,8 +166,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Get a single report definition.</summary>
     [HttpGet("reports/{publicId:guid}")]
-    [RequirePermission(PermissionCodes.ReportsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -185,8 +178,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Execute a report and return paged results. Pass dynamic filter values as dynamicFilters=fieldId:value (repeatable).</summary>
     [HttpGet("reports/{publicId:guid}/run")]
-    [RequirePermission(PermissionCodes.ReportsRun)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
+    [RequireAppPermission(PermissionCodes.ReportsRun, AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(ApiResponse<ReportRunResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -223,8 +215,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Export report results as CSV.</summary>
     [HttpGet("reports/{publicId:guid}/export/csv")]
-    [RequirePermission(PermissionCodes.ReportsRun)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
+    [RequireAppPermission(PermissionCodes.ReportsRun, AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -236,8 +227,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Export report results as Excel (.xlsx).</summary>
     [HttpGet("reports/{publicId:guid}/export/xlsx")]
-    [RequirePermission(PermissionCodes.ReportsRun)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByReportPublicId)]
+    [RequireAppPermission(PermissionCodes.ReportsRun, AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

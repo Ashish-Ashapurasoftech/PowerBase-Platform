@@ -34,8 +34,7 @@ public class FieldsController : ControllerBase
 
     /// <summary>Add a field to a table (also runs ALTER TABLE on the physical data table).</summary>
     [HttpPost("tables/{tableId:guid}/fields")]
-    [RequirePermission(PermissionCodes.FieldsCreate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.FieldsCreate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<FieldResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -50,8 +49,7 @@ public class FieldsController : ControllerBase
 
     /// <summary>List all fields for a table.</summary>
     [HttpGet("tables/{tableId:guid}/fields")]
-    [RequirePermission(PermissionCodes.FieldsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiListResponse<FieldResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -64,8 +62,7 @@ public class FieldsController : ControllerBase
 
     /// <summary>Update a field's properties (name, label, required, searchable, reportable, etc.).</summary>
     [HttpPatch("tables/{tableId:guid}/fields/{fieldId:guid}")]
-    [RequirePermission(PermissionCodes.FieldsCreate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -83,14 +80,26 @@ public class FieldsController : ControllerBase
 
     /// <summary>Soft-delete a field (does not run DROP COLUMN).</summary>
     [HttpDelete("tables/{tableId:guid}/fields/{fieldId:guid}")]
-    [RequirePermission(PermissionCodes.FieldsCreate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete(Guid tableId, Guid fieldId, CancellationToken ct)
     {
         await _deleteHandler.HandleAsync(new DeleteFieldCommand(tableId, fieldId), ct);
+        return NoContent();
+    }
+
+    /// <summary>Soft-delete multiple fields.</summary>
+    [HttpDelete("tables/{tableId:guid}/fields")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> BulkDelete(
+        [FromServices] PowerBase.Application.Fields.Commands.BulkDeleteFields.BulkDeleteFieldsCommandHandler bulkDeleteHandler,
+        Guid tableId, [FromBody] BulkDeleteFieldsRequest request, CancellationToken ct)
+    {
+        await bulkDeleteHandler.HandleAsync(new PowerBase.Application.Fields.Commands.BulkDeleteFields.BulkDeleteFieldsCommand(tableId, request.FieldIds), ct);
         return NoContent();
     }
 

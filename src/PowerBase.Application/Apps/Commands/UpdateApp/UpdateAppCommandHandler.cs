@@ -1,3 +1,4 @@
+using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
@@ -19,6 +20,9 @@ public class UpdateAppCommandHandler
 
     public async Task HandleAsync(UpdateAppCommand command, CancellationToken ct = default)
     {
+        // Enforce App Administrator privileges explicitly
+        await _appAccessService.RequireAppRoleAsync(command.AppPublicId, "Administrator", ct);
+
         var validator = new UpdateAppCommandValidator();
         var validation = await validator.ValidateAsync(command, ct);
         if (!validation.IsValid)
@@ -27,9 +31,9 @@ public class UpdateAppCommandHandler
                     .GroupBy(e => e.PropertyName)
                     .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
 
-        await _appAccessService.RequireByAppPublicIdAsync(command.AppPublicId, AppAccess.Admin, ct);
-
-        var affected = await _appRepo.UpdateAsync(command.AppPublicId, command.Name, command.Description, command.Icon, command.Color, ct);
+        var formattingStr = command.Formatting != null ? JsonSerializer.Serialize(command.Formatting) : null;
+        var securityStr = command.SecurityOptions != null ? JsonSerializer.Serialize(command.SecurityOptions) : null;
+        var affected = await _appRepo.UpdateAsync(command.AppPublicId, command.Name, command.Description, command.Icon, command.Color, formattingStr, securityStr, ct);
         if (affected == 0)
             throw new NotFoundException("App", command.AppPublicId);
 

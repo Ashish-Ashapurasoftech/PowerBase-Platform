@@ -20,9 +20,11 @@ public class DeleteAppVariableCommandHandler
 
     public async Task HandleAsync(DeleteAppVariableCommand command, CancellationToken ct = default)
     {
-        await _appAccessService.RequireByAppPublicIdAsync(command.AppPublicId, AppAccess.Admin, ct);
+        // Enforce App Administrator privileges explicitly
+        await _appAccessService.RequireAppRoleAsync(command.AppPublicId, "Administrator", ct);
 
         var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
+        var variable = await _variableRepo.GetByPublicIdAsync(appId, command.PublicId, ct);
 
         await _variableRepo.DeleteAsync(appId, command.PublicId, ct);
     }

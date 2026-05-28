@@ -30,8 +30,6 @@ public class ChangeAppUserRoleCommandHandler
 
     public async Task HandleAsync(ChangeAppUserRoleCommand command, CancellationToken ct = default)
     {
-        await _appAccessService.RequireByAppPublicIdAsync(command.AppPublicId, AppAccess.Admin, ct);
-
         var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
 
         var user = await _userRepo.GetByPublicIdAsync(command.UserPublicId, ct)

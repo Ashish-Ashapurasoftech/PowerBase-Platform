@@ -1,14 +1,10 @@
 namespace PowerBase.Application.Common.Interfaces;
 
-public enum AppAccess { Read, Admin }
-
-public record AppPermissionFlags(bool CanView, bool CanAdd, bool CanEdit, bool CanDelete);
-
 public interface IAppAccessService
 {
-    Task RequireByAppPublicIdAsync(Guid appPublicId, AppAccess required, CancellationToken ct = default);
-    Task RequireByTablePublicIdAsync(Guid tablePublicId, AppAccess required, CancellationToken ct = default);
-    Task RequireByReportPublicIdAsync(Guid reportPublicId, AppAccess required, CancellationToken ct = default);
-    Task RequireByAppIdAsync(long appId, AppAccess required, CancellationToken ct = default);
-    Task<AppPermissionFlags> GetPermissionFlagsByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default);
+    Task RequirePermissionByAppPublicIdAsync(Guid appPublicId, string permissionCode, CancellationToken ct = default);
+    Task RequirePermissionByTablePublicIdAsync(Guid tablePublicId, string permissionCode, CancellationToken ct = default);
+    Task RequirePermissionByReportPublicIdAsync(Guid reportPublicId, string permissionCode, CancellationToken ct = default);
+    Task RequirePermissionByAppIdAsync(long appId, string permissionCode, CancellationToken ct = default);
+    Task RequireAppRoleAsync(Guid appPublicId, string roleName, CancellationToken ct = default);
 }

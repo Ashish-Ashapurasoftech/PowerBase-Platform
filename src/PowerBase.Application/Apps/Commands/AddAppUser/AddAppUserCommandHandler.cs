@@ -31,8 +31,6 @@ public class AddAppUserCommandHandler
 
     public async Task HandleAsync(AddAppUserCommand command, CancellationToken ct = default)
     {
-        await _appAccessService.RequireByAppPublicIdAsync(command.AppPublicId, AppAccess.Admin, ct);
-
         var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
 
         var user = await _userRepo.GetByEmailAsync(command.Email)
@@ -42,18 +40,16 @@ public class AddAppUserCommandHandler
         if (existing is not null)
             throw new DuplicateException("AppUser", "userId", user.Id.ToString());
 
-        AppRole role;
+        long roleId;
         if (command.RolePublicId.HasValue)
         {
-            role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId.Value, ct)
+            var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId.Value, ct)
                 ?? throw new NotFoundException("AppRole", command.RolePublicId.Value);
+            roleId = role.Id;
         }
         else
         {
-            var defaultRoleId = await _appRepo.GetDefaultRoleIdAsync(appId, ct)
-                ?? throw new NotFoundException("DefaultAppRole", appId);
-            var allRoles = await _appRoleRepo.ListByAppIdAsync(appId, ct);
-            role = allRoles.FirstOrDefault(r => r.Id == defaultRoleId)
+            roleId = await _appRepo.GetDefaultRoleIdAsync(appId, ct)
                 ?? throw new NotFoundException("DefaultAppRole", appId);
         }
 
@@ -62,7 +58,7 @@ public class AddAppUserCommandHandler
             AppId = appId,
             TenantId = _queryContext.TenantId,
             UserId = user.Id,
-            AppRoleId = role.Id,
+            AppRoleId = roleId,
             Status = "Active",
             AddedBy = _queryContext.UserId,
         }, ct: ct);

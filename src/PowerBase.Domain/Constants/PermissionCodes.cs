@@ -15,6 +15,7 @@ public static class PermissionCodes
     public const string FieldsCreate = "fields:create";
     public const string FieldsRead   = "fields:read";
     public const string FieldsUpdate = "fields:update";
+    public const string FieldsDelete = "fields:delete";
 
     public const string RecordsCreate = "records:create";
     public const string RecordsRead   = "records:read";

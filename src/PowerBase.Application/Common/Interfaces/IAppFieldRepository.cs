@@ -14,4 +14,5 @@ public interface IAppFieldRepository
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
         bool isFilterable, bool isReportable, CancellationToken ct = default);
     Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default);
+    Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default);
 }

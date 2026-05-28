@@ -34,8 +34,6 @@ public class UpdateReportCommandHandler
             throw new ValidationException(new Dictionary<string, string[]>
                 { ["Visibility"] = [$"Visibility must be one of: {string.Join(", ", AllowedVisibilities)}"] });
 
-        await _appAccessService.RequireByReportPublicIdAsync(command.ReportPublicId, AppAccess.Admin, ct);
-
         // Validate filter tree operators
         if (command.FilterTree is not null)
             ValidateFilterGroup(command.FilterTree, AllowedOperators);

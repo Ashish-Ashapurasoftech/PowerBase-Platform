@@ -7,19 +7,15 @@ public class DeleteFieldCommandHandler
 {
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
-    private readonly IAppAccessService _appAccessService;
 
-    public DeleteFieldCommandHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IAppAccessService appAccessService)
+    public DeleteFieldCommandHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
-        _appAccessService = appAccessService;
     }
 
     public async Task HandleAsync(DeleteFieldCommand command, CancellationToken ct = default)
     {
-        await _appAccessService.RequireByTablePublicIdAsync(command.TablePublicId, AppAccess.Admin, ct);
-
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
         var field = await _fieldRepo.GetByPublicIdAsync(command.FieldPublicId, ct)

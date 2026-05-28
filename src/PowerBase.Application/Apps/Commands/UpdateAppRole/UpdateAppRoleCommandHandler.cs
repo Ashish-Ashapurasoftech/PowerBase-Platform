@@ -16,17 +16,10 @@ public class UpdateAppRoleCommandHandler
 
     public async Task HandleAsync(UpdateAppRoleCommand command, CancellationToken ct = default)
     {
-        await _appAccessService.RequireByAppPublicIdAsync(command.AppPublicId, AppAccess.Admin, ct);
-
-        var affected = await _appRoleRepo.UpdateFlagsAsync(
-            command.RolePublicId,
-            command.CanViewRecords,
-            command.CanAddRecords,
-            command.CanEditRecords,
-            command.CanDeleteRecords,
-            ct);
-
-        if (affected == 0)
+        var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId, ct);
+        if (role is null)
             throw new NotFoundException("AppRole", command.RolePublicId);
+
+        await _appRoleRepo.SetPermissionsAsync(role.Id, command.Permissions, null, ct);
     }
 }

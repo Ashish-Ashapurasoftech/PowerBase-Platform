@@ -11,6 +11,8 @@ public class App
     public string? Icon { get; set; }
     public string? Color { get; set; }
     public string Status { get; set; } = "Active";
+    public string? Formatting { get; set; }
+    public string? SecurityOptions { get; set; }
     public long? DefaultAppRoleId { get; set; }
     public bool IsDeleted { get; set; }
     public DateTime CreatedOn { get; set; }

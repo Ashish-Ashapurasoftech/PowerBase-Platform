@@ -7,10 +7,7 @@ public record AppRoleResult(
     string Name,
     bool IsDefault,
     bool IsSystem,
-    bool CanViewRecords,
-    bool CanAddRecords,
-    bool CanEditRecords,
-    bool CanDeleteRecords);
+    IReadOnlyList<string> Permissions);
 
 public class ListAppRolesQueryHandler
 {
@@ -26,9 +23,8 @@ public class ListAppRolesQueryHandler
     public async Task<IReadOnlyList<AppRoleResult>> HandleAsync(ListAppRolesQuery query, CancellationToken ct = default)
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
-        var roles = await _appRoleRepo.ListByAppIdAsync(appId, ct);
+        var roles = await _appRoleRepo.ListDetailsByAppIdAsync(appId, ct);
         return roles.Select(r => new AppRoleResult(
-            r.PublicId, r.Name, r.IsDefault, r.IsSystem,
-            r.CanViewRecords, r.CanAddRecords, r.CanEditRecords, r.CanDeleteRecords)).ToList();
+            r.PublicId, r.Name, r.IsDefault, r.IsSystem, r.Permissions)).ToList();
     }
 }

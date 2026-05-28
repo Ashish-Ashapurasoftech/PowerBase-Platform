@@ -25,41 +25,41 @@ public class AppAccessService : IAppAccessService
         _queryContext = queryContext;
     }
 
-    public async Task RequireByAppPublicIdAsync(Guid appPublicId, AppAccess required, CancellationToken ct = default)
+    public async Task RequirePermissionByAppPublicIdAsync(Guid appPublicId, string permissionCode, CancellationToken ct = default)
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
-        await RequireByAppIdAsync(appId, required, ct);
+        await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
     }
 
-    public async Task RequireByTablePublicIdAsync(Guid tablePublicId, AppAccess required, CancellationToken ct = default)
+    public async Task RequirePermissionByTablePublicIdAsync(Guid tablePublicId, string permissionCode, CancellationToken ct = default)
     {
         var appId = await _tableRepo.GetAppIdByPublicIdAsync(tablePublicId, ct);
-        await RequireByAppIdAsync(appId, required, ct);
+        await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
     }
 
-    public async Task RequireByReportPublicIdAsync(Guid reportPublicId, AppAccess required, CancellationToken ct = default)
+    public async Task RequirePermissionByReportPublicIdAsync(Guid reportPublicId, string permissionCode, CancellationToken ct = default)
     {
         var appId = await _reportRepo.GetAppIdByPublicIdAsync(reportPublicId, ct);
-        await RequireByAppIdAsync(appId, required, ct);
+        await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
     }
 
-    public async Task RequireByAppIdAsync(long appId, AppAccess required, CancellationToken ct = default)
+    public async Task RequirePermissionByAppIdAsync(long appId, string permissionCode, CancellationToken ct = default)
     {
-        var roleName = await _appUserRepo.GetUserRoleNameAsync(appId, _queryContext.UserId, ct);
-
-        if (roleName is null)
-            throw new UnauthorizedActionException("You do not have access to this app.");
-
-        if (required == AppAccess.Admin && roleName != "Administrator")
-            throw new UnauthorizedActionException("Administrator access is required for this action.");
+        var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
+        if (!permissions.Contains(permissionCode))
+        {
+            throw new UnauthorizedActionException("You do not have permission to perform this action in this app.");
+        }
     }
 
-    public async Task<AppPermissionFlags> GetPermissionFlagsByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default)
+    public async Task RequireAppRoleAsync(Guid appPublicId, string roleName, CancellationToken ct = default)
     {
-        var appId = await _tableRepo.GetAppIdByPublicIdAsync(tablePublicId, ct);
-        var flags = await _appUserRepo.GetUserPermissionFlagsAsync(appId, _queryContext.UserId, ct);
-        if (flags is null)
-            throw new UnauthorizedActionException("You do not have access to this app.");
-        return new AppPermissionFlags(flags.Value.CanView, flags.Value.CanAdd, flags.Value.CanEdit, flags.Value.CanDelete);
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var actualRoleName = await _appUserRepo.GetUserRoleNameAsync(appId, _queryContext.UserId, ct);
+        
+        if (actualRoleName != roleName)
+        {
+            throw new UnauthorizedActionException($"This action requires the '{roleName}' app role.");
+        }
     }
 }

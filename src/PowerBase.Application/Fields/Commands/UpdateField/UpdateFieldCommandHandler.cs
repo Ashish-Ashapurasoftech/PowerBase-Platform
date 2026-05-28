@@ -7,21 +7,17 @@ public class UpdateFieldCommandHandler
 {
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
-    private readonly IAppAccessService _appAccessService;
 
-    public UpdateFieldCommandHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IAppAccessService appAccessService)
+    public UpdateFieldCommandHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
-        _appAccessService = appAccessService;
     }
 
     public async Task HandleAsync(UpdateFieldCommand command, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(command.Name))
             throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name is required."] });
-
-        await _appAccessService.RequireByTablePublicIdAsync(command.TablePublicId, AppAccess.Admin, ct);
 
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 

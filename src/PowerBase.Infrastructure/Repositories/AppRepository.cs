@@ -9,7 +9,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class AppRepository : BaseRepository, IAppRepository
 {
-    private const string SelectColumns = "Id, PublicId, TenantId, OwnerId, Name, Description, Icon, Color, Status, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
+    private const string SelectColumns = "Id, PublicId, TenantId, OwnerId, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
 
     private const string GetByPublicIdSql = $"""
         SELECT {SelectColumns}
@@ -37,7 +37,7 @@ public class AppRepository : BaseRepository, IAppRepository
 
     private const string ListByUserSql = """
         SELECT a.Id, a.PublicId, a.TenantId, a.OwnerId, a.Name, a.Description, a.Icon, a.Color,
-               a.Status, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
+               a.Status, a.Formatting, a.SecurityOptions, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion, u.Name AS OwnerName
         FROM meta.App a
         JOIN meta.AppUser au ON au.AppId = a.Id
@@ -63,7 +63,7 @@ public class AppRepository : BaseRepository, IAppRepository
 
     private const string ListAllByUserSql = """
         SELECT a.Id, a.PublicId, a.TenantId, a.OwnerId, a.Name, a.Description, a.Icon, a.Color,
-               a.Status, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
+               a.Status, a.Formatting, a.SecurityOptions, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
         JOIN meta.AppUser au ON au.AppId = a.Id
@@ -87,9 +87,9 @@ public class AppRepository : BaseRepository, IAppRepository
         """;
 
     private const string InsertSql = """
-        INSERT INTO meta.App (TenantId, OwnerId, Name, Description, Icon, Color, Status, IsDeleted, CreatedOn, CreatedBy)
+        INSERT INTO meta.App (TenantId, OwnerId, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.PublicId, INSERTED.Id
-        VALUES (@tenantId, @ownerId, @name, @description, @icon, @color, @status, 0, SYSUTCDATETIME(), @createdBy)
+        VALUES (@tenantId, @ownerId, @name, @description, @icon, @color, @status, @formatting, @securityOptions, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string SetDefaultRoleSql = """
@@ -109,6 +109,8 @@ public class AppRepository : BaseRepository, IAppRepository
             Description = @description,
             Icon        = @icon,
             Color       = @color,
+            Formatting  = @formatting,
+            SecurityOptions = @securityOptions,
             ModifiedOn  = SYSUTCDATETIME(),
             ModifiedBy  = @modifiedBy
         WHERE TenantId = @tenantId
@@ -178,6 +180,8 @@ public class AppRepository : BaseRepository, IAppRepository
             icon = app.Icon,
             color = app.Color,
             status = app.Status,
+            formatting = app.Formatting,
+            securityOptions = app.SecurityOptions,
             createdBy = QueryContext.UserId,
         };
 
@@ -235,7 +239,7 @@ public class AppRepository : BaseRepository, IAppRepository
             new CommandDefinition(GetDefaultRoleIdSql, new { appId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
     }
 
-    public async Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, CancellationToken ct = default)
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, string? formatting, string? securityOptions, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteAsync(
@@ -247,6 +251,8 @@ public class AppRepository : BaseRepository, IAppRepository
                 description,
                 icon,
                 color,
+                formatting,
+                securityOptions,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

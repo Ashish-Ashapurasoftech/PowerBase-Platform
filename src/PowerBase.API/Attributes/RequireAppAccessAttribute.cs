@@ -8,33 +8,33 @@ namespace PowerBase.API.Attributes;
 public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId }
 
 [AttributeUsage(AttributeTargets.Method)]
-public class RequireAppAccessAttribute : Attribute, IFilterFactory
+public class RequireAppPermissionAttribute : Attribute, IFilterFactory
 {
-    private readonly AppAccess _required;
+    private readonly string _permissionCode;
     private readonly AppAccessResolver _resolver;
 
-    public RequireAppAccessAttribute(AppAccess required, AppAccessResolver resolver)
+    public RequireAppPermissionAttribute(string permissionCode, AppAccessResolver resolver)
     {
-        _required = required;
+        _permissionCode = permissionCode;
         _resolver = resolver;
     }
 
     public bool IsReusable => false;
 
     public IFilterMetadata CreateInstance(IServiceProvider serviceProvider) =>
-        new AppAccessFilter(serviceProvider.GetRequiredService<IAppAccessService>(), _required, _resolver);
+        new AppPermissionFilter(serviceProvider.GetRequiredService<IAppAccessService>(), _permissionCode, _resolver);
 }
 
-internal class AppAccessFilter : IAsyncActionFilter
+internal class AppPermissionFilter : IAsyncActionFilter
 {
     private readonly IAppAccessService _accessService;
-    private readonly AppAccess _required;
+    private readonly string _permissionCode;
     private readonly AppAccessResolver _resolver;
 
-    public AppAccessFilter(IAppAccessService accessService, AppAccess required, AppAccessResolver resolver)
+    public AppPermissionFilter(IAppAccessService accessService, string permissionCode, AppAccessResolver resolver)
     {
         _accessService = accessService;
-        _required = required;
+        _permissionCode = permissionCode;
         _resolver = resolver;
     }
 
@@ -48,27 +48,27 @@ internal class AppAccessFilter : IAsyncActionFilter
             {
                 case AppAccessResolver.ByAppId:
                     var appId = Guid.Parse(route["appId"]!.ToString()!);
-                    await _accessService.RequireByAppPublicIdAsync(appId, _required, context.HttpContext.RequestAborted);
+                    await _accessService.RequirePermissionByAppPublicIdAsync(appId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
 
                 case AppAccessResolver.ByAppPublicId:
                     var appPubId = Guid.Parse(route["publicId"]!.ToString()!);
-                    await _accessService.RequireByAppPublicIdAsync(appPubId, _required, context.HttpContext.RequestAborted);
+                    await _accessService.RequirePermissionByAppPublicIdAsync(appPubId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
 
                 case AppAccessResolver.ByTableId:
                     var tableId = Guid.Parse(route["tableId"]!.ToString()!);
-                    await _accessService.RequireByTablePublicIdAsync(tableId, _required, context.HttpContext.RequestAborted);
+                    await _accessService.RequirePermissionByTablePublicIdAsync(tableId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
 
                 case AppAccessResolver.ByTablePublicId:
                     var tablePubId = Guid.Parse(route["publicId"]!.ToString()!);
-                    await _accessService.RequireByTablePublicIdAsync(tablePubId, _required, context.HttpContext.RequestAborted);
+                    await _accessService.RequirePermissionByTablePublicIdAsync(tablePubId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
 
                 case AppAccessResolver.ByReportPublicId:
                     var reportPubId = Guid.Parse(route["publicId"]!.ToString()!);
-                    await _accessService.RequireByReportPublicIdAsync(reportPubId, _required, context.HttpContext.RequestAborted);
+                    await _accessService.RequirePermissionByReportPublicIdAsync(reportPubId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
             }
         }

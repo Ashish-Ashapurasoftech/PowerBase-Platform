@@ -10,6 +10,8 @@ using PowerBase.Application.Apps.Queries.GetApp;
 using PowerBase.Application.Apps.Queries.ListApps;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.ValueObjects;
+using System.Text.Json;
 
 namespace PowerBase.API.Controllers;
 
@@ -22,6 +24,7 @@ public class AppsController : ControllerBase
     private readonly DeleteAppCommandHandler _deleteHandler;
     private readonly GetAppQueryHandler _getHandler;
     private readonly ListAppsQueryHandler _listHandler;
+    private readonly PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler _getPermissionsHandler;
     private readonly IAppRepository _appRepo;
     private readonly IQueryContext _queryContext;
 
@@ -31,6 +34,7 @@ public class AppsController : ControllerBase
         DeleteAppCommandHandler deleteHandler,
         GetAppQueryHandler getHandler,
         ListAppsQueryHandler listHandler,
+        PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler getPermissionsHandler,
         IAppRepository appRepo,
         IQueryContext queryContext)
     {
@@ -39,6 +43,7 @@ public class AppsController : ControllerBase
         _deleteHandler = deleteHandler;
         _getHandler = getHandler;
         _listHandler = listHandler;
+        _getPermissionsHandler = getPermissionsHandler;
         _appRepo = appRepo;
         _queryContext = queryContext;
     }
@@ -167,7 +172,6 @@ public class AppsController : ControllerBase
     /// <summary>Get a single app by its public ID.</summary>
     [HttpGet("{publicId:guid}")]
     [RequirePermission(PermissionCodes.AppsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByAppPublicId)]
     [ProducesResponseType(typeof(ApiResponse<AppResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -177,24 +181,33 @@ public class AppsController : ControllerBase
         return Ok(new ApiResponse<AppResponse>(MapToAppResponse(app)));
     }
 
+    /// <summary>Get current user's active permissions for this app.</summary>
+    [HttpGet("{publicId:guid}/permissions")]
+    [RequirePermission(PermissionCodes.AppsRead)]
+    [ProducesResponseType(typeof(ApiResponse<PowerBase.Application.Apps.Queries.GetAppPermissions.AppPermissionsResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> GetPermissions(Guid publicId, CancellationToken ct)
+    {
+        var result = await _getPermissionsHandler.HandleAsync(new PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQuery(publicId), ct);
+        return Ok(new ApiResponse<PowerBase.Application.Apps.Queries.GetAppPermissions.AppPermissionsResult>(result));
+    }
+
     /// <summary>Update an app's name, description, icon, or color.</summary>
     [HttpPatch("{publicId:guid}")]
     [RequirePermission(PermissionCodes.AppsUpdate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByAppPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateAppRequest request, CancellationToken ct)
     {
-        await _updateHandler.HandleAsync(new UpdateAppCommand(publicId, request.Name, request.Description, request.Icon, request.Color), ct);
+        await _updateHandler.HandleAsync(new UpdateAppCommand(publicId, request.Name, request.Description, request.Icon, request.Color, request.Formatting, request.SecurityOptions), ct);
         return NoContent();
     }
 
     /// <summary>Soft-delete an app by its public ID.</summary>
     [HttpDelete("{publicId:guid}")]
     [RequirePermission(PermissionCodes.AppsDelete)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByAppPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -215,26 +228,52 @@ public class AppsController : ControllerBase
         CreatedOn = result.CreatedOn,
     };
 
-    private static AppResponse MapToAppResponse(PowerBase.Domain.Entities.App app) => new()
+    private static AppResponse MapToAppResponse(PowerBase.Domain.Entities.App app)
     {
-        PublicId = app.PublicId,
-        Name = app.Name,
-        Description = app.Description,
-        Icon = app.Icon,
-        Color = app.Color,
-        Status = app.Status,
-        CreatedOn = app.CreatedOn,
-    };
+        var formatting = string.IsNullOrEmpty(app.Formatting)
+            ? new AppFormattingSettings()
+            : JsonSerializer.Deserialize<AppFormattingSettings>(app.Formatting, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppFormattingSettings();
 
-    private static AppResponse MapToAppResponse(AppListItemDto app) => new()
+        var security = string.IsNullOrEmpty(app.SecurityOptions)
+            ? new AppSecurityOptionsSettings()
+            : JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
+
+        return new AppResponse
+        {
+            PublicId = app.PublicId,
+            Name = app.Name,
+            Description = app.Description,
+            Icon = app.Icon,
+            Color = app.Color,
+            Formatting = formatting,
+            SecurityOptions = security,
+            Status = app.Status,
+            CreatedOn = app.CreatedOn,
+        };
+    }
+
+    private static AppResponse MapToAppResponse(AppListItemDto app)
     {
-        PublicId = app.PublicId,
-        Name = app.Name,
-        Description = app.Description,
-        Icon = app.Icon,
-        Color = app.Color,
-        Status = app.Status,
-        CreatedOn = app.CreatedOn,
-        OwnerName = app.OwnerName,
-    };
+        var formatting = string.IsNullOrEmpty(app.Formatting)
+            ? new AppFormattingSettings()
+            : JsonSerializer.Deserialize<AppFormattingSettings>(app.Formatting, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppFormattingSettings();
+
+        var security = string.IsNullOrEmpty(app.SecurityOptions)
+            ? new AppSecurityOptionsSettings()
+            : JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
+
+        return new AppResponse
+        {
+            PublicId = app.PublicId,
+            Name = app.Name,
+            Description = app.Description,
+            Icon = app.Icon,
+            Color = app.Color,
+            Formatting = formatting,
+            SecurityOptions = security,
+            Status = app.Status,
+            CreatedOn = app.CreatedOn,
+            OwnerName = app.OwnerName,
+        };
+    }
 }

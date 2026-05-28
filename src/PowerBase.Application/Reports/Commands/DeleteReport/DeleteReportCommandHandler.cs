@@ -19,8 +19,6 @@ public class DeleteReportCommandHandler
 
     public async Task HandleAsync(DeleteReportCommand command, CancellationToken ct = default)
     {
-        await _appAccessService.RequireByReportPublicIdAsync(command.ReportPublicId, AppAccess.Admin, ct);
-
         var affected = await _reportRepo.DeleteAsync(command.ReportPublicId, ct);
         if (affected == 0)
             throw new NotFoundException("Report", command.ReportPublicId);

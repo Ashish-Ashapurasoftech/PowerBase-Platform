@@ -22,6 +22,9 @@ public class CreateAppVariableCommandHandler
 
     public async Task<AppVariable> HandleAsync(CreateAppVariableCommand command, CancellationToken ct = default)
     {
+        // Enforce App Administrator privileges explicitly
+        await _appAccessService.RequireAppRoleAsync(command.AppPublicId, "Administrator", ct);
+
         var validator = new CreateAppVariableCommandValidator();
         var validation = await validator.ValidateAsync(command, ct);
         if (!validation.IsValid)
@@ -29,8 +32,6 @@ public class CreateAppVariableCommandHandler
                 validation.Errors
                     .GroupBy(e => e.PropertyName)
                     .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
-
-        await _appAccessService.RequireByAppPublicIdAsync(command.AppPublicId, AppAccess.Admin, ct);
 
         var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
 

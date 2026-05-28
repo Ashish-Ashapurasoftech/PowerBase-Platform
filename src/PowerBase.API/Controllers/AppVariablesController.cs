@@ -6,8 +6,10 @@ using PowerBase.API.Models.Apps;
 using PowerBase.Application.Apps.Commands.CreateAppVariable;
 using PowerBase.Application.Apps.Commands.DeleteAppVariable;
 using PowerBase.Application.Apps.Commands.UpdateAppVariable;
+
 using PowerBase.Application.Apps.Queries.ListAppVariables;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
 
@@ -35,7 +37,7 @@ public class AppVariablesController : ControllerBase
 
     /// <summary>List all variables defined for this app.</summary>
     [HttpGet]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByAppId)]
+
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<AppVariableResponse>>), StatusCodes.Status200OK)]
     public async Task<IActionResult> List([FromRoute] Guid appId, CancellationToken ct)
     {
@@ -55,7 +57,7 @@ public class AppVariablesController : ControllerBase
 
     /// <summary>Create a variable for this app.</summary>
     [HttpPost]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByAppId)]
+
     [ProducesResponseType(typeof(ApiResponse<AppVariableResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
@@ -77,7 +79,7 @@ public class AppVariablesController : ControllerBase
 
     /// <summary>Update a variable for this app.</summary>
     [HttpPatch("{id:guid}")]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByAppId)]
+
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -94,7 +96,7 @@ public class AppVariablesController : ControllerBase
 
     /// <summary>Delete a variable from this app.</summary>
     [HttpDelete("{id:guid}")]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByAppId)]
+
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete([FromRoute] Guid appId, [FromRoute] Guid id, CancellationToken ct)

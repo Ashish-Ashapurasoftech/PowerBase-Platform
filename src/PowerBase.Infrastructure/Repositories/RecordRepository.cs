@@ -235,12 +235,11 @@ public class RecordRepository : BaseRepository, IRecordRepository
 
     // --- Helpers ---
 
-    private static string BuildFieldColumnList(IReadOnlyList<AppField> fields) =>
-        fields.Count > 0
-            ? ", " + string.Join(", ", fields
-                .Where(f => !f.IsSystem)  // system fields already exist in base SELECT (Id, CreatedOn, etc.)
-                .Select(f => PhysicalNaming.ColumnName(f.Id)))
-            : string.Empty;
+    private static string BuildFieldColumnList(IReadOnlyList<AppField> fields)
+    {
+        var customCols = fields.Where(f => !f.IsSystem).Select(f => PhysicalNaming.ColumnName(f.Id)).ToList();
+        return customCols.Count > 0 ? ", " + string.Join(", ", customCols) : string.Empty;
+    }
 
     /// <summary>
     /// Wraps the tree SQL fragment into a WHERE clause suffix.

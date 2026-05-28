@@ -161,6 +161,12 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
             }, cancellationToken: ct));
     }
 
+    private const string SoftBulkDeleteFieldsSql = """
+        UPDATE meta.AppField
+        SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
+        WHERE TenantId = @tenantId AND PublicId IN @publicIds AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
+        """;
+
     public async Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
@@ -169,6 +175,20 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
             {
                 tenantId = QueryContext.TenantId,
                 publicId, tableId,
+                deletedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
+    }
+
+    public async Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default)
+    {
+        if (!publicIds.Any()) return 0;
+        await using var connection = ConnectionFactory.Create();
+        return await connection.ExecuteAsync(
+            new CommandDefinition(SoftBulkDeleteFieldsSql, new
+            {
+                tenantId = QueryContext.TenantId,
+                publicIds,
+                tableId,
                 deletedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }
