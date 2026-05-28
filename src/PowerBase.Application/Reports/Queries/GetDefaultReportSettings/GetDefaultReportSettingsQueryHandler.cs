@@ -32,7 +32,7 @@ public class GetDefaultReportSettingsQueryHandler
         if (!DefaultReportModes.IsValid(settings.Mode))
             settings.Mode = DefaultReportModes.Everyone;
 
-        var roles = await _appRoleRepo.ListByAppIdAsync(table.AppId, ct);
+        var roles = await _appRoleRepo.ListDetailsByAppIdAsync(table.AppId, ct);
         var roleDefaults = settings.RoleDefaults
             .Where(kvp => Guid.TryParse(kvp.Key, out _) && Guid.TryParse(kvp.Value, out _))
             .ToDictionary(kvp => Guid.Parse(kvp.Key), kvp => Guid.Parse(kvp.Value));

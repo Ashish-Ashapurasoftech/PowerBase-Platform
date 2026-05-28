@@ -2,6 +2,7 @@ using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.Constants;
 
 namespace PowerBase.Application.Reports.Commands.UpdateDefaultReportSettings;
 
@@ -26,7 +27,7 @@ public class UpdateDefaultReportSettingsCommandHandler
 
     public async Task HandleAsync(UpdateDefaultReportSettingsCommand command, CancellationToken ct = default)
     {
-        await _appAccessService.RequireByTablePublicIdAsync(command.TablePublicId, AppAccess.Admin, ct);
+        await _appAccessService.RequirePermissionByTablePublicIdAsync(command.TablePublicId, PermissionCodes.TablesUpdate, ct);
 
         if (!DefaultReportModes.IsValid(command.Mode))
             throw new ValidationException(new Dictionary<string, string[]> { ["mode"] = ["Mode must be Everyone or RoleBased."] });

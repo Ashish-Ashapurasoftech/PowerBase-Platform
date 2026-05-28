@@ -143,13 +143,7 @@ public class AppUserRepository : BaseRepository, IAppUserRepository
             new CommandDefinition(GetUserRolePublicIdSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
     }
 
-    public async Task<(bool CanView, bool CanAdd, bool CanEdit, bool CanDelete)?> GetUserPermissionFlagsAsync(long appId, long userId, CancellationToken ct = default)
-    {
-        await using var connection = ConnectionFactory.Create();
-        var result = await connection.QueryAsync<string>(
-            new CommandDefinition(GetAppPermissionsSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
-        return result.ToHashSet();
-    }
+
     public async Task<IReadOnlySet<string>> GetUserAppPermissionsAsync(long appId, long userId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();

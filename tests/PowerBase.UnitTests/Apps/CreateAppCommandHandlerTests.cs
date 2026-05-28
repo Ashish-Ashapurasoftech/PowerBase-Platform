@@ -17,8 +17,11 @@ public class CreateAppCommandHandlerTests
     private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
     private readonly ISchemaEngineService _schemaEngine = Substitute.For<ISchemaEngineService>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
+    private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
+    private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
+    private readonly IFieldTypeRepository _fieldTypeRepo = Substitute.For<IFieldTypeRepository>();
 
-    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine, _auditRepo);
+    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo);
 
     public CreateAppCommandHandlerTests()
     {

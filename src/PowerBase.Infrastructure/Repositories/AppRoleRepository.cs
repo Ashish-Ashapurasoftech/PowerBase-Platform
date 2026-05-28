@@ -102,7 +102,7 @@ public class AppRoleRepository : BaseRepository, IAppRoleRepository
             await transaction.Connection!.ExecuteAsync(new CommandDefinition(DeleteRolePermissionsSql, new { appRoleId }, transaction, cancellationToken: ct));
             if (permissionCodes.Any())
             {
-                await transaction.Connection.ExecuteAsync(new CommandDefinition(InsertRolePermissionsSql, new { appRoleId, codes = permissionCodes }, transaction, cancellationToken: ct));
+                await transaction.Connection!.ExecuteAsync(new CommandDefinition(InsertRolePermissionsSql, new { appRoleId, codes = permissionCodes }, transaction, cancellationToken: ct));
             }
         }
         else

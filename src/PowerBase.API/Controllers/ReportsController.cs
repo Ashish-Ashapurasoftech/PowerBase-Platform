@@ -166,8 +166,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Get default report settings for a table, including app roles and selectable reports.</summary>
     [HttpGet("tables/{tableId:guid}/default-report-settings")]
-    [RequirePermission(PermissionCodes.ReportsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<DefaultReportSettingsResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -179,8 +178,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Update default report settings for a table.</summary>
     [HttpPut("tables/{tableId:guid}/default-report-settings")]
-    [RequirePermission(PermissionCodes.ReportsUpdate)]
-    [RequireAppAccess(AppAccess.Admin, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.TablesUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -197,8 +195,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Resolve the effective default report for the current user and table.</summary>
     [HttpGet("tables/{tableId:guid}/default-report")]
-    [RequirePermission(PermissionCodes.ReportsRead)]
-    [RequireAppAccess(AppAccess.Read, AppAccessResolver.ByTableId)]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

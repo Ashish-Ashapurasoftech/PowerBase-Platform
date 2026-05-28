@@ -32,7 +32,7 @@ public class DefaultReportSettingsHandlerTests
         var reportId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(MakeTable(defaultReportSettings: "{}"));
         _reportRepo.ListByTableAsync(tableId, Arg.Any<CancellationToken>()).Returns([MakeReport(reportId, isDefault: true)]);
-        _appRoleRepo.ListByAppIdAsync(10L, Arg.Any<CancellationToken>()).Returns([MakeRole(Guid.NewGuid())]);
+        _appRoleRepo.ListDetailsByAppIdAsync(10L, Arg.Any<CancellationToken>()).Returns([MakeRoleDetail(Guid.NewGuid())]);
         var sut = new GetDefaultReportSettingsQueryHandler(_tableRepo, _appRoleRepo, _reportRepo);
 
         var result = await sut.HandleAsync(new GetDefaultReportSettingsQuery(tableId));
@@ -182,6 +182,16 @@ public class DefaultReportSettingsHandlerTests
         AppId = appId,
         Name = "Viewer",
     };
+
+    private static AppRoleDetail MakeRoleDetail(Guid publicId, long appId = 10L) => new(
+        Id: 2L,
+        PublicId: publicId,
+        AppId: appId,
+        Name: "Viewer",
+        IsDefault: false,
+        IsSystem: false,
+        Permissions: []
+    );
 
     private static Report MakeReport(Guid publicId, bool isDefault = false, string name = "Report") => new()
     {
