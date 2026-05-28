@@ -7,9 +7,14 @@ public record SaveFormLayoutCommand(
 public record FormSectionLayout(
     Guid? PublicId,
     string Name,
-    int ColumnCount,
-    string? ColumnWidths,
     bool IsCollapsed,
+    IReadOnlyList<FormBlockLayout> Blocks);
+
+public record FormBlockLayout(
+    Guid? PublicId,
+    string? Heading,
+    string? BackgroundColor,
+    int? Width,
     IReadOnlyList<FormElementLayout> Elements);
 
 public record FormElementLayout(

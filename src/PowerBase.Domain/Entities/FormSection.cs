@@ -11,5 +11,6 @@ public class FormSection
     public bool IsCollapsed { get; set; }
     public int DisplayOrder { get; set; }
     public string? ColumnWidths { get; set; }
-    public List<FormElement> Elements { get; set; } = new();
+    public List<FormElement> Elements { get; set; } = new();   // kept for backward-compat; populated from Blocks by the repo
+    public List<FormSectionBlock> Blocks { get; set; } = [];
 }
