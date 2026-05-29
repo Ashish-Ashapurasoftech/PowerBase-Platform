@@ -14,5 +14,6 @@ public interface IReportRepository
     Task<int> UpdateAsync(Guid publicId, string name, string? description,
         string visibility, string definition, CancellationToken ct = default);
     Task SetDefaultAsync(Guid tablePublicId, Guid reportPublicId, CancellationToken ct = default);
+    Task UpdateFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid ReportPublicId, Guid? ViewEditFormPublicId)> overrides, CancellationToken ct = default);
     Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default);
 }

@@ -145,7 +145,7 @@ public class ReportHandlerTests
         var reports = new List<Report> { MakeReport(table.Id), MakeReport(table.Id) };
         _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
         _reportRepo.ListByAppAsync(app.Id).Returns(reports);
-        var sut = new ListReportsQueryHandler(_appRepo, _reportRepo);
+        var sut = new ListReportsQueryHandler(_reportRepo, _appRepo);
 
         var result = await sut.HandleAsync(new ListReportsQuery(app.PublicId));
 

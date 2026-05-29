@@ -129,6 +129,7 @@ public class CreateReportCommandHandler
             Definition = definition,
             IsDefault = report.IsDefault,
             DisplayOrder = report.DisplayOrder,
+            ViewEditFormId = report.ViewEditFormPublicId,
             CreatedOn = DateTime.UtcNow,
         };
     }

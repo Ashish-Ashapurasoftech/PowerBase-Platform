@@ -62,6 +62,7 @@ public class ResolveDefaultReportQueryHandler
             Definition = definition,
             IsDefault = report.IsDefault,
             DisplayOrder = report.DisplayOrder,
+            ViewEditFormId = report.ViewEditFormPublicId,
             CreatedOn = report.CreatedOn,
         };
     }

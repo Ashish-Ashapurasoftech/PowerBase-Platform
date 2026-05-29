@@ -83,6 +83,55 @@ public class FormRepository : BaseRepository, IFormRepository
           AND IsDeleted = 0
         """;
 
+    private const string UnsetDefaultFormSql = """
+        UPDATE meta.Form
+        SET IsDefault = 0, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND TenantId = @tenantId AND IsDeleted = 0)
+          AND TenantId = @tenantId AND IsDeleted = 0
+        """;
+
+    private const string SetDefaultFormSql = """
+        UPDATE meta.Form
+        SET IsDefault = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE TenantId = @tenantId AND PublicId = @formPublicId AND IsDeleted = 0
+        """;
+
+    private const string GetRoleFormOverridesSql = """
+        SELECT 
+            r.PublicId AS RolePublicId, 
+            ef.PublicId AS EditFormPublicId, 
+            af.PublicId AS AddFormPublicId
+        FROM meta.AppRoleTableFormOverride o
+        JOIN meta.AppTable t ON t.Id = o.AppTableId
+        LEFT JOIN meta.AppRole r ON r.Id = o.AppRoleId
+        LEFT JOIN meta.Form ef ON ef.Id = o.EditFormId
+        LEFT JOIN meta.Form af ON af.Id = o.AddFormId
+        WHERE o.TenantId = @tenantId
+          AND t.PublicId = @tablePublicId
+          AND t.IsDeleted = 0
+        """;
+
+    private const string DeleteRoleFormOverridesSql = """
+        DELETE o
+        FROM meta.AppRoleTableFormOverride o
+        JOIN meta.AppTable t ON t.Id = o.AppTableId
+        WHERE o.TenantId = @tenantId
+          AND t.PublicId = @tablePublicId
+        """;
+
+    private const string InsertRoleFormOverrideSql = """
+        INSERT INTO meta.AppRoleTableFormOverride (TenantId, AppTableId, AppRoleId, EditFormId, AddFormId, CreatedBy)
+        VALUES (
+            @tenantId,
+            (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND TenantId = @tenantId AND IsDeleted = 0),
+            CASE WHEN @rolePublicId IS NULL THEN NULL ELSE (SELECT Id FROM meta.AppRole WHERE PublicId = @rolePublicId AND TenantId = @tenantId AND IsDeleted = 0) END,
+            CASE WHEN @editFormPublicId IS NULL THEN NULL ELSE (SELECT Id FROM meta.Form WHERE PublicId = @editFormPublicId AND TenantId = @tenantId AND IsDeleted = 0) END,
+            CASE WHEN @addFormPublicId IS NULL THEN NULL ELSE (SELECT Id FROM meta.Form WHERE PublicId = @addFormPublicId AND TenantId = @tenantId AND IsDeleted = 0) END,
+            @createdBy
+        )
+        """;
+
+
     private const string GetSectionsSql = """
         SELECT Id, PublicId, TenantId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder
         FROM meta.FormSection
@@ -413,5 +462,77 @@ public class FormRepository : BaseRepository, IFormRepository
         var (newId, newPublicId) = await CreateAsync(newForm, ct);
         await SaveLayoutAsync(newId, tenantId, sourceLayout, ct);
         return (newId, newPublicId);
+    }
+
+    public async Task SetDefaultAsync(Guid tablePublicId, Guid formPublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            await connection.ExecuteAsync(
+                new CommandDefinition(UnsetDefaultFormSql,
+                    new { tenantId = QueryContext.TenantId, tablePublicId, modifiedBy = QueryContext.UserId },
+                    transaction: transaction, cancellationToken: ct));
+
+            await connection.ExecuteAsync(
+                new CommandDefinition(SetDefaultFormSql,
+                    new { tenantId = QueryContext.TenantId, formPublicId, modifiedBy = QueryContext.UserId },
+                    transaction: transaction, cancellationToken: ct));
+
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
+    }
+
+    public async Task<IReadOnlyList<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)>> GetRoleFormOverridesAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var overrides = await connection.QueryAsync<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)>(
+            new CommandDefinition(GetRoleFormOverridesSql,
+                new { tenantId = QueryContext.TenantId, tablePublicId },
+                cancellationToken: ct));
+        return overrides.ToList();
+    }
+
+    public async Task UpdateRoleFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)> overrides, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            await connection.ExecuteAsync(
+                new CommandDefinition(DeleteRoleFormOverridesSql,
+                    new { tenantId = QueryContext.TenantId, tablePublicId },
+                    transaction: transaction, cancellationToken: ct));
+
+            foreach (var o in overrides)
+            {
+                await connection.ExecuteAsync(
+                    new CommandDefinition(InsertRoleFormOverrideSql,
+                        new 
+                        { 
+                            tenantId = QueryContext.TenantId, 
+                            tablePublicId, 
+                            rolePublicId = o.RolePublicId,
+                            editFormPublicId = o.EditFormPublicId,
+                            addFormPublicId = o.AddFormPublicId,
+                            createdBy = QueryContext.UserId 
+                        },
+                        transaction: transaction, cancellationToken: ct));
+            }
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
     }
 }

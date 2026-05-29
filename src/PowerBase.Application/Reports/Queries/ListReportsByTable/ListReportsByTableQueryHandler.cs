@@ -31,6 +31,7 @@ public class ListReportsByTableQueryHandler
                 Definition = def,
                 IsDefault = r.IsDefault,
                 DisplayOrder = r.DisplayOrder,
+                ViewEditFormId = r.ViewEditFormPublicId,
                 CreatedOn = r.CreatedOn,
             };
         }).ToList();

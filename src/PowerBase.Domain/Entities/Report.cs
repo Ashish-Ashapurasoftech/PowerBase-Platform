@@ -22,4 +22,6 @@ public class Report
     public DateTime? DeletedOn { get; set; }
     public long? DeletedBy { get; set; }
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
+    public long? ViewEditFormId { get; set; }
+    public Guid? ViewEditFormPublicId { get; set; }
 }

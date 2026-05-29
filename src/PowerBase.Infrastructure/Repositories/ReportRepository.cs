@@ -11,12 +11,14 @@ public class ReportRepository : BaseRepository, IReportRepository
     private const string SelectColumns = """
         r.Id, r.PublicId, r.TenantId, r.AppTableId, r.OwnerId, r.Name, r.Description,
         r.ReportType, r.Visibility, r.Definition, r.IsDefault, r.DisplayOrder,
-        r.IsDeleted, r.CreatedOn, r.CreatedBy, r.ModifiedOn, r.ModifiedBy
+        r.IsDeleted, r.CreatedOn, r.CreatedBy, r.ModifiedOn, r.ModifiedBy, r.ViewEditFormId,
+        f.PublicId AS ViewEditFormPublicId
         """;
 
     private const string GetByPublicIdSql = $"""
         SELECT {SelectColumns}
         FROM meta.Report r
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.TenantId = @tenantId
           AND r.PublicId = @publicId
           AND r.IsDeleted = 0
@@ -32,6 +34,7 @@ public class ReportRepository : BaseRepository, IReportRepository
     private const string ListByTableSql = $"""
         SELECT {SelectColumns}
         FROM meta.Report r
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.TenantId = @tenantId
           AND r.AppTableId = (SELECT Id FROM meta.AppTable
                               WHERE PublicId = @tablePublicId
@@ -46,6 +49,7 @@ public class ReportRepository : BaseRepository, IReportRepository
         SELECT {SelectColumns}
         FROM meta.Report r
         JOIN meta.AppTable t ON t.Id = r.AppTableId
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.TenantId = @tenantId
           AND t.AppId = @appId
           AND r.IsDeleted = 0
@@ -56,6 +60,7 @@ public class ReportRepository : BaseRepository, IReportRepository
     private const string GetDefaultByTableSql = $"""
         SELECT {SelectColumns}
         FROM meta.Report r
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.TenantId = @tenantId
           AND r.AppTableId = (SELECT Id FROM meta.AppTable
                               WHERE PublicId = @tablePublicId
@@ -114,6 +119,25 @@ public class ReportRepository : BaseRepository, IReportRepository
         SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
         WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
         """;
+
+    private const string UpdateReportFormOverrideSql = """
+        UPDATE r
+        SET r.ViewEditFormId = (SELECT Id FROM meta.Form WHERE PublicId = @viewEditFormPublicId AND TenantId = @tenantId AND IsDeleted = 0),
+            r.ModifiedOn = SYSUTCDATETIME(),
+            r.ModifiedBy = @modifiedBy
+        FROM meta.Report r
+        WHERE r.TenantId = @tenantId AND r.PublicId = @reportPublicId AND r.IsDeleted = 0
+        """;
+
+    private const string ClearReportFormOverrideSql = """
+        UPDATE r
+        SET r.ViewEditFormId = NULL,
+            r.ModifiedOn = SYSUTCDATETIME(),
+            r.ModifiedBy = @modifiedBy
+        FROM meta.Report r
+        WHERE r.TenantId = @tenantId AND r.PublicId = @reportPublicId AND r.IsDeleted = 0
+        """;
+
 
     public ReportRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
@@ -236,5 +260,38 @@ public class ReportRepository : BaseRepository, IReportRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteAsync(
             new CommandDefinition(SoftDeleteReportSql, new { tenantId = QueryContext.TenantId, publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    public async Task UpdateFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid ReportPublicId, Guid? ViewEditFormPublicId)> overrides, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            foreach (var (reportPublicId, viewEditFormPublicId) in overrides)
+            {
+                if (viewEditFormPublicId.HasValue)
+                {
+                    await connection.ExecuteAsync(
+                        new CommandDefinition(UpdateReportFormOverrideSql,
+                            new { tenantId = QueryContext.TenantId, reportPublicId, viewEditFormPublicId, modifiedBy = QueryContext.UserId },
+                            transaction: transaction, cancellationToken: ct));
+                }
+                else
+                {
+                    await connection.ExecuteAsync(
+                        new CommandDefinition(ClearReportFormOverrideSql,
+                            new { tenantId = QueryContext.TenantId, reportPublicId, modifiedBy = QueryContext.UserId },
+                            transaction: transaction, cancellationToken: ct));
+                }
+            }
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
     }
 }

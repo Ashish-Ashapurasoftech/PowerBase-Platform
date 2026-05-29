@@ -20,6 +20,10 @@ using PowerBase.Application.Forms.Queries.GetFormLayout;
 using PowerBase.Application.Forms.Queries.GetFormRule;
 using PowerBase.Application.Forms.Queries.ListFormRules;
 using PowerBase.Application.Forms.Queries.ListForms;
+using PowerBase.Application.Forms.Commands.SetDefaultForm;
+using PowerBase.Application.Forms.Commands.UpdateRoleFormOverrides;
+using PowerBase.Application.Forms.Queries.GetRoleFormOverrides;
+using PowerBase.Application.Forms.Queries.ResolveForm;
 using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
@@ -43,6 +47,10 @@ public class FormsController : ControllerBase
     private readonly GetFormLayoutQueryHandler _getLayoutHandler;
     private readonly ListFormRulesQueryHandler _listRulesHandler;
     private readonly GetFormRuleQueryHandler _getRuleHandler;
+    private readonly SetDefaultFormCommandHandler _setDefaultFormHandler;
+    private readonly GetRoleFormOverridesQueryHandler _getRoleFormOverridesHandler;
+    private readonly UpdateRoleFormOverridesCommandHandler _updateRoleFormOverridesHandler;
+    private readonly ResolveFormQueryHandler _resolveFormHandler;
 
     public FormsController(
         CreateFormCommandHandler createFormHandler,
@@ -60,7 +68,11 @@ public class FormsController : ControllerBase
         ListFormsQueryHandler listFormsHandler,
         GetFormLayoutQueryHandler getLayoutHandler,
         ListFormRulesQueryHandler listRulesHandler,
-        GetFormRuleQueryHandler getRuleHandler)
+        GetFormRuleQueryHandler getRuleHandler,
+        SetDefaultFormCommandHandler setDefaultFormHandler,
+        GetRoleFormOverridesQueryHandler getRoleFormOverridesHandler,
+        UpdateRoleFormOverridesCommandHandler updateRoleFormOverridesHandler,
+        ResolveFormQueryHandler resolveFormHandler)
     {
         _createFormHandler = createFormHandler;
         _updateSettingsHandler = updateSettingsHandler;
@@ -78,6 +90,10 @@ public class FormsController : ControllerBase
         _getLayoutHandler = getLayoutHandler;
         _listRulesHandler = listRulesHandler;
         _getRuleHandler = getRuleHandler;
+        _setDefaultFormHandler = setDefaultFormHandler;
+        _getRoleFormOverridesHandler = getRoleFormOverridesHandler;
+        _updateRoleFormOverridesHandler = updateRoleFormOverridesHandler;
+        _resolveFormHandler = resolveFormHandler;
     }
 
     // ── Forms ────────────────────────────────────────────────────────────────
@@ -93,6 +109,71 @@ public class FormsController : ControllerBase
         var results = await _listFormsHandler.HandleAsync(new ListFormsQuery(tableId), ct);
         var items = results.Select(MapToListItem).ToList();
         return Ok(new ApiResponse<IReadOnlyList<FormListItemResponse>>(items));
+    }
+
+    /// <summary>Get form settings (defaults & role overrides).</summary>
+    [HttpGet("tables/{tableId:guid}/forms/settings")]
+    [RequireAppPermission(PermissionCodes.FormsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<DefaultFormSettingsResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetFormSettings(Guid tableId, CancellationToken ct)
+    {
+        var forms = await _listFormsHandler.HandleAsync(new ListFormsQuery(tableId), ct);
+        var overrides = await _getRoleFormOverridesHandler.HandleAsync(new GetRoleFormOverridesQuery(tableId), ct);
+        var everyoneOverride = overrides.FirstOrDefault(o => o.RoleId == null);
+        var roleOverrides = overrides.Where(o => o.RoleId != null).ToList();
+
+        var response = new DefaultFormSettingsResponse
+        {
+            EveryoneEditFormId = everyoneOverride?.EditFormId ?? forms.FirstOrDefault(f => f.IsDefault)?.Id ?? Guid.Empty,
+            EveryoneAddFormId = everyoneOverride?.AddFormId ?? forms.FirstOrDefault(f => f.IsDefault)?.Id ?? Guid.Empty,
+            Roles = roleOverrides.Select(o => new RoleFormOverrideResponse
+            {
+                RoleId = o.RoleId!.Value,
+                RoleName = o.RoleName ?? "",
+                EditFormId = o.EditFormId,
+                AddFormId = o.AddFormId
+            }).ToList(),
+            Forms = forms.Select(MapToListItem).ToList()
+        };
+
+        return Ok(new ApiResponse<DefaultFormSettingsResponse>(response));
+    }
+
+    /// <summary>Update form settings (defaults & role overrides).</summary>
+    [HttpPut("tables/{tableId:guid}/forms/settings")]
+    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> UpdateFormSettings(Guid tableId, [FromBody] UpdateDefaultFormSettingsRequest request, CancellationToken ct)
+    {
+        var overrides = new List<RoleFormOverrideCommandDto>
+        {
+            new RoleFormOverrideCommandDto(null, request.EveryoneEditFormId, request.EveryoneAddFormId)
+        };
+        overrides.AddRange(request.RoleOverrides.Select(o => new RoleFormOverrideCommandDto(o.RoleId, o.EditFormId, o.AddFormId)));
+
+        await _updateRoleFormOverridesHandler.HandleAsync(new UpdateRoleFormOverridesCommand(tableId, overrides), ct);
+        return NoContent();
+    }
+
+    /// <summary>Resolve which form to use for Add/Edit.</summary>
+    [HttpGet("tables/{tableId:guid}/forms/resolve")]
+    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<FormDetailResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ResolveForm(Guid tableId, [FromQuery] string mode, [FromQuery] Guid? reportId, CancellationToken ct)
+    {
+        var form = await _resolveFormHandler.HandleAsync(new ResolveFormQuery(tableId, mode, reportId), ct);
+        if (form == null) return NotFound();
+        return Ok(new ApiResponse<FormDetailResponse>(MapToDetail(form)));
+    }
+
+    /// <summary>Set a form as the default form for the table.</summary>
+    [HttpPost("forms/{formId:guid}/set-default")]
+    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByFormPublicId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> SetDefaultForm(Guid formId, [FromQuery] Guid tableId, CancellationToken ct)
+    {
+        await _setDefaultFormHandler.HandleAsync(new SetDefaultFormCommand(tableId, formId), ct);
+        return NoContent();
     }
 
     /// <summary>Create a new form for a table.</summary>

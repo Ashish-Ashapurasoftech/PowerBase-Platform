@@ -20,8 +20,9 @@ public class CreateAppCommandHandlerTests
     private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
     private readonly IFieldTypeRepository _fieldTypeRepo = Substitute.For<IFieldTypeRepository>();
+    private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
 
-    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo);
+    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo);
 
     public CreateAppCommandHandlerTests()
     {

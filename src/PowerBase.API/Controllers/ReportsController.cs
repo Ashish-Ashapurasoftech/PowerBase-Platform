@@ -17,6 +17,9 @@ using PowerBase.Application.Reports.Queries.ListReportsByTable;
 using PowerBase.Application.Reports.Queries.ExportReport;
 using PowerBase.Application.Reports.Queries.ResolveDefaultReport;
 using PowerBase.Application.Reports.Queries.RunReport;
+using PowerBase.Application.Reports.Commands.UpdateReportFormOverrides;
+using PowerBase.Application.Forms.Queries.ListForms;
+using PowerBase.API.Models.Forms;
 using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
@@ -36,6 +39,8 @@ public class ReportsController : ControllerBase
     private readonly GetDefaultReportSettingsQueryHandler _getDefaultSettingsHandler;
     private readonly UpdateDefaultReportSettingsCommandHandler _updateDefaultSettingsHandler;
     private readonly ResolveDefaultReportQueryHandler _resolveDefaultReportHandler;
+    private readonly UpdateReportFormOverridesCommandHandler _updateReportFormOverridesHandler;
+    private readonly ListFormsQueryHandler _listFormsHandler;
 
     public ReportsController(
         CreateReportCommandHandler createHandler,
@@ -49,7 +54,9 @@ public class ReportsController : ControllerBase
         ExportReportQueryHandler exportHandler,
         GetDefaultReportSettingsQueryHandler getDefaultSettingsHandler,
         UpdateDefaultReportSettingsCommandHandler updateDefaultSettingsHandler,
-        ResolveDefaultReportQueryHandler resolveDefaultReportHandler)
+        ResolveDefaultReportQueryHandler resolveDefaultReportHandler,
+        UpdateReportFormOverridesCommandHandler updateReportFormOverridesHandler,
+        ListFormsQueryHandler listFormsHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -63,6 +70,8 @@ public class ReportsController : ControllerBase
         _getDefaultSettingsHandler = getDefaultSettingsHandler;
         _updateDefaultSettingsHandler = updateDefaultSettingsHandler;
         _resolveDefaultReportHandler = resolveDefaultReportHandler;
+        _updateReportFormOverridesHandler = updateReportFormOverridesHandler;
+        _listFormsHandler = listFormsHandler;
     }
 
     /// <summary>Save a report definition for a table.</summary>
@@ -104,9 +113,47 @@ public class ReportsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> ListByTable(Guid tableId, CancellationToken ct)
     {
-        var results = await _listByTableHandler.HandleAsync(new ListReportsByTableQuery(tableId), ct);
-        var items = results.Select(MapToResponse).ToList();
-        return Ok(new ApiResponse<IReadOnlyList<ReportResponse>>(items));
+        var reports = await _listByTableHandler.HandleAsync(new ListReportsByTableQuery(tableId), ct);
+        return Ok(new ApiResponse<IReadOnlyList<ReportResponse>>(reports.Select(MapToResponse).ToList()));
+    }
+
+    /// <summary>Get report form settings.</summary>
+    [HttpGet("tables/{tableId:guid}/reports/form-settings")]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<ReportFormSettingsResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetReportFormSettings(Guid tableId, CancellationToken ct)
+    {
+        var reports = await _listByTableHandler.HandleAsync(new ListReportsByTableQuery(tableId), ct);
+        var forms = await _listFormsHandler.HandleAsync(new ListFormsQuery(tableId), ct);
+
+        var response = new ReportFormSettingsResponse
+        {
+            Reports = reports.Select(r => new ReportFormOverrideResponse
+            {
+                ReportId = r.Id,
+                ReportName = r.Name,
+                FormId = r.ViewEditFormId
+            }).ToList(),
+            Forms = forms.Select(f => new FormListItemResponse
+            {
+                Id = f.Id,
+                Name = f.Name,
+                IsDefault = f.IsDefault
+            }).ToList()
+        };
+
+        return Ok(new ApiResponse<ReportFormSettingsResponse>(response));
+    }
+
+    /// <summary>Update report form settings.</summary>
+    [HttpPut("tables/{tableId:guid}/reports/form-settings")]
+    [RequireAppPermission(PermissionCodes.ReportsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> UpdateReportFormSettings(Guid tableId, [FromBody] UpdateReportFormSettingsRequest request, CancellationToken ct)
+    {
+        var overrides = request.ReportOverrides.Select(o => new ReportFormOverrideCommandDto(o.ReportId, o.FormId)).ToList();
+        await _updateReportFormOverridesHandler.HandleAsync(new UpdateReportFormOverridesCommand(tableId, overrides), ct);
+        return NoContent();
     }
 
     /// <summary>List all reports for an app.</summary>
@@ -341,6 +388,7 @@ public class ReportsController : ControllerBase
         },
         IsDefault = r.IsDefault,
         DisplayOrder = r.DisplayOrder,
+        ViewEditFormId = r.ViewEditFormId,
         CreatedOn = r.CreatedOn,
     };
 
