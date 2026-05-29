@@ -6,6 +6,7 @@ public class FormElement
     public Guid PublicId { get; set; }
     public long TenantId { get; set; }
     public long FormSectionId { get; set; }
+    public long? FormSectionBlockId { get; set; }
     public long? AppFieldId { get; set; }
     public string ElementType { get; set; } = "Field";
     public string? ElementContent { get; set; }

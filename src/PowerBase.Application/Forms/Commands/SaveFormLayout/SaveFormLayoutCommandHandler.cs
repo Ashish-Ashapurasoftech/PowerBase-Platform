@@ -9,20 +9,17 @@ public class SaveFormLayoutCommandHandler
 {
     private readonly IFormRepository _formRepo;
     private readonly IAppFieldRepository _fieldRepo;
-    private readonly IAppTableRepository _tableRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
 
     public SaveFormLayoutCommandHandler(
         IFormRepository formRepo,
         IAppFieldRepository fieldRepo,
-        IAppTableRepository tableRepo,
         IQueryContext queryContext,
         IAuditRepository auditRepo)
     {
         _formRepo = formRepo;
         _fieldRepo = fieldRepo;
-        _tableRepo = tableRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
     }
@@ -41,8 +38,10 @@ public class SaveFormLayoutCommandHandler
         var tableFields = await _fieldRepo.ListByTableAsync(form.AppTableId, ct);
         var validFieldIds = tableFields.Select(f => f.Id).ToHashSet();
 
+        // Collect all field element IDs across all blocks
         var fieldElementIds = command.Sections
-            .SelectMany(s => s.Elements)
+            .SelectMany(s => s.Blocks)
+            .SelectMany(b => b.Elements)
             .Where(e => e.ElementType == "Field" && e.AppFieldId.HasValue)
             .Select(e => e.AppFieldId!.Value)
             .ToList();
@@ -56,29 +55,35 @@ public class SaveFormLayoutCommandHandler
 
         var sections = command.Sections.Select(s => new FormSection
         {
-            TenantId     = _queryContext.TenantId,
-            FormId       = form.Id,
-            Name         = s.Name,
-            ColumnCount  = s.ColumnCount,
-            ColumnWidths = s.ColumnWidths,
-            IsCollapsed  = s.IsCollapsed,
-            Elements     = s.Elements.Select(e => new FormElement
+            TenantId    = _queryContext.TenantId,
+            FormId      = form.Id,
+            Name        = s.Name,
+            ColumnCount = s.Blocks.Count,
+            IsCollapsed = s.IsCollapsed,
+            Blocks      = s.Blocks.Select(b => new FormSectionBlock
             {
-                TenantId         = _queryContext.TenantId,
-                AppFieldId       = e.ElementType == "Field" ? e.AppFieldId : null,
-                ElementType      = e.ElementType,
-                ElementContent   = e.ElementContent,
-                LabelMode        = e.LabelMode,
-                CustomLabel      = e.CustomLabel,
-                ShowOnAdd        = e.ShowOnAdd,
-                ShowOnEdit       = e.ShowOnEdit,
-                ShowOnView       = e.ShowOnView,
-                WidthMode        = e.WidthMode,
-                WidthValue       = e.WidthValue,
-                HelpTextOverride = e.HelpTextOverride,
-                IsReadOnly       = e.IsReadOnly,
-                IsRequired       = e.IsRequired,
-                DisplayAs        = e.DisplayAs,
+                TenantId        = _queryContext.TenantId,
+                Heading         = b.Heading,
+                BackgroundColor = b.BackgroundColor,
+                Width           = b.Width,
+                Elements        = b.Elements.Select(e => new FormElement
+                {
+                    TenantId         = _queryContext.TenantId,
+                    AppFieldId       = e.ElementType == "Field" ? e.AppFieldId : null,
+                    ElementType      = e.ElementType,
+                    ElementContent   = e.ElementContent,
+                    LabelMode        = e.LabelMode,
+                    CustomLabel      = e.CustomLabel,
+                    ShowOnAdd        = e.ShowOnAdd,
+                    ShowOnEdit       = e.ShowOnEdit,
+                    ShowOnView       = e.ShowOnView,
+                    WidthMode        = e.WidthMode,
+                    WidthValue       = e.WidthValue,
+                    HelpTextOverride = e.HelpTextOverride,
+                    IsReadOnly       = e.IsReadOnly,
+                    IsRequired       = e.IsRequired,
+                    DisplayAs        = e.DisplayAs,
+                }).ToList(),
             }).ToList(),
         }).ToList();
 

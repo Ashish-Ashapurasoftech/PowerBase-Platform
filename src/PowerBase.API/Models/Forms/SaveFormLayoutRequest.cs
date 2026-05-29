@@ -9,9 +9,16 @@ public class FormSectionLayoutRequest
 {
     public Guid? PublicId { get; init; }
     public string Name { get; init; } = string.Empty;
-    public int ColumnCount { get; init; }
-    public string? ColumnWidths { get; init; }
     public bool IsCollapsed { get; init; }
+    public List<FormBlockLayoutRequest> Blocks { get; init; } = [];
+}
+
+public class FormBlockLayoutRequest
+{
+    public Guid? PublicId { get; init; }
+    public string? Heading { get; init; }
+    public string? BackgroundColor { get; init; }
+    public int? Width { get; init; }
     public List<FormElementLayoutRequest> Elements { get; init; } = [];
 }
 

@@ -185,28 +185,32 @@ public class FormsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> SaveLayout(Guid publicId, [FromBody] SaveFormLayoutRequest request, CancellationToken ct)
     {
-        var sections = request.Sections.Select((s, si) => new FormSectionLayout(
+        var sections = request.Sections.Select(s => new FormSectionLayout(
             s.PublicId,
             s.Name,
-            s.ColumnCount,
-            s.ColumnWidths,
             s.IsCollapsed,
-            s.Elements.Select((e, ei) => new FormElementLayout(
-                e.PublicId,
-                e.AppFieldId,
-                e.ElementType,
-                e.ElementContent,
-                e.LabelMode,
-                e.CustomLabel,
-                e.ShowOnAdd,
-                e.ShowOnEdit,
-                e.ShowOnView,
-                e.WidthMode,
-                e.WidthValue,
-                e.HelpTextOverride,
-                e.IsReadOnly,
-                e.IsRequired,
-                e.DisplayAs)).ToList()
+            s.Blocks.Select(b => new FormBlockLayout(
+                b.PublicId,
+                b.Heading,
+                b.BackgroundColor,
+                b.Width,
+                b.Elements.Select(e => new FormElementLayout(
+                    e.PublicId,
+                    e.AppFieldId,
+                    e.ElementType,
+                    e.ElementContent,
+                    e.LabelMode,
+                    e.CustomLabel,
+                    e.ShowOnAdd,
+                    e.ShowOnEdit,
+                    e.ShowOnView,
+                    e.WidthMode,
+                    e.WidthValue,
+                    e.HelpTextOverride,
+                    e.IsReadOnly,
+                    e.IsRequired,
+                    e.DisplayAs)).ToList()
+            )).ToList()
         )).ToList();
 
         await _saveLayoutHandler.HandleAsync(new SaveFormLayoutCommand(publicId, sections), ct);
@@ -362,25 +366,34 @@ public class FormsController : ControllerBase
             ColumnWidths = s.ColumnWidths,
             IsCollapsed  = s.IsCollapsed,
             DisplayOrder = s.DisplayOrder,
-            Elements     = s.Elements.Select(e => new FormElementResponse
+            Blocks       = s.Blocks.Select(b => new FormBlockResponse
             {
-                DbId             = e.DbId,
-                Id               = e.Id,
-                AppFieldId       = e.AppFieldId,
-                ElementType      = e.ElementType,
-                ElementContent   = e.ElementContent,
-                LabelMode        = e.LabelMode,
-                CustomLabel      = e.CustomLabel,
-                ShowOnAdd        = e.ShowOnAdd,
-                ShowOnEdit       = e.ShowOnEdit,
-                ShowOnView       = e.ShowOnView,
-                WidthMode        = e.WidthMode,
-                WidthValue       = e.WidthValue,
-                HelpTextOverride = e.HelpTextOverride,
-                IsReadOnly       = e.IsReadOnly,
-                IsRequired       = e.IsRequired,
-                DisplayAs        = e.DisplayAs,
-                DisplayOrder     = e.DisplayOrder,
+                DbId            = b.DbId,
+                Id              = b.Id,
+                Heading         = b.Heading,
+                BackgroundColor = b.BackgroundColor,
+                Width           = b.Width,
+                DisplayOrder    = b.DisplayOrder,
+                Elements        = b.Elements.Select(e => new FormElementResponse
+                {
+                    DbId             = e.DbId,
+                    Id               = e.Id,
+                    AppFieldId       = e.AppFieldId,
+                    ElementType      = e.ElementType,
+                    ElementContent   = e.ElementContent,
+                    LabelMode        = e.LabelMode,
+                    CustomLabel      = e.CustomLabel,
+                    ShowOnAdd        = e.ShowOnAdd,
+                    ShowOnEdit       = e.ShowOnEdit,
+                    ShowOnView       = e.ShowOnView,
+                    WidthMode        = e.WidthMode,
+                    WidthValue       = e.WidthValue,
+                    HelpTextOverride = e.HelpTextOverride,
+                    IsReadOnly       = e.IsReadOnly,
+                    IsRequired       = e.IsRequired,
+                    DisplayAs        = e.DisplayAs,
+                    DisplayOrder     = e.DisplayOrder,
+                }).ToList(),
             }).ToList(),
         }).ToList(),
     };

@@ -15,6 +15,17 @@ public class FormSectionResponse
     public string? ColumnWidths { get; init; }
     public bool IsCollapsed { get; init; }
     public int DisplayOrder { get; init; }
+    public List<FormBlockResponse> Blocks { get; init; } = [];
+}
+
+public class FormBlockResponse
+{
+    public long DbId { get; init; }
+    public Guid Id { get; init; }
+    public string? Heading { get; init; }
+    public string? BackgroundColor { get; init; }
+    public int? Width { get; init; }
+    public int DisplayOrder { get; init; }
     public List<FormElementResponse> Elements { get; init; } = [];
 }
 

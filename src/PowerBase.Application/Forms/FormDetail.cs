@@ -28,6 +28,17 @@ public class FormSectionDetail
     public string? ColumnWidths { get; init; }
     public bool IsCollapsed { get; init; }
     public int DisplayOrder { get; init; }
+    public List<FormBlockDetail> Blocks { get; init; } = [];
+}
+
+public class FormBlockDetail
+{
+    public long DbId { get; init; }
+    public Guid Id { get; init; }
+    public string? Heading { get; init; }
+    public string? BackgroundColor { get; init; }
+    public int? Width { get; init; }
+    public int DisplayOrder { get; init; }
     public List<FormElementDetail> Elements { get; init; } = [];
 }
 
