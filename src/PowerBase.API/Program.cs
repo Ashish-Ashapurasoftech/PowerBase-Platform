@@ -250,6 +250,19 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+// Serve statically uploaded files from the configured local path
+var localPath = app.Configuration.GetValue<string>("Storage:LocalPath") ?? "C:\\PowerbaseUploads";
+if (!System.IO.Directory.Exists(localPath))
+{
+    System.IO.Directory.CreateDirectory(localPath);
+}
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(localPath),
+    RequestPath = "/files"
+});
+
 app.UseMiddleware<QueryContextMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.MapControllers();

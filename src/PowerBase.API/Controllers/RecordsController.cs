@@ -140,12 +140,14 @@ public class RecordsController : ControllerBase
                 JsonValueKind.Number => el.GetDecimal(),
                 JsonValueKind.True => (object?)true,
                 JsonValueKind.False => false,
+                JsonValueKind.Array => JsonSerializer.Serialize(el),
                 JsonValueKind.Null => null,
                 _ => null,
             };
         }
         return result;
     }
+
 
     private static RecordResponse MapToResponse(RecordResult r) => new()
     {

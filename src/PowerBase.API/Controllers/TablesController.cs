@@ -167,6 +167,7 @@ public class TablesController : ControllerBase
         IsReportable = f.IsReportable,
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
+        Settings = f.Settings,
         CreatedOn = f.CreatedOn,
     };
 }

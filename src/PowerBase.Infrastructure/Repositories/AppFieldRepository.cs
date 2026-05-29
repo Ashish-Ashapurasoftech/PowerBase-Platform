@@ -12,7 +12,7 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
         af.Id, af.PublicId, af.TenantId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName, af.DefaultValue,
         af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable,
-        af.IsUnique, af.IsSystem, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        af.IsUnique, af.IsSystem, af.Settings, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
     private const string GetByIdInTableSql = $"""
@@ -46,11 +46,11 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
         INSERT INTO meta.AppField
             (TenantId, AppTableId, FieldTypeId, Name, Label, Description, IsRequired,
              IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable,
-             DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
+             Settings, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES (@tenantId, @tableId, @fieldTypeId, @name, @label, @description, @isRequired,
                 @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable,
-                @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
+                @settings, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string UpdatePhysicalColumnNameSql = """
@@ -70,6 +70,7 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
             IsRequired = @isRequired, DefaultValue = @defaultValue,
             IsSearchable = @isSearchable, IsSortable = @isSortable,
             IsFilterable = @isFilterable, IsReportable = @isReportable,
+            Settings = @settings,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE TenantId = @tenantId AND PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
         """;
@@ -125,6 +126,7 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
                 isSortable = field.IsSortable,
                 isFilterable = field.IsFilterable,
                 isReportable = field.IsReportable,
+                settings = field.Settings,
                 displayOrder = field.DisplayOrder,
                 createdBy = QueryContext.UserId,
             }, cancellationToken: ct));
@@ -147,7 +149,7 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
 
     public async Task<int> UpdateAsync(Guid publicId, long tableId, string name, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
-        bool isFilterable, bool isReportable, CancellationToken ct = default)
+        bool isFilterable, bool isReportable, string? settings, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteAsync(
@@ -156,7 +158,7 @@ public class AppFieldRepository : BaseRepository, IAppFieldRepository
                 tenantId = QueryContext.TenantId,
                 publicId, tableId, name, label, description,
                 isRequired, defaultValue, isSearchable, isSortable,
-                isFilterable, isReportable,
+                isFilterable, isReportable, settings,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

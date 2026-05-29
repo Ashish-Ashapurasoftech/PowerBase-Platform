@@ -12,7 +12,7 @@ public interface IAppFieldRepository
     Task UpdatePhysicalColumnNameAsync(long id, string physicalColumnName, CancellationToken ct = default);
     Task<int> UpdateAsync(Guid publicId, long tableId, string name, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
-        bool isFilterable, bool isReportable, CancellationToken ct = default);
+        bool isFilterable, bool isReportable, string? settings, CancellationToken ct = default);
     Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default);
     Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default);
 }

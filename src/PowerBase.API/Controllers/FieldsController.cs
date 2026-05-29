@@ -42,7 +42,7 @@ public class FieldsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Create(Guid tableId, [FromBody] CreateFieldRequest request, CancellationToken ct)
     {
-        var command = new CreateFieldCommand(tableId, request.TypeCode, request.Name, request.Label, request.Description, request.IsRequired);
+        var command = new CreateFieldCommand(tableId, request.TypeCode, request.Name, request.Label, request.Description, request.IsRequired, request.Settings);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<FieldResponse>(MapToResponse(result)));
     }
@@ -74,7 +74,7 @@ public class FieldsController : ControllerBase
             request.Name, request.Label, request.Description,
             request.IsRequired, request.DefaultValue,
             request.IsSearchable, request.IsSortable,
-            request.IsFilterable, request.IsReportable), ct);
+            request.IsFilterable, request.IsReportable, request.Settings), ct);
         return NoContent();
     }
 
@@ -114,6 +114,7 @@ public class FieldsController : ControllerBase
         PhysicalColumnName = r.PhysicalColumnName,
         IsRequired = r.IsRequired,
         IsSystem = false,
+        Settings = r.Settings,
         CreatedOn = r.CreatedOn,
     };
 
@@ -134,6 +135,7 @@ public class FieldsController : ControllerBase
         IsReportable = f.IsReportable,
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
+        Settings = f.Settings,
         CreatedOn = f.CreatedOn,
     };
 }

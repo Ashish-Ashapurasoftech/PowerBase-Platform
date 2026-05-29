@@ -27,7 +27,7 @@ public class UpdateFieldCommandHandler
             command.IsRequired, command.DefaultValue,
             command.IsSearchable, command.IsSortable,
             command.IsFilterable, command.IsReportable,
-            ct);
+            command.Settings, ct);
 
         if (affected == 0)
             throw new NotFoundException("Field", command.FieldPublicId);
