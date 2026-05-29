@@ -31,6 +31,7 @@ public class CreateAppCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IReportRepository _reportRepo;
     private readonly IFieldTypeRepository _fieldTypeRepo;
+    private readonly IFormRepository _formRepo;
 
     public CreateAppCommandHandler(
         IAppRepository appRepo,
@@ -43,7 +44,8 @@ public class CreateAppCommandHandler
         IAuditRepository auditRepo,
         IAppFieldRepository fieldRepo,
         IReportRepository reportRepo,
-        IFieldTypeRepository fieldTypeRepo)
+        IFieldTypeRepository fieldTypeRepo,
+        IFormRepository formRepo)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
@@ -56,6 +58,7 @@ public class CreateAppCommandHandler
         _fieldRepo = fieldRepo;
         _reportRepo = reportRepo;
         _fieldTypeRepo = fieldTypeRepo;
+        _formRepo = formRepo;
     }
 
     public async Task<CreateAppResult> HandleAsync(CreateAppCommand command, CancellationToken ct = default)
@@ -250,6 +253,45 @@ public class CreateAppCommandHandler
                 IsDefault = false,
                 DisplayOrder = 2,
             }, ct);
+
+            // Auto-create "Main Form" with all seeded system fields in a default section
+            var mainForm = new Form
+            {
+                TenantId          = table.TenantId,
+                AppTableId        = table.Id,
+                Name              = "Main Form",
+                IsDefault         = true,
+                AutoAddNewFields  = true,
+                ShowBuiltInFields = false,
+                SaveOptions       = "SaveKeepWorking,SaveNew,SaveNext,SaveView",
+                DisplayOrder      = 1,
+                CreatedBy         = _queryContext.UserId,
+            };
+            var (formId, _) = await _formRepo.CreateAsync(mainForm, ct);
+
+            var defaultSection = new FormSection
+            {
+                TenantId    = table.TenantId,
+                FormId      = formId,
+                Name        = "Section 1",
+                ColumnCount = 2,
+                DisplayOrder = 1,
+                Elements    = seededIds.Select((kvp, i) => new FormElement
+                {
+                    TenantId     = table.TenantId,
+                    AppFieldId   = kvp.Value,
+                    LabelMode    = "Default",
+                    ShowOnAdd    = true,
+                    ShowOnEdit   = true,
+                    ShowOnView   = true,
+                    WidthMode    = "Auto",
+                    IsReadOnly   = kvp.Key is "Record ID#" or "Date Created" or "Date Modified"
+                                       or "Record Owner" or "Last Modified By",
+                    IsRequired   = false,
+                    DisplayOrder = i + 1,
+                }).ToList(),
+            };
+            await _formRepo.SaveLayoutAsync(formId, table.TenantId, [defaultSection], ct);
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), appId: appId, ct: ct);
