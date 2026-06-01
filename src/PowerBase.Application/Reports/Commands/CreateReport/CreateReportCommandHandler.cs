@@ -13,6 +13,8 @@ public class CreateReportCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IReportRepository _reportRepo;
+    private readonly IAppUserRepository _appUserRepo;
+    private readonly IAppRoleRepository _appRoleRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
     private readonly CreateReportCommandValidator _validator;
@@ -25,12 +27,16 @@ public class CreateReportCommandHandler
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IReportRepository reportRepo,
+        IAppUserRepository appUserRepo,
+        IAppRoleRepository appRoleRepo,
         IQueryContext queryContext,
         IAuditRepository auditRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _reportRepo = reportRepo;
+        _appUserRepo = appUserRepo;
+        _appRoleRepo = appRoleRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
         _validator = new CreateReportCommandValidator();
@@ -114,7 +120,33 @@ public class CreateReportCommandHandler
             DisplayOrder = 0,
         };
 
-        var (_, publicId) = await _reportRepo.CreateAsync(report, ct);
+        var (reportId, publicId) = await _reportRepo.CreateAsync(report, ct);
+
+        var reportRolesToSave = new List<long>();
+        if (command.Visibility == Domain.Enums.Visibility.MyRole.ToString())
+        {
+            var appUser = await _appUserRepo.GetByAppAndUserAsync(table.AppId, _queryContext.UserId, ct);
+            if (appUser?.AppRoleId is not null)
+            {
+                reportRolesToSave.Add(appUser.AppRoleId);
+            }
+        }
+        else if (command.Visibility == Domain.Enums.Visibility.SpecificRoles.ToString() && command.VisibleToRoleIds?.Count > 0)
+        {
+            foreach (var rolePubId in command.VisibleToRoleIds)
+            {
+                var role = await _appRoleRepo.GetByPublicIdAsync(rolePubId, ct);
+                if (role is not null)
+                {
+                    reportRolesToSave.Add(role.Id);
+                }
+            }
+        }
+
+        if (reportRolesToSave.Count > 0)
+        {
+            await _reportRepo.SetReportRolesAsync(reportId, reportRolesToSave, ct);
+        }
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.Report, publicId.ToString(), appId: table.AppId, ct: ct);

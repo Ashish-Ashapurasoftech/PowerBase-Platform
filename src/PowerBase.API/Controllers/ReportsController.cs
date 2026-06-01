@@ -100,7 +100,8 @@ public class ReportsController : ControllerBase
             request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function, a.DisplayAs)).ToList(),
             request.DynamicFilterType,
             request.CustomDynamicFilterFields,
-            request.AllowQuickSearch);
+            request.AllowQuickSearch,
+            request.VisibleToRoleIds ?? []);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
@@ -194,7 +195,8 @@ public class ReportsController : ControllerBase
             request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function, a.DisplayAs)).ToList(),
             request.DynamicFilterType,
             request.CustomDynamicFilterFields,
-            request.AllowQuickSearch);
+            request.AllowQuickSearch,
+            request.VisibleToRoleIds ?? []);
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
     }
@@ -390,6 +392,7 @@ public class ReportsController : ControllerBase
         DisplayOrder = r.DisplayOrder,
         ViewEditFormId = r.ViewEditFormId,
         CreatedOn = r.CreatedOn,
+        VisibleToRoleIds = r.VisibleToRoleIds,
     };
 
     private static DefaultReportSettingsResponse MapToDefaultSettingsResponse(DefaultReportSettingsResult r) => new()

@@ -20,10 +20,18 @@ public class ListReportsQueryHandler
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
         var reports = await _reportRepo.ListByAppAsync(appId, ct);
 
-        return reports.Select(r =>
+        var results = new List<ReportDetailResult>();
+        foreach (var r in reports)
         {
             var def = JsonSerializer.Deserialize<ReportDefinition>(r.Definition) ?? new ReportDefinition();
-            return new ReportDetailResult
+            
+            var visibleToRoleIds = new List<Guid>();
+            if (r.Visibility == Domain.Enums.Visibility.SpecificRoles.ToString())
+            {
+                visibleToRoleIds = (await _reportRepo.GetReportRolePublicIdsAsync(r.Id, ct)).ToList();
+            }
+
+            results.Add(new ReportDetailResult
             {
                 Id = r.PublicId,
                 Name = r.Name,
@@ -35,7 +43,10 @@ public class ListReportsQueryHandler
                 DisplayOrder = r.DisplayOrder,
                 ViewEditFormId = r.ViewEditFormPublicId,
                 CreatedOn = r.CreatedOn,
-            };
-        }).ToList();
+                VisibleToRoleIds = visibleToRoleIds
+            });
+        }
+        
+        return results;
     }
 }

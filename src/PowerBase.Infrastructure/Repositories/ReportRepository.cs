@@ -41,7 +41,15 @@ public class ReportRepository : BaseRepository, IReportRepository
                                 AND TenantId = @tenantId
                                 AND IsDeleted = 0)
           AND r.IsDeleted = 0
-          AND (r.Visibility != 'Personal' OR r.OwnerId = @userId)
+          AND (
+              r.Visibility = 'Shared'
+              OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
+              OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
+                  SELECT 1 FROM meta.AppRoleReport arr
+                  JOIN meta.AppUser au ON au.AppRoleId = arr.AppRoleId
+                  WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+              ))
+          )
         ORDER BY r.DisplayOrder, r.Name
         """;
 
@@ -53,7 +61,15 @@ public class ReportRepository : BaseRepository, IReportRepository
         WHERE r.TenantId = @tenantId
           AND t.AppId = @appId
           AND r.IsDeleted = 0
-          AND (r.Visibility != 'Personal' OR r.OwnerId = @userId)
+          AND (
+              r.Visibility = 'Shared'
+              OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
+              OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
+                  SELECT 1 FROM meta.AppRoleReport arr
+                  JOIN meta.AppUser au ON au.AppRoleId = arr.AppRoleId
+                  WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+              ))
+          )
         ORDER BY r.DisplayOrder, r.Name
         """;
 
@@ -293,5 +309,72 @@ public class ReportRepository : BaseRepository, IReportRepository
             await transaction.RollbackAsync(ct);
             throw;
         }
+    }
+
+    public async Task SetReportRolesAsync(long reportId, IEnumerable<long> roleIds, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            await connection.ExecuteAsync(
+                new CommandDefinition("DELETE FROM meta.AppRoleReport WHERE ReportId = @reportId",
+                    new { reportId }, transaction: transaction, cancellationToken: ct));
+
+            if (roleIds.Any())
+            {
+                var parameters = roleIds.Select(roleId => new { reportId, roleId }).ToList();
+                await connection.ExecuteAsync(
+                    new CommandDefinition("INSERT INTO meta.AppRoleReport (ReportId, AppRoleId) VALUES (@reportId, @roleId)",
+                        parameters, transaction: transaction, cancellationToken: ct));
+            }
+            
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
+    }
+
+    public async Task<IReadOnlyList<long>> GetReportRoleIdsAsync(long reportId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<long>(
+            new CommandDefinition("SELECT AppRoleId FROM meta.AppRoleReport WHERE ReportId = @reportId",
+                new { reportId }, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task<IReadOnlyList<Guid>> GetReportRolePublicIdsAsync(long reportId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<Guid>(
+            new CommandDefinition(@"
+                SELECT ar.PublicId 
+                FROM meta.AppRoleReport arr
+                JOIN meta.AppRole ar ON ar.Id = arr.AppRoleId
+                WHERE arr.ReportId = @reportId",
+                new { reportId }, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task<Dictionary<long, List<long>>> GetAppRoleReportsMapAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var sql = """
+            SELECT arr.ReportId, arr.AppRoleId 
+            FROM meta.AppRoleReport arr
+            JOIN meta.Report r ON r.Id = arr.ReportId
+            JOIN meta.AppTable t ON t.Id = r.AppTableId
+            WHERE t.AppId = @appId AND r.IsDeleted = 0 AND r.TenantId = @tenantId
+            """;
+        var results = await connection.QueryAsync<(long ReportId, long AppRoleId)>(
+            new CommandDefinition(sql, new { appId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+        
+        return results.GroupBy(x => x.ReportId)
+                      .ToDictionary(g => g.Key, g => g.Select(x => x.AppRoleId).ToList());
     }
 }
