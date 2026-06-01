@@ -7,5 +7,9 @@ public enum FormRuleActionType
     Enable,
     Disable,
     Require,
-    NotRequired
+    NotRequired,
+    ChangeLabel,
+    SetColor,
+    DisplayMessage,
+    PreventSave
 }

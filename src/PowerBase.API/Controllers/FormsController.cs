@@ -351,9 +351,9 @@ public class FormsController : ControllerBase
     {
         var rowVersion = Convert.FromBase64String(request.RowVersion);
         var conditions = request.Conditions.Select(c =>
-            new FormRuleConditionSpec(c.AppFieldId, c.Operator, c.Value, c.DisplayOrder)).ToList();
+            new FormRuleConditionSpec(c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder)).ToList();
         var actions = request.Actions.Select(a =>
-            new FormRuleActionSpec(a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.DisplayOrder)).ToList();
+            new FormRuleActionSpec(a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder)).ToList();
 
         await _saveRuleHandler.HandleAsync(new SaveFormRuleCommand(
             ruleId, request.Name, request.Description, request.Tags, request.IsActive,
@@ -510,6 +510,8 @@ public class FormsController : ControllerBase
             AppFieldId   = c.AppFieldId,
             Operator     = c.Operator,
             Value        = c.Value,
+            ValueType    = c.ValueType,
+            ValueFieldId = c.ValueFieldId,
             DisplayOrder = c.DisplayOrder,
         }).ToList(),
         Actions = r.Actions.Select(a => new FormRuleActionResponse
@@ -518,6 +520,8 @@ public class FormsController : ControllerBase
             TargetType      = a.TargetType,
             TargetElementId = a.TargetElementId,
             TargetSectionId = a.TargetSectionId,
+            TargetBlockId   = a.TargetBlockId,
+            ActionValue     = a.ActionValue,
             DisplayOrder    = a.DisplayOrder,
         }).ToList(),
     };

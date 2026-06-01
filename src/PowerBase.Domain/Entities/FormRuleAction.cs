@@ -8,5 +8,7 @@ public class FormRuleAction
     public string TargetType { get; set; } = "Field";
     public long? TargetElementId { get; set; }
     public long? TargetSectionId { get; set; }
+    public long? TargetBlockId { get; set; }
+    public string? ActionValue { get; set; }
     public int DisplayOrder { get; set; }
 }

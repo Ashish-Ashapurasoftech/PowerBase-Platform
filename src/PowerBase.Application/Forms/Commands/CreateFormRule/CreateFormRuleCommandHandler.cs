@@ -76,6 +76,8 @@ public class CreateFormRuleCommandHandler
             AppFieldId   = c.AppFieldId,
             Operator     = c.Operator,
             Value        = c.Value,
+            ValueType    = c.ValueType,
+            ValueFieldId = c.ValueFieldId,
             DisplayOrder = c.DisplayOrder,
         }).ToList(),
         Actions = r.Actions.Select(a => new FormRuleActionDetail
@@ -85,6 +87,8 @@ public class CreateFormRuleCommandHandler
             TargetType      = a.TargetType,
             TargetElementId = a.TargetElementId,
             TargetSectionId = a.TargetSectionId,
+            TargetBlockId   = a.TargetBlockId,
+            ActionValue     = a.ActionValue,
             DisplayOrder    = a.DisplayOrder,
         }).ToList(),
     };

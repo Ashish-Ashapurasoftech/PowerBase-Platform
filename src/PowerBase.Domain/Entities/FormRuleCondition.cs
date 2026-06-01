@@ -7,5 +7,7 @@ public class FormRuleCondition
     public long AppFieldId { get; set; }
     public string Operator { get; set; } = "eq";
     public string? Value { get; set; }
+    public string? ValueType { get; set; }
+    public long? ValueFieldId { get; set; }
     public int DisplayOrder { get; set; }
 }
