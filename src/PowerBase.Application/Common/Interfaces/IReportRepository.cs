@@ -18,5 +18,6 @@ public interface IReportRepository
     Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task SetReportRolesAsync(long reportId, IEnumerable<long> roleIds, CancellationToken ct = default);
     Task<IReadOnlyList<long>> GetReportRoleIdsAsync(long reportId, CancellationToken ct = default);
+    Task<IReadOnlyList<Guid>> GetReportRolePublicIdsAsync(long reportId, CancellationToken ct = default);
     Task<Dictionary<long, List<long>>> GetAppRoleReportsMapAsync(long appId, CancellationToken ct = default);
 }

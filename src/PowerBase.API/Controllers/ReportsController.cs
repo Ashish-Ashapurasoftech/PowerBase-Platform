@@ -392,6 +392,7 @@ public class ReportsController : ControllerBase
         DisplayOrder = r.DisplayOrder,
         ViewEditFormId = r.ViewEditFormId,
         CreatedOn = r.CreatedOn,
+        VisibleToRoleIds = r.VisibleToRoleIds,
     };
 
     private static DefaultReportSettingsResponse MapToDefaultSettingsResponse(DefaultReportSettingsResult r) => new()

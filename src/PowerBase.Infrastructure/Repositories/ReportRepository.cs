@@ -348,6 +348,19 @@ public class ReportRepository : BaseRepository, IReportRepository
         return results.AsList();
     }
 
+    public async Task<IReadOnlyList<Guid>> GetReportRolePublicIdsAsync(long reportId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<Guid>(
+            new CommandDefinition(@"
+                SELECT ar.PublicId 
+                FROM meta.AppRoleReport arr
+                JOIN meta.AppRole ar ON ar.Id = arr.AppRoleId
+                WHERE arr.ReportId = @reportId",
+                new { reportId }, cancellationToken: ct));
+        return results.AsList();
+    }
+
     public async Task<Dictionary<long, List<long>>> GetAppRoleReportsMapAsync(long appId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();

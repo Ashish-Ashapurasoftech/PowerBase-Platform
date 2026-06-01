@@ -12,4 +12,5 @@ public class ReportDetailResult
     public int DisplayOrder { get; init; }
     public Guid? ViewEditFormId { get; init; }
     public DateTime CreatedOn { get; init; }
+    public List<Guid> VisibleToRoleIds { get; init; } = [];
 }
