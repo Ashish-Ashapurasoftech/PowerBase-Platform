@@ -12,13 +12,16 @@ public class UpdateDeleteReportHandlerTests
 {
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
     private readonly IAppAccessService _appAccessService = Substitute.For<IAppAccessService>();
+    private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
+    private readonly IAppRoleRepository _appRoleRepo = Substitute.For<IAppRoleRepository>();
+    private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
 
-    private UpdateReportCommandHandler CreateUpdateSut() => new(_reportRepo, _appAccessService, _auditRepo);
+    private UpdateReportCommandHandler CreateUpdateSut() => new(_reportRepo, _appAccessService, _appUserRepo, _appRoleRepo, _queryContext, _auditRepo);
     private DeleteReportCommandHandler CreateDeleteSut() => new(_reportRepo, _appAccessService, _auditRepo);
 
     private static UpdateReportCommand ValidCommand(Guid id, string name = "New Name") =>
-        new(id, name, null, "Shared", [], [], null, null, "EqualValues", false, false, false, [], "Default", [], true);
+        new(id, name, null, "Shared", [], [], null, null, "EqualValues", false, false, false, [], "Default", [], true, []);
 
     [Fact]
     public async Task UpdateReport_ValidCommand_CallsUpdate()

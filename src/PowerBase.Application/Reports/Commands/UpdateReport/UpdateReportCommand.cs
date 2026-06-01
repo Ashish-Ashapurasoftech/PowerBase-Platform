@@ -18,4 +18,5 @@ public record UpdateReportCommand(
     List<SummaryAggregationCommand> Aggregations,
     string DynamicFilterType,
     List<long> CustomDynamicFilterFields,
-    bool AllowQuickSearch);
+    bool AllowQuickSearch,
+    List<Guid>? VisibleToRoleIds);

@@ -209,6 +209,8 @@ builder.Services.AddScoped<ListReportsByTableQueryHandler>();
 builder.Services.AddScoped<ResolveDefaultReportQueryHandler>();
 builder.Services.AddScoped<RunReportQueryHandler>();
 builder.Services.AddScoped<ExportReportQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetRolesReportsMatrix.GetRolesReportsMatrixQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportVisibilityMatrix.UpdateReportVisibilityMatrixCommandHandler>();
 builder.Services.AddScoped<ListUsersQueryHandler>();
 builder.Services.AddScoped<InviteUserCommandHandler>();
 builder.Services.AddScoped<ChangeUserRoleCommandHandler>();

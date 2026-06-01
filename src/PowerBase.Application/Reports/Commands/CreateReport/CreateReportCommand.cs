@@ -17,6 +17,7 @@ public record CreateReportCommand(
     List<SummaryAggregationCommand> Aggregations,
     string DynamicFilterType,
     List<long> CustomDynamicFilterFields,
-    bool AllowQuickSearch);
+    bool AllowQuickSearch,
+    List<Guid>? VisibleToRoleIds);
 
 public record SummaryAggregationCommand(long FieldId, string Function, string DisplayAs = "Normal");

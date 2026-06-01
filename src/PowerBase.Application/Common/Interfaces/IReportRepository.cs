@@ -16,4 +16,7 @@ public interface IReportRepository
     Task SetDefaultAsync(Guid tablePublicId, Guid reportPublicId, CancellationToken ct = default);
     Task UpdateFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid ReportPublicId, Guid? ViewEditFormPublicId)> overrides, CancellationToken ct = default);
     Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default);
+    Task SetReportRolesAsync(long reportId, IEnumerable<long> roleIds, CancellationToken ct = default);
+    Task<IReadOnlyList<long>> GetReportRoleIdsAsync(long reportId, CancellationToken ct = default);
+    Task<Dictionary<long, List<long>>> GetAppRoleReportsMapAsync(long appId, CancellationToken ct = default);
 }
