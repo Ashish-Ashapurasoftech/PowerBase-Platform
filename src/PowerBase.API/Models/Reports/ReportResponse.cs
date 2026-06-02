@@ -10,7 +10,9 @@ public class ReportResponse
     public ReportDefinitionDto Definition { get; init; } = new();
     public bool IsDefault { get; init; }
     public int DisplayOrder { get; init; }
+    public Guid? ViewEditFormId { get; init; }
     public DateTime CreatedOn { get; init; }
+    public List<Guid> VisibleToRoleIds { get; init; } = [];
 }
 
 public class ReportDefinitionDto

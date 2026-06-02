@@ -11,4 +11,5 @@ public record UpdateFieldCommand(
     bool IsSearchable,
     bool IsSortable,
     bool IsFilterable,
-    bool IsReportable);
+    bool IsReportable,
+    string? Settings);

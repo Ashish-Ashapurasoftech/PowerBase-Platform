@@ -19,7 +19,7 @@ public class SaveFormRuleCommandValidator : AbstractValidator<SaveFormRuleComman
 
     private static readonly HashSet<string> ValidConditionLogic = new() { "all", "any" };
 
-    private static readonly HashSet<string> ValidTargetTypes = new() { "Field", "Section" };
+    private static readonly HashSet<string> ValidTargetTypes = new() { "Field", "Section", "Block" };
 
     public SaveFormRuleCommandValidator()
     {

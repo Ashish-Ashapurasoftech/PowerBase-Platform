@@ -7,6 +7,7 @@ public class CreateReportRequest
     public string Visibility { get; set; } = "Personal";
     public string ReportType { get; set; } = "Table";
     public List<long> Columns { get; set; } = [];
+    public List<Guid>? VisibleToRoleIds { get; set; }
 
     // New multi-sort
     public List<SortSpecRequest> SortFields { get; set; } = [];

@@ -4,5 +4,6 @@ public enum Visibility
 {
     Personal,
     Shared,
-    RoleScoped
+    MyRole,
+    SpecificRoles
 }

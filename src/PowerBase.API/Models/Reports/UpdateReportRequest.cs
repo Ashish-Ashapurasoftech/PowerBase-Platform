@@ -6,6 +6,7 @@ public class UpdateReportRequest
     public string? Description { get; set; }
     public string Visibility { get; set; } = "Personal";
     public List<long> Columns { get; set; } = [];
+    public List<Guid>? VisibleToRoleIds { get; set; }
 
     // New multi-sort
     public List<SortSpecRequest> SortFields { get; set; } = [];

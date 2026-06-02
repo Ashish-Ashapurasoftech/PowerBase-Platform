@@ -14,11 +14,13 @@ public record SaveFormRuleCommand(
     IReadOnlyList<FormRuleActionSpec> Actions,
     byte[] RowVersion);
 
-public record FormRuleConditionSpec(long AppFieldId, string Operator, string? Value, int DisplayOrder);
+public record FormRuleConditionSpec(long AppFieldId, string Operator, string? Value, string? ValueType, long? ValueFieldId, int DisplayOrder);
 
 public record FormRuleActionSpec(
     string ActionType,
     string TargetType,
     long? TargetElementId,
     long? TargetSectionId,
+    long? TargetBlockId,
+    string? ActionValue,
     int DisplayOrder);

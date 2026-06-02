@@ -200,6 +200,7 @@ builder.Services.AddScoped<CreateReportCommandHandler>();
 builder.Services.AddScoped<UpdateReportCommandHandler>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();
 builder.Services.AddScoped<SetDefaultReportCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();
 builder.Services.AddScoped<UpdateDefaultReportSettingsCommandHandler>();
 builder.Services.AddScoped<GetReportQueryHandler>();
 builder.Services.AddScoped<GetDefaultReportSettingsQueryHandler>();
@@ -208,6 +209,8 @@ builder.Services.AddScoped<ListReportsByTableQueryHandler>();
 builder.Services.AddScoped<ResolveDefaultReportQueryHandler>();
 builder.Services.AddScoped<RunReportQueryHandler>();
 builder.Services.AddScoped<ExportReportQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetRolesReportsMatrix.GetRolesReportsMatrixQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportVisibilityMatrix.UpdateReportVisibilityMatrixCommandHandler>();
 builder.Services.AddScoped<ListUsersQueryHandler>();
 builder.Services.AddScoped<InviteUserCommandHandler>();
 builder.Services.AddScoped<ChangeUserRoleCommandHandler>();
@@ -226,6 +229,8 @@ builder.Services.AddScoped<UpdateFormSettingsCommandHandler>();
 builder.Services.AddScoped<SaveFormLayoutCommandHandler>();
 builder.Services.AddScoped<DeleteFormCommandHandler>();
 builder.Services.AddScoped<DuplicateFormCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Forms.Commands.SetDefaultForm.SetDefaultFormCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Forms.Commands.UpdateRoleFormOverrides.UpdateRoleFormOverridesCommandHandler>();
 builder.Services.AddScoped<CreateFormRuleCommandHandler>();
 builder.Services.AddScoped<SaveFormRuleCommandHandler>();
 builder.Services.AddScoped<DeleteFormRuleCommandHandler>();
@@ -235,6 +240,8 @@ builder.Services.AddScoped<ToggleFormRuleCommandHandler>();
 builder.Services.AddScoped<GetFormQueryHandler>();
 builder.Services.AddScoped<ListFormsQueryHandler>();
 builder.Services.AddScoped<GetFormLayoutQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Forms.Queries.GetRoleFormOverrides.GetRoleFormOverridesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Forms.Queries.ResolveForm.ResolveFormQueryHandler>();
 builder.Services.AddScoped<ListFormRulesQueryHandler>();
 builder.Services.AddScoped<GetFormRuleQueryHandler>();
 
@@ -250,6 +257,19 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+// Serve statically uploaded files from the configured local path
+var localPath = app.Configuration.GetValue<string>("Storage:LocalPath") ?? "C:\\PowerbaseUploads";
+if (!System.IO.Directory.Exists(localPath))
+{
+    System.IO.Directory.CreateDirectory(localPath);
+}
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(localPath),
+    RequestPath = "/files"
+});
+
 app.UseMiddleware<QueryContextMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.MapControllers();

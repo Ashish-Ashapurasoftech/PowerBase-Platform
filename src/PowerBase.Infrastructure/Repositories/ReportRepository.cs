@@ -11,12 +11,14 @@ public class ReportRepository : BaseRepository, IReportRepository
     private const string SelectColumns = """
         r.Id, r.PublicId, r.TenantId, r.AppTableId, r.OwnerId, r.Name, r.Description,
         r.ReportType, r.Visibility, r.Definition, r.IsDefault, r.DisplayOrder,
-        r.IsDeleted, r.CreatedOn, r.CreatedBy, r.ModifiedOn, r.ModifiedBy
+        r.IsDeleted, r.CreatedOn, r.CreatedBy, r.ModifiedOn, r.ModifiedBy, r.ViewEditFormId,
+        f.PublicId AS ViewEditFormPublicId
         """;
 
     private const string GetByPublicIdSql = $"""
         SELECT {SelectColumns}
         FROM meta.Report r
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.TenantId = @tenantId
           AND r.PublicId = @publicId
           AND r.IsDeleted = 0
@@ -32,13 +34,22 @@ public class ReportRepository : BaseRepository, IReportRepository
     private const string ListByTableSql = $"""
         SELECT {SelectColumns}
         FROM meta.Report r
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.TenantId = @tenantId
           AND r.AppTableId = (SELECT Id FROM meta.AppTable
                               WHERE PublicId = @tablePublicId
                                 AND TenantId = @tenantId
                                 AND IsDeleted = 0)
           AND r.IsDeleted = 0
-          AND (r.Visibility != 'Personal' OR r.OwnerId = @userId)
+          AND (
+              r.Visibility = 'Shared'
+              OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
+              OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
+                  SELECT 1 FROM meta.AppRoleReport arr
+                  JOIN meta.AppUser au ON au.AppRoleId = arr.AppRoleId
+                  WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+              ))
+          )
         ORDER BY r.DisplayOrder, r.Name
         """;
 
@@ -46,16 +57,26 @@ public class ReportRepository : BaseRepository, IReportRepository
         SELECT {SelectColumns}
         FROM meta.Report r
         JOIN meta.AppTable t ON t.Id = r.AppTableId
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.TenantId = @tenantId
           AND t.AppId = @appId
           AND r.IsDeleted = 0
-          AND (r.Visibility != 'Personal' OR r.OwnerId = @userId)
+          AND (
+              r.Visibility = 'Shared'
+              OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
+              OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
+                  SELECT 1 FROM meta.AppRoleReport arr
+                  JOIN meta.AppUser au ON au.AppRoleId = arr.AppRoleId
+                  WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+              ))
+          )
         ORDER BY r.DisplayOrder, r.Name
         """;
 
     private const string GetDefaultByTableSql = $"""
         SELECT {SelectColumns}
         FROM meta.Report r
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.TenantId = @tenantId
           AND r.AppTableId = (SELECT Id FROM meta.AppTable
                               WHERE PublicId = @tablePublicId
@@ -114,6 +135,25 @@ public class ReportRepository : BaseRepository, IReportRepository
         SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
         WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
         """;
+
+    private const string UpdateReportFormOverrideSql = """
+        UPDATE r
+        SET r.ViewEditFormId = (SELECT Id FROM meta.Form WHERE PublicId = @viewEditFormPublicId AND TenantId = @tenantId AND IsDeleted = 0),
+            r.ModifiedOn = SYSUTCDATETIME(),
+            r.ModifiedBy = @modifiedBy
+        FROM meta.Report r
+        WHERE r.TenantId = @tenantId AND r.PublicId = @reportPublicId AND r.IsDeleted = 0
+        """;
+
+    private const string ClearReportFormOverrideSql = """
+        UPDATE r
+        SET r.ViewEditFormId = NULL,
+            r.ModifiedOn = SYSUTCDATETIME(),
+            r.ModifiedBy = @modifiedBy
+        FROM meta.Report r
+        WHERE r.TenantId = @tenantId AND r.PublicId = @reportPublicId AND r.IsDeleted = 0
+        """;
+
 
     public ReportRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
@@ -236,5 +276,105 @@ public class ReportRepository : BaseRepository, IReportRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteAsync(
             new CommandDefinition(SoftDeleteReportSql, new { tenantId = QueryContext.TenantId, publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    public async Task UpdateFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid ReportPublicId, Guid? ViewEditFormPublicId)> overrides, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            foreach (var (reportPublicId, viewEditFormPublicId) in overrides)
+            {
+                if (viewEditFormPublicId.HasValue)
+                {
+                    await connection.ExecuteAsync(
+                        new CommandDefinition(UpdateReportFormOverrideSql,
+                            new { tenantId = QueryContext.TenantId, reportPublicId, viewEditFormPublicId, modifiedBy = QueryContext.UserId },
+                            transaction: transaction, cancellationToken: ct));
+                }
+                else
+                {
+                    await connection.ExecuteAsync(
+                        new CommandDefinition(ClearReportFormOverrideSql,
+                            new { tenantId = QueryContext.TenantId, reportPublicId, modifiedBy = QueryContext.UserId },
+                            transaction: transaction, cancellationToken: ct));
+                }
+            }
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
+    }
+
+    public async Task SetReportRolesAsync(long reportId, IEnumerable<long> roleIds, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            await connection.ExecuteAsync(
+                new CommandDefinition("DELETE FROM meta.AppRoleReport WHERE ReportId = @reportId",
+                    new { reportId }, transaction: transaction, cancellationToken: ct));
+
+            if (roleIds.Any())
+            {
+                var parameters = roleIds.Select(roleId => new { reportId, roleId }).ToList();
+                await connection.ExecuteAsync(
+                    new CommandDefinition("INSERT INTO meta.AppRoleReport (ReportId, AppRoleId) VALUES (@reportId, @roleId)",
+                        parameters, transaction: transaction, cancellationToken: ct));
+            }
+            
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
+    }
+
+    public async Task<IReadOnlyList<long>> GetReportRoleIdsAsync(long reportId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<long>(
+            new CommandDefinition("SELECT AppRoleId FROM meta.AppRoleReport WHERE ReportId = @reportId",
+                new { reportId }, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task<IReadOnlyList<Guid>> GetReportRolePublicIdsAsync(long reportId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<Guid>(
+            new CommandDefinition(@"
+                SELECT ar.PublicId 
+                FROM meta.AppRoleReport arr
+                JOIN meta.AppRole ar ON ar.Id = arr.AppRoleId
+                WHERE arr.ReportId = @reportId",
+                new { reportId }, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task<Dictionary<long, List<long>>> GetAppRoleReportsMapAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var sql = """
+            SELECT arr.ReportId, arr.AppRoleId 
+            FROM meta.AppRoleReport arr
+            JOIN meta.Report r ON r.Id = arr.ReportId
+            JOIN meta.AppTable t ON t.Id = r.AppTableId
+            WHERE t.AppId = @appId AND r.IsDeleted = 0 AND r.TenantId = @tenantId
+            """;
+        var results = await connection.QueryAsync<(long ReportId, long AppRoleId)>(
+            new CommandDefinition(sql, new { appId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+        
+        return results.GroupBy(x => x.ReportId)
+                      .ToDictionary(g => g.Key, g => g.Select(x => x.AppRoleId).ToList());
     }
 }

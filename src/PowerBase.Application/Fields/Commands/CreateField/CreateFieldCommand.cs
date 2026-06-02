@@ -6,4 +6,5 @@ public record CreateFieldCommand(
     string Name,
     string? Label,
     string? Description,
-    bool IsRequired);
+    bool IsRequired,
+    string? Settings = null);

@@ -24,6 +24,8 @@ public class FormRuleConditionDetail
     public long AppFieldId { get; init; }
     public string Operator { get; init; } = string.Empty;
     public string? Value { get; init; }
+    public string? ValueType { get; init; }
+    public long? ValueFieldId { get; init; }
     public int DisplayOrder { get; init; }
 }
 
@@ -34,5 +36,7 @@ public class FormRuleActionDetail
     public string TargetType { get; init; } = string.Empty;
     public long? TargetElementId { get; init; }
     public long? TargetSectionId { get; init; }
+    public long? TargetBlockId { get; init; }
+    public string? ActionValue { get; init; }
     public int DisplayOrder { get; init; }
 }

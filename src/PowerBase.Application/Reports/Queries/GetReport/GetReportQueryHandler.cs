@@ -18,6 +18,12 @@ public class GetReportQueryHandler
         var report = await _reportRepo.GetByPublicIdAsync(query.PublicId, ct);
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
+        var visibleToRoleIds = new List<Guid>();
+        if (report.Visibility == Domain.Enums.Visibility.SpecificRoles.ToString())
+        {
+            visibleToRoleIds = (await _reportRepo.GetReportRolePublicIdsAsync(report.Id, ct)).ToList();
+        }
+
         return new ReportDetailResult
         {
             Id = report.PublicId,
@@ -28,7 +34,9 @@ public class GetReportQueryHandler
             Definition = definition,
             IsDefault = report.IsDefault,
             DisplayOrder = report.DisplayOrder,
+            ViewEditFormId = report.ViewEditFormPublicId,
             CreatedOn = report.CreatedOn,
+            VisibleToRoleIds = visibleToRoleIds
         };
     }
 }

@@ -49,7 +49,7 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
         """;
 
     private const string ListConditionsSql = """
-        SELECT c.Id, c.FormRuleId, c.AppFieldId, c.Operator, c.Value, c.DisplayOrder
+        SELECT c.Id, c.FormRuleId, c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder
         FROM meta.FormRuleCondition c
         JOIN meta.FormRule r ON r.Id = c.FormRuleId
         WHERE r.TenantId = @tenantId
@@ -60,7 +60,7 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
 
     private const string ListActionsSql = """
         SELECT a.Id, a.FormRuleId, a.ActionType, a.TargetType,
-               a.TargetElementId, a.TargetSectionId, a.DisplayOrder
+               a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder
         FROM meta.FormRuleAction a
         JOIN meta.FormRule r ON r.Id = a.FormRuleId
         WHERE r.TenantId = @tenantId
@@ -108,13 +108,13 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
         """;
 
     private const string InsertConditionSql = """
-        INSERT INTO meta.FormRuleCondition (FormRuleId, AppFieldId, Operator, Value, DisplayOrder)
-        VALUES (@formRuleId, @appFieldId, @operator, @value, @displayOrder)
+        INSERT INTO meta.FormRuleCondition (FormRuleId, AppFieldId, Operator, Value, ValueType, ValueFieldId, DisplayOrder)
+        VALUES (@formRuleId, @appFieldId, @operator, @value, @valueType, @valueFieldId, @displayOrder)
         """;
 
     private const string InsertActionSql = """
-        INSERT INTO meta.FormRuleAction (FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, DisplayOrder)
-        VALUES (@formRuleId, @actionType, @targetType, @targetElementId, @targetSectionId, @displayOrder)
+        INSERT INTO meta.FormRuleAction (FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, TargetBlockId, ActionValue, DisplayOrder)
+        VALUES (@formRuleId, @actionType, @targetType, @targetElementId, @targetSectionId, @targetBlockId, @actionValue, @displayOrder)
         """;
 
     private const string SoftDeleteSql = """
@@ -163,13 +163,13 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
 
         var conditions = await conn.QueryAsync<FormRuleCondition>(
             new CommandDefinition(
-                "SELECT Id, FormRuleId, AppFieldId, Operator, Value, DisplayOrder FROM meta.FormRuleCondition WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
+                "SELECT Id, FormRuleId, AppFieldId, Operator, Value, ValueType, ValueFieldId, DisplayOrder FROM meta.FormRuleCondition WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
                 new { ruleId = rule.Id }, cancellationToken: ct));
         rule.Conditions = conditions.ToList();
 
         var actions = await conn.QueryAsync<FormRuleAction>(
             new CommandDefinition(
-                "SELECT Id, FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, DisplayOrder FROM meta.FormRuleAction WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
+                "SELECT Id, FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, TargetBlockId, ActionValue, DisplayOrder FROM meta.FormRuleAction WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
                 new { ruleId = rule.Id }, cancellationToken: ct));
         rule.Actions = actions.ToList();
 
@@ -286,6 +286,8 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
                 appFieldId   = c.AppFieldId,
                 @operator    = c.Operator,
                 value        = c.Value,
+                valueType    = c.ValueType,
+                valueFieldId = c.ValueFieldId,
                 displayOrder = c.DisplayOrder,
             }, tx, cancellationToken: ct));
         }
@@ -299,6 +301,8 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
                 targetType      = a.TargetType,
                 targetElementId = a.TargetElementId,
                 targetSectionId = a.TargetSectionId,
+                targetBlockId   = a.TargetBlockId,
+                actionValue     = a.ActionValue,
                 displayOrder    = a.DisplayOrder,
             }, tx, cancellationToken: ct));
         }
@@ -379,6 +383,8 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
                     appFieldId   = c.AppFieldId,
                     @operator    = c.Operator,
                     value        = c.Value,
+                    valueType    = c.ValueType,
+                    valueFieldId = c.ValueFieldId,
                     displayOrder = c.DisplayOrder,
                 }, tx, cancellationToken: ct));
             }
@@ -391,6 +397,8 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
                     targetType      = a.TargetType,
                     targetElementId = a.TargetElementId,
                     targetSectionId = a.TargetSectionId,
+                    targetBlockId   = a.TargetBlockId,
+                    actionValue     = a.ActionValue,
                     displayOrder    = a.DisplayOrder,
                 }, tx, cancellationToken: ct));
             }

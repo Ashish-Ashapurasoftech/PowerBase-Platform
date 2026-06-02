@@ -8,6 +8,8 @@ using PowerBase.Application.Apps.Commands.DeleteApp;
 using PowerBase.Application.Apps.Commands.UpdateApp;
 using PowerBase.Application.Apps.Queries.GetApp;
 using PowerBase.Application.Apps.Queries.ListApps;
+using PowerBase.Application.Reports.Queries.GetRolesReportsMatrix;
+using PowerBase.Application.Reports.Commands.UpdateReportVisibilityMatrix;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.ValueObjects;
@@ -25,6 +27,8 @@ public class AppsController : ControllerBase
     private readonly GetAppQueryHandler _getHandler;
     private readonly ListAppsQueryHandler _listHandler;
     private readonly PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler _getPermissionsHandler;
+    private readonly GetRolesReportsMatrixQueryHandler _getRolesReportsMatrixHandler;
+    private readonly UpdateReportVisibilityMatrixCommandHandler _updateReportVisibilityMatrixHandler;
     private readonly IAppRepository _appRepo;
     private readonly IQueryContext _queryContext;
 
@@ -35,6 +39,8 @@ public class AppsController : ControllerBase
         GetAppQueryHandler getHandler,
         ListAppsQueryHandler listHandler,
         PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler getPermissionsHandler,
+        GetRolesReportsMatrixQueryHandler getRolesReportsMatrixHandler,
+        UpdateReportVisibilityMatrixCommandHandler updateReportVisibilityMatrixHandler,
         IAppRepository appRepo,
         IQueryContext queryContext)
     {
@@ -44,6 +50,8 @@ public class AppsController : ControllerBase
         _getHandler = getHandler;
         _listHandler = listHandler;
         _getPermissionsHandler = getPermissionsHandler;
+        _getRolesReportsMatrixHandler = getRolesReportsMatrixHandler;
+        _updateReportVisibilityMatrixHandler = updateReportVisibilityMatrixHandler;
         _appRepo = appRepo;
         _queryContext = queryContext;
     }
@@ -214,6 +222,29 @@ public class AppsController : ControllerBase
     public async Task<IActionResult> Delete(Guid publicId, CancellationToken ct)
     {
         await _deleteHandler.HandleAsync(new DeleteAppCommand(publicId), ct);
+        return NoContent();
+    }
+
+    /// <summary>Get the roles and reports visibility matrix for this app.</summary>
+    [HttpGet("{publicId:guid}/roles-reports-matrix")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppPublicId)]
+    [ProducesResponseType(typeof(ApiResponse<RolesReportsMatrixResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> GetRolesReportsMatrix(Guid publicId, CancellationToken ct)
+    {
+        var result = await _getRolesReportsMatrixHandler.HandleAsync(new GetRolesReportsMatrixQuery(publicId), ct);
+        return Ok(new ApiResponse<RolesReportsMatrixResult>(result));
+    }
+
+    /// <summary>Update the roles and reports visibility matrix for this app.</summary>
+    [HttpPut("{publicId:guid}/roles-reports-matrix")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppPublicId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> UpdateRolesReportsMatrix(Guid publicId, [FromBody] UpdateReportVisibilityMatrixRequest request, CancellationToken ct)
+    {
+        var updates = request.Updates.Select(u => new ReportVisibilityUpdate(u.ReportPublicId, u.Visibility, u.VisibleToRoleIds)).ToList();
+        await _updateReportVisibilityMatrixHandler.HandleAsync(new UpdateReportVisibilityMatrixCommand(publicId, updates), ct);
         return NoContent();
     }
 

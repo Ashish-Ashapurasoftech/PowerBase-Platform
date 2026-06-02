@@ -15,6 +15,7 @@ public class CreateFieldResult
     public string TypeCode { get; init; } = string.Empty;
     public string PhysicalColumnName { get; init; } = string.Empty;
     public bool IsRequired { get; init; }
+    public string? Settings { get; init; }
     public DateTime CreatedOn { get; init; }
 }
 
@@ -73,6 +74,7 @@ public class CreateFieldCommandHandler
             Label = command.Label,
             Description = command.Description,
             IsRequired = command.IsRequired,
+            Settings = command.Settings,
             CreatedBy = _queryContext.UserId,
         };
 
@@ -106,6 +108,7 @@ public class CreateFieldCommandHandler
             TypeCode = command.TypeCode,
             PhysicalColumnName = physicalColumn,
             IsRequired = field.IsRequired,
+            Settings = field.Settings,
             CreatedOn = DateTime.UtcNow,
         };
     }
