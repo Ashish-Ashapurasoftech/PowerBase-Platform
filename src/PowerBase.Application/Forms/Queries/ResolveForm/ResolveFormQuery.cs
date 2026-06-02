@@ -65,7 +65,7 @@ public class ResolveFormQueryHandler
             var userRoleOverride = roleOverrides.FirstOrDefault(r => r.RolePublicId == userRoleId.Value);
             if (userRoleOverride != default)
             {
-                overrideFormPublicId = request.Mode.ToLowerInvariant() == "edit"
+                overrideFormPublicId = request.Mode.ToLowerInvariant() == "edit" || request.Mode.ToLowerInvariant() == "view"
                     ? userRoleOverride.EditFormPublicId
                     : userRoleOverride.AddFormPublicId;
             }
@@ -77,7 +77,7 @@ public class ResolveFormQueryHandler
             var everyoneOverride = roleOverrides.FirstOrDefault(r => r.RolePublicId == null);
             if (everyoneOverride != default)
             {
-                overrideFormPublicId = request.Mode.ToLowerInvariant() == "edit"
+                overrideFormPublicId = request.Mode.ToLowerInvariant() == "edit" || request.Mode.ToLowerInvariant() == "view"
                     ? everyoneOverride.EditFormPublicId
                     : everyoneOverride.AddFormPublicId;
             }

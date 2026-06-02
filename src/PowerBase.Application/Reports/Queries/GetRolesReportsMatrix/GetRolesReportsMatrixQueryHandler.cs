@@ -36,7 +36,7 @@ public class GetRolesReportsMatrixQueryHandler
 
         var roles = await _appRoleRepo.ListDetailsByAppIdAsync(app.Id, ct);
         var tables = await _appTableRepo.ListByAppAsync(app.Id, ct);
-        var reports = await _reportRepo.ListByAppAsync(app.Id, ct);
+        var reports = await _reportRepo.ListAllByAppAsync(app.Id, ct);
         var roleMappings = await _reportRepo.GetAppRoleReportsMapAsync(app.Id, ct);
 
         var roleMap = roles.ToDictionary(r => r.Id, r => r.PublicId);

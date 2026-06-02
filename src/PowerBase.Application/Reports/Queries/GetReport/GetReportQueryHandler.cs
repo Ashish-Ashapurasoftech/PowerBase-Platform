@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Reports;
+using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Reports.Queries.GetReport;
 
@@ -15,7 +16,8 @@ public class GetReportQueryHandler
 
     public async Task<ReportDetailResult> HandleAsync(GetReportQuery query, CancellationToken ct = default)
     {
-        var report = await _reportRepo.GetByPublicIdAsync(query.PublicId, ct);
+        var report = await _reportRepo.GetVisibleReportAsync(query.PublicId, ct)
+            ?? throw new NotFoundException("Report", query.PublicId);
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
         var visibleToRoleIds = new List<Guid>();
