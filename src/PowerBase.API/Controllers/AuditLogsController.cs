@@ -43,6 +43,11 @@ public class AuditLogsController : ControllerBase
         [FromQuery] int pageSize = 50,
         CancellationToken ct = default)
     {
+        if (from.HasValue && to.HasValue && (to.Value - from.Value).TotalDays > 15)
+        {
+            return BadRequest("Date range cannot exceed 15 days.");
+        }
+
         var query = new ListAuditLogsQuery(
             AppPublicId: appId,
             From: from,
@@ -76,6 +81,11 @@ public class AuditLogsController : ControllerBase
         [FromQuery] string? action,
         CancellationToken ct = default)
     {
+        if (from.HasValue && to.HasValue && (to.Value - from.Value).TotalDays > 15)
+        {
+            return BadRequest("Date range cannot exceed 15 days.");
+        }
+
         var query = new ExportAuditLogsCsvQuery(
             AppPublicId: appId,
             From: from,
@@ -89,15 +99,21 @@ public class AuditLogsController : ControllerBase
         return File(bytes, "text/csv", filename);
     }
 
-    private static AuditLogResponse Map(Domain.Entities.ActivityLog log) => new()
+    private static AuditLogResponse Map(Domain.Entities.ActivityLog log)
     {
-        Id = log.Id,
-        UserEmail = log.UserEmail,
-        UserName = log.UserName,
-        Action = log.Action,
-        EntityType = log.EntityType,
-        EntityId = log.EntityId,
-        IpAddress = log.IpAddress,
-        OccurredOn = log.OccurredOn,
-    };
+        var nameParts = log.UserName?.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries) ?? Array.Empty<string>();
+        return new AuditLogResponse
+        {
+            Id = log.Id,
+            Email = log.UserEmail,
+            FirstName = nameParts.Length > 0 ? nameParts[0] : null,
+            LastName = nameParts.Length > 1 ? nameParts[1] : null,
+            Action = log.Action,
+            EntityType = log.EntityType,
+            EntityId = log.EntityId,
+            Value = log.EntityTitle,
+            IpAddress = log.IpAddress,
+            OccurredOn = log.OccurredOn,
+        };
+    }
 }

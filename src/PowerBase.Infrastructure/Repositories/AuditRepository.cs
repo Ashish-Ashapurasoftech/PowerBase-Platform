@@ -37,8 +37,8 @@ public class AuditRepository : BaseRepository, IAuditRepository
         """;
 
     private const string InsertActivityLogSql = """
-        INSERT INTO audit.ActivityLog (TenantId, UserId, Action, EntityType, EntityId, AppId, OldValues, NewValues, IpAddress, OccurredOn)
-        VALUES (@tenantId, @userId, @action, @entityType, @entityId, @appId, @oldValues, @newValues, @ipAddress, SYSUTCDATETIME())
+        INSERT INTO audit.ActivityLog (TenantId, UserId, Action, EntityType, EntityId, EntityTitle, AppId, OldValues, NewValues, IpAddress, OccurredOn)
+        VALUES (@tenantId, @userId, @action, @entityType, @entityId, @entityTitle, @appId, @oldValues, @newValues, @ipAddress, SYSUTCDATETIME())
         """;
 
     public AuditRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -89,6 +89,7 @@ public class AuditRepository : BaseRepository, IAuditRepository
         string action,
         string entityType,
         string entityId,
+        string? entityTitle = null,
         long? appId = null,
         string? oldValues = null,
         string? newValues = null,
@@ -102,6 +103,7 @@ public class AuditRepository : BaseRepository, IAuditRepository
             action,
             entityType,
             entityId,
+            entityTitle,
             appId,
             oldValues,
             newValues,
@@ -125,7 +127,7 @@ public class AuditRepository : BaseRepository, IAuditRepository
 
         var dataSql = $"""
             SELECT a.Id, a.TenantId, a.UserId, u.Email AS UserEmail, u.Name AS UserName,
-                   a.Action, a.EntityType, a.EntityId, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
+                   a.Action, a.EntityType, a.EntityId, a.EntityTitle, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
             FROM audit.ActivityLog a
             LEFT JOIN core.[User] u ON u.Id = a.UserId
             {where}
@@ -148,7 +150,7 @@ public class AuditRepository : BaseRepository, IAuditRepository
 
         var sql = $"""
             SELECT a.Id, a.TenantId, a.UserId, u.Email AS UserEmail, u.Name AS UserName,
-                   a.Action, a.EntityType, a.EntityId, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
+                   a.Action, a.EntityType, a.EntityId, a.EntityTitle, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
             FROM audit.ActivityLog a
             LEFT JOIN core.[User] u ON u.Id = a.UserId
             {where}

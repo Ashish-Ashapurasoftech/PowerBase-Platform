@@ -18,6 +18,7 @@ public interface IAuditRepository
         string action,
         string entityType,
         string entityId,
+        string? entityTitle = null,
         long? appId = null,
         string? oldValues = null,
         string? newValues = null,
