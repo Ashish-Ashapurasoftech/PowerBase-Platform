@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
+using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Reports.Queries.RunReport;
 
@@ -46,7 +47,8 @@ public class RunReportQueryHandler
         var page = Math.Max(1, query.Page);
         var pageSize = Math.Clamp(query.PageSize, 1, 200);
 
-        var report = await _reportRepo.GetByPublicIdAsync(query.ReportPublicId, ct);
+        var report = await _reportRepo.GetVisibleReportAsync(query.ReportPublicId, ct)
+            ?? throw new NotFoundException("Report", query.ReportPublicId);
         var table = await _tableRepo.GetByIdAsync(report.AppTableId, ct);
         var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 

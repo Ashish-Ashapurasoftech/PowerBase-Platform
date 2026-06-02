@@ -24,6 +24,46 @@ public class ReportRepository : BaseRepository, IReportRepository
           AND r.IsDeleted = 0
         """;
 
+    private const string GetVisibleReportSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.Report r
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
+        WHERE r.TenantId = @tenantId
+          AND r.PublicId = @publicId
+          AND r.IsDeleted = 0
+          AND (
+              r.Visibility = 'Shared'
+              OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
+              OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
+                  SELECT 1 FROM meta.AppRoleReport arr
+                  JOIN meta.AppUser au ON au.AppRoleId = arr.AppRoleId
+                  WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+              ))
+          )
+        """;
+
+    private const string GetFirstVisibleReportByTableSql = $"""
+        SELECT TOP 1 {SelectColumns}
+        FROM meta.Report r
+        JOIN meta.AppTable t ON t.Id = r.AppTableId
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
+        WHERE r.TenantId = @tenantId
+          AND t.PublicId = @tablePublicId
+          AND t.TenantId = @tenantId
+          AND r.IsDeleted = 0
+          AND t.IsDeleted = 0
+          AND (
+              r.Visibility = 'Shared'
+              OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
+              OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
+                  SELECT 1 FROM meta.AppRoleReport arr
+                  JOIN meta.AppUser au ON au.AppRoleId = arr.AppRoleId
+                  WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+              ))
+          )
+        ORDER BY r.DisplayOrder, r.Name
+        """;
+
     private const string GetAppIdByPublicIdSql = """
         SELECT t.AppId
         FROM meta.Report r
@@ -70,6 +110,17 @@ public class ReportRepository : BaseRepository, IReportRepository
                   WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
               ))
           )
+        ORDER BY r.DisplayOrder, r.Name
+        """;
+
+    private const string ListAllByAppSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.Report r
+        JOIN meta.AppTable t ON t.Id = r.AppTableId
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
+        WHERE r.TenantId = @tenantId
+          AND t.AppId = @appId
+          AND r.IsDeleted = 0
         ORDER BY r.DisplayOrder, r.Name
         """;
 
@@ -168,6 +219,24 @@ public class ReportRepository : BaseRepository, IReportRepository
         return report ?? throw new NotFoundException("Report", publicId);
     }
 
+    public async Task<Report?> GetVisibleReportAsync(Guid publicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<Report>(
+            new CommandDefinition(GetVisibleReportSql,
+                new { tenantId = QueryContext.TenantId, publicId, userId = QueryContext.UserId },
+                cancellationToken: ct));
+    }
+
+    public async Task<Report?> GetFirstVisibleReportByTableAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<Report>(
+            new CommandDefinition(GetFirstVisibleReportByTableSql,
+                new { tenantId = QueryContext.TenantId, tablePublicId, userId = QueryContext.UserId },
+                cancellationToken: ct));
+    }
+
     public async Task<long> GetAppIdByPublicIdAsync(Guid reportPublicId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
@@ -182,6 +251,16 @@ public class ReportRepository : BaseRepository, IReportRepository
         var results = await connection.QueryAsync<Report>(
             new CommandDefinition(ListByAppSql,
                 new { tenantId = QueryContext.TenantId, appId, userId = QueryContext.UserId },
+                cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task<IReadOnlyList<Report>> ListAllByAppAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var results = await connection.QueryAsync<Report>(
+            new CommandDefinition(ListAllByAppSql,
+                new { tenantId = QueryContext.TenantId, appId },
                 cancellationToken: ct));
         return results.AsList();
     }
