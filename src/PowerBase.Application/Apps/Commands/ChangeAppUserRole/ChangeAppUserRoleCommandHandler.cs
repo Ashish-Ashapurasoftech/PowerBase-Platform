@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Apps.Commands.ChangeAppUserRole;
@@ -11,6 +12,7 @@ public class ChangeAppUserRoleCommandHandler
     private readonly IUserRepository _userRepo;
     private readonly IAppAccessService _appAccessService;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
     public ChangeAppUserRoleCommandHandler(
         IAppRepository appRepo,
@@ -18,7 +20,8 @@ public class ChangeAppUserRoleCommandHandler
         IAppUserRepository appUserRepo,
         IUserRepository userRepo,
         IAppAccessService appAccessService,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAuditRepository auditRepo)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
@@ -26,6 +29,7 @@ public class ChangeAppUserRoleCommandHandler
         _userRepo = userRepo;
         _appAccessService = appAccessService;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task HandleAsync(ChangeAppUserRoleCommand command, CancellationToken ct = default)
@@ -42,5 +46,8 @@ public class ChangeAppUserRoleCommandHandler
             ?? throw new NotFoundException("AppRole", command.RolePublicId);
 
         await _appUserRepo.UpdateRoleAsync(appId, user.Id, role.Id, ct);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Updated, AuditEntityTypes.AppUser, user.Id.ToString(), $"User role changed in app: {user.Email} to {role.Name}", appId: appId, ct: ct);
     }
 }

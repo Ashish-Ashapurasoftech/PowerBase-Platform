@@ -55,20 +55,17 @@ public class SaveFormLayoutCommandHandler
 
         var sections = command.Sections.Select(s => new FormSection
         {
-            TenantId    = _queryContext.TenantId,
             FormId      = form.Id,
             Name        = s.Name,
             ColumnCount = s.Blocks.Count,
             IsCollapsed = s.IsCollapsed,
             Blocks      = s.Blocks.Select(b => new FormSectionBlock
             {
-                TenantId        = _queryContext.TenantId,
                 Heading         = b.Heading,
                 BackgroundColor = b.BackgroundColor,
                 Width           = b.Width,
                 Elements        = b.Elements.Select(e => new FormElement
                 {
-                    TenantId         = _queryContext.TenantId,
                     AppFieldId       = e.ElementType == "Field" ? e.AppFieldId : null,
                     ElementType      = e.ElementType,
                     ElementContent   = e.ElementContent,

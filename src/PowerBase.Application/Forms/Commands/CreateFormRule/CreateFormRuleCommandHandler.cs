@@ -37,7 +37,6 @@ public class CreateFormRuleCommandHandler
 
         var rule = new FormRule
         {
-            TenantId       = _queryContext.TenantId,
             FormId         = form.Id,
             Name           = command.Name,
             IsActive       = true,

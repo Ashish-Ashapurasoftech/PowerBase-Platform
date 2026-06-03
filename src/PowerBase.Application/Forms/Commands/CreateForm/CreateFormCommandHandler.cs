@@ -37,7 +37,6 @@ public class CreateFormCommandHandler
 
         var form = new Form
         {
-            TenantId         = _queryContext.TenantId,
             AppTableId       = table.Id,
             Name             = command.Name,
             IsDefault        = false,
@@ -53,8 +52,8 @@ public class CreateFormCommandHandler
         var created = await _formRepo.GetByPublicIdAsync(publicId, ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Created, AuditEntityTypes.Form, created.Id.ToString(),
-            appId: null, ct: ct);
+            AuditActions.Created, AuditEntityTypes.Form, created.Id.ToString(), $"Form added: {command.Name}",
+            appId: table.AppId, ct: ct);
 
         return MapToDetail(created);
     }

@@ -100,7 +100,6 @@ public class CreateAppCommandHandler
             var (adminRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
             {
                 AppId = appId,
-                TenantId = _queryContext.TenantId,
                 Name = "Administrator",
                 IsSystem = true,
                 IsDefault = false,
@@ -120,7 +119,6 @@ public class CreateAppCommandHandler
             var (participantRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
             {
                 AppId = appId,
-                TenantId = _queryContext.TenantId,
                 Name = "Participant",
                 IsSystem = true,
                 IsDefault = false,
@@ -138,7 +136,6 @@ public class CreateAppCommandHandler
             var (viewerRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
             {
                 AppId = appId,
-                TenantId = _queryContext.TenantId,
                 Name = "Viewer",
                 IsSystem = true,
                 IsDefault = true,
@@ -157,7 +154,6 @@ public class CreateAppCommandHandler
             await _appUserRepo.CreateAsync(new AppUser
             {
                 AppId        = appId,
-                TenantId     = _queryContext.TenantId,
                 UserId       = _queryContext.UserId,
                 UserPublicId = owner.PublicId,
                 UserName     = owner.Name,
@@ -174,7 +170,6 @@ public class CreateAppCommandHandler
 
             var table = new AppTable
             {
-                TenantId = _queryContext.TenantId,
                 AppId = appId,
                 Name = command.TableName,
                 SingularLabel = command.TableSingularLabel,
@@ -213,7 +208,6 @@ public class CreateAppCommandHandler
             {
                 var f = new AppField
                 {
-                    TenantId = table.TenantId,
                     AppTableId = table.Id,
                     FieldTypeId = typeId,
                     Name = name,
@@ -234,7 +228,6 @@ public class CreateAppCommandHandler
 
             await _reportRepo.CreateAsync(new Report
             {
-                TenantId = table.TenantId,
                 AppTableId = table.Id,
                 OwnerId = _queryContext.UserId,
                 Name = "List All",
@@ -247,7 +240,6 @@ public class CreateAppCommandHandler
 
             await _reportRepo.CreateAsync(new Report
             {
-                TenantId = table.TenantId,
                 AppTableId = table.Id,
                 OwnerId = _queryContext.UserId,
                 Name = "List Changes",
@@ -264,7 +256,6 @@ public class CreateAppCommandHandler
             // Auto-create "Main Form" with all seeded system fields in a default section
             var mainForm = new Form
             {
-                TenantId          = table.TenantId,
                 AppTableId        = table.Id,
                 Name              = "Main Form",
                 IsDefault         = true,
@@ -278,14 +269,12 @@ public class CreateAppCommandHandler
 
             var defaultSection = new FormSection
             {
-                TenantId    = table.TenantId,
                 FormId      = formId,
                 Name        = "Section 1",
                 ColumnCount = 2,
                 DisplayOrder = 1,
                 Elements    = seededIds.Select((kvp, i) => new FormElement
                 {
-                    TenantId     = table.TenantId,
                     AppFieldId   = kvp.Value,
                     LabelMode    = "Default",
                     ShowOnAdd    = true,
@@ -301,7 +290,7 @@ public class CreateAppCommandHandler
             await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
 
             await _auditRepo.LogActivityAsync(
-                AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), appId: appId, ct: ct);
+                AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), $"Application added: {command.Name}", appId: appId, ct: ct);
 
             return new CreateAppResult
             {

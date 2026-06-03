@@ -4,7 +4,6 @@ public class FormRule
 {
     public long Id { get; set; }
     public Guid PublicId { get; set; }
-    public long TenantId { get; set; }
     public long FormId { get; set; }
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }

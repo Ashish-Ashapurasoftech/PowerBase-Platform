@@ -16,7 +16,8 @@ public class DeleteAppCommandHandler
 
     public async Task HandleAsync(DeleteAppCommand command, CancellationToken ct = default)
     {
+        var app = await _appRepo.GetByPublicIdAsync(command.PublicId, ct);
         await _appRepo.DeleteAsync(command.PublicId, ct);
-        await _auditRepo.LogActivityAsync(AuditActions.Deleted, AuditEntityTypes.App, command.PublicId.ToString(), ct: ct);
+        await _auditRepo.LogActivityAsync(AuditActions.Deleted, AuditEntityTypes.App, command.PublicId.ToString(), $"Application deleted: {app.Name}", ct: ct);
     }
 }

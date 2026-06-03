@@ -2,6 +2,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Reports.Commands.UpdateReportVisibilityMatrix;
@@ -12,17 +13,20 @@ public class UpdateReportVisibilityMatrixCommandHandler
     private readonly IAppRoleRepository _appRoleRepo;
     private readonly IAppRepository _appRepo;
     private readonly IAppAccessService _appAccessService;
+    private readonly IAuditRepository _auditRepo;
 
     public UpdateReportVisibilityMatrixCommandHandler(
         IReportRepository reportRepo,
         IAppRoleRepository appRoleRepo,
         IAppRepository appRepo,
-        IAppAccessService appAccessService)
+        IAppAccessService appAccessService,
+        IAuditRepository auditRepo)
     {
         _reportRepo = reportRepo;
         _appRoleRepo = appRoleRepo;
         _appRepo = appRepo;
         _appAccessService = appAccessService;
+        _auditRepo = auditRepo;
     }
 
     public async Task HandleAsync(UpdateReportVisibilityMatrixCommand command, CancellationToken ct = default)
@@ -65,6 +69,9 @@ public class UpdateReportVisibilityMatrixCommandHandler
             }
 
             await _reportRepo.SetReportRolesAsync(report.Id, reportRolesToSave, ct);
+
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Updated, AuditEntityTypes.Report, report.Id.ToString(), $"Report visibility modified: {report.Name}", appId: app.Id, ct: ct);
         }
     }
 }

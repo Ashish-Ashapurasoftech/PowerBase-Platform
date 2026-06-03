@@ -4,7 +4,6 @@ public class AppField
 {
     public long Id { get; set; }
     public Guid PublicId { get; set; }
-    public long TenantId { get; set; }
     public long AppTableId { get; set; }
     public int FieldTypeId { get; set; }
     public string TypeCode { get; set; } = string.Empty;

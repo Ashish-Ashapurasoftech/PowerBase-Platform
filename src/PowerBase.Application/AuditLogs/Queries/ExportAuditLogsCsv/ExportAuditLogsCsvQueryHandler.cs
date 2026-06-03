@@ -30,6 +30,7 @@ public class ExportAuditLogsCsvQueryHandler
             AppId: appId,
             Email: query.Email,
             EntityType: query.EntityType,
+            EntityId: query.EntityId,
             Action: query.Action);
 
         var rows = await _auditRepo.ExportActivityLogsAsync(filter, ct);

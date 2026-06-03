@@ -37,7 +37,7 @@ public class CreateRecordCommandHandler
         var publicId = await _recordRepo.CreateAsync(table, fields, command.FieldValues, ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), appId: table.AppId, ct: ct);
+            AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), $"Record added in {table.Name} with ID {publicId}", appId: table.AppId, ct: ct);
 
         await _tableRepo.IncrementRecordCountAsync(table.Id, ct);
 

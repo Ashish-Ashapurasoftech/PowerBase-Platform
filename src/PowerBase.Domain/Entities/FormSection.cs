@@ -4,7 +4,6 @@ public class FormSection
 {
     public long Id { get; set; }
     public Guid PublicId { get; set; }
-    public long TenantId { get; set; }
     public long FormId { get; set; }
     public string Name { get; set; } = "Section heading";
     public int ColumnCount { get; set; } = 2;

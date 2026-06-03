@@ -28,11 +28,10 @@ public class ResolveDefaultReportQueryHandler
     public async Task<ReportDetailResult> HandleAsync(ResolveDefaultReportQuery query, CancellationToken ct = default)
     {
         var table = await _tableRepo.GetByPublicIdAsync(query.TablePublicId, ct);
-        var everyoneDefault = await _reportRepo.GetDefaultByTableAsync(query.TablePublicId, ct)
-            ?? throw new NotFoundException("DefaultReport", query.TablePublicId);
+        var everyoneDefault = await _reportRepo.GetDefaultByTableAsync(query.TablePublicId, ct);
 
         var settings = ParseSettings(table.DefaultReportSettings);
-        var selectedReport = everyoneDefault;
+        Report? selectedReport = everyoneDefault;
 
         if (settings.Mode == DefaultReportModes.RoleBased)
         {
@@ -46,7 +45,25 @@ public class ResolveDefaultReportQueryHandler
             }
         }
 
-        return MapToResult(selectedReport);
+        // Ensure the resolved report is actually visible to the user
+        if (selectedReport != null)
+        {
+            var visibleSelected = await _reportRepo.GetVisibleReportAsync(selectedReport.PublicId, ct);
+            if (visibleSelected != null)
+            {
+                return MapToResult(visibleSelected);
+            }
+        }
+
+        // Fallback: If no default or it's not visible, return the first visible report
+        var firstVisible = await _reportRepo.GetFirstVisibleReportByTableAsync(query.TablePublicId, ct);
+        if (firstVisible != null)
+        {
+            return MapToResult(firstVisible);
+        }
+
+        // If the user has permission to see ZERO reports in this table
+        throw new NotFoundException("DefaultReport", query.TablePublicId);
     }
 
     private static ReportDetailResult MapToResult(Report report)

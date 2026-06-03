@@ -4,7 +4,6 @@ public class FormElement
 {
     public long Id { get; set; }
     public Guid PublicId { get; set; }
-    public long TenantId { get; set; }
     public long FormSectionId { get; set; }
     public long? FormSectionBlockId { get; set; }
     public long? AppFieldId { get; set; }

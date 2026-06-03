@@ -43,8 +43,8 @@ public class AuditRepository : IAuditRepository
         """;
 
     private const string InsertActivityLogSql = """
-        INSERT INTO audit.ActivityLog (UserId, UserName, UserEmail, Action, EntityType, EntityId, AppId, OldValues, NewValues, IpAddress, OccurredOn)
-        VALUES (@userId, @userName, @userEmail, @action, @entityType, @entityId, @appId, @oldValues, @newValues, @ipAddress, SYSUTCDATETIME())
+        INSERT INTO audit.ActivityLog (UserId, UserName, UserEmail, Action, EntityType, EntityId, EntityTitle, AppId, OldValues, NewValues, IpAddress, OccurredOn)
+        VALUES (@userId, @userName, @userEmail, @action, @entityType, @entityId, @entityTitle, @appId, @oldValues, @newValues, @ipAddress, SYSUTCDATETIME())
         """;
 
     public AuditRepository(
@@ -103,8 +103,13 @@ public class AuditRepository : IAuditRepository
     // ── tenant-scoped: activity log ──────────────────────────────────────────
 
     public async Task LogActivityAsync(
-        string action, string entityType, string entityId,
-        long? appId = null, string? oldValues = null, string? newValues = null,
+        string action,
+        string entityType,
+        string entityId,
+        string? entityTitle = null,
+        long? appId = null,
+        string? oldValues = null,
+        string? newValues = null,
         CancellationToken ct = default)
     {
         await using var connection = await _tenantFactory.CreateAsync(ct);
@@ -113,7 +118,7 @@ public class AuditRepository : IAuditRepository
             userId    = _queryContext.UserId,
             userName  = _queryContext.UserName,
             userEmail = _queryContext.UserEmail,
-            action, entityType, entityId, appId, oldValues, newValues,
+            action, entityType, entityId, entityTitle, appId, oldValues, newValues,
             ipAddress = _queryContext.IpAddress,
         }, cancellationToken: ct));
     }
@@ -132,7 +137,7 @@ public class AuditRepository : IAuditRepository
 
         var dataSql = $"""
             SELECT a.Id, a.UserId, a.UserName, a.UserEmail,
-                   a.Action, a.EntityType, a.EntityId, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
+                   a.Action, a.EntityType, a.EntityId, a.EntityTitle, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
             FROM audit.ActivityLog a
             {where}
             ORDER BY a.OccurredOn DESC
@@ -152,7 +157,7 @@ public class AuditRepository : IAuditRepository
 
         var sql = $"""
             SELECT a.Id, a.UserId, a.UserName, a.UserEmail,
-                   a.Action, a.EntityType, a.EntityId, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
+                   a.Action, a.EntityType, a.EntityId, a.EntityTitle, a.AppId, a.OldValues, a.NewValues, a.IpAddress, a.UserAgent, a.OccurredOn
             FROM audit.ActivityLog a
             {where}
             ORDER BY a.OccurredOn DESC
@@ -170,7 +175,8 @@ public class AuditRepository : IAuditRepository
         if (filter.AppId.HasValue)                         conditions.Add("a.AppId = @appId");
         if (!string.IsNullOrWhiteSpace(filter.Email))      conditions.Add("a.UserEmail = @email");
         if (!string.IsNullOrWhiteSpace(filter.EntityType)) conditions.Add("a.EntityType = @entityType");
-        if (!string.IsNullOrWhiteSpace(filter.Action))     conditions.Add("a.Action = @action");
+        if (!string.IsNullOrWhiteSpace(filter.EntityId)) conditions.Add("a.EntityId = @entityId");
+        if (!string.IsNullOrWhiteSpace(filter.Action)) conditions.Add("a.Action = @action");
 
         var clause = "WHERE " + string.Join(" AND ", conditions);
         var parameters = new
@@ -180,7 +186,8 @@ public class AuditRepository : IAuditRepository
             appId      = filter.AppId,
             email      = filter.Email,
             entityType = filter.EntityType,
-            action     = filter.Action,
+            entityId = filter.EntityId,
+            action = filter.Action,
         };
         return (clause, parameters);
     }

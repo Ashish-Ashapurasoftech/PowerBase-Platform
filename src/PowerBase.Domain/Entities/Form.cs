@@ -4,7 +4,6 @@ public class Form
 {
     public long Id { get; set; }
     public Guid PublicId { get; set; }
-    public long TenantId { get; set; }
     public long AppTableId { get; set; }
     public string Name { get; set; } = string.Empty;
     public bool IsDefault { get; set; }

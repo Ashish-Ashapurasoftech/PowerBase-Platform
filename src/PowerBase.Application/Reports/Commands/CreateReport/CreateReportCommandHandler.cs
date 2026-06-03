@@ -108,7 +108,6 @@ public class CreateReportCommandHandler
 
         var report = new Report
         {
-            TenantId = _queryContext.TenantId,
             AppTableId = table.Id,
             OwnerId = _queryContext.UserId,
             Name = command.Name,
@@ -149,7 +148,7 @@ public class CreateReportCommandHandler
         }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Created, AuditEntityTypes.Report, publicId.ToString(), appId: table.AppId, ct: ct);
+            AuditActions.Created, AuditEntityTypes.Report, publicId.ToString(), $"Report added: {command.Name}", appId: table.AppId, ct: ct);
 
         return new ReportDetailResult
         {

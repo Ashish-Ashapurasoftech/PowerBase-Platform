@@ -5,7 +5,6 @@ public class AppUser
     public long Id { get; set; }
     public Guid PublicId { get; set; }
     public long AppId { get; set; }
-    public long TenantId { get; set; }
     public long UserId { get; set; }
     public Guid? UserPublicId { get; set; }
     public string? UserName { get; set; }

@@ -71,7 +71,6 @@ public class CreateTableCommandHandler
 
         var table = new AppTable
         {
-            TenantId = _queryContext.TenantId,
             AppId = app.Id,
             Name = command.Name,
             SingularLabel = command.SingularLabel,
@@ -110,7 +109,6 @@ public class CreateTableCommandHandler
         {
             var f = new AppField
             {
-                TenantId = table.TenantId,
                 AppTableId = table.Id,
                 FieldTypeId = typeId,
                 Name = name,
@@ -131,7 +129,6 @@ public class CreateTableCommandHandler
 
         await _reportRepo.CreateAsync(new Report
         {
-            TenantId = table.TenantId,
             AppTableId = table.Id,
             OwnerId = _queryContext.UserId,
             Name = "List All",
@@ -144,7 +141,6 @@ public class CreateTableCommandHandler
 
         await _reportRepo.CreateAsync(new Report
         {
-            TenantId = table.TenantId,
             AppTableId = table.Id,
             OwnerId = _queryContext.UserId,
             Name = "List Changes",
@@ -161,7 +157,6 @@ public class CreateTableCommandHandler
         // Auto-create "Main Form" with all seeded system fields in a default section
         var mainForm = new Form
         {
-            TenantId          = table.TenantId,
             AppTableId        = table.Id,
             Name              = "Main Form",
             IsDefault         = true,
@@ -175,14 +170,12 @@ public class CreateTableCommandHandler
 
         var defaultSection = new FormSection
         {
-            TenantId    = table.TenantId,
             FormId      = formId,
             Name        = "Section 1",
             ColumnCount = 2,
             DisplayOrder = 1,
             Elements    = seededIds.Select((kvp, i) => new FormElement
             {
-                TenantId     = table.TenantId,
                 AppFieldId   = kvp.Value,
                 LabelMode    = "Default",
                 ShowOnAdd    = true,
@@ -198,7 +191,7 @@ public class CreateTableCommandHandler
         await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppTable, publicId.ToString(), appId: app.Id, ct: ct);
+            AuditActions.SchemaChanged, AuditEntityTypes.AppTable, publicId.ToString(), $"Table added: {table.Name}", appId: app.Id, ct: ct);
 
         return new CreateTableResult
         {

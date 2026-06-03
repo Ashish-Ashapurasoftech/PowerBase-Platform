@@ -4,7 +4,6 @@ public class App
 {
     public long Id { get; set; }
     public Guid PublicId { get; set; }
-    public long TenantId { get; set; }
     public long OwnerId { get; set; }
     public string? OwnerName { get; set; }
     public string Name { get; set; } = string.Empty;

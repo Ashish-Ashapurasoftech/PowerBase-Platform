@@ -67,7 +67,6 @@ public class CreateFieldCommandHandler
 
         var field = new AppField
         {
-            TenantId = _queryContext.TenantId,
             AppTableId = table.Id,
             FieldTypeId = fieldType.Id,
             Name = command.Name,
@@ -96,7 +95,7 @@ public class CreateFieldCommandHandler
         }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), appId: table.AppId, ct: ct);
+            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), $"Field added: {command.Name} To TableName : {table.Name}", appId: table.AppId, ct: ct);
 
         return new CreateFieldResult
         {
