@@ -26,7 +26,7 @@ public class DuplicateFormRuleCommandHandler
         var newName = command.Name ?? $"{source.Name} (copy)";
 
         var (_, newPublicId) = await _ruleRepo.DuplicateAsync(
-            command.RulePublicId, newName, _queryContext.TenantId, _queryContext.UserId, ct);
+            command.RulePublicId, newName, _queryContext.UserId, ct);
 
         var created = await _ruleRepo.GetByPublicIdAsync(newPublicId, ct);
 

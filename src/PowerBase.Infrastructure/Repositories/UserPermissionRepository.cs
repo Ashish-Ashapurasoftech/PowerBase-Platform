@@ -4,7 +4,7 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
 
-public class UserPermissionRepository : BaseRepository, IUserPermissionRepository
+public class UserPermissionRepository : ControlRepositoryBase, IUserPermissionRepository
 {
     private const string GetPermissionsSql = """
         SELECT p.Code
@@ -17,7 +17,7 @@ public class UserPermissionRepository : BaseRepository, IUserPermissionRepositor
           AND tu.IsDeleted = 0
         """;
 
-    public UserPermissionRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
+    public UserPermissionRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
     public async Task<IReadOnlySet<string>> GetPermissionsAsync(long userId, long tenantId, CancellationToken ct = default)

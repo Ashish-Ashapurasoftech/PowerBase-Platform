@@ -15,5 +15,5 @@ public interface IFormRuleRepository
     Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task ReorderAsync(long formId, IReadOnlyList<Guid> orderedPublicIds, CancellationToken ct = default);
     Task<int> SetActiveAsync(Guid publicId, bool isActive, CancellationToken ct = default);
-    Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long tenantId, long userId, CancellationToken ct = default);
+    Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default);
 }

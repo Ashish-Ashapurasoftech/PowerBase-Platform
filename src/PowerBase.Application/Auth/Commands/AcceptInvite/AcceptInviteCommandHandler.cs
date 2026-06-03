@@ -56,7 +56,9 @@ public class AcceptInviteCommandHandler
 
         var hashedPassword = _passwordService.Hash(command.Password);
         await _userRepo.ActivateAsync(tokenRecord.UserId, command.Name, hashedPassword, ct);
-        await _tenantRepo.ActivateTenantUserAsync(tokenRecord.UserId, tokenRecord.TenantId, ct);
+        // TenantId is null for platform-level invites (no tenant pre-assigned)
+        if (tokenRecord.TenantId.HasValue)
+            await _tenantRepo.ActivateTenantUserAsync(tokenRecord.UserId, tokenRecord.TenantId.Value, ct);
         await _auditRepo.ConsumeInviteTokenAsync(tokenRecord.Id, ct);
 
         var user = await _userRepo.GetByIdAsync(tokenRecord.UserId, ct);

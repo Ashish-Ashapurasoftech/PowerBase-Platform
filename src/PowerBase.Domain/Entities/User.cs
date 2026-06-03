@@ -9,6 +9,8 @@ public class User
     public string HashedPassword { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public bool IsEmailVerified { get; set; }
+    public int? SystemRoleId { get; set; }
+    public string? SystemRoleCode { get; set; }
     public bool IsActive { get; set; }
     public bool IsDeleted { get; set; }
     public DateTime? LastLoginOn { get; set; }

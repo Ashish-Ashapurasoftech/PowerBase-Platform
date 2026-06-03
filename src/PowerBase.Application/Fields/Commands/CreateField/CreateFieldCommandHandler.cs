@@ -92,7 +92,7 @@ public class CreateFieldCommandHandler
         var formsForTable = await _formRepo.ListByTableAsync(table.PublicId, ct);
         foreach (var form in formsForTable.Where(f => f.AutoAddNewFields))
         {
-            await _formRepo.AppendFieldToLastSectionAsync(form.Id, id, _queryContext.TenantId, ct);
+            await _formRepo.AppendFieldToLastSectionAsync(form.Id, id, ct);
         }
 
         await _auditRepo.LogActivityAsync(

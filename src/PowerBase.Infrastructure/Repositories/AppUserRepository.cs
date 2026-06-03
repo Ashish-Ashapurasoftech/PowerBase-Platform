@@ -6,56 +6,54 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
 
-public class AppUserRepository : BaseRepository, IAppUserRepository
+public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 {
     private const string ListByAppIdSql = """
         SELECT
             au.PublicId,
-            u.PublicId  AS UserPublicId,
-            u.Name      AS UserName,
-            u.Email     AS UserEmail,
+            au.UserPublicId,
+            au.UserName,
+            au.UserEmail,
             ar.PublicId AS RolePublicId,
             ar.Name     AS RoleName,
             au.Status,
             au.CreatedOn
         FROM meta.AppUser au
-        JOIN core.[User]  u  ON u.Id  = au.UserId
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
         WHERE au.AppId    = @appId
-          AND au.TenantId = @tenantId
           AND au.IsDeleted = 0
-        ORDER BY u.Name
+        ORDER BY au.UserName
         """;
 
     private const string GetByAppAndUserSql = """
-        SELECT Id, PublicId, AppId, TenantId, UserId, AppRoleId, Status, AddedBy, CreatedOn, UpdatedOn, IsDeleted
+        SELECT Id, PublicId, AppId, UserId, AppRoleId, Status, AddedBy, CreatedOn, UpdatedOn, IsDeleted
         FROM meta.AppUser
-        WHERE AppId = @appId AND UserId = @userId AND TenantId = @tenantId AND IsDeleted = 0
+        WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
         """;
 
     private const string InsertSql = """
-        INSERT INTO meta.AppUser (AppId, TenantId, UserId, AppRoleId, Status, AddedBy, CreatedOn)
-        VALUES (@appId, @tenantId, @userId, @appRoleId, @status, @addedBy, SYSUTCDATETIME())
+        INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, AddedBy, CreatedOn)
+        VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, @addedBy, SYSUTCDATETIME())
         """;
 
     private const string UpdateRoleSql = """
         UPDATE meta.AppUser
         SET AppRoleId = @appRoleId, UpdatedOn = SYSUTCDATETIME()
-        WHERE AppId = @appId AND UserId = @userId AND TenantId = @tenantId AND IsDeleted = 0
+        WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
         """;
 
     private const string GetUserRoleNameSql = """
         SELECT ar.Name
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
-        WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+        WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
         """;
 
     private const string GetUserRolePublicIdSql = """
         SELECT ar.PublicId
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
-        WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+        WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
         """;
 
     private const string GetPermissionFlagsSql = """
@@ -64,51 +62,54 @@ public class AppUserRepository : BaseRepository, IAppUserRepository
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
         JOIN meta.AppRolePermission arp ON arp.AppRoleId = ar.Id
         JOIN meta.Permission p ON p.Id = arp.PermissionId
-        WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
+        WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
         """;
+
     private const string GetAppPermissionsSql = """
-    SELECT p.Code
-    FROM meta.AppUser au
-    JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
-    JOIN meta.AppRolePermission arp ON arp.AppRoleId = ar.Id
-    JOIN meta.Permission p ON p.Id = arp.PermissionId
-    WHERE au.AppId = @appId AND au.UserId = @userId AND au.TenantId = @tenantId AND au.IsDeleted = 0
-    """;
+        SELECT p.Code
+        FROM meta.AppUser au
+        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        JOIN meta.AppRolePermission arp ON arp.AppRoleId = ar.Id
+        JOIN meta.Permission p ON p.Id = arp.PermissionId
+        WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
+        """;
 
     private const string RemoveSql = """
         UPDATE meta.AppUser
         SET IsDeleted = 1, UpdatedOn = SYSUTCDATETIME()
-        WHERE AppId = @appId AND UserId = @userId AND TenantId = @tenantId AND IsDeleted = 0
+        WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
         """;
 
-    public AppUserRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
+    public AppUserRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
     public async Task<IReadOnlyList<AppUserDetail>> ListByAppIdAsync(long appId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         var results = await connection.QueryAsync<AppUserDetail>(
-            new CommandDefinition(ListByAppIdSql, new { appId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(ListByAppIdSql, new { appId }, cancellationToken: ct));
         return results.AsList();
     }
 
     public async Task<AppUser?> GetByAppAndUserAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.QuerySingleOrDefaultAsync<AppUser>(
-            new CommandDefinition(GetByAppAndUserSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(GetByAppAndUserSql, new { appId, userId }, cancellationToken: ct));
     }
 
     public async Task CreateAsync(AppUser appUser, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var parameters = new
         {
-            appId = appUser.AppId,
-            tenantId = QueryContext.TenantId,
-            userId = appUser.UserId,
-            appRoleId = appUser.AppRoleId,
-            status = appUser.Status,
-            addedBy = QueryContext.UserId,
+            appId      = appUser.AppId,
+            userId     = appUser.UserId,
+            userPublicId = appUser.UserPublicId,
+            userName   = appUser.UserName,
+            userEmail  = appUser.UserEmail,
+            appRoleId  = appUser.AppRoleId,
+            status     = appUser.Status,
+            addedBy    = QueryContext.UserId,
         };
 
         if (transaction is not null)
@@ -118,44 +119,43 @@ public class AppUserRepository : BaseRepository, IAppUserRepository
             return;
         }
 
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(InsertSql, parameters, cancellationToken: ct));
     }
 
     public async Task UpdateRoleAsync(long appId, long userId, long newRoleId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
-            new CommandDefinition(UpdateRoleSql, new { appId, userId, appRoleId = newRoleId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(UpdateRoleSql, new { appId, userId, appRoleId = newRoleId }, cancellationToken: ct));
     }
 
     public async Task<string?> GetUserRoleNameAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<string?>(
-            new CommandDefinition(GetUserRoleNameSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(GetUserRoleNameSql, new { appId, userId }, cancellationToken: ct));
     }
 
     public async Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<Guid?>(
-            new CommandDefinition(GetUserRolePublicIdSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(GetUserRolePublicIdSql, new { appId, userId }, cancellationToken: ct));
     }
-
 
     public async Task<IReadOnlySet<string>> GetUserAppPermissionsAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         var result = await connection.QueryAsync<string>(
-            new CommandDefinition(GetAppPermissionsSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(GetAppPermissionsSql, new { appId, userId }, cancellationToken: ct));
         return result.ToHashSet();
     }
 
     public async Task RemoveAsync(long appId, long userId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
-            new CommandDefinition(RemoveSql, new { appId, userId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(RemoveSql, new { appId, userId }, cancellationToken: ct));
     }
 }

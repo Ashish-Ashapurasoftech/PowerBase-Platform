@@ -12,9 +12,9 @@ public interface IFormRepository
         string saveOptions, byte[] rowVersion, CancellationToken ct = default);
     Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<FormSection>> GetLayoutAsync(long formId, CancellationToken ct = default);
-    Task SaveLayoutAsync(long formId, long tenantId, IReadOnlyList<FormSection> sections, CancellationToken ct = default);
-    Task AppendFieldToLastSectionAsync(long formId, long fieldId, long tenantId, CancellationToken ct = default);
-    Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long tenantId, long userId, CancellationToken ct = default);
+    Task SaveLayoutAsync(long formId, IReadOnlyList<FormSection> sections, CancellationToken ct = default);
+    Task AppendFieldToLastSectionAsync(long formId, long fieldId, CancellationToken ct = default);
+    Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default);
     Task SetDefaultAsync(Guid tablePublicId, Guid formPublicId, CancellationToken ct = default);
     Task<IReadOnlyList<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)>> GetRoleFormOverridesAsync(Guid tablePublicId, CancellationToken ct = default);
     Task UpdateRoleFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)> overrides, CancellationToken ct = default);

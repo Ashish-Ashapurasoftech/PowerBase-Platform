@@ -6,6 +6,7 @@ public class App
     public Guid PublicId { get; set; }
     public long TenantId { get; set; }
     public long OwnerId { get; set; }
+    public string? OwnerName { get; set; }
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string? Icon { get; set; }

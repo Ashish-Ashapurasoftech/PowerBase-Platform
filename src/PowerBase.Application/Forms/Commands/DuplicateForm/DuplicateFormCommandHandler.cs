@@ -26,7 +26,7 @@ public class DuplicateFormCommandHandler
         var newName = command.Name ?? $"{source.Name} (copy)";
 
         var (_, newPublicId) = await _formRepo.DuplicateAsync(
-            command.FormPublicId, newName, _queryContext.TenantId, _queryContext.UserId, ct);
+            command.FormPublicId, newName, _queryContext.UserId, ct);
 
         var created = await _formRepo.GetByPublicIdAsync(newPublicId, ct);
 

@@ -4,5 +4,5 @@ using PowerBase.Domain.Entities;
 
 public class AppListItemDto : App
 {
-    public string? OwnerName { get; set; }
+    public new string? OwnerName { get; set; }
 }

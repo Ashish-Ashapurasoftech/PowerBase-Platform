@@ -195,7 +195,7 @@ public class CreateTableCommandHandler
                 DisplayOrder = i + 1,
             }).ToList(),
         };
-        await _formRepo.SaveLayoutAsync(formId, table.TenantId, [defaultSection], ct);
+        await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppTable, publicId.ToString(), appId: app.Id, ct: ct);

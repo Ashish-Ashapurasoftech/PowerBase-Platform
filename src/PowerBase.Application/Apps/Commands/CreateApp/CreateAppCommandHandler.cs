@@ -23,7 +23,7 @@ public class CreateAppCommandHandler
     private readonly IAppRepository _appRepo;
     private readonly IAppRoleRepository _appRoleRepo;
     private readonly IAppUserRepository _appUserRepo;
-    private readonly IUnitOfWork _uow;
+    private readonly ITenantUnitOfWork _uow;
     private readonly IQueryContext _queryContext;
     private readonly IAppTableRepository _tableRepo;
     private readonly ISchemaEngineService _schemaEngine;
@@ -32,12 +32,13 @@ public class CreateAppCommandHandler
     private readonly IReportRepository _reportRepo;
     private readonly IFieldTypeRepository _fieldTypeRepo;
     private readonly IFormRepository _formRepo;
+    private readonly IUserRepository _userRepo;
 
     public CreateAppCommandHandler(
         IAppRepository appRepo,
         IAppRoleRepository appRoleRepo,
         IAppUserRepository appUserRepo,
-        IUnitOfWork uow,
+        ITenantUnitOfWork uow,
         IQueryContext queryContext,
         IAppTableRepository tableRepo,
         ISchemaEngineService schemaEngine,
@@ -45,7 +46,8 @@ public class CreateAppCommandHandler
         IAppFieldRepository fieldRepo,
         IReportRepository reportRepo,
         IFieldTypeRepository fieldTypeRepo,
-        IFormRepository formRepo)
+        IFormRepository formRepo,
+        IUserRepository userRepo)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
@@ -59,6 +61,7 @@ public class CreateAppCommandHandler
         _reportRepo = reportRepo;
         _fieldTypeRepo = fieldTypeRepo;
         _formRepo = formRepo;
+        _userRepo = userRepo;
     }
 
     public async Task<CreateAppResult> HandleAsync(CreateAppCommand command, CancellationToken ct = default)
@@ -74,11 +77,12 @@ public class CreateAppCommandHandler
         if (await _appRepo.NameExistsAsync(command.Name, ct))
             throw new DuplicateException("App", "name", command.Name);
 
+        var owner = await _userRepo.GetByIdAsync(_queryContext.UserId, ct);
         var now = DateTime.UtcNow;
         var app = new App
         {
-            TenantId = _queryContext.TenantId,
             OwnerId = _queryContext.UserId,
+            OwnerName = owner.Name,
             Name = command.Name,
             Description = command.Description,
             Icon = command.Icon,
@@ -152,11 +156,14 @@ public class CreateAppCommandHandler
 
             await _appUserRepo.CreateAsync(new AppUser
             {
-                AppId = appId,
-                TenantId = _queryContext.TenantId,
-                UserId = _queryContext.UserId,
-                AppRoleId = adminRoleId,
-                Status = "Active",
+                AppId        = appId,
+                TenantId     = _queryContext.TenantId,
+                UserId       = _queryContext.UserId,
+                UserPublicId = owner.PublicId,
+                UserName     = owner.Name,
+                UserEmail    = owner.Email,
+                AppRoleId    = adminRoleId,
+                Status       = "Active",
             }, _uow.Transaction, ct);
 
             await _uow.CommitAsync(ct);
@@ -188,9 +195,9 @@ public class CreateAppCommandHandler
             await _schemaEngine.CreateTableAsync(table, ct);
 
             // Seed system fields
-            var userTypeId = await _fieldTypeRepo.GetIdByCodeAsync("User", ct);
-            const int numberTypeId = 2;   // Number
-            const int dateTimeTypeId = 5; // DateTime
+            var userTypeId     = await _fieldTypeRepo.GetIdByCodeAsync("User", ct);
+            var numberTypeId   = await _fieldTypeRepo.GetIdByCodeAsync("Number", ct);
+            var dateTimeTypeId = await _fieldTypeRepo.GetIdByCodeAsync("DateTime", ct);
 
             (string Name, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order)[] systemFieldDefs =
             [
@@ -291,7 +298,7 @@ public class CreateAppCommandHandler
                     DisplayOrder = i + 1,
                 }).ToList(),
             };
-            await _formRepo.SaveLayoutAsync(formId, table.TenantId, [defaultSection], ct);
+            await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), appId: appId, ct: ct);

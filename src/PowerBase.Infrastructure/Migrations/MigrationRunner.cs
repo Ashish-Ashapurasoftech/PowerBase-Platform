@@ -1,12 +1,9 @@
 using Microsoft.Data.SqlClient;
 
-namespace PowerBase.Migrator;
+namespace PowerBase.Infrastructure.Migrations;
 
-public class MigrationRunner
+public static class MigrationRunner
 {
-    private readonly string _connectionString;
-    private readonly string _migrationsPath;
-
     private const string EnsureTableSql = """
         IF NOT EXISTS (
             SELECT 1 FROM sys.tables
@@ -23,29 +20,32 @@ public class MigrationRunner
     private const string RecordSql =
         "INSERT INTO dbo._migrations (ScriptName) VALUES (@scriptName)";
 
-    public MigrationRunner(string connectionString, string migrationsPath)
-    {
-        _connectionString = connectionString;
-        _migrationsPath = migrationsPath;
-    }
-
-    public async Task RunAsync()
+    /// <summary>
+    /// Runs all *.sql scripts in <paramref name="migrationsFolder"/> against
+    /// <paramref name="connectionString"/> in filename order, skipping already-applied ones.
+    /// Returns the number of scripts newly applied.
+    /// </summary>
+    public static async Task<int> RunAsync(
+        string connectionString,
+        string migrationsFolder,
+        string label = "",
+        CancellationToken ct = default)
     {
         var scripts = Directory
-            .GetFiles(_migrationsPath, "*.sql")
+            .GetFiles(migrationsFolder, "*.sql")
             .OrderBy(f => Path.GetFileName(f))
             .ToList();
 
         if (scripts.Count == 0)
         {
-            Console.WriteLine("No migration scripts found.");
-            return;
+            Console.WriteLine($"  No migration scripts found in {migrationsFolder}");
+            return 0;
         }
 
-        await using var connection = new SqlConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(ct);
 
-        await EnsureMigrationsTableAsync(connection);
+        await EnsureMigrationsTableAsync(connection, ct);
 
         var applied = 0;
         var skipped = 0;
@@ -54,7 +54,7 @@ public class MigrationRunner
         {
             var scriptName = Path.GetFileName(scriptPath);
 
-            if (await IsAppliedAsync(connection, scriptName))
+            if (await IsAppliedAsync(connection, scriptName, ct))
             {
                 Console.WriteLine($"  [skip]  {scriptName}");
                 skipped++;
@@ -62,59 +62,61 @@ public class MigrationRunner
             }
 
             Console.Write($"  [run]   {scriptName} ... ");
-            await RunScriptAsync(connection, scriptPath, scriptName);
+            await RunScriptAsync(connection, scriptPath, scriptName, ct);
             Console.WriteLine("done");
             applied++;
         }
 
         Console.WriteLine();
+        if (!string.IsNullOrEmpty(label))
+            Console.Write($"{label}: ");
         Console.WriteLine($"Applied: {applied}  Skipped: {skipped}  Total: {scripts.Count}");
+        return applied;
     }
 
-    private static async Task EnsureMigrationsTableAsync(SqlConnection connection)
+    private static async Task EnsureMigrationsTableAsync(SqlConnection connection, CancellationToken ct)
     {
         await using var cmd = new SqlCommand(EnsureTableSql, connection);
-        await cmd.ExecuteNonQueryAsync();
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<bool> IsAppliedAsync(SqlConnection connection, string scriptName)
+    private static async Task<bool> IsAppliedAsync(SqlConnection connection, string scriptName, CancellationToken ct)
     {
         await using var cmd = new SqlCommand(IsAppliedSql, connection);
         cmd.Parameters.AddWithValue("@scriptName", scriptName);
-        var count = (int)(await cmd.ExecuteScalarAsync())!;
+        var count = (int)(await cmd.ExecuteScalarAsync(ct))!;
         return count > 0;
     }
 
-    private static async Task RunScriptAsync(SqlConnection connection, string scriptPath, string scriptName)
+    private static async Task RunScriptAsync(SqlConnection connection, string scriptPath, string scriptName, CancellationToken ct)
     {
-        var sql = await File.ReadAllTextAsync(scriptPath);
+        var sql = await File.ReadAllTextAsync(scriptPath, ct);
 
-        // Split on GO batch separators (SQL Server convention)
         var batches = sql
             .Split(["\nGO", "\r\nGO"], StringSplitOptions.RemoveEmptyEntries)
             .Select(b => b.Trim())
             .Where(b => !string.IsNullOrWhiteSpace(b))
             .ToList();
 
-        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync();
+        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(ct);
         try
         {
             foreach (var batch in batches)
             {
                 await using var cmd = new SqlCommand(batch, connection, transaction);
                 cmd.CommandTimeout = 120;
-                await cmd.ExecuteNonQueryAsync();
+                await cmd.ExecuteNonQueryAsync(ct);
             }
 
             await using var record = new SqlCommand(RecordSql, connection, transaction);
             record.Parameters.AddWithValue("@scriptName", scriptName);
-            await record.ExecuteNonQueryAsync();
+            await record.ExecuteNonQueryAsync(ct);
 
-            await transaction.CommitAsync();
+            await transaction.CommitAsync(ct);
         }
         catch
         {
-            await transaction.RollbackAsync();
+            await transaction.RollbackAsync(ct);
             throw;
         }
     }

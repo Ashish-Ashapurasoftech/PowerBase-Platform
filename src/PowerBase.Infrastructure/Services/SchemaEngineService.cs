@@ -8,11 +8,11 @@ namespace PowerBase.Infrastructure.Services;
 
 public class SchemaEngineService : ISchemaEngineService
 {
-    private readonly DbConnectionFactory _connectionFactory;
+    private readonly ITenantConnectionFactory _connectionFactory;
 
     private const string GetFieldTypeSqlDataTypeSql = "SELECT SqlDataType FROM core.FieldType WHERE Id = @id AND IsActive = 1";
 
-    public SchemaEngineService(DbConnectionFactory connectionFactory)
+    public SchemaEngineService(ITenantConnectionFactory connectionFactory)
     {
         _connectionFactory = connectionFactory;
     }
@@ -28,7 +28,6 @@ public class SchemaEngineService : ISchemaEngineService
                 CREATE TABLE {physicalName} (
                     Id         BIGINT IDENTITY(1,1) NOT NULL,
                     PublicId   UNIQUEIDENTIFIER NOT NULL DEFAULT NEWSEQUENTIALID(),
-                    TenantId   BIGINT NOT NULL,
                     IsDeleted  BIT NOT NULL DEFAULT 0,
                     CreatedOn  DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
                     CreatedBy  BIGINT NOT NULL DEFAULT 0,
@@ -43,14 +42,14 @@ public class SchemaEngineService : ISchemaEngineService
             END
             """;
 
-        await using var connection = _connectionFactory.Create();
+        await using var connection = await _connectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
     }
 
     public async Task AddColumnAsync(AppTable table, AppField field, CancellationToken ct = default)
     {
-        await using var connection = _connectionFactory.Create();
+        await using var connection = await _connectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
 
         var sqlDataType = await connection.ExecuteScalarAsync<string>(

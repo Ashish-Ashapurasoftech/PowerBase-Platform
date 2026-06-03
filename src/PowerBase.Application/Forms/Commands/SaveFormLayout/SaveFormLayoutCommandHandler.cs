@@ -87,7 +87,7 @@ public class SaveFormLayoutCommandHandler
             }).ToList(),
         }).ToList();
 
-        await _formRepo.SaveLayoutAsync(form.Id, _queryContext.TenantId, sections, ct);
+        await _formRepo.SaveLayoutAsync(form.Id, sections, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.Form, form.Id.ToString(),

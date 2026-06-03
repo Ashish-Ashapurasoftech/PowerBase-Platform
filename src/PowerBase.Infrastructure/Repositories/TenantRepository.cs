@@ -9,7 +9,7 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
 
-public class TenantRepository : BaseRepository, ITenantRepository
+public class TenantRepository : ControlRepositoryBase, ITenantRepository
 {
     private const string SlugExistsSql = """
         SELECT CAST(CASE WHEN EXISTS (
@@ -40,6 +40,7 @@ public class TenantRepository : BaseRepository, ITenantRepository
           AND tu.IsActive = 1
           AND tu.IsDeleted = 0
           AND t.IsDeleted  = 0
+          AND t.Status     = 'Active'
         ORDER BY tu.Id
         """;
 
@@ -56,9 +57,18 @@ public class TenantRepository : BaseRepository, ITenantRepository
         """;
 
     private const string InsertTenantSql = """
-        INSERT INTO meta.Tenant (PublicId, Name, Slug, PlanCode, Status, IsDeleted, CreatedOn, CreatedBy)
+        INSERT INTO meta.Tenant (PublicId, Name, Slug, PlanCode, Status, ProvisioningState, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
-        VALUES (@publicId, @name, @slug, 'Free', 'Active', 0, SYSUTCDATETIME(), 0)
+        VALUES (@publicId, @name, @slug, 'Free', 'Active', 'Provisioning', 0, SYSUTCDATETIME(), 0)
+        """;
+
+    private const string UpdateProvisioningSql = """
+        UPDATE meta.Tenant
+        SET ProvisioningState = @provisioningState,
+            DatabaseName      = @databaseName,
+            SchemaVersion     = @schemaVersion,
+            ModifiedOn        = SYSUTCDATETIME()
+        WHERE Id = @tenantId
         """;
 
     private const string InsertTenantRoleSql = """
@@ -186,7 +196,7 @@ public class TenantRepository : BaseRepository, ITenantRepository
         WHERE TenantId = @tenantId AND TenantRoleId = @roleId AND IsDeleted = 0
         """;
 
-    public TenantRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
+    public TenantRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
     public async Task<string?> GetTenantNameByIdAsync(long tenantId, CancellationToken ct = default)
@@ -440,10 +450,16 @@ public class TenantRepository : BaseRepository, ITenantRepository
         return tenant ?? throw new NotFoundException("Tenant", tenantPublicId);
     }
 
-    private async Task<IDbConnection> OpenNewConnectionAsync(CancellationToken ct)
+    public async Task UpdateProvisioningAsync(long tenantId, string provisioningState, string? databaseName, int schemaVersion = 0, CancellationToken ct = default)
     {
-        var conn = ConnectionFactory.Create();
-        await conn.OpenAsync(ct);
-        return conn;
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(new CommandDefinition(UpdateProvisioningSql, new
+        {
+            tenantId,
+            provisioningState,
+            databaseName,
+            schemaVersion,
+        }, cancellationToken: ct));
     }
+
 }

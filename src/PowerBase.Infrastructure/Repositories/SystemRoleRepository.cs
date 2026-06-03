@@ -5,13 +5,13 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
 
-public class SystemRoleRepository : BaseRepository, ISystemRoleRepository
+public class SystemRoleRepository : ControlRepositoryBase, ISystemRoleRepository
 {
     private const string GetIdByCodeSql = """
         SELECT Id FROM core.SystemRole WHERE Code = @code
         """;
 
-    public SystemRoleRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
+    public SystemRoleRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
     public async Task<int> GetIdByCodeAsync(string code, CancellationToken ct = default)

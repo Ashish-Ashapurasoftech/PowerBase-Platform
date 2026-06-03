@@ -25,8 +25,9 @@ public class CreateTenantCommandHandler
     private readonly IPermissionRepository _permissionRepo;
     private readonly IAuditRepository _auditRepo;
     private readonly IJwtService _jwtService;
-    private readonly IUnitOfWork _uow;
+    private readonly IControlUnitOfWork _uow;
     private readonly IQueryContext _queryContext;
+    private readonly ITenantProvisioningService _provisioningService;
 
     public CreateTenantCommandHandler(
         ITenantRepository tenantRepo,
@@ -34,8 +35,9 @@ public class CreateTenantCommandHandler
         IPermissionRepository permissionRepo,
         IAuditRepository auditRepo,
         IJwtService jwtService,
-        IUnitOfWork uow,
-        IQueryContext queryContext)
+        IControlUnitOfWork uow,
+        IQueryContext queryContext,
+        ITenantProvisioningService provisioningService)
     {
         _tenantRepo = tenantRepo;
         _userRepo = userRepo;
@@ -44,6 +46,7 @@ public class CreateTenantCommandHandler
         _jwtService = jwtService;
         _uow = uow;
         _queryContext = queryContext;
+        _provisioningService = provisioningService;
     }
 
     public async Task<CreateTenantResult> HandleAsync(CreateTenantCommand command, CancellationToken ct = default)
@@ -97,6 +100,10 @@ public class CreateTenantCommandHandler
             }, _uow.Transaction, ct);
 
             await _uow.CommitAsync(ct);
+
+            // Provision the tenant's isolated database (CREATE DB + baseline migrations).
+            // This runs outside the control transaction — on failure the tenant row is marked Failed.
+            await _provisioningService.ProvisionAsync(tenantId, ct);
 
             var user = await _userRepo.GetByIdAsync(_queryContext.UserId, ct);
             var token = _jwtService.GenerateToken(user, tenantId, out var jwtId, out var expiresAt);

@@ -8,9 +8,9 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
 
-public class RecordRepository : BaseRepository, IRecordRepository
+public class RecordRepository : TenantRepositoryBase, IRecordRepository
 {
-    public RecordRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
+    public RecordRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
@@ -21,7 +21,6 @@ public class RecordRepository : BaseRepository, IRecordRepository
     {
         var fieldCols = BuildFieldColumnList(fields);
         var parameters = new DynamicParameters();
-        parameters.Add("tenantId", QueryContext.TenantId);
         parameters.Add("offset", (page - 1) * pageSize);
         parameters.Add("pageSize", pageSize);
 
@@ -38,29 +37,25 @@ public class RecordRepository : BaseRepository, IRecordRepository
             : "Id";
 
         var sql = $"""
-            SELECT Id, PublicId, TenantId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
             FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE TenantId = @tenantId AND IsDeleted = 0{filterWhere}
+            WHERE IsDeleted = 0{filterWhere}
             ORDER BY {orderBy}
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;
 
-        await using var connection = ConnectionFactory.Create();
-        var rows = await connection.QueryAsync(
-            new CommandDefinition(sql, parameters, cancellationToken: ct));
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
         return rows.Select(ToDictionary).ToList();
     }
 
     public async Task<int> CountAsync(AppTable table, FilterGroup? filterTree = null, CancellationToken ct = default)
     {
         var parameters = new DynamicParameters();
-        parameters.Add("tenantId", QueryContext.TenantId);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
-
-        var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE TenantId = @tenantId AND IsDeleted = 0{filterWhere}";
-        await using var connection = ConnectionFactory.Create();
-        return await connection.ExecuteScalarAsync<int>(
-            new CommandDefinition(sql, parameters, cancellationToken: ct));
+        var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
@@ -68,18 +63,16 @@ public class RecordRepository : BaseRepository, IRecordRepository
     {
         var fieldCols = BuildFieldColumnList(fields);
         var sql = $"""
-            SELECT Id, PublicId, TenantId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
             FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+            WHERE PublicId = @publicId AND IsDeleted = 0
             """;
 
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         var row = await connection.QuerySingleOrDefaultAsync(
-            new CommandDefinition(sql, new { tenantId = QueryContext.TenantId, publicId }, cancellationToken: ct));
+            new CommandDefinition(sql, new { publicId }, cancellationToken: ct));
 
-        if (row is null)
-            throw new NotFoundException("Record", publicId);
-
+        if (row is null) throw new NotFoundException("Record", publicId);
         return ToDictionary(row);
     }
 
@@ -88,16 +81,15 @@ public class RecordRepository : BaseRepository, IRecordRepository
     {
         var relevantFields = fields.Where(f => values.ContainsKey(f.Id)).ToList();
         var parameters = new DynamicParameters();
-        parameters.Add("tenantId", QueryContext.TenantId);
         parameters.Add("createdBy", QueryContext.UserId);
 
         string sql;
         if (relevantFields.Count == 0)
         {
             sql = $"""
-                INSERT INTO {PhysicalNaming.FullTableName(table.Id)} (TenantId, CreatedBy)
+                INSERT INTO {PhysicalNaming.FullTableName(table.Id)} (CreatedBy)
                 OUTPUT INSERTED.PublicId
-                VALUES (@tenantId, @createdBy)
+                VALUES (@createdBy)
                 """;
         }
         else
@@ -108,15 +100,14 @@ public class RecordRepository : BaseRepository, IRecordRepository
                 parameters.Add(PhysicalNaming.ColumnName(f.Id), values[f.Id]);
 
             sql = $"""
-                INSERT INTO {PhysicalNaming.FullTableName(table.Id)} (TenantId, CreatedBy, {colList})
+                INSERT INTO {PhysicalNaming.FullTableName(table.Id)} (CreatedBy, {colList})
                 OUTPUT INSERTED.PublicId
-                VALUES (@tenantId, @createdBy, {paramList})
+                VALUES (@createdBy, {paramList})
                 """;
         }
 
-        await using var connection = ConnectionFactory.Create();
-        return await connection.ExecuteScalarAsync<Guid>(
-            new CommandDefinition(sql, parameters, cancellationToken: ct));
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
     public async Task UpdateAsync(
@@ -124,29 +115,24 @@ public class RecordRepository : BaseRepository, IRecordRepository
         IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
     {
         var relevantFields = fields.Where(f => values.ContainsKey(f.Id)).ToList();
-        if (relevantFields.Count == 0)
-            return;
+        if (relevantFields.Count == 0) return;
 
         var setClauses = string.Join(", ", relevantFields.Select(f => $"{PhysicalNaming.ColumnName(f.Id)} = @{PhysicalNaming.ColumnName(f.Id)}"));
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET {setClauses}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
-            WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+            WHERE PublicId = @publicId AND IsDeleted = 0
             """;
 
         var parameters = new DynamicParameters();
-        parameters.Add("tenantId", QueryContext.TenantId);
         parameters.Add("publicId", publicId);
         parameters.Add("modifiedBy", QueryContext.UserId);
         foreach (var f in relevantFields)
             parameters.Add(PhysicalNaming.ColumnName(f.Id), values[f.Id]);
 
-        await using var connection = ConnectionFactory.Create();
-        var affected = await connection.ExecuteAsync(
-            new CommandDefinition(sql, parameters, cancellationToken: ct));
-
-        if (affected == 0)
-            throw new NotFoundException("Record", publicId);
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        if (affected == 0) throw new NotFoundException("Record", publicId);
     }
 
     public async Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default)
@@ -154,15 +140,13 @@ public class RecordRepository : BaseRepository, IRecordRepository
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
-            WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+            WHERE PublicId = @publicId AND IsDeleted = 0
             """;
 
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
-            new CommandDefinition(sql, new { tenantId = QueryContext.TenantId, publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
-
-        if (affected == 0)
-            throw new NotFoundException("Record", publicId);
+            new CommandDefinition(sql, new { publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+        if (affected == 0) throw new NotFoundException("Record", publicId);
     }
 
     public async Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
@@ -170,18 +154,15 @@ public class RecordRepository : BaseRepository, IRecordRepository
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
-            WHERE TenantId = @tenantId AND PublicId IN @publicIds AND IsDeleted = 0
+            WHERE PublicId IN @publicIds AND IsDeleted = 0
             """;
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
-            new CommandDefinition(sql,
-                new { tenantId = QueryContext.TenantId, publicIds, modifiedBy = QueryContext.UserId },
-                cancellationToken: ct));
+            new CommandDefinition(sql, new { publicIds, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
-        AppTable table,
-        AppField groupByField,
+        AppTable table, AppField groupByField,
         IReadOnlyList<SummaryAggregation> aggregations,
         IReadOnlyList<AppField> allFields,
         string groupByMode = "EqualValues",
@@ -194,9 +175,7 @@ public class RecordRepository : BaseRepository, IRecordRepository
         var aggClauses = new List<string> { "COUNT(*) AS [Count]" };
         foreach (var agg in aggregations)
         {
-            if (!fieldMap.TryGetValue(agg.FieldId, out var aggField))
-                continue;
-
+            if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
             var col = PhysicalNaming.ColumnName(agg.FieldId);
             var alias = $"[{agg.Function}_{aggField.Name.Replace(" ", "_")}]";
             var clause = agg.Function switch
@@ -207,22 +186,19 @@ public class RecordRepository : BaseRepository, IRecordRepository
                 "Max" => $"MAX({col}) AS {alias}",
                 _ => null,
             };
-            if (clause is not null)
-                aggClauses.Add(clause);
+            if (clause is not null) aggClauses.Add(clause);
         }
 
-        var aggSql = string.Join(", ", aggClauses);
         var sql = $"""
-            SELECT {groupExpr} AS GroupValue, {aggSql}
+            SELECT {groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}
             FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE TenantId = @tenantId AND IsDeleted = 0
+            WHERE IsDeleted = 0
             GROUP BY {groupExpr}
             ORDER BY {groupExpr}
             """;
 
-        await using var connection = ConnectionFactory.Create();
-        var rows = await connection.QueryAsync(
-            new CommandDefinition(sql, new { tenantId = QueryContext.TenantId }, cancellationToken: ct));
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, cancellationToken: ct));
         return rows.Select(ToDictionary).ToList();
     }
 
@@ -233,18 +209,12 @@ public class RecordRepository : BaseRepository, IRecordRepository
         _ => col,
     };
 
-    // --- Helpers ---
-
     private static string BuildFieldColumnList(IReadOnlyList<AppField> fields)
     {
         var customCols = fields.Where(f => !f.IsSystem).Select(f => PhysicalNaming.ColumnName(f.Id)).ToList();
         return customCols.Count > 0 ? ", " + string.Join(", ", customCols) : string.Empty;
     }
 
-    /// <summary>
-    /// Wraps the tree SQL fragment into a WHERE clause suffix.
-    /// Returns " AND (...)" when there are conditions, empty string otherwise.
-    /// </summary>
     private static string BuildFilterTreeWhere(FilterGroup? group, DynamicParameters parameters)
     {
         if (group is null || group.Nodes.Count == 0) return string.Empty;
@@ -253,11 +223,6 @@ public class RecordRepository : BaseRepository, IRecordRepository
         return string.IsNullOrEmpty(fragment) ? string.Empty : $" AND ({fragment})";
     }
 
-    /// <summary>
-    /// Recursively builds a SQL fragment (no outer parentheses) for a filter group.
-    /// Column names come from integer field IDs only — no user input enters the SQL string.
-    /// Values are Dapper parameters (@fv0, @fv1, …).
-    /// </summary>
     private static string BuildTreeFragment(FilterGroup group, DynamicParameters parameters, ref int paramIdx)
     {
         var parts = new List<string>();
@@ -274,7 +239,6 @@ public class RecordRepository : BaseRepository, IRecordRepository
                 if (!string.IsNullOrEmpty(subSql)) parts.Add($"({subSql})");
             }
         }
-
         if (parts.Count == 0) return string.Empty;
         var joiner = group.Logic?.ToLowerInvariant() == "or" ? " OR " : " AND ";
         return string.Join(joiner, parts);
@@ -282,27 +246,25 @@ public class RecordRepository : BaseRepository, IRecordRepository
 
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i)
     {
-        var col = PhysicalNaming.ColumnName(cond.FieldId); // safe: integer field ID
+        var col = PhysicalNaming.ColumnName(cond.FieldId);
         var pname = $"fv{i++}";
         switch (cond.Operator)
         {
-            case "eq":        p.Add(pname, cond.Value);             return $"{col} = @{pname}";
-            case "ne":        p.Add(pname, cond.Value);             return $"{col} <> @{pname}";
-            case "gt":        p.Add(pname, cond.Value);             return $"{col} > @{pname}";
-            case "gte":       p.Add(pname, cond.Value);             return $"{col} >= @{pname}";
-            case "lt":        p.Add(pname, cond.Value);             return $"{col} < @{pname}";
-            case "lte":       p.Add(pname, cond.Value);             return $"{col} <= @{pname}";
-            case "contains":  p.Add(pname, $"%{cond.Value}%");      return $"{col} LIKE @{pname}";
-            case "startsWith":p.Add(pname, $"{cond.Value}%");       return $"{col} LIKE @{pname}";
-            default: i--; return null; // unknown operator skipped; undo param counter
+            case "eq":         p.Add(pname, cond.Value);        return $"{col} = @{pname}";
+            case "ne":         p.Add(pname, cond.Value);        return $"{col} <> @{pname}";
+            case "gt":         p.Add(pname, cond.Value);        return $"{col} > @{pname}";
+            case "gte":        p.Add(pname, cond.Value);        return $"{col} >= @{pname}";
+            case "lt":         p.Add(pname, cond.Value);        return $"{col} < @{pname}";
+            case "lte":        p.Add(pname, cond.Value);        return $"{col} <= @{pname}";
+            case "contains":   p.Add(pname, $"%{cond.Value}%"); return $"{col} LIKE @{pname}";
+            case "startsWith": p.Add(pname, $"{cond.Value}%");  return $"{col} LIKE @{pname}";
+            default: i--; return null;
         }
     }
 
     private static IReadOnlyDictionary<string, object?> ToDictionary(dynamic row)
     {
         var dict = (IDictionary<string, object>)row;
-        return dict.ToDictionary(
-            kvp => kvp.Key,
-            kvp => kvp.Value == DBNull.Value ? null : (object?)kvp.Value);
+        return dict.ToDictionary(kvp => kvp.Key, kvp => kvp.Value == DBNull.Value ? null : (object?)kvp.Value);
     }
 }

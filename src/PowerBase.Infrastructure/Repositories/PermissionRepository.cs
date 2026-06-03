@@ -6,7 +6,7 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
 
-public class PermissionRepository : BaseRepository, IPermissionRepository
+public class PermissionRepository : ControlRepositoryBase, IPermissionRepository
 {
     private const string GetAllSql = """
         SELECT Id, Code, DisplayName, Description
@@ -31,12 +31,12 @@ public class PermissionRepository : BaseRepository, IPermissionRepository
         DELETE FROM meta.RolePermission WHERE TenantRoleId = @roleId
         """;
 
-    public PermissionRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
+    public PermissionRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
     public async Task<IReadOnlyList<Permission>> GetAllAsync(CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await OpenNewConnectionAsync(ct);
         var results = await connection.QueryAsync<Permission>(
             new CommandDefinition(GetAllSql, cancellationToken: ct));
         return results.ToList();
@@ -44,7 +44,7 @@ public class PermissionRepository : BaseRepository, IPermissionRepository
 
     public async Task<IReadOnlyList<Permission>> GetByRoleIdAsync(long roleId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await OpenNewConnectionAsync(ct);
         var results = await connection.QueryAsync<Permission>(
             new CommandDefinition(GetByRoleIdSql, new { roleId }, cancellationToken: ct));
         return results.ToList();
@@ -52,26 +52,23 @@ public class PermissionRepository : BaseRepository, IPermissionRepository
 
     public async Task AssignToRoleAsync(long roleId, IReadOnlyList<long> permissionIds, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
-        var connection = transaction?.Connection ?? (IDbConnection)(ConnectionFactory.Create());
-        bool ownConnection = transaction is null;
-        try
+        if (transaction is not null)
         {
             foreach (var permId in permissionIds)
-            {
-                await connection.ExecuteAsync(
+                await transaction.Connection!.ExecuteAsync(
                     new CommandDefinition(InsertRolePermissionSql, new { roleId, permissionId = permId }, transaction, cancellationToken: ct));
-            }
+            return;
         }
-        finally
-        {
-            if (ownConnection) connection.Dispose();
-        }
+
+        await using var connection = await OpenNewConnectionAsync(ct);
+        foreach (var permId in permissionIds)
+            await connection.ExecuteAsync(
+                new CommandDefinition(InsertRolePermissionSql, new { roleId, permissionId = permId }, cancellationToken: ct));
     }
 
     public async Task ReplaceRolePermissionsAsync(long roleId, IReadOnlyList<long> permissionIds, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenNewConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
         try
         {

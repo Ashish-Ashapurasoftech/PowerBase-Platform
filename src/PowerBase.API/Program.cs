@@ -80,6 +80,7 @@ using PowerBase.Application.Users.Commands.InviteUser;
 using PowerBase.Application.Users.Commands.RemoveUser;
 using PowerBase.Application.Users.Queries.ListUsers;
 using PowerBase.Infrastructure.Persistence;
+using PowerBase.Infrastructure.Provisioning;
 using PowerBase.Infrastructure.Repositories;
 using PowerBase.Infrastructure.Services;
 using PowerBase.Infrastructure.UOW;
@@ -123,9 +124,21 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // Infrastructure
-builder.Services.AddSingleton<DbConnectionFactory>();
+builder.Services.AddMemoryCache();
+builder.Services.AddSingleton<DbConnectionFactory>(); // shim — kept for compatibility
+builder.Services.AddSingleton<IControlConnectionFactory, ControlConnectionFactory>();
+builder.Services.AddSingleton<ISecretResolver, ConfigSecretResolver>();
+builder.Services.AddSingleton<ITenantConnectionResolver, TenantConnectionResolver>();
+builder.Services.AddScoped<ITenantConnectionFactory, TenantConnectionFactory>();
+builder.Services.AddScoped<ControlUnitOfWork>();
+builder.Services.AddScoped<IControlUnitOfWork>(sp => sp.GetRequiredService<ControlUnitOfWork>());
+builder.Services.AddScoped<TenantUnitOfWork>();
+builder.Services.AddScoped<ITenantUnitOfWork>(sp => sp.GetRequiredService<TenantUnitOfWork>());
 builder.Services.AddScoped<UnitOfWork>();
-builder.Services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<UnitOfWork>());
+builder.Services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<ControlUnitOfWork>());
+
+// Provisioning
+builder.Services.AddScoped<ITenantProvisioningService, TenantProvisioningService>();
 
 // Services
 builder.Services.AddScoped<QueryContext>();
@@ -154,6 +167,7 @@ builder.Services.AddScoped<IPermissionRepository, PermissionRepository>();
 builder.Services.AddScoped<IUserPermissionRepository, UserPermissionRepository>();
 builder.Services.AddScoped<IFormRepository, FormRepository>();
 builder.Services.AddScoped<IFormRuleRepository, FormRuleRepository>();
+builder.Services.AddScoped<IAdminRepository, AdminRepository>();
 
 // Handlers
 builder.Services.AddScoped<SignupCommandHandler>();
@@ -213,6 +227,8 @@ builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetRolesReports
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportVisibilityMatrix.UpdateReportVisibilityMatrixCommandHandler>();
 builder.Services.AddScoped<ListUsersQueryHandler>();
 builder.Services.AddScoped<InviteUserCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Admin.Commands.AdminInviteUserCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Admin.Commands.AdminInvitePlatformUserCommandHandler>();
 builder.Services.AddScoped<ChangeUserRoleCommandHandler>();
 builder.Services.AddScoped<RemoveUserCommandHandler>();
 builder.Services.AddScoped<ListRolesQueryHandler>();

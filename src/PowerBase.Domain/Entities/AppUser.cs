@@ -7,6 +7,9 @@ public class AppUser
     public long AppId { get; set; }
     public long TenantId { get; set; }
     public long UserId { get; set; }
+    public Guid? UserPublicId { get; set; }
+    public string? UserName { get; set; }
+    public string? UserEmail { get; set; }
     public long AppRoleId { get; set; }
     public string Status { get; set; } = "Active";
     public long AddedBy { get; set; }

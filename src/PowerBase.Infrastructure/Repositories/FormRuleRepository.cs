@@ -6,17 +6,13 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
 
-public class FormRuleRepository : BaseRepository, IFormRuleRepository
+public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 {
-    public FormRuleRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
+    public FormRuleRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
-    // -----------------------------------------------------------------------
-    // Selects
-    // -----------------------------------------------------------------------
-
     private const string RuleSelectColumns = """
-        Id, PublicId, TenantId, FormId, Name, Description, Tags, IsActive,
+        Id, PublicId, FormId, Name, Description, Tags, IsActive,
         IsExpressionMode, ExpressionText, RunTrigger, ConditionLogic, DisplayOrder,
         IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, RowVersion
         """;
@@ -24,27 +20,22 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
     private const string GetByPublicIdSql = $"""
         SELECT {RuleSelectColumns}
         FROM meta.FormRule
-        WHERE TenantId = @tenantId
-          AND PublicId = @publicId
+        WHERE PublicId = @publicId
           AND IsDeleted = 0
         """;
 
     private const string GetAppIdByPublicIdSql = """
         SELECT t.AppId
         FROM meta.FormRule r
-        JOIN meta.Form f      ON f.Id = r.FormId
-        JOIN meta.AppTable t  ON t.Id = f.AppTableId
-        WHERE r.TenantId = @tenantId
-          AND r.PublicId = @publicId
-          AND r.IsDeleted = 0
+        JOIN meta.Form f     ON f.Id = r.FormId
+        JOIN meta.AppTable t ON t.Id = f.AppTableId
+        WHERE r.PublicId = @publicId AND r.IsDeleted = 0
         """;
 
     private const string ListByFormRulesSql = $"""
         SELECT {RuleSelectColumns}
         FROM meta.FormRule
-        WHERE TenantId = @tenantId
-          AND FormId   = @formId
-          AND IsDeleted = 0
+        WHERE FormId = @formId AND IsDeleted = 0
         ORDER BY DisplayOrder, Id
         """;
 
@@ -52,9 +43,7 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
         SELECT c.Id, c.FormRuleId, c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder
         FROM meta.FormRuleCondition c
         JOIN meta.FormRule r ON r.Id = c.FormRuleId
-        WHERE r.TenantId = @tenantId
-          AND r.FormId   = @formId
-          AND r.IsDeleted = 0
+        WHERE r.FormId = @formId AND r.IsDeleted = 0
         ORDER BY c.FormRuleId, c.DisplayOrder
         """;
 
@@ -63,20 +52,18 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
                a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder
         FROM meta.FormRuleAction a
         JOIN meta.FormRule r ON r.Id = a.FormRuleId
-        WHERE r.TenantId = @tenantId
-          AND r.FormId   = @formId
-          AND r.IsDeleted = 0
+        WHERE r.FormId = @formId AND r.IsDeleted = 0
         ORDER BY a.FormRuleId, a.DisplayOrder
         """;
 
     private const string InsertRuleSql = """
         INSERT INTO meta.FormRule
-            (TenantId, FormId, Name, Description, Tags, IsActive, IsExpressionMode,
+            (FormId, Name, Description, Tags, IsActive, IsExpressionMode,
              ExpressionText, RunTrigger, ConditionLogic, DisplayOrder, IsDeleted,
              CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES
-            (@tenantId, @formId, @name, @description, @tags, @isActive, @isExpressionMode,
+            (@formId, @name, @description, @tags, @isActive, @isExpressionMode,
              @expressionText, @runTrigger, @conditionLogic, @displayOrder, 0,
              SYSUTCDATETIME(), @createdBy)
         """;
@@ -93,19 +80,11 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
             ConditionLogic   = @conditionLogic,
             ModifiedOn       = SYSUTCDATETIME(),
             ModifiedBy       = @modifiedBy
-        WHERE TenantId  = @tenantId
-          AND PublicId  = @publicId
-          AND IsDeleted = 0
-          AND RowVersion = @rowVersion
+        WHERE PublicId = @publicId AND IsDeleted = 0 AND RowVersion = @rowVersion
         """;
 
-    private const string DeleteConditionsSql = """
-        DELETE FROM meta.FormRuleCondition WHERE FormRuleId = @formRuleId
-        """;
-
-    private const string DeleteActionsSql = """
-        DELETE FROM meta.FormRuleAction WHERE FormRuleId = @formRuleId
-        """;
+    private const string DeleteConditionsSql = "DELETE FROM meta.FormRuleCondition WHERE FormRuleId = @formRuleId";
+    private const string DeleteActionsSql    = "DELETE FROM meta.FormRuleAction    WHERE FormRuleId = @formRuleId";
 
     private const string InsertConditionSql = """
         INSERT INTO meta.FormRuleCondition (FormRuleId, AppFieldId, Operator, Value, ValueType, ValueFieldId, DisplayOrder)
@@ -119,57 +98,36 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
 
     private const string SoftDeleteSql = """
         UPDATE meta.FormRule
-        SET IsDeleted = 1,
-            DeletedOn = SYSUTCDATETIME(),
-            DeletedBy = @deletedBy
-        WHERE TenantId  = @tenantId
-          AND PublicId  = @publicId
-          AND IsDeleted = 0
+        SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
+        WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
     private const string SetActiveSql = """
         UPDATE meta.FormRule
-        SET IsActive   = @isActive,
-            ModifiedOn = SYSUTCDATETIME(),
-            ModifiedBy = @modifiedBy
-        WHERE TenantId  = @tenantId
-          AND PublicId  = @publicId
-          AND IsDeleted = 0
+        SET IsActive = @isActive, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
-    private const string GetRuleIdSql = """
-        SELECT Id FROM meta.FormRule
-        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
-        """;
+    private const string GetRuleIdSql = "SELECT Id FROM meta.FormRule WHERE PublicId = @publicId AND IsDeleted = 0";
 
     private const string UpdateDisplayOrderSql = """
-        UPDATE meta.FormRule
-        SET DisplayOrder = @displayOrder
-        WHERE TenantId = @tenantId AND PublicId = @publicId AND IsDeleted = 0
+        UPDATE meta.FormRule SET DisplayOrder = @displayOrder WHERE PublicId = @publicId AND IsDeleted = 0
         """;
-
-    // -----------------------------------------------------------------------
-    // Public methods
-    // -----------------------------------------------------------------------
 
     public async Task<FormRule> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
-        await using var conn = ConnectionFactory.Create();
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
         var rule = await conn.QuerySingleOrDefaultAsync<FormRule>(
-            new CommandDefinition(GetByPublicIdSql,
-                new { tenantId = QueryContext.TenantId, publicId },
-                cancellationToken: ct));
+            new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
         if (rule is null) throw new NotFoundException("FormRule", publicId);
 
         var conditions = await conn.QueryAsync<FormRuleCondition>(
-            new CommandDefinition(
-                "SELECT Id, FormRuleId, AppFieldId, Operator, Value, ValueType, ValueFieldId, DisplayOrder FROM meta.FormRuleCondition WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
+            new CommandDefinition("SELECT Id, FormRuleId, AppFieldId, Operator, Value, ValueType, ValueFieldId, DisplayOrder FROM meta.FormRuleCondition WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
                 new { ruleId = rule.Id }, cancellationToken: ct));
         rule.Conditions = conditions.ToList();
 
         var actions = await conn.QueryAsync<FormRuleAction>(
-            new CommandDefinition(
-                "SELECT Id, FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, TargetBlockId, ActionValue, DisplayOrder FROM meta.FormRuleAction WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
+            new CommandDefinition("SELECT Id, FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, TargetBlockId, ActionValue, DisplayOrder FROM meta.FormRuleAction WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
                 new { ruleId = rule.Id }, cancellationToken: ct));
         rule.Actions = actions.ToList();
 
@@ -178,22 +136,17 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
 
     public async Task<long> GetAppIdByPublicIdAsync(Guid rulePublicId, CancellationToken ct = default)
     {
-        await using var conn = ConnectionFactory.Create();
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
         var appId = await conn.QuerySingleOrDefaultAsync<long?>(
-            new CommandDefinition(GetAppIdByPublicIdSql,
-                new { tenantId = QueryContext.TenantId, publicId = rulePublicId },
-                cancellationToken: ct));
+            new CommandDefinition(GetAppIdByPublicIdSql, new { publicId = rulePublicId }, cancellationToken: ct));
         return appId ?? throw new NotFoundException("FormRule", rulePublicId);
     }
 
     public async Task<IReadOnlyList<FormRule>> ListByFormAsync(long formId, CancellationToken ct = default)
     {
-        await using var conn = ConnectionFactory.Create();
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
         using var multi = await conn.QueryMultipleAsync(
-            new CommandDefinition(
-                $"{ListByFormRulesSql};\n{ListConditionsSql};\n{ListActionsSql}",
-                new { tenantId = QueryContext.TenantId, formId },
-                cancellationToken: ct));
+            new CommandDefinition($"{ListByFormRulesSql};\n{ListConditionsSql};\n{ListActionsSql}", new { formId }, cancellationToken: ct));
 
         var rules      = (await multi.ReadAsync<FormRule>()).ToList();
         var conditions = (await multi.ReadAsync<FormRuleCondition>()).ToList();
@@ -201,29 +154,22 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
 
         var ruleMap = rules.ToDictionary(r => r.Id);
         foreach (var c in conditions)
-        {
             if (ruleMap.TryGetValue(c.FormRuleId, out var rule)) rule.Conditions.Add(c);
-        }
         foreach (var a in actions)
-        {
             if (ruleMap.TryGetValue(a.FormRuleId, out var rule)) rule.Actions.Add(a);
-        }
         return rules;
     }
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(FormRule rule, CancellationToken ct = default)
     {
-        await using var conn = ConnectionFactory.Create();
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
         var maxOrder = await conn.QuerySingleOrDefaultAsync<int?>(
-            new CommandDefinition(
-                "SELECT ISNULL(MAX(DisplayOrder),0) FROM meta.FormRule WHERE TenantId=@tenantId AND FormId=@formId AND IsDeleted=0",
-                new { tenantId = rule.TenantId, formId = rule.FormId },
-                cancellationToken: ct)) ?? 0;
+            new CommandDefinition("SELECT ISNULL(MAX(DisplayOrder),0) FROM meta.FormRule WHERE FormId=@formId AND IsDeleted=0",
+                new { formId = rule.FormId }, cancellationToken: ct)) ?? 0;
 
         var row = await conn.QuerySingleAsync(
             new CommandDefinition(InsertRuleSql, new
             {
-                tenantId         = rule.TenantId,
                 formId           = rule.FormId,
                 name             = rule.Name,
                 description      = rule.Description,
@@ -244,117 +190,65 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
         string? expressionText, IReadOnlyList<FormRuleCondition> conditions,
         IReadOnlyList<FormRuleAction> actions, byte[] rowVersion, CancellationToken ct = default)
     {
-        await using var conn = ConnectionFactory.Create();
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
 
         var rows = await conn.ExecuteAsync(
             new CommandDefinition(UpdateRuleHeaderSql, new
             {
-                tenantId         = QueryContext.TenantId,
-                publicId,
-                name,
-                description,
-                tags,
-                isActive,
-                isExpressionMode,
-                expressionText,
-                runTrigger,
-                conditionLogic,
-                modifiedBy       = QueryContext.UserId,
-                rowVersion,
+                publicId, name, description, tags, isActive, isExpressionMode,
+                expressionText, runTrigger, conditionLogic,
+                modifiedBy = QueryContext.UserId, rowVersion,
             }, tx, cancellationToken: ct));
 
-        if (rows == 0)
-        {
-            await tx.RollbackAsync(ct);
-            throw new ConcurrencyException("FormRule");
-        }
+        if (rows == 0) { await tx.RollbackAsync(ct); throw new ConcurrencyException("FormRule"); }
 
         var ruleId = await conn.QuerySingleAsync<long>(
-            new CommandDefinition(GetRuleIdSql,
-                new { tenantId = QueryContext.TenantId, publicId }, tx, cancellationToken: ct));
+            new CommandDefinition(GetRuleIdSql, new { publicId }, tx, cancellationToken: ct));
 
         await conn.ExecuteAsync(new CommandDefinition(DeleteConditionsSql, new { formRuleId = ruleId }, tx, cancellationToken: ct));
         await conn.ExecuteAsync(new CommandDefinition(DeleteActionsSql,    new { formRuleId = ruleId }, tx, cancellationToken: ct));
 
         foreach (var c in conditions)
-        {
-            await conn.ExecuteAsync(new CommandDefinition(InsertConditionSql, new
-            {
-                formRuleId   = ruleId,
-                appFieldId   = c.AppFieldId,
-                @operator    = c.Operator,
-                value        = c.Value,
-                valueType    = c.ValueType,
-                valueFieldId = c.ValueFieldId,
-                displayOrder = c.DisplayOrder,
-            }, tx, cancellationToken: ct));
-        }
+            await conn.ExecuteAsync(new CommandDefinition(InsertConditionSql, new { formRuleId = ruleId, appFieldId = c.AppFieldId, @operator = c.Operator, value = c.Value, valueType = c.ValueType, valueFieldId = c.ValueFieldId, displayOrder = c.DisplayOrder }, tx, cancellationToken: ct));
 
         foreach (var a in actions)
-        {
-            await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new
-            {
-                formRuleId      = ruleId,
-                actionType      = a.ActionType,
-                targetType      = a.TargetType,
-                targetElementId = a.TargetElementId,
-                targetSectionId = a.TargetSectionId,
-                targetBlockId   = a.TargetBlockId,
-                actionValue     = a.ActionValue,
-                displayOrder    = a.DisplayOrder,
-            }, tx, cancellationToken: ct));
-        }
+            await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new { formRuleId = ruleId, actionType = a.ActionType, targetType = a.TargetType, targetElementId = a.TargetElementId, targetSectionId = a.TargetSectionId, targetBlockId = a.TargetBlockId, actionValue = a.ActionValue, displayOrder = a.DisplayOrder }, tx, cancellationToken: ct));
 
         await tx.CommitAsync(ct);
     }
 
     public async Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
-        await using var conn = ConnectionFactory.Create();
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
         return await conn.ExecuteAsync(
-            new CommandDefinition(SoftDeleteSql,
-                new { tenantId = QueryContext.TenantId, publicId, deletedBy = QueryContext.UserId },
-                cancellationToken: ct));
+            new CommandDefinition(SoftDeleteSql, new { publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
     public async Task ReorderAsync(long formId, IReadOnlyList<Guid> orderedPublicIds, CancellationToken ct = default)
     {
-        await using var conn = ConnectionFactory.Create();
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
-
         for (var i = 0; i < orderedPublicIds.Count; i++)
-        {
-            await conn.ExecuteAsync(new CommandDefinition(UpdateDisplayOrderSql, new
-            {
-                tenantId     = QueryContext.TenantId,
-                publicId     = orderedPublicIds[i],
-                displayOrder = i + 1,
-            }, tx, cancellationToken: ct));
-        }
-
+            await conn.ExecuteAsync(new CommandDefinition(UpdateDisplayOrderSql, new { publicId = orderedPublicIds[i], displayOrder = i + 1 }, tx, cancellationToken: ct));
         await tx.CommitAsync(ct);
     }
 
     public async Task<int> SetActiveAsync(Guid publicId, bool isActive, CancellationToken ct = default)
     {
-        await using var conn = ConnectionFactory.Create();
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
         return await conn.ExecuteAsync(
-            new CommandDefinition(SetActiveSql,
-                new { tenantId = QueryContext.TenantId, publicId, isActive, modifiedBy = QueryContext.UserId },
-                cancellationToken: ct));
+            new CommandDefinition(SetActiveSql, new { publicId, isActive, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
-    public async Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName,
-        long tenantId, long userId, CancellationToken ct = default)
+    public async Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default)
     {
         var source = await GetByPublicIdAsync(sourcePublicId, ct);
 
         var newRule = new FormRule
         {
-            TenantId         = tenantId,
             FormId           = source.FormId,
             Name             = newName,
             Description      = source.Description,
@@ -371,37 +265,13 @@ public class FormRuleRepository : BaseRepository, IFormRuleRepository
 
         if (source.Conditions.Count > 0 || source.Actions.Count > 0)
         {
-            await using var conn = ConnectionFactory.Create();
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
             await conn.OpenAsync(ct);
             await using var tx = await conn.BeginTransactionAsync(ct);
-
             foreach (var c in source.Conditions)
-            {
-                await conn.ExecuteAsync(new CommandDefinition(InsertConditionSql, new
-                {
-                    formRuleId   = newId,
-                    appFieldId   = c.AppFieldId,
-                    @operator    = c.Operator,
-                    value        = c.Value,
-                    valueType    = c.ValueType,
-                    valueFieldId = c.ValueFieldId,
-                    displayOrder = c.DisplayOrder,
-                }, tx, cancellationToken: ct));
-            }
+                await conn.ExecuteAsync(new CommandDefinition(InsertConditionSql, new { formRuleId = newId, appFieldId = c.AppFieldId, @operator = c.Operator, value = c.Value, valueType = c.ValueType, valueFieldId = c.ValueFieldId, displayOrder = c.DisplayOrder }, tx, cancellationToken: ct));
             foreach (var a in source.Actions)
-            {
-                await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new
-                {
-                    formRuleId      = newId,
-                    actionType      = a.ActionType,
-                    targetType      = a.TargetType,
-                    targetElementId = a.TargetElementId,
-                    targetSectionId = a.TargetSectionId,
-                    targetBlockId   = a.TargetBlockId,
-                    actionValue     = a.ActionValue,
-                    displayOrder    = a.DisplayOrder,
-                }, tx, cancellationToken: ct));
-            }
+                await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new { formRuleId = newId, actionType = a.ActionType, targetType = a.TargetType, targetElementId = a.TargetElementId, targetSectionId = a.TargetSectionId, targetBlockId = a.TargetBlockId, actionValue = a.ActionValue, displayOrder = a.DisplayOrder }, tx, cancellationToken: ct));
             await tx.CommitAsync(ct);
         }
 

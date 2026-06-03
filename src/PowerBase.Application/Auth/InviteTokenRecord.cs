@@ -4,8 +4,8 @@ public class InviteTokenRecord
 {
     public long Id { get; set; }
     public long UserId { get; set; }
-    public long TenantId { get; set; }
-    public long TenantRoleId { get; set; }
+    public long? TenantId { get; set; }
+    public long? TenantRoleId { get; set; }
     public string TokenHash { get; set; } = string.Empty;
     public long InvitedBy { get; set; }
     public DateTime ExpiresOn { get; set; }

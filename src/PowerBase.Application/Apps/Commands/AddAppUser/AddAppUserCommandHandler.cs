@@ -55,12 +55,15 @@ public class AddAppUserCommandHandler
 
         await _appUserRepo.CreateAsync(new AppUser
         {
-            AppId = appId,
-            TenantId = _queryContext.TenantId,
-            UserId = user.Id,
-            AppRoleId = roleId,
-            Status = "Active",
-            AddedBy = _queryContext.UserId,
+            AppId        = appId,
+            TenantId     = _queryContext.TenantId,
+            UserId       = user.Id,
+            UserPublicId = user.PublicId,
+            UserName     = user.Name,
+            UserEmail    = user.Email,
+            AppRoleId    = roleId,
+            Status       = "Active",
+            AddedBy      = _queryContext.UserId,
         }, ct: ct);
     }
 }

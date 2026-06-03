@@ -1,5 +1,7 @@
+using System.Collections.Generic;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
@@ -38,11 +40,14 @@ public class JwtService : IJwtService
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secretKey));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
-        var claims = new[]
+        var identityClaims = new List<Claim>
         {
-            new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
-            new Claim(JwtRegisteredClaimNames.Jti, jwtId.ToString()),
+            new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
+            new(JwtRegisteredClaimNames.Jti, jwtId.ToString()),
         };
+        if (!string.IsNullOrEmpty(user.SystemRoleCode))
+            identityClaims.Add(new Claim("role", user.SystemRoleCode));
+        var claims = identityClaims.ToArray();
 
         var token = new JwtSecurityToken(
             issuer: _issuer,
@@ -61,12 +66,17 @@ public class JwtService : IJwtService
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secretKey));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
-        var claims = new[]
+        var claimList = new List<Claim>
         {
-            new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
-            new Claim("tid", tenantId.ToString()),
-            new Claim(JwtRegisteredClaimNames.Jti, jwtId.ToString()),
+            new(JwtRegisteredClaimNames.Sub,   user.Id.ToString()),
+            new("tid",                          tenantId.ToString()),
+            new(JwtRegisteredClaimNames.Jti,   jwtId.ToString()),
+            new(JwtRegisteredClaimNames.Name,  user.Name ?? string.Empty),
+            new(JwtRegisteredClaimNames.Email, user.Email ?? string.Empty),
         };
+        if (!string.IsNullOrEmpty(user.SystemRoleCode))
+            claimList.Add(new Claim("role", user.SystemRoleCode));
+        var claims = claimList.ToArray();
 
         var token = new JwtSecurityToken(
             issuer: _issuer,
@@ -78,9 +88,9 @@ public class JwtService : IJwtService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    public bool ValidateToken(string token, out long userId, out long tenantId, out Guid jwtId)
+    public bool ValidateToken(string token, out long userId, out long tenantId, out Guid jwtId, out string userName, out string userEmail, out string systemRoleCode)
     {
-        userId = 0; tenantId = 0; jwtId = Guid.Empty;
+        userId = 0; tenantId = 0; jwtId = Guid.Empty; userName = string.Empty; userEmail = string.Empty; systemRoleCode = string.Empty;
         try
         {
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secretKey));
@@ -100,9 +110,12 @@ public class JwtService : IJwtService
                 ClockSkew = TimeSpan.Zero
             }, out _);
 
-            userId = long.Parse(principal.FindFirst(JwtRegisteredClaimNames.Sub)!.Value);
-            tenantId = long.TryParse(principal.FindFirst("tid")?.Value, out var tid) ? tid : 0;
-            jwtId = Guid.Parse(principal.FindFirst(JwtRegisteredClaimNames.Jti)!.Value);
+            userId    = long.Parse(principal.FindFirst(JwtRegisteredClaimNames.Sub)!.Value);
+            tenantId  = long.TryParse(principal.FindFirst("tid")?.Value, out var tid) ? tid : 0;
+            jwtId     = Guid.Parse(principal.FindFirst(JwtRegisteredClaimNames.Jti)!.Value);
+            userName       = principal.FindFirst(JwtRegisteredClaimNames.Name)?.Value ?? string.Empty;
+            userEmail      = principal.FindFirst(JwtRegisteredClaimNames.Email)?.Value ?? string.Empty;
+            systemRoleCode = principal.FindFirst("role")?.Value ?? string.Empty;
             return true;
         }
         catch

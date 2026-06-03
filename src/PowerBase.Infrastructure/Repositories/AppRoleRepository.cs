@@ -6,7 +6,7 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
 
-public class AppRoleRepository : BaseRepository, IAppRoleRepository
+public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
 {
     private const string ListDetailsByAppIdSql = """
         SELECT r.Id, r.PublicId, r.AppId, r.Name, r.IsDefault, r.IsSystem,
@@ -14,7 +14,7 @@ public class AppRoleRepository : BaseRepository, IAppRoleRepository
         FROM meta.AppRole r
         LEFT JOIN meta.AppRolePermission arp ON arp.AppRoleId = r.Id
         LEFT JOIN meta.Permission p ON p.Id = arp.PermissionId
-        WHERE r.AppId = @appId AND r.TenantId = @tenantId AND r.IsDeleted = 0
+        WHERE r.AppId = @appId AND r.IsDeleted = 0
         GROUP BY r.Id, r.PublicId, r.AppId, r.Name, r.IsDefault, r.IsSystem
         ORDER BY r.IsSystem DESC, r.Name
         """;
@@ -31,37 +31,37 @@ public class AppRoleRepository : BaseRepository, IAppRoleRepository
     private const string SoftDeleteSql = """
         UPDATE meta.AppRole
         SET IsDeleted = 1
-        WHERE PublicId = @publicId AND TenantId = @tenantId AND IsSystem = 0 AND IsDeleted = 0
+        WHERE PublicId = @publicId AND IsSystem = 0 AND IsDeleted = 0
         """;
 
     private const string GetByPublicIdSql = """
         SELECT Id, PublicId, AppId, Name, IsDefault, IsSystem
         FROM meta.AppRole
-        WHERE PublicId = @publicId AND TenantId = @tenantId AND IsDeleted = 0
+        WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
     private const string NameExistsSql = """
         SELECT CASE WHEN EXISTS (
             SELECT 1 FROM meta.AppRole
-            WHERE AppId = @appId AND TenantId = @tenantId AND Name = @name AND IsDeleted = 0
+            WHERE AppId = @appId AND Name = @name AND IsDeleted = 0
         ) THEN 1 ELSE 0 END
         """;
 
     private const string InsertSql = """
-        INSERT INTO meta.AppRole (AppId, TenantId, Name, IsDefault, IsSystem, CreatedBy)
+        INSERT INTO meta.AppRole (AppId, Name, IsDefault, IsSystem, CreatedBy)
         OUTPUT inserted.Id, inserted.PublicId
-        VALUES (@appId, @tenantId, @name, @isDefault, @isSystem, @createdBy)
+        VALUES (@appId, @name, @isDefault, @isSystem, @createdBy)
         """;
 
-    public AppRoleRepository(DbConnectionFactory connectionFactory, IQueryContext queryContext)
+    public AppRoleRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
     public async Task<IReadOnlyList<AppRoleDetail>> ListDetailsByAppIdAsync(long appId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         var results = await connection.QueryAsync(
-            new CommandDefinition(ListDetailsByAppIdSql, new { appId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
-        
+            new CommandDefinition(ListDetailsByAppIdSql, new { appId }, cancellationToken: ct));
+
         return results.Select(r => new AppRoleDetail(
             (long)r.Id, (Guid)r.PublicId, (long)r.AppId, (string)r.Name, (bool)r.IsDefault, (bool)r.IsSystem,
             ((string)r.PermissionsString).Split(',', StringSplitOptions.RemoveEmptyEntries).ToList()
@@ -70,27 +70,27 @@ public class AppRoleRepository : BaseRepository, IAppRoleRepository
 
     public async Task<AppRole?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.QuerySingleOrDefaultAsync<AppRole>(
-            new CommandDefinition(GetByPublicIdSql, new { publicId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
     }
 
     public async Task<bool> NameExistsInAppAsync(long appId, string name, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<bool>(
-            new CommandDefinition(NameExistsSql, new { appId, tenantId = QueryContext.TenantId, name }, cancellationToken: ct));
+            new CommandDefinition(NameExistsSql, new { appId, name }, cancellationToken: ct));
     }
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(AppRole role, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
-        var parameters = new { appId = role.AppId, tenantId = QueryContext.TenantId, name = role.Name, isDefault = role.IsDefault, isSystem = role.IsSystem, createdBy = QueryContext.UserId };
+        var parameters = new { appId = role.AppId, name = role.Name, isDefault = role.IsDefault, isSystem = role.IsSystem, createdBy = QueryContext.UserId };
 
         if (transaction is not null)
             return await transaction.Connection!.QuerySingleAsync<(long Id, Guid PublicId)>(
                 new CommandDefinition(InsertSql, parameters, transaction, cancellationToken: ct));
 
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.QuerySingleAsync<(long Id, Guid PublicId)>(
             new CommandDefinition(InsertSql, parameters, cancellationToken: ct));
     }
@@ -101,25 +101,21 @@ public class AppRoleRepository : BaseRepository, IAppRoleRepository
         {
             await transaction.Connection!.ExecuteAsync(new CommandDefinition(DeleteRolePermissionsSql, new { appRoleId }, transaction, cancellationToken: ct));
             if (permissionCodes.Any())
-            {
                 await transaction.Connection!.ExecuteAsync(new CommandDefinition(InsertRolePermissionsSql, new { appRoleId, codes = permissionCodes }, transaction, cancellationToken: ct));
-            }
         }
         else
         {
-            await using var conn = ConnectionFactory.Create();
+            await using var conn = await ConnectionFactory.CreateAsync(ct);
             await conn.ExecuteAsync(new CommandDefinition(DeleteRolePermissionsSql, new { appRoleId }, cancellationToken: ct));
             if (permissionCodes.Any())
-            {
                 await conn.ExecuteAsync(new CommandDefinition(InsertRolePermissionsSql, new { appRoleId, codes = permissionCodes }, cancellationToken: ct));
-            }
         }
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
-        await using var connection = ConnectionFactory.Create();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
-            new CommandDefinition(SoftDeleteSql, new { publicId, tenantId = QueryContext.TenantId }, cancellationToken: ct));
+            new CommandDefinition(SoftDeleteSql, new { publicId }, cancellationToken: ct));
     }
 }

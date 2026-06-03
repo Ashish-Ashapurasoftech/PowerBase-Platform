@@ -12,7 +12,7 @@ public class CreateAppCommandHandlerTests
     private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
     private readonly IAppRoleRepository _appRoleRepo = Substitute.For<IAppRoleRepository>();
     private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
-    private readonly IUnitOfWork _uow = Substitute.For<IUnitOfWork>();
+    private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
     private readonly ISchemaEngineService _schemaEngine = Substitute.For<ISchemaEngineService>();
@@ -21,13 +21,16 @@ public class CreateAppCommandHandlerTests
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
     private readonly IFieldTypeRepository _fieldTypeRepo = Substitute.For<IFieldTypeRepository>();
     private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
+    private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
 
-    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo);
+    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo, _userRepo);
 
     public CreateAppCommandHandlerTests()
     {
         _queryContext.TenantId.Returns(1L);
         _queryContext.UserId.Returns(1L);
+        _userRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new User { Id = 1, PublicId = Guid.NewGuid(), Name = "Test User", Email = "test@example.com" });
     }
 
     private void SetupHappyPath(Guid publicId, long appId = 10)
