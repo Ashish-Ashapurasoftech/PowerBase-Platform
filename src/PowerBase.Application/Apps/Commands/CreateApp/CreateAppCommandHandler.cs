@@ -294,7 +294,7 @@ public class CreateAppCommandHandler
             await _formRepo.SaveLayoutAsync(formId, table.TenantId, [defaultSection], ct);
 
             await _auditRepo.LogActivityAsync(
-                AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), appId: appId, ct: ct);
+                AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), $"Application added: {command.Name}", appId: appId, ct: ct);
 
             return new CreateAppResult
             {

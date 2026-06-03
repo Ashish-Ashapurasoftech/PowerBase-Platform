@@ -37,6 +37,6 @@ public class UpdateAppCommandHandler
         if (affected == 0)
             throw new NotFoundException("App", command.AppPublicId);
 
-        await _auditRepo.LogActivityAsync(AuditActions.Updated, AuditEntityTypes.App, command.AppPublicId.ToString(), ct: ct);
+        await _auditRepo.LogActivityAsync(AuditActions.Updated, AuditEntityTypes.App, command.AppPublicId.ToString(), $"Application name changed to {command.Name}", ct: ct);
     }
 }

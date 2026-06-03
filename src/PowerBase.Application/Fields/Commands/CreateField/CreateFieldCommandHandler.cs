@@ -96,7 +96,7 @@ public class CreateFieldCommandHandler
         }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), appId: table.AppId, ct: ct);
+            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), $"Field added: {command.Name} To TableName : {table.Name}", appId: table.AppId, ct: ct);
 
         return new CreateFieldResult
         {

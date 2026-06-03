@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -12,6 +13,7 @@ public class AddAppUserCommandHandler
     private readonly IUserRepository _userRepo;
     private readonly IAppAccessService _appAccessService;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
     public AddAppUserCommandHandler(
         IAppRepository appRepo,
@@ -19,7 +21,8 @@ public class AddAppUserCommandHandler
         IAppUserRepository appUserRepo,
         IUserRepository userRepo,
         IAppAccessService appAccessService,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAuditRepository auditRepo)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
@@ -27,6 +30,7 @@ public class AddAppUserCommandHandler
         _userRepo = userRepo;
         _appAccessService = appAccessService;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task HandleAsync(AddAppUserCommand command, CancellationToken ct = default)
@@ -62,5 +66,8 @@ public class AddAppUserCommandHandler
             Status = "Active",
             AddedBy = _queryContext.UserId,
         }, ct: ct);
+        
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Created, AuditEntityTypes.AppUser, user.Id.ToString(), $"User added to app: {user.Email}", appId: appId, ct: ct);
     }
 }

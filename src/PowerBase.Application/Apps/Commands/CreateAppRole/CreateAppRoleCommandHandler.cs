@@ -12,12 +12,14 @@ public class CreateAppRoleCommandHandler
     private readonly IAppRepository _appRepo;
     private readonly IAppRoleRepository _appRoleRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
-    public CreateAppRoleCommandHandler(IAppRepository appRepo, IAppRoleRepository appRoleRepo, IQueryContext queryContext)
+    public CreateAppRoleCommandHandler(IAppRepository appRepo, IAppRoleRepository appRoleRepo, IQueryContext queryContext, IAuditRepository auditRepo)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task<CreateAppRoleResult> HandleAsync(CreateAppRoleCommand command, CancellationToken ct = default)
@@ -47,6 +49,9 @@ public class CreateAppRoleCommandHandler
         // Assign default permissions
         var defaultPermissions = new[] { PermissionCodes.RecordsRead, PermissionCodes.RecordsCreate, PermissionCodes.RecordsUpdate };
         await _appRoleRepo.SetPermissionsAsync(id, defaultPermissions, null, ct);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Created, AuditEntityTypes.AppRole, id.ToString(), $"App role added: {command.Name}", appId: appId, ct: ct);
 
         return new CreateAppRoleResult(publicId, command.Name, command.IsDefault);
     }

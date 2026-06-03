@@ -40,6 +40,6 @@ public class UpdateRecordCommandHandler
         await _recordRepo.UpdateAsync(table, fields, command.RecordPublicId, command.FieldValues, ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Updated, AuditEntityTypes.Record, command.RecordPublicId.ToString(), appId: table.AppId, ct: ct);
+            AuditActions.Updated, AuditEntityTypes.Record, command.RecordPublicId.ToString(), $"Record modified in {table.Name} with ID {command.RecordPublicId}", appId: table.AppId, ct: ct);
     }
 }

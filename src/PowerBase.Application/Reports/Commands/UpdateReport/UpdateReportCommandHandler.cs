@@ -123,7 +123,7 @@ public class UpdateReportCommandHandler
         }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), ct: ct);
+            AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Report name changed to {command.Name}", appId: appId, ct: ct);
     }
 
     private static void ValidateFilterGroup(FilterGroup group, HashSet<string> allowedOperators)

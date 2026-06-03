@@ -169,6 +169,7 @@ public class AuditRepository : BaseRepository, IAuditRepository
         if (filter.AppId.HasValue) conditions.Add("a.AppId = @appId");
         if (!string.IsNullOrWhiteSpace(filter.Email)) conditions.Add("u.Email = @email");
         if (!string.IsNullOrWhiteSpace(filter.EntityType)) conditions.Add("a.EntityType = @entityType");
+        if (!string.IsNullOrWhiteSpace(filter.EntityId)) conditions.Add("a.EntityId = @entityId");
         if (!string.IsNullOrWhiteSpace(filter.Action)) conditions.Add("a.Action = @action");
 
         var clause = "WHERE " + string.Join(" AND ", conditions);
@@ -181,6 +182,7 @@ public class AuditRepository : BaseRepository, IAuditRepository
             appId = filter.AppId,
             email = filter.Email,
             entityType = filter.EntityType,
+            entityId = filter.EntityId,
             action = filter.Action,
         };
 

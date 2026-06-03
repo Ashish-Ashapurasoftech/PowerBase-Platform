@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -93,7 +94,12 @@ public class InviteUserCommandHandler
         }
 
         var users = await _tenantRepo.ListUsersAsync(ct: ct);
-        return users.First(u => u.UserPublicId == user.PublicId);
+        var addedUser = users.First(u => u.UserPublicId == user.PublicId);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.InviteSent, AuditEntityTypes.TenantUser, addedUser.UserPublicId.ToString(), $"User invited to tenant: {command.Email}", ct: ct);
+
+        return addedUser;
     }
 
     private static string ComputeSha256(string input)

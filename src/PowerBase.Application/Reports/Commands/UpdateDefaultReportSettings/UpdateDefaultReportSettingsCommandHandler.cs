@@ -12,17 +12,20 @@ public class UpdateDefaultReportSettingsCommandHandler
     private readonly IAppRoleRepository _appRoleRepo;
     private readonly IReportRepository _reportRepo;
     private readonly IAppAccessService _appAccessService;
+    private readonly IAuditRepository _auditRepo;
 
     public UpdateDefaultReportSettingsCommandHandler(
         IAppTableRepository tableRepo,
         IAppRoleRepository appRoleRepo,
         IReportRepository reportRepo,
-        IAppAccessService appAccessService)
+        IAppAccessService appAccessService,
+        IAuditRepository auditRepo)
     {
         _tableRepo = tableRepo;
         _appRoleRepo = appRoleRepo;
         _reportRepo = reportRepo;
         _appAccessService = appAccessService;
+        _auditRepo = auditRepo;
     }
 
     public async Task HandleAsync(UpdateDefaultReportSettingsCommand command, CancellationToken ct = default)
@@ -63,6 +66,9 @@ public class UpdateDefaultReportSettingsCommandHandler
         };
         var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
         await _tableRepo.UpdateDefaultReportSettingsAsync(command.TablePublicId, json, ct);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Updated, AuditEntityTypes.AppTable, table.Id.ToString(), $"Default report settings modified for table: {table.Name}", appId: table.AppId, ct: ct);
     }
 }
 

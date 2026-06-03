@@ -6,6 +6,7 @@ public record ActivityLogFilter(
     long? AppId,
     string? Email,
     string? EntityType,
+    string? EntityId,
     string? Action,
     int Page = 1,
     int PageSize = 50);

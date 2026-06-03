@@ -6,4 +6,5 @@ public record ExportAuditLogsCsvQuery(
     DateTime? To,
     string? Email,
     string? EntityType,
+    string? EntityId,
     string? Action);

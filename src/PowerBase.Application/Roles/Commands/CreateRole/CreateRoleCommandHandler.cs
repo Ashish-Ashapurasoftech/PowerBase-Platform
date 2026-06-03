@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -9,12 +10,14 @@ public class CreateRoleCommandHandler
     private readonly ITenantRepository _tenantRepo;
     private readonly IPermissionRepository _permissionRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
-    public CreateRoleCommandHandler(ITenantRepository tenantRepo, IPermissionRepository permissionRepo, IQueryContext queryContext)
+    public CreateRoleCommandHandler(ITenantRepository tenantRepo, IPermissionRepository permissionRepo, IQueryContext queryContext, IAuditRepository auditRepo)
     {
         _tenantRepo = tenantRepo;
         _permissionRepo = permissionRepo;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task<RoleResult> HandleAsync(CreateRoleCommand command, CancellationToken ct = default)
@@ -51,6 +54,9 @@ public class CreateRoleCommandHandler
 
         var created = await _tenantRepo.GetRoleByIdAsync(roleId, ct)
             ?? throw new NotFoundException("TenantRole", roleId);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Created, AuditEntityTypes.TenantRole, created.Id.ToString(), $"Tenant role added: {command.Name}", ct: ct);
 
         return new RoleResult(created.PublicId, created.Name, created.Description, created.IsDefault, created.IsSystem, created.CreatedOn);
     }

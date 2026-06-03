@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Tables.Commands.UpdateTable;
@@ -7,11 +8,13 @@ public class UpdateTableCommandHandler
 {
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppAccessService _appAccessService;
+    private readonly IAuditRepository _auditRepo;
 
-    public UpdateTableCommandHandler(IAppTableRepository tableRepo, IAppAccessService appAccessService)
+    public UpdateTableCommandHandler(IAppTableRepository tableRepo, IAppAccessService appAccessService, IAuditRepository auditRepo)
     {
         _tableRepo = tableRepo;
         _appAccessService = appAccessService;
+        _auditRepo = auditRepo;
     }
 
     public async Task HandleAsync(UpdateTableCommand command, CancellationToken ct = default)
@@ -28,5 +31,9 @@ public class UpdateTableCommandHandler
 
         if (affected == 0)
             throw new NotFoundException("Table", command.TablePublicId);
+
+        var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
+        await _auditRepo.LogActivityAsync(
+            AuditActions.SchemaChanged, AuditEntityTypes.AppTable, command.TablePublicId.ToString(), $"Table name changed to {command.Name}", appId: table.AppId, ct: ct);
     }
 }

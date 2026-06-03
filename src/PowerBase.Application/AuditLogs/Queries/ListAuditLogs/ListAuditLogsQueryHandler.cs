@@ -37,6 +37,7 @@ public class ListAuditLogsQueryHandler
             AppId: appId,
             Email: query.Email,
             EntityType: query.EntityType,
+            EntityId: query.EntityId,
             Action: query.Action,
             Page: query.Page,
             PageSize: Math.Clamp(query.PageSize, 1, 200));
