@@ -115,6 +115,8 @@ public class AuditLogsController : ControllerBase
             EntityId = log.EntityId,
             Description = log.EntityTitle,
             IpAddress = log.IpAddress,
+            OldValues = log.OldValues,
+            NewValues = log.NewValues,
             OccurredOn = DateTime.SpecifyKind(log.OccurredOn, DateTimeKind.Utc),
         };
     }

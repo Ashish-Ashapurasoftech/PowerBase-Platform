@@ -10,5 +10,7 @@ public class AuditLogResponse
     public string? EntityId { get; set; }
     public string? Description { get; set; }
     public string? IpAddress { get; set; }
+    public string? OldValues { get; set; }
+    public string? NewValues { get; set; }
     public DateTime OccurredOn { get; set; }
 }
