@@ -22,6 +22,7 @@ public class TableHandlerTests
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
     private readonly IFieldTypeRepository _fieldTypeRepo = Substitute.For<IFieldTypeRepository>();
     private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
+    private readonly IAppRolePermissionRepository _permRepo = Substitute.For<IAppRolePermissionRepository>();
 
     private static App MakeApp(long id = 10) => new() { Id = id, PublicId = Guid.NewGuid(), Name = "App" };
 
@@ -46,7 +47,7 @@ public class TableHandlerTests
         _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
         _tableRepo.NameExistsInAppAsync(app.Id, "Contacts").Returns(false);
         _tableRepo.CreateAsync(Arg.Any<AppTable>()).Returns((20L, Guid.NewGuid()));
-        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo);
+        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo, _permRepo);
 
         var result = await sut.HandleAsync(new CreateTableCommand(app.PublicId, "Contacts", null, null, null, null));
 
@@ -61,7 +62,7 @@ public class TableHandlerTests
         var app = MakeApp();
         _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
         _tableRepo.NameExistsInAppAsync(app.Id, "Contacts").Returns(true);
-        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo);
+        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo, _permRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreateTableCommand(app.PublicId, "Contacts", null, null, null, null)))
             .Should().ThrowAsync<DuplicateException>();
@@ -70,7 +71,7 @@ public class TableHandlerTests
     [Fact]
     public async Task CreateTable_EmptyName_ThrowsValidationException()
     {
-        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo);
+        var sut = new CreateTableCommandHandler(_appRepo, _tableRepo, _schemaEngine, _queryContext, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo, _permRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreateTableCommand(Guid.NewGuid(), "", null, null, null, null)))
             .Should().ThrowAsync<ValidationException>();

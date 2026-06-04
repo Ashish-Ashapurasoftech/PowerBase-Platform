@@ -74,10 +74,31 @@ public class AppAccessService : IAppAccessService
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
         var actualRoleName = await _appUserRepo.GetUserRoleNameAsync(appId, _queryContext.UserId, ct);
-        
+
         if (actualRoleName != roleName)
         {
             throw new UnauthorizedActionException($"This action requires the '{roleName}' app role.");
         }
+    }
+
+    public async Task RequireMembershipByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        if (_queryContext.IsSuperAdmin) return;
+        var appId = await _tableRepo.GetAppIdByPublicIdAsync(tablePublicId, ct);
+        await RequireMembershipByAppIdAsync(appId, ct);
+    }
+
+    public async Task RequireMembershipByReportPublicIdAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        if (_queryContext.IsSuperAdmin) return;
+        var appId = await _reportRepo.GetAppIdByPublicIdAsync(reportPublicId, ct);
+        await RequireMembershipByAppIdAsync(appId, ct);
+    }
+
+    private async Task RequireMembershipByAppIdAsync(long appId, CancellationToken ct)
+    {
+        var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
+        if (permissions.Count == 0)
+            throw new UnauthorizedActionException("You are not a member of this app.");
     }
 }

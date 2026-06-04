@@ -13,13 +13,20 @@ public class CreateAppRoleCommandHandler
     private readonly IAppRoleRepository _appRoleRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly IAppRolePermissionRepository _permRepo;
 
-    public CreateAppRoleCommandHandler(IAppRepository appRepo, IAppRoleRepository appRoleRepo, IQueryContext queryContext, IAuditRepository auditRepo)
+    public CreateAppRoleCommandHandler(
+        IAppRepository appRepo,
+        IAppRoleRepository appRoleRepo,
+        IQueryContext queryContext,
+        IAuditRepository auditRepo,
+        IAppRolePermissionRepository permRepo)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
+        _permRepo = permRepo;
     }
 
     public async Task<CreateAppRoleResult> HandleAsync(CreateAppRoleCommand command, CancellationToken ct = default)
@@ -45,9 +52,20 @@ public class CreateAppRoleCommandHandler
             IsSystem = false,
         }, ct: ct);
 
-        // Assign default permissions
-        var defaultPermissions = new[] { PermissionCodes.RecordsRead, PermissionCodes.RecordsCreate, PermissionCodes.RecordsUpdate };
+        // Default permissions: structural reads only. Record data access is governed by
+        // table-level permissions (ViewScope / CanAdd / ModifyScope / CanDelete) on each table.
+        var defaultPermissions = new[]
+        {
+            PermissionCodes.TablesRead,
+            PermissionCodes.FieldsRead,
+            PermissionCodes.ReportsRead,
+            PermissionCodes.ReportsRun,
+            PermissionCodes.FormsRead,
+        };
         await _appRoleRepo.SetPermissionsAsync(id, defaultPermissions, null, ct);
+
+        // Seed default table-level permission rows for every existing table in the app
+        await _permRepo.SeedDefaultsForRoleAsync(id, appId, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.AppRole, id.ToString(), $"App role added: {command.Name}", appId: appId, ct: ct);

@@ -280,7 +280,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Execute a report and return paged results. Pass dynamic filter values as dynamicFilters=fieldId:value (repeatable).</summary>
     [HttpGet("reports/{publicId:guid}/run")]
-    [RequireAppPermission(PermissionCodes.ReportsRun, AppAccessResolver.ByReportPublicId)]
+    [RequireAppMember(AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(ApiResponse<ReportRunResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -306,6 +306,7 @@ public class ReportsController : ControllerBase
                 Id = r.Id,
                 CreatedOn = r.CreatedOn,
                 ModifiedOn = r.ModifiedOn,
+                CreatedBy = r.CreatedBy,
                 Fields = r.Fields,
             }).ToList(),
             TotalCount = result.TotalCount,
@@ -317,7 +318,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Export report results as CSV.</summary>
     [HttpGet("reports/{publicId:guid}/export/csv")]
-    [RequireAppPermission(PermissionCodes.ReportsRun, AppAccessResolver.ByReportPublicId)]
+    [RequireAppMember(AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -329,7 +330,7 @@ public class ReportsController : ControllerBase
 
     /// <summary>Export report results as Excel (.xlsx).</summary>
     [HttpGet("reports/{publicId:guid}/export/xlsx")]
-    [RequireAppPermission(PermissionCodes.ReportsRun, AppAccessResolver.ByReportPublicId)]
+    [RequireAppMember(AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

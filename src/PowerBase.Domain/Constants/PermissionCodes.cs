@@ -40,12 +40,16 @@ public static class PermissionCodes
     public const string FormsDelete      = "forms:delete";
     public const string FormsRulesManage = "forms:rules:manage";
 
+    /// <summary>
+    /// Structural/admin permission codes assigned to regular app members by default.
+    /// Record data access (view/add/modify/delete/field-level) is governed by table-level
+    /// permissions configured per role in AppRoleTablePermission, not these flat codes.
+    /// </summary>
     public static readonly IReadOnlySet<string> DefaultUserPermissions = new HashSet<string>
     {
         AppsRead,
         TablesRead,
         FieldsRead,
-        RecordsCreate, RecordsRead, RecordsUpdate, RecordsDelete,
         ReportsRead, ReportsRun,
         FormsRead,
     };

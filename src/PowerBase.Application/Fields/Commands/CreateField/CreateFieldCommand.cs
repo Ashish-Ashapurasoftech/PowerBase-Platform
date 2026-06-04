@@ -7,4 +7,5 @@ public record CreateFieldCommand(
     string? Label,
     string? Description,
     bool IsRequired,
-    string? Settings = null);
+    string? Settings = null,
+    string? DefaultValue = null);

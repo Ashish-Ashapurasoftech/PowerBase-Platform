@@ -37,9 +37,8 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
         if (appUser is null)
             return Unrestricted(fields); // not an app member via AppUser → leave existing access checks in charge
 
-        var tablePerm = await _permRepo.GetTablePermissionAsync(appUser.AppRoleId, table.Id, ct);
-        if (tablePerm is null)
-            return Unrestricted(fields); // admin has not configured this table for the role yet
+        var tablePerm = await _permRepo.GetTablePermissionAsync(appUser.AppRoleId, table.Id, ct)
+                        ?? AppRoleTablePermission.Default(appUser.AppRoleId, table.Id);
 
         // ── Field visibility ──
         var hidden = new HashSet<long>();

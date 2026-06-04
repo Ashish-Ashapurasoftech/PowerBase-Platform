@@ -22,6 +22,7 @@ public class ReportHandlerTests
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
+    private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
 
     private static AppTable MakeTable(long id = 5) => new()
     {
@@ -168,14 +169,21 @@ public class ReportHandlerTests
             ["CreatedOn"] = DateTime.UtcNow,
             [PhysicalNaming.ColumnName(1)] = "Alice",
         };
-        _reportRepo.GetByPublicIdAsync(report.PublicId).Returns(report);
+        _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
         _tableRepo.GetByIdAsync(table.Id).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field1, field2 });
         _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
             Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>())
             .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
         _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<FilterGroup?>()).Returns(1);
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult(new TableAccessContext
+            {
+                Unrestricted = true,
+                VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
+                EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
+            }));
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -197,14 +205,21 @@ public class ReportHandlerTests
             ["CreatedOn"] = DateTime.UtcNow,
             [PhysicalNaming.ColumnName(1)] = "Data",
         };
-        _reportRepo.GetByPublicIdAsync(report.PublicId).Returns(report);
+        _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
         _tableRepo.GetByIdAsync(table.Id).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { reportableField, nonReportableField });
         _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
             Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>())
             .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
         _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<FilterGroup?>()).Returns(1);
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult(new TableAccessContext
+            {
+                Unrestricted = true,
+                VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
+                EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
+            }));
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 

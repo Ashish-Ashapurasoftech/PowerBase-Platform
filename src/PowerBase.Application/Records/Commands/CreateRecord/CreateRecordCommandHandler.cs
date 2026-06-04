@@ -47,7 +47,18 @@ public class CreateRecordCommandHandler
                 throw new UnauthorizedActionException("You do not have permission to write to one or more of the specified fields.");
         }
 
-        var publicId = await _recordRepo.CreateAsync(table, fields, command.FieldValues, ct);
+        // Inject default values for fields that were not submitted (e.g. hidden None-access fields).
+        // This ensures required fields with defaults are always populated regardless of role restrictions.
+        var effectiveValues = new Dictionary<long, object?>(command.FieldValues);
+        foreach (var field in fields)
+        {
+            if (field.IsSystem || field.IsDeleted) continue;
+            if (effectiveValues.ContainsKey(field.Id)) continue;
+            if (!string.IsNullOrWhiteSpace(field.DefaultValue))
+                effectiveValues[field.Id] = field.DefaultValue;
+        }
+
+        var publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), $"Record added in {table.Name} with ID {publicId}", appId: table.AppId, ct: ct);
@@ -55,8 +66,8 @@ public class CreateRecordCommandHandler
         await _tableRepo.IncrementRecordCountAsync(table.Id, ct);
 
         var fieldData = new Dictionary<string, object?>();
-        foreach (var field in fields.Where(f => command.FieldValues.ContainsKey(f.Id)))
-            fieldData[field.Id.ToString()] = command.FieldValues[field.Id];
+        foreach (var field in fields.Where(f => effectiveValues.ContainsKey(f.Id)))
+            fieldData[field.Id.ToString()] = effectiveValues[field.Id];
 
         return new RecordResult
         {

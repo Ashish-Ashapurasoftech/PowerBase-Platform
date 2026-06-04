@@ -155,6 +155,17 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
         return rows.AsList();
     }
 
+    private const string CountRolesWithNoneAccessForFieldSql = """
+        SELECT COUNT(*) FROM meta.AppRoleFieldPermission WHERE AppFieldId = @appFieldId AND Access = 'None'
+        """;
+
+    public async Task<int> CountRolesWithNoneAccessForFieldAsync(long appFieldId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        return await conn.ExecuteScalarAsync<int>(
+            new CommandDefinition(CountRolesWithNoneAccessForFieldSql, new { appFieldId }, cancellationToken: ct));
+    }
+
     // ── Record-level row filters ───────────────────────────────────────────────
 
     private const string GetRecordFiltersSql = """
@@ -211,5 +222,49 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<AppRoleRecordFilter>(
             new CommandDefinition(GetRecordFilterSql, new { appRoleId, appTableId }, cancellationToken: ct));
+    }
+
+    // ── Seeding helpers ──────────────────────────────────────────────────────────
+
+    private const string SeedDefaultsForRoleSql = """
+        INSERT INTO meta.AppRoleTablePermission
+            (AppRoleId, AppTableId, ViewScope, ModifyScope, CanAdd, CanDelete,
+             CanSaveSharedReports, CanEditFieldProperties, FieldAccessLevel)
+        SELECT @appRoleId, t.Id,
+               'AllRecords', 'None', 0, 0, 0, 0, 'FullAccess'
+        FROM meta.AppTable t
+        WHERE t.AppId = @appId
+          AND t.IsDeleted = 0
+          AND NOT EXISTS (
+              SELECT 1 FROM meta.AppRoleTablePermission x
+              WHERE x.AppRoleId = @appRoleId AND x.AppTableId = t.Id
+          )
+        """;
+
+    private const string SeedDefaultsForTableSql = """
+        INSERT INTO meta.AppRoleTablePermission
+            (AppRoleId, AppTableId, ViewScope, ModifyScope, CanAdd, CanDelete,
+             CanSaveSharedReports, CanEditFieldProperties, FieldAccessLevel)
+        SELECT r.Id, @appTableId,
+               'AllRecords', 'None', 0, 0, 0, 0, 'FullAccess'
+        FROM meta.AppRole r
+        WHERE r.AppId = @appId
+          AND r.IsDeleted = 0
+          AND NOT EXISTS (
+              SELECT 1 FROM meta.AppRoleTablePermission x
+              WHERE x.AppRoleId = r.Id AND x.AppTableId = @appTableId
+          )
+        """;
+
+    public async Task SeedDefaultsForRoleAsync(long appRoleId, long appId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(SeedDefaultsForRoleSql, new { appRoleId, appId }, cancellationToken: ct));
+    }
+
+    public async Task SeedDefaultsForTableAsync(long appTableId, long appId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(SeedDefaultsForTableSql, new { appTableId, appId }, cancellationToken: ct));
     }
 }

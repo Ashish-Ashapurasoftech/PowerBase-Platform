@@ -28,6 +28,10 @@ public interface IRecordRepository
 
     Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
 
+    /// <summary>Set the given field's column to <paramref name="defaultValue"/> for all non-deleted rows
+    /// whose value is currently NULL or empty. Used when an optional field becomes required. Returns rows affected.</summary>
+    Task<int> BackfillDefaultAsync(AppTable table, AppField field, string defaultValue, CancellationToken ct = default);
+
     /// <summary>Run a GROUP BY aggregation query for Summary reports.</summary>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table,
@@ -35,5 +39,7 @@ public interface IRecordRepository
         IReadOnlyList<SummaryAggregation> aggregations,
         IReadOnlyList<AppField> allFields,
         string groupByMode = "EqualValues",
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
         CancellationToken ct = default);
 }

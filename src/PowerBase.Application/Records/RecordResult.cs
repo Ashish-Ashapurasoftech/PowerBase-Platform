@@ -8,6 +8,8 @@ public class RecordResult
     public Guid Id { get; init; }
     public DateTime CreatedOn { get; init; }
     public DateTime? ModifiedOn { get; init; }
+    /// <summary>Internal userId (long) of the user who created this record. Used by the UI for OwnRecords scope gating.</summary>
+    public long CreatedBy { get; init; }
     public Dictionary<string, object?> Fields { get; init; } = new();
 
     public static RecordResult FromRow(IReadOnlyDictionary<string, object?> row, IReadOnlyList<AppField> fields)
@@ -22,11 +24,14 @@ public class RecordResult
                 fieldData[field.Id.ToString()] = val;
         }
 
+        var createdBy = row.TryGetValue("CreatedBy", out var cb) && cb is not null ? Convert.ToInt64(cb) : 0L;
+
         return new RecordResult
         {
             Id = (Guid)row["PublicId"]!,
             CreatedOn = (DateTime)row["CreatedOn"]!,
             ModifiedOn = row.TryGetValue("ModifiedOn", out var mo) && mo is DateTime moDate ? moDate : null,
+            CreatedBy = createdBy,
             Fields = fieldData,
         };
     }

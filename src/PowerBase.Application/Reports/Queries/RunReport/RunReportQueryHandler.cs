@@ -29,17 +29,20 @@ public class RunReportQueryHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IRolePermissionEnforcer _enforcer;
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
-        IRecordRepository recordRepo)
+        IRecordRepository recordRepo,
+        IRolePermissionEnforcer enforcer)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
+        _enforcer = enforcer;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -51,6 +54,10 @@ public class RunReportQueryHandler
             ?? throw new NotFoundException("Report", query.ReportPublicId);
         var table = await _tableRepo.GetByIdAsync(report.AppTableId, ct);
         var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+
+        var access = await _enforcer.GetTableAccessAsync(table, allFields, ct);
+        if (!access.CanView)
+            return new PagedReportRunResult { Page = page, PageSize = pageSize };
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
@@ -91,14 +98,15 @@ public class RunReportQueryHandler
         }
 
         if (report.ReportType == "Summary")
-            return await RunSummaryAsync(table, allFields, definition, page, pageSize, ct);
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, ct);
 
-        return await RunTableAsync(table, allFields, definition, page, pageSize, filterTree, sortFields, query.RuntimeFilters, ct);
+        return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields, query.RuntimeFilters, ct);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
         AppTable table,
         IReadOnlyList<AppField> allFields,
+        TableAccessContext access,
         ReportDefinition definition,
         int page, int pageSize,
         FilterGroup? filterTree,
@@ -106,18 +114,32 @@ public class RunReportQueryHandler
         IReadOnlyList<(long FieldId, string Value)>? runtimeFilters,
         CancellationToken ct)
     {
+        // Intersect report columns with fields the role can see (drop None-access fields)
+        var visibleFieldIds = access.VisibleFields.Select(f => f.Id).ToHashSet();
         IReadOnlyList<AppField> selectedFields;
         if (definition.Columns.Count > 0)
         {
             var fieldMap = allFields.ToDictionary(f => f.Id);
             selectedFields = definition.Columns
-                .Where(id => fieldMap.ContainsKey(id))
+                .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
                 .Select(id => fieldMap[id])
                 .ToList();
         }
         else
         {
-            selectedFields = allFields.Where(f => f.IsReportable).ToList();
+            selectedFields = allFields.Where(f => f.IsReportable && visibleFieldIds.Contains(f.Id)).ToList();
+        }
+
+        // Merge role record filter into the report's filter tree
+        if (access.ViewFilter != null)
+        {
+            filterTree = filterTree == null
+                ? access.ViewFilter
+                : new FilterGroup
+                {
+                    Logic = "and",
+                    Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = access.ViewFilter }]
+                };
         }
 
         // Merge runtime filters (dynamic/quick-search) into the filter tree
@@ -137,8 +159,9 @@ public class RunReportQueryHandler
                 };
         }
 
-        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterTree, sortFields, ct: ct);
-        var total = await _recordRepo.CountAsync(table, filterTree, ct: ct);
+        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterTree, sortFields,
+            restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+        var total = await _recordRepo.CountAsync(table, filterTree, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo
@@ -161,6 +184,7 @@ public class RunReportQueryHandler
     private async Task<PagedReportRunResult> RunSummaryAsync(
         AppTable table,
         IReadOnlyList<AppField> allFields,
+        TableAccessContext access,
         ReportDefinition definition,
         int page, int pageSize,
         CancellationToken ct)
@@ -171,21 +195,30 @@ public class RunReportQueryHandler
             return new PagedReportRunResult { Page = page, PageSize = pageSize };
         }
 
+        var visibleFieldIds = access.VisibleFields.Select(f => f.Id).ToHashSet();
         var fieldMap = allFields.ToDictionary(f => f.Id);
-        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField))
+
+        // If the group-by field is hidden, cannot produce a meaningful summary
+        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField) || !visibleFieldIds.Contains(groupByField.Id))
         {
             return new PagedReportRunResult { Page = page, PageSize = pageSize };
         }
 
+        // Only aggregate visible fields
+        var visibleAggregations = definition.Aggregations
+            .Where(a => visibleFieldIds.Contains(a.FieldId))
+            .ToList();
+
         var rows = await _recordRepo.SummarizeAsync(
-            table, groupByField, definition.Aggregations, allFields, definition.GroupByMode, ct);
+            table, groupByField, visibleAggregations, allFields, definition.GroupByMode,
+            filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         // Build alias→fieldId map. Identify columns displayed as percent-of-total and compute their totals.
         var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var percentAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var columnTotals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var agg in definition.Aggregations)
+        foreach (var agg in visibleAggregations)
         {
             if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
             var alias = $"{agg.Function}_{aggField.Name.Replace(" ", "_")}";
@@ -215,13 +248,13 @@ public class RunReportQueryHandler
             return new RecordResult { Id = Guid.Empty, CreatedOn = DateTime.UtcNow, Fields = fields };
         }).ToList();
 
-        // Synthetic columns: group-by field + Count + one per aggregation
+        // Synthetic columns: group-by field + Count + one per visible aggregation
         var columns = new List<ReportColumnInfo>
         {
             new() { FieldId = groupByField.Id, Name = groupByField.Name, TypeCode = groupByField.TypeCode },
             new() { FieldId = 0, Name = "Count", TypeCode = "Number" },
         };
-        foreach (var agg in definition.Aggregations)
+        foreach (var agg in visibleAggregations)
         {
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
             {

@@ -157,7 +157,7 @@ public class FormsController : ControllerBase
 
     /// <summary>Resolve which form to use for Add/Edit.</summary>
     [HttpGet("tables/{tableId:guid}/forms/resolve")]
-    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<FormDetailResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ResolveForm(Guid tableId, [FromQuery] string mode, [FromQuery] Guid? reportId, CancellationToken ct)
     {

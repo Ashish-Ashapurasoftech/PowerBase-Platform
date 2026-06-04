@@ -19,7 +19,9 @@ public record AppPermissionsResult(
     IReadOnlySet<string> Permissions,
     IReadOnlyList<AppGranularTablePermission> TablePermissions,
     IReadOnlyList<AppGranularFieldPermission> FieldPermissions,
-    IReadOnlyList<AppGranularRecordFilter> RecordFilters);
+    IReadOnlyList<AppGranularRecordFilter> RecordFilters,
+    /// <summary>The current user's internal userId — used by the UI for per-row OwnRecords gating.</summary>
+    long CurrentUserId = 0);
 
 public class GetAppPermissionsQueryHandler
 {
@@ -48,7 +50,7 @@ public class GetAppPermissionsQueryHandler
 
         var appUser = await _appUserRepo.GetByAppAndUserAsync(appId, _queryContext.UserId, ct);
         if (appUser is null)
-            return new AppPermissionsResult(roleName, permissions, [], [], []);
+            return new AppPermissionsResult(roleName, permissions, [], [], [], _queryContext.UserId);
 
         var tableRows = await _permRepo.GetTablePermissionsAsync(appUser.AppRoleId, ct);
         var fieldRows = await _permRepo.GetAllFieldPermissionsAsync(appUser.AppRoleId, ct);
@@ -69,6 +71,6 @@ public class GetAppPermissionsQueryHandler
             return new AppGranularRecordFilter(r.TablePublicId, r.Conjunction, conditions);
         }).ToList();
 
-        return new AppPermissionsResult(roleName, permissions, tablePermissions, fieldPermissions, recordFilters);
+        return new AppPermissionsResult(roleName, permissions, tablePermissions, fieldPermissions, recordFilters, _queryContext.UserId);
     }
 }

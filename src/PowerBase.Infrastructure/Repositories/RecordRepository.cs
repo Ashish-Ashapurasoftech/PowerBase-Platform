@@ -162,11 +162,30 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             new CommandDefinition(sql, new { publicIds, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
+    public async Task<int> BackfillDefaultAsync(AppTable table, AppField field, string defaultValue, CancellationToken ct = default)
+    {
+        var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
+            ? field.PhysicalColumnName!
+            : PhysicalNaming.ColumnName(field.Id);
+
+        var sql = $"""
+            UPDATE {PhysicalNaming.FullTableName(table.Id)}
+            SET {col} = @defaultValue
+            WHERE IsDeleted = 0 AND ({col} IS NULL OR {col} = '')
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteAsync(
+            new CommandDefinition(sql, new { defaultValue }, cancellationToken: ct));
+    }
+
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table, AppField groupByField,
         IReadOnlyList<SummaryAggregation> aggregations,
         IReadOnlyList<AppField> allFields,
         string groupByMode = "EqualValues",
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
         CancellationToken ct = default)
     {
         var groupCol = PhysicalNaming.ColumnName(groupByField.Id);
@@ -190,16 +209,20 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             if (clause is not null) aggClauses.Add(clause);
         }
 
+        var parameters = new DynamicParameters();
+        var ownerWhere = BuildOwnerWhere(restrictToCreatedBy, parameters);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
+
         var sql = $"""
             SELECT {groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}
             FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE IsDeleted = 0
+            WHERE IsDeleted = 0{ownerWhere}{filterWhere}
             GROUP BY {groupExpr}
             ORDER BY {groupExpr}
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync(new CommandDefinition(sql, cancellationToken: ct));
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
         return rows.Select(ToDictionary).ToList();
     }
 

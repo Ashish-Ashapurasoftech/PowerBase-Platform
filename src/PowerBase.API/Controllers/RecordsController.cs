@@ -46,7 +46,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Insert a new record into a table.</summary>
     [HttpPost("tables/{tableId:guid}/records")]
-    [RequireAppPermission(PermissionCodes.RecordsCreate, AppAccessResolver.ByTableId)]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<RecordResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -60,7 +60,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>List records for a table (paged).</summary>
     [HttpGet("tables/{tableId:guid}/records")]
-    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiListResponse<RecordResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -77,7 +77,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Get a single record by its public ID.</summary>
     [HttpGet("tables/{tableId:guid}/records/{id:guid}")]
-    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<RecordResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -89,7 +89,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Update specific fields on an existing record.</summary>
     [HttpPatch("tables/{tableId:guid}/records/{id:guid}")]
-    [RequireAppPermission(PermissionCodes.RecordsUpdate, AppAccessResolver.ByTableId)]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -103,7 +103,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Bulk soft-delete up to 500 records by public ID.</summary>
     [HttpPost("tables/{tableId:guid}/records/bulk-delete")]
-    [RequireAppPermission(PermissionCodes.RecordsDelete, AppAccessResolver.ByTableId)]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -116,7 +116,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Soft-delete a record.</summary>
     [HttpDelete("tables/{tableId:guid}/records/{id:guid}")]
-    [RequireAppPermission(PermissionCodes.RecordsDelete, AppAccessResolver.ByTableId)]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -154,6 +154,7 @@ public class RecordsController : ControllerBase
         Id = r.Id,
         CreatedOn = r.CreatedOn,
         ModifiedOn = r.ModifiedOn,
+        CreatedBy = r.CreatedBy,
         Fields = r.Fields,
     };
 }

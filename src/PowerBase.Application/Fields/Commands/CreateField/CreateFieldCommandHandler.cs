@@ -65,6 +65,9 @@ public class CreateFieldCommandHandler
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(command.TypeCode, ct)
             ?? throw new NotFoundException("FieldType", command.TypeCode);
 
+        // Note: the required+None+default invariant is enforced on update and on field-permission
+        // changes. A brand-new field has no field-permission rows yet, so there is nothing to check here.
+
         var field = new AppField
         {
             AppTableId = table.Id,
@@ -73,6 +76,7 @@ public class CreateFieldCommandHandler
             Label = command.Label,
             Description = command.Description,
             IsRequired = command.IsRequired,
+            DefaultValue = command.DefaultValue,
             Settings = command.Settings,
             CreatedBy = _queryContext.UserId,
         };

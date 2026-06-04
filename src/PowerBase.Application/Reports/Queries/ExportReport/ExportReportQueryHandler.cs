@@ -14,17 +14,20 @@ public class ExportReportQueryHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IRolePermissionEnforcer _enforcer;
 
     public ExportReportQueryHandler(
         IReportRepository reportRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
-        IRecordRepository recordRepo)
+        IRecordRepository recordRepo,
+        IRolePermissionEnforcer enforcer)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
+        _enforcer = enforcer;
     }
 
     public async Task<ExportResult> HandleAsync(ExportReportQuery query, CancellationToken ct = default)
@@ -32,6 +35,10 @@ public class ExportReportQueryHandler
         var report = await _reportRepo.GetByPublicIdAsync(query.ReportPublicId, ct);
         var table = await _tableRepo.GetByIdAsync(report.AppTableId, ct);
         var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+
+        var access = await _enforcer.GetTableAccessAsync(table, allFields, ct);
+        if (!access.CanView)
+            return BuildExport([], [], "export", query.Format);
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
@@ -70,14 +77,15 @@ public class ExportReportQueryHandler
         var safeName = string.Concat(report.Name.Split(Path.GetInvalidFileNameChars()));
 
         if (report.ReportType == "Summary")
-            return await ExportSummaryAsync(table, allFields, definition, safeName, query.Format, ct);
+            return await ExportSummaryAsync(table, allFields, access, definition, safeName, query.Format, ct);
 
-        return await ExportTableAsync(table, allFields, definition, safeName, query.Format, filterTree, sortFields, ct);
+        return await ExportTableAsync(table, allFields, access, definition, safeName, query.Format, filterTree, sortFields, ct);
     }
 
     private async Task<ExportResult> ExportTableAsync(
         AppTable table,
         IReadOnlyList<AppField> allFields,
+        TableAccessContext access,
         ReportDefinition definition,
         string safeName,
         string format,
@@ -85,21 +93,35 @@ public class ExportReportQueryHandler
         IReadOnlyList<SortSpec> sortFields,
         CancellationToken ct)
     {
+        var visibleFieldIds = access.VisibleFields.Select(f => f.Id).ToHashSet();
         IReadOnlyList<AppField> selectedFields;
         if (definition.Columns.Count > 0)
         {
             var fieldMap = allFields.ToDictionary(f => f.Id);
             selectedFields = definition.Columns
-                .Where(id => fieldMap.ContainsKey(id))
+                .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
                 .Select(id => fieldMap[id])
                 .ToList();
         }
         else
         {
-            selectedFields = allFields.Where(f => f.IsReportable).ToList();
+            selectedFields = allFields.Where(f => f.IsReportable && visibleFieldIds.Contains(f.Id)).ToList();
         }
 
-        var rows = await _recordRepo.ListAsync(table, selectedFields, 1, 50_000, filterTree, sortFields, ct: ct);
+        // Merge role record filter into the report's filter tree
+        if (access.ViewFilter != null)
+        {
+            filterTree = filterTree == null
+                ? access.ViewFilter
+                : new FilterGroup
+                {
+                    Logic = "and",
+                    Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = access.ViewFilter }]
+                };
+        }
+
+        var rows = await _recordRepo.ListAsync(table, selectedFields, 1, 50_000, filterTree, sortFields,
+            restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
 
         var columns = selectedFields.Select(f => new ColumnInfo(f.Id, f.Name)).ToList();
@@ -109,6 +131,7 @@ public class ExportReportQueryHandler
     private async Task<ExportResult> ExportSummaryAsync(
         AppTable table,
         IReadOnlyList<AppField> allFields,
+        TableAccessContext access,
         ReportDefinition definition,
         string safeName,
         string format,
@@ -117,19 +140,25 @@ public class ExportReportQueryHandler
         if (!definition.GroupByFieldId.HasValue)
             return BuildExport([], [], safeName, format);
 
+        var visibleFieldIds = access.VisibleFields.Select(f => f.Id).ToHashSet();
         var fieldMap = allFields.ToDictionary(f => f.Id);
-        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField))
+        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField) || !visibleFieldIds.Contains(groupByField.Id))
             return BuildExport([], [], safeName, format);
 
+        var visibleAggregations = definition.Aggregations
+            .Where(a => visibleFieldIds.Contains(a.FieldId))
+            .ToList();
+
         var rows = await _recordRepo.SummarizeAsync(
-            table, groupByField, definition.Aggregations, allFields, definition.GroupByMode, ct);
+            table, groupByField, visibleAggregations, allFields, definition.GroupByMode,
+            filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         // Build alias→fieldId map and percent set (same logic as RunSummaryAsync)
         var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var percentAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var columnTotals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var agg in definition.Aggregations)
+        foreach (var agg in visibleAggregations)
         {
             if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
             var alias = $"{agg.Function}_{aggField.Name.Replace(" ", "_")}";
@@ -147,7 +176,7 @@ public class ExportReportQueryHandler
             new(groupByField.Id, groupByField.Name),
             new(0, "Count"),
         };
-        foreach (var agg in definition.Aggregations)
+        foreach (var agg in visibleAggregations)
         {
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
             {

@@ -42,11 +42,11 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     private const string InsertSql = """
         INSERT INTO meta.AppField
-            (AppTableId, FieldTypeId, Name, Label, Description, IsRequired,
+            (AppTableId, FieldTypeId, Name, Label, Description, IsRequired, DefaultValue,
              IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable,
              Settings, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
-        VALUES (@tableId, @fieldTypeId, @name, @label, @description, @isRequired,
+        VALUES (@tableId, @fieldTypeId, @name, @label, @description, @isRequired, @defaultValue,
                 @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable,
                 @settings, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
@@ -123,6 +123,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 label = field.Label,
                 description = field.Description,
                 isRequired = field.IsRequired,
+                defaultValue = field.DefaultValue,
                 isSystem = field.IsSystem,
                 physicalColumnName = field.PhysicalColumnName,
                 isSearchable = field.IsSearchable,

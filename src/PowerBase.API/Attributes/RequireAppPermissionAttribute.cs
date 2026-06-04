@@ -7,6 +7,70 @@ namespace PowerBase.API.Attributes;
 
 public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId }
 
+/// <summary>
+/// Requires the caller to be an app member (any role). Does NOT require a specific permission code.
+/// Used on data-access endpoints (records, report run/export) where access is governed
+/// entirely by table-level granular permissions, not flat permission codes.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public class RequireAppMemberAttribute : Attribute, IFilterFactory
+{
+    private readonly AppAccessResolver _resolver;
+
+    public RequireAppMemberAttribute(AppAccessResolver resolver) => _resolver = resolver;
+
+    public bool IsReusable => false;
+
+    public IFilterMetadata CreateInstance(IServiceProvider serviceProvider) =>
+        new AppMemberFilter(serviceProvider.GetRequiredService<IAppAccessService>(), _resolver);
+}
+
+internal class AppMemberFilter : IAsyncActionFilter
+{
+    private readonly IAppAccessService _accessService;
+    private readonly AppAccessResolver _resolver;
+
+    public AppMemberFilter(IAppAccessService accessService, AppAccessResolver resolver)
+    {
+        _accessService = accessService;
+        _resolver = resolver;
+    }
+
+    public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
+    {
+        var route = context.RouteData.Values;
+        try
+        {
+            switch (_resolver)
+            {
+                case AppAccessResolver.ByTableId:
+                    var tableId = Guid.Parse(route["tableId"]!.ToString()!);
+                    await _accessService.RequireMembershipByTablePublicIdAsync(tableId, context.HttpContext.RequestAborted);
+                    break;
+                case AppAccessResolver.ByReportPublicId:
+                    var reportId = Guid.Parse(route["publicId"]!.ToString()!);
+                    await _accessService.RequireMembershipByReportPublicIdAsync(reportId, context.HttpContext.RequestAborted);
+                    break;
+                default:
+                    throw new InvalidOperationException($"RequireAppMember does not support resolver {_resolver}");
+            }
+        }
+        catch (UnauthorizedActionException ex)
+        {
+            context.Result = new ObjectResult(new { error = new { code = "FORBIDDEN", message = ex.Message } })
+            { StatusCode = StatusCodes.Status403Forbidden };
+            return;
+        }
+        catch (NotFoundException ex)
+        {
+            context.Result = new ObjectResult(new { error = new { code = "NOT_FOUND", message = ex.Message } })
+            { StatusCode = StatusCodes.Status404NotFound };
+            return;
+        }
+        await next();
+    }
+}
+
 [AttributeUsage(AttributeTargets.Method)]
 public class RequireAppPermissionAttribute : Attribute, IFilterFactory
 {

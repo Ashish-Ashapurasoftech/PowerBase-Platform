@@ -31,9 +31,17 @@ public interface IAppRolePermissionRepository
     Task<IReadOnlyDictionary<long, string>> GetFieldAccessMapAsync(long appRoleId, long appTableId, CancellationToken ct = default);
     /// <summary>All stored field permissions for a role across every table (for the runtime read path).</summary>
     Task<IReadOnlyList<FieldPermissionScopedRow>> GetAllFieldPermissionsAsync(long appRoleId, CancellationToken ct = default);
+    /// <summary>Count of roles that have set this field's access to 'None' (used to enforce the required+default invariant).</summary>
+    Task<int> CountRolesWithNoneAccessForFieldAsync(long appFieldId, CancellationToken ct = default);
 
     // Record-level row filters
     Task<IReadOnlyList<RecordFilterRow>> GetRecordFiltersAsync(long appRoleId, CancellationToken ct = default);
     Task SetRecordFiltersAsync(long appRoleId, IReadOnlyList<AppRoleRecordFilter> rows, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<AppRoleRecordFilter?> GetRecordFilterAsync(long appRoleId, long appTableId, CancellationToken ct = default);
+
+    // Seeding helpers
+    /// <summary>Insert default permission rows for every table in the app for the given role (skips tables already configured).</summary>
+    Task SeedDefaultsForRoleAsync(long appRoleId, long appId, CancellationToken ct = default);
+    /// <summary>Insert default permission rows for every role in the app for the given table (skips roles already configured).</summary>
+    Task SeedDefaultsForTableAsync(long appTableId, long appId, CancellationToken ct = default);
 }

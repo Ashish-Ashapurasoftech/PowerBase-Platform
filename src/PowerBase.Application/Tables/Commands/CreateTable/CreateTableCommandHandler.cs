@@ -31,6 +31,7 @@ public class CreateTableCommandHandler
     private readonly IReportRepository _reportRepo;
     private readonly IFieldTypeRepository _fieldTypeRepo;
     private readonly IFormRepository _formRepo;
+    private readonly IAppRolePermissionRepository _permRepo;
 
     public CreateTableCommandHandler(
         IAppRepository appRepo,
@@ -41,7 +42,8 @@ public class CreateTableCommandHandler
         IAppFieldRepository fieldRepo,
         IReportRepository reportRepo,
         IFieldTypeRepository fieldTypeRepo,
-        IFormRepository formRepo)
+        IFormRepository formRepo,
+        IAppRolePermissionRepository permRepo)
     {
         _appRepo = appRepo;
         _tableRepo = tableRepo;
@@ -52,6 +54,7 @@ public class CreateTableCommandHandler
         _reportRepo = reportRepo;
         _fieldTypeRepo = fieldTypeRepo;
         _formRepo = formRepo;
+        _permRepo = permRepo;
     }
 
     public async Task<CreateTableResult> HandleAsync(CreateTableCommand command, CancellationToken ct = default)
@@ -189,6 +192,9 @@ public class CreateTableCommandHandler
             }).ToList(),
         };
         await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
+
+        // Seed default table-permission rows for every existing role in the app
+        await _permRepo.SeedDefaultsForTableAsync(id, app.Id, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppTable, publicId.ToString(), $"Table added: {table.Name}", appId: app.Id, ct: ct);
