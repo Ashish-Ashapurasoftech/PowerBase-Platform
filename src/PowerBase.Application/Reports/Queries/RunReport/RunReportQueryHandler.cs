@@ -232,7 +232,7 @@ public class RunReportQueryHandler
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
             FieldId = f.Id,
-            Name = f.Name,
+            Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label,
             TypeCode = f.TypeCode,
         }).ToList();
 
@@ -317,16 +317,17 @@ public class RunReportQueryHandler
         // Synthetic columns: group-by field + Count + one per visible aggregation
         var columns = new List<ReportColumnInfo>
         {
-            new() { FieldId = groupByField.Id, Name = groupByField.Name, TypeCode = groupByField.TypeCode },
+            new() { FieldId = groupByField.Id, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
             new() { FieldId = 0, Name = "Count", TypeCode = "Number" },
         };
         foreach (var agg in visibleAggregations)
         {
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
             {
+                var fieldName = string.IsNullOrWhiteSpace(aggField.Label) ? aggField.Name : aggField.Label;
                 var label = agg.DisplayAs == "PercentOfColumnTotal"
-                    ? $"{agg.Function} of {aggField.Name} (%)"
-                    : $"{agg.Function} of {aggField.Name}";
+                    ? $"{agg.Function} of {fieldName} (%)"
+                    : $"{agg.Function} of {fieldName}";
                 columns.Add(new ReportColumnInfo { FieldId = aggField.Id, Name = label, TypeCode = "Number" });
             }
         }
