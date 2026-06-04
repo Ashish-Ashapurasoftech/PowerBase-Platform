@@ -11,6 +11,7 @@ using PowerBase.Application.Records.Commands.DeleteRecord;
 using PowerBase.Application.Records.Commands.UpdateRecord;
 using PowerBase.Application.Records.Queries.GetRecord;
 using PowerBase.Application.Records.Queries.ListRecords;
+using PowerBase.Application.Records.Queries.GetDistinctFieldValues;
 using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
@@ -24,6 +25,7 @@ public class RecordsController : ControllerBase
     private readonly BulkDeleteRecordsCommandHandler _bulkDeleteHandler;
     private readonly ListRecordsQueryHandler _listHandler;
     private readonly GetRecordQueryHandler _getHandler;
+    private readonly GetDistinctFieldValuesQueryHandler _distinctHandler;
     private readonly IAppAccessService _appAccessService;
 
     public RecordsController(
@@ -33,6 +35,7 @@ public class RecordsController : ControllerBase
         BulkDeleteRecordsCommandHandler bulkDeleteHandler,
         ListRecordsQueryHandler listHandler,
         GetRecordQueryHandler getHandler,
+        GetDistinctFieldValuesQueryHandler distinctHandler,
         IAppAccessService appAccessService)
     {
         _createHandler = createHandler;
@@ -41,7 +44,20 @@ public class RecordsController : ControllerBase
         _bulkDeleteHandler = bulkDeleteHandler;
         _listHandler = listHandler;
         _getHandler = getHandler;
+        _distinctHandler = distinctHandler;
         _appAccessService = appAccessService;
+    }
+
+    /// <summary>Get distinct values for a field in a table.</summary>
+    [HttpGet("tables/{tableId:guid}/records/distinct/{fieldId:long}")]
+    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<DistinctValuesResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetDistinct(Guid tableId, long fieldId, [FromQuery] int limit = 25, CancellationToken ct = default)
+    {
+        var result = await _distinctHandler.HandleAsync(new GetDistinctFieldValuesQuery(tableId, fieldId, limit), ct);
+        return Ok(new ApiResponse<DistinctValuesResponse>(result));
     }
 
     /// <summary>Insert a new record into a table.</summary>

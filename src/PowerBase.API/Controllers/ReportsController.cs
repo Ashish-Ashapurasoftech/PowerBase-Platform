@@ -289,10 +289,11 @@ public class ReportsController : ControllerBase
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         [FromQuery] List<string>? dynamicFilters = null,
+        [FromQuery] string? quickSearch = null,
         CancellationToken ct = default)
     {
         var runtimeFilters = ParseDynamicFilters(dynamicFilters);
-        var result = await _runHandler.HandleAsync(new RunReportQuery(publicId, page, pageSize, runtimeFilters), ct);
+        var result = await _runHandler.HandleAsync(new RunReportQuery(publicId, page, pageSize, runtimeFilters, quickSearch), ct);
         var response = new ReportRunResponse
         {
             Columns = result.Columns.Select(c => new ReportColumnDto

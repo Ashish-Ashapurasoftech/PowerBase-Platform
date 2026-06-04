@@ -218,6 +218,7 @@ builder.Services.AddScoped<DeleteRecordCommandHandler>();
 builder.Services.AddScoped<BulkDeleteRecordsCommandHandler>();
 builder.Services.AddScoped<ListRecordsQueryHandler>();
 builder.Services.AddScoped<GetRecordQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetDistinctFieldValues.GetDistinctFieldValuesQueryHandler>();
 builder.Services.AddScoped<CreateReportCommandHandler>();
 builder.Services.AddScoped<UpdateReportCommandHandler>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();

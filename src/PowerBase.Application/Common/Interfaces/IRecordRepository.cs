@@ -36,4 +36,7 @@ public interface IRecordRepository
         IReadOnlyList<AppField> allFields,
         string groupByMode = "EqualValues",
         CancellationToken ct = default);
+
+    Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
+        AppTable table, AppField field, int limit, CancellationToken ct = default);
 }
