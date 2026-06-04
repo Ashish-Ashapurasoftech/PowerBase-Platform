@@ -99,7 +99,7 @@ public class ExportReportQueryHandler
             selectedFields = allFields.Where(f => f.IsReportable).ToList();
         }
 
-        var rows = await _recordRepo.ListAsync(table, selectedFields, 1, 50_000, filterTree, sortFields, ct);
+        var rows = await _recordRepo.ListAsync(table, selectedFields, 1, 50_000, filterTree, sortFields, ct: ct);
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
 
         var columns = selectedFields.Select(f => new ColumnInfo(f.Id, f.Name)).ToList();

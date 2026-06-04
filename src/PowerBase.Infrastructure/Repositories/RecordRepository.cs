@@ -17,6 +17,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
         FilterGroup? filterTree = null,
         IReadOnlyList<SortSpec>? sortFields = null,
+        long? restrictToCreatedBy = null,
         CancellationToken ct = default)
     {
         var fieldCols = BuildFieldColumnList(fields);
@@ -24,7 +25,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         parameters.Add("offset", (page - 1) * pageSize);
         parameters.Add("pageSize", pageSize);
 
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var fieldLookup = fields.ToDictionary(f => f.Id);
         var orderBy = sortFields?.Count > 0
             ? string.Join(", ", sortFields.Select(s =>
@@ -49,10 +50,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return rows.Select(ToDictionary).ToList();
     }
 
-    public async Task<int> CountAsync(AppTable table, FilterGroup? filterTree = null, CancellationToken ct = default)
+    public async Task<int> CountAsync(AppTable table, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
     {
         var parameters = new DynamicParameters();
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
@@ -215,6 +216,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return customCols.Count > 0 ? ", " + string.Join(", ", customCols) : string.Empty;
     }
 
+    private static string BuildOwnerWhere(long? restrictToCreatedBy, DynamicParameters parameters)
+    {
+        if (restrictToCreatedBy is null) return string.Empty;
+        parameters.Add("ownerUserId", restrictToCreatedBy.Value);
+        return " AND CreatedBy = @ownerUserId";
+    }
+
     private static string BuildFilterTreeWhere(FilterGroup? group, DynamicParameters parameters)
     {
         if (group is null || group.Nodes.Count == 0) return string.Empty;
@@ -258,6 +266,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             case "lte":        p.Add(pname, cond.Value);        return $"{col} <= @{pname}";
             case "contains":   p.Add(pname, $"%{cond.Value}%"); return $"{col} LIKE @{pname}";
             case "startsWith": p.Add(pname, $"{cond.Value}%");  return $"{col} LIKE @{pname}";
+            case "isEmpty":    i--; return $"({col} IS NULL OR {col} = '')";
+            case "isNotEmpty": i--; return $"({col} IS NOT NULL AND {col} <> '')";
             default: i--; return null;
         }
     }

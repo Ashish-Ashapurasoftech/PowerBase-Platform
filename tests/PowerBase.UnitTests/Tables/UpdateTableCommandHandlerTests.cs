@@ -10,8 +10,9 @@ public class UpdateTableCommandHandlerTests
 {
     private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
     private readonly IAppAccessService _appAccessService = Substitute.For<IAppAccessService>();
+    private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
 
-    private UpdateTableCommandHandler CreateSut() => new(_tableRepo, _appAccessService);
+    private UpdateTableCommandHandler CreateSut() => new(_tableRepo, _appAccessService, _auditRepo);
 
     [Fact]
     public async Task HandleAsync_ValidCommand_CallsUpdate()

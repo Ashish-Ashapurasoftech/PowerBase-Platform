@@ -1,0 +1,61 @@
+using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
+using PowerBase.Domain.Entities;
+using PowerBase.Domain.Exceptions;
+
+namespace PowerBase.Application.Apps.Commands.UpdateFieldPermissions;
+
+public class UpdateFieldPermissionsCommandHandler
+{
+    private readonly IAppRoleRepository _appRoleRepo;
+    private readonly IAppRolePermissionRepository _permRepo;
+    private readonly IAppTableRepository _tableRepo;
+    private readonly IAppFieldRepository _fieldRepo;
+    private readonly IAuditRepository _auditRepo;
+
+    public UpdateFieldPermissionsCommandHandler(
+        IAppRoleRepository appRoleRepo,
+        IAppRolePermissionRepository permRepo,
+        IAppTableRepository tableRepo,
+        IAppFieldRepository fieldRepo,
+        IAuditRepository auditRepo)
+    {
+        _appRoleRepo = appRoleRepo;
+        _permRepo = permRepo;
+        _tableRepo = tableRepo;
+        _fieldRepo = fieldRepo;
+        _auditRepo = auditRepo;
+    }
+
+    public async Task HandleAsync(UpdateFieldPermissionsCommand command, CancellationToken ct = default)
+    {
+        var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId, ct)
+                   ?? throw new NotFoundException("AppRole", command.RolePublicId);
+        var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
+
+        // Only persist non-default ('Modify') entries to keep the table lean.
+        var rows = new List<AppRoleFieldPermission>();
+        foreach (var f in command.Fields)
+        {
+            var access = Normalize(f.Access);
+            if (access == FieldAccessLevels.Modify) continue;
+
+            var field = await _fieldRepo.GetByPublicIdAsync(f.FieldPublicId, ct);
+            if (field is null || field.AppTableId != table.Id) continue;
+
+            rows.Add(new AppRoleFieldPermission { AppRoleId = role.Id, AppFieldId = field.Id, Access = access });
+        }
+
+        await _permRepo.SetFieldPermissionsAsync(role.Id, table.Id, rows, null, ct);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Updated, AuditEntityTypes.AppRole, role.Id.ToString(),
+            $"Field permissions updated for role: {role.Name} on table {table.Name}", appId: role.AppId, ct: ct);
+    }
+
+    private static string Normalize(string access) => access switch
+    {
+        FieldAccessLevels.View or FieldAccessLevels.Modify or FieldAccessLevels.None => access,
+        _ => FieldAccessLevels.Modify,
+    };
+}

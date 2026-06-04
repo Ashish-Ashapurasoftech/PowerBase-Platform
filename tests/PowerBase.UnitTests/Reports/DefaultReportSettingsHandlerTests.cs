@@ -19,6 +19,7 @@ public class DefaultReportSettingsHandlerTests
     private readonly IAppAccessService _appAccessService = Substitute.For<IAppAccessService>();
     private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
 
     public DefaultReportSettingsHandlerTests()
     {
@@ -48,7 +49,7 @@ public class DefaultReportSettingsHandlerTests
         var reportId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(MakeTable());
         _reportRepo.BelongsToTableAsync(tableId, reportId, Arg.Any<CancellationToken>()).Returns(true);
-        var sut = new UpdateDefaultReportSettingsCommandHandler(_tableRepo, _appRoleRepo, _reportRepo, _appAccessService);
+        var sut = new UpdateDefaultReportSettingsCommandHandler(_tableRepo, _appRoleRepo, _reportRepo, _appAccessService, _auditRepo);
 
         await sut.HandleAsync(new UpdateDefaultReportSettingsCommand(
             tableId,
@@ -74,7 +75,7 @@ public class DefaultReportSettingsHandlerTests
         _reportRepo.BelongsToTableAsync(tableId, reportId, Arg.Any<CancellationToken>()).Returns(true);
         _reportRepo.BelongsToTableAsync(tableId, roleReportId, Arg.Any<CancellationToken>()).Returns(true);
         _appRoleRepo.GetByPublicIdAsync(roleId, Arg.Any<CancellationToken>()).Returns(MakeRole(roleId));
-        var sut = new UpdateDefaultReportSettingsCommandHandler(_tableRepo, _appRoleRepo, _reportRepo, _appAccessService);
+        var sut = new UpdateDefaultReportSettingsCommandHandler(_tableRepo, _appRoleRepo, _reportRepo, _appAccessService, _auditRepo);
 
         await sut.HandleAsync(new UpdateDefaultReportSettingsCommand(
             tableId,
@@ -95,7 +96,7 @@ public class DefaultReportSettingsHandlerTests
         var reportId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(MakeTable());
         _reportRepo.BelongsToTableAsync(tableId, reportId, Arg.Any<CancellationToken>()).Returns(false);
-        var sut = new UpdateDefaultReportSettingsCommandHandler(_tableRepo, _appRoleRepo, _reportRepo, _appAccessService);
+        var sut = new UpdateDefaultReportSettingsCommandHandler(_tableRepo, _appRoleRepo, _reportRepo, _appAccessService, _auditRepo);
 
         await sut.Invoking(s => s.HandleAsync(new UpdateDefaultReportSettingsCommand(
                 tableId,
@@ -114,7 +115,7 @@ public class DefaultReportSettingsHandlerTests
         _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(MakeTable(appId: 10L));
         _reportRepo.BelongsToTableAsync(tableId, reportId, Arg.Any<CancellationToken>()).Returns(true);
         _appRoleRepo.GetByPublicIdAsync(roleId, Arg.Any<CancellationToken>()).Returns(MakeRole(roleId, appId: 99L));
-        var sut = new UpdateDefaultReportSettingsCommandHandler(_tableRepo, _appRoleRepo, _reportRepo, _appAccessService);
+        var sut = new UpdateDefaultReportSettingsCommandHandler(_tableRepo, _appRoleRepo, _reportRepo, _appAccessService, _auditRepo);
 
         await sut.Invoking(s => s.HandleAsync(new UpdateDefaultReportSettingsCommand(
                 tableId,

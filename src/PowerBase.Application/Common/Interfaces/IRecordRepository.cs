@@ -9,9 +9,10 @@ public interface IRecordRepository
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
         FilterGroup? filterTree = null,
         IReadOnlyList<SortSpec>? sortFields = null,
+        long? restrictToCreatedBy = null,
         CancellationToken ct = default);
 
-    Task<int> CountAsync(AppTable table, FilterGroup? filterTree = null, CancellationToken ct = default);
+    Task<int> CountAsync(AppTable table, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default);

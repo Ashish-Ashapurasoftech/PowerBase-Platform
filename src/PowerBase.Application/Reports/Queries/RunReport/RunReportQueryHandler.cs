@@ -137,8 +137,8 @@ public class RunReportQueryHandler
                 };
         }
 
-        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterTree, sortFields, ct);
-        var total = await _recordRepo.CountAsync(table, filterTree, ct);
+        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterTree, sortFields, ct: ct);
+        var total = await _recordRepo.CountAsync(table, filterTree, ct: ct);
 
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo

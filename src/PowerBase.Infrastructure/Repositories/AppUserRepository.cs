@@ -26,7 +26,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         """;
 
     private const string GetByAppAndUserSql = """
-        SELECT Id, PublicId, AppId, UserId, AppRoleId, Status, AddedBy, CreatedOn, UpdatedOn, IsDeleted
+        SELECT Id, PublicId, AppId, UserId, UserPublicId, AppRoleId, Status, AddedBy, CreatedOn, UpdatedOn, IsDeleted
         FROM meta.AppUser
         WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
         """;

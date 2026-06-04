@@ -9,17 +9,20 @@ public class CreateRecordCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
+        IRolePermissionEnforcer enforcer,
         IAuditRepository auditRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
+        _enforcer = enforcer;
         _auditRepo = auditRepo;
     }
 
@@ -33,6 +36,16 @@ public class CreateRecordCommandHandler
         if (unknownIds.Count > 0)
             throw new ValidationException(
                 new Dictionary<string, string[]> { ["fields"] = [$"Unknown field IDs: {string.Join(", ", unknownIds)}"] });
+
+        var access = await _enforcer.GetTableAccessAsync(table, fields, ct);
+        if (!access.Unrestricted)
+        {
+            if (!access.CanAdd)
+                throw new UnauthorizedActionException("You do not have permission to add records to this table.");
+            var blocked = command.FieldValues.Keys.Where(k => !access.EditableFieldIds.Contains(k)).ToList();
+            if (blocked.Count > 0)
+                throw new UnauthorizedActionException("You do not have permission to write to one or more of the specified fields.");
+        }
 
         var publicId = await _recordRepo.CreateAsync(table, fields, command.FieldValues, ct);
 
