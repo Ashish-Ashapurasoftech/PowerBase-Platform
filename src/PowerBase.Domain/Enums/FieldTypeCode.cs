@@ -23,4 +23,4 @@ public enum FieldTypeCode
     Address,
     User,
     MultiUser
-}
+}   

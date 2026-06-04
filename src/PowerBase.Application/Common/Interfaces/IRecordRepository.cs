@@ -42,4 +42,7 @@ public interface IRecordRepository
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
         CancellationToken ct = default);
+
+    Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
+        AppTable table, AppField field, int limit, CancellationToken ct = default);
 }

@@ -95,8 +95,8 @@ public class CreateTableCommandHandler
 
         // Seed system fields (Quickbase FID equivalents)
         var userTypeId = await _fieldTypeRepo.GetIdByCodeAsync("User", ct);
-        const int numberTypeId = 2;   // Number (seeded in 007_seed_fieldtypes)
-        const int dateTimeTypeId = 5; // DateTime (seeded in 017_seed_extended_fieldtypes)
+        var numberTypeId = await _fieldTypeRepo.GetIdByCodeAsync("Number", ct);
+        var dateTimeTypeId = await _fieldTypeRepo.GetIdByCodeAsync("DateTime", ct);
 
         (string Name, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order)[] systemFieldDefs =
         [

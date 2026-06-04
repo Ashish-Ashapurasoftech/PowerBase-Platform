@@ -98,9 +98,9 @@ public class RunReportQueryHandler
         }
 
         if (report.ReportType == "Summary")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, ct);
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, ct);
 
-        return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields, query.RuntimeFilters, ct);
+        return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields, query.RuntimeFilters, query.QuickSearch, ct);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -112,6 +112,7 @@ public class RunReportQueryHandler
         FilterGroup? filterTree,
         IReadOnlyList<SortSpec> sortFields,
         IReadOnlyList<(long FieldId, string Value)>? runtimeFilters,
+        string? quickSearch,
         CancellationToken ct)
     {
         // Intersect report columns with fields the role can see (drop None-access fields)
@@ -145,10 +146,54 @@ public class RunReportQueryHandler
         // Merge runtime filters (dynamic/quick-search) into the filter tree
         if (runtimeFilters?.Count > 0)
         {
-            var runtimeNodes = runtimeFilters.Select(rf => new FilterNode
+            var runtimeNodes = new List<FilterNode>();
+            
+            var fieldDict = allFields.ToDictionary(f => f.Id);
+            
+            // Group by FieldId to support multi-select (OR within the same field)
+            var groupedFilters = runtimeFilters.GroupBy(rf => rf.FieldId);
+            
+            foreach (var group in groupedFilters)
             {
-                Condition = new FilterCondition { FieldId = rf.FieldId, Operator = "contains", Value = rf.Value }
-            }).ToList();
+                var field = fieldDict.GetValueOrDefault(group.Key);
+                
+                // Use eq for SingleSelect/Boolean/User, contains for everything else
+                var operatorName = field?.TypeCode is "SingleSelect" or "Boolean" or "User" ? "eq" : "contains";
+
+                var values = group.Select(rf => rf.Value).ToList();
+
+                // Defensively filter out unparseable values for numeric/date fields to prevent SQL cast errors
+                if (field?.TypeCode is "Number" or "Currency" or "Percent")
+                {
+                    values = values.Where(v => double.TryParse(v, out _)).ToList();
+                }
+                else if (field?.TypeCode is "Date" or "DateTime")
+                {
+                    values = values.Where(v => DateTime.TryParse(v, out _)).ToList();
+                }
+
+                if (values.Count == 0) continue;
+
+                if (values.Count == 1)
+                {
+                    runtimeNodes.Add(new FilterNode
+                    {
+                        Condition = new FilterCondition { FieldId = group.Key, Operator = operatorName, Value = values[0] }
+                    });
+                }
+                else
+                {
+                    var orNodes = values.Select(v => new FilterNode
+                    {
+                        Condition = new FilterCondition { FieldId = group.Key, Operator = operatorName, Value = v }
+                    }).ToList();
+                    
+                    runtimeNodes.Add(new FilterNode
+                    {
+                        Group = new FilterGroup { Logic = "or", Nodes = orNodes }
+                    });
+                }
+            }
 
             filterTree = filterTree == null
                 ? new FilterGroup { Logic = "and", Nodes = runtimeNodes }
@@ -159,9 +204,29 @@ public class RunReportQueryHandler
                 };
         }
 
+        // Apply Quick Search across all text fields (OR)
+        if (!string.IsNullOrWhiteSpace(quickSearch))
+        {
+            var textFields = allFields.Where(f => f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect").ToList();
+            if (textFields.Count > 0)
+            {
+                var qsNodes = textFields.Select(f => new FilterNode
+                {
+                    Condition = new FilterCondition { FieldId = f.Id, Operator = "contains", Value = quickSearch }
+                }).ToList();
+
+                var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
+                
+                filterTree = filterTree == null 
+                    ? qsGroup 
+                    : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = qsGroup }] };
+            }
+        }
+
         var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterTree, sortFields,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-        var total = await _recordRepo.CountAsync(table, filterTree, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+        var total = await _recordRepo.CountAsync(table, filterTree,
+            restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo
@@ -187,6 +252,7 @@ public class RunReportQueryHandler
         TableAccessContext access,
         ReportDefinition definition,
         int page, int pageSize,
+        string? quickSearch,
         CancellationToken ct)
     {
         if (!definition.GroupByFieldId.HasValue)

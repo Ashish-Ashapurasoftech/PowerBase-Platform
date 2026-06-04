@@ -295,6 +295,48 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
     }
 
+    public async Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
+        AppTable table, AppField field, int limit, CancellationToken ct = default)
+    {
+        var col = PhysicalNaming.ColumnName(field.Id);
+        var sql = $"""
+            SELECT DISTINCT {col} 
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rawValues = await connection.QueryAsync<string>(new CommandDefinition(sql, cancellationToken: ct));
+        
+        IEnumerable<string> processedValues = rawValues.Where(v => !string.IsNullOrWhiteSpace(v));
+        
+        if (field.TypeCode == "MultiSelect")
+        {
+            processedValues = processedValues
+                .SelectMany(v => 
+                {
+                    try 
+                    {
+                        if (v.TrimStart().StartsWith("["))
+                        {
+                            return System.Text.Json.JsonSerializer.Deserialize<string[]>(v) ?? Array.Empty<string>();
+                        }
+                    } 
+                    catch { }
+                    return v.Split(',');
+                })
+                .Select(v => v.Trim())
+                .Where(v => !string.IsNullOrWhiteSpace(v));
+        }
+
+        var distinctList = processedValues.Distinct().ToList();
+        bool exceedsLimit = distinctList.Count > limit;
+        
+        var results = distinctList.Take(limit).OrderBy(v => v).ToList();
+        
+        return (results, exceedsLimit);
+    }
+
     private static IReadOnlyDictionary<string, object?> ToDictionary(dynamic row)
     {
         var dict = (IDictionary<string, object>)row;
