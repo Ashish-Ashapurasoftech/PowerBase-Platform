@@ -23,5 +23,6 @@ public class UpdateReportRequest
     public List<SummaryAggregationRequest> Aggregations { get; set; } = [];
     public string DynamicFilterType { get; set; } = "Default";
     public List<long> CustomDynamicFilterFields { get; set; } = [];
+    public List<CustomDynamicFilterItemRequest> CustomDynamicFilterItems { get; set; } = [];
     public bool AllowQuickSearch { get; set; } = true;
 }

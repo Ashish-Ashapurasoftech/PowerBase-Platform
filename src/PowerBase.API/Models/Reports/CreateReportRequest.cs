@@ -24,7 +24,14 @@ public class CreateReportRequest
     public List<SummaryAggregationRequest> Aggregations { get; set; } = [];
     public string DynamicFilterType { get; set; } = "Default";
     public List<long> CustomDynamicFilterFields { get; set; } = [];
+    public List<CustomDynamicFilterItemRequest> CustomDynamicFilterItems { get; set; } = [];
     public bool AllowQuickSearch { get; set; } = true;
+}
+
+public class CustomDynamicFilterItemRequest
+{
+    public long FieldId { get; set; }
+    public string? SubField { get; set; }
 }
 
 // ── Filter tree request models ────────────────────────────────────────────────

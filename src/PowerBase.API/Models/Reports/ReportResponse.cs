@@ -33,12 +33,19 @@ public class ReportDefinitionDto
     public List<SummaryAggregationDto> Aggregations { get; init; } = [];
     public string DynamicFilterType { get; init; } = "Default";
     public List<long> CustomDynamicFilterFields { get; init; } = [];
+    public List<CustomDynamicFilterItemDto> CustomDynamicFilterItems { get; init; } = [];
     public bool AllowQuickSearch { get; init; } = true;
 
     // Legacy fields — included for backward-compat clients
     public long? SortFieldId { get; init; }
     public bool SortDesc { get; init; }
     public List<ReportFilterDto> Filters { get; init; } = [];
+}
+
+public class CustomDynamicFilterItemDto
+{
+    public long FieldId { get; init; }
+    public string? SubField { get; init; }
 }
 
 // ── Filter tree DTOs ──────────────────────────────────────────────────────────

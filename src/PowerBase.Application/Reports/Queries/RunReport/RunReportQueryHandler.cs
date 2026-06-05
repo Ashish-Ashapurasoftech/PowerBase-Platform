@@ -111,7 +111,7 @@ public class RunReportQueryHandler
         int page, int pageSize,
         FilterGroup? filterTree,
         IReadOnlyList<SortSpec> sortFields,
-        IReadOnlyList<(long FieldId, string Value)>? runtimeFilters,
+        IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters,
         string? quickSearch,
         CancellationToken ct)
     {
@@ -150,15 +150,19 @@ public class RunReportQueryHandler
             
             var fieldDict = allFields.ToDictionary(f => f.Id);
             
-            // Group by FieldId to support multi-select (OR within the same field)
-            var groupedFilters = runtimeFilters.GroupBy(rf => rf.FieldId);
+            // Group by (FieldId, SubField) to support:
+            //  - Same-field multi-select → OR'd together
+            //  - Different sub-fields of the same Address field → AND'd together
+            var groupedFilters = runtimeFilters.GroupBy(rf => (rf.FieldId, rf.SubField ?? string.Empty));
             
             foreach (var group in groupedFilters)
             {
-                var field = fieldDict.GetValueOrDefault(group.Key);
+                var field = fieldDict.GetValueOrDefault(group.Key.FieldId);
                 
                 // Use eq for SingleSelect/Boolean/User, contains for everything else
-                var operatorName = field?.TypeCode is "SingleSelect" or "Boolean" or "User" ? "eq" : "contains";
+                // For Address sub-fields (JSON path), use eq by default
+                var firstSubField = string.IsNullOrEmpty(group.Key.Item2) ? null : group.Key.Item2;
+                var operatorName = field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address" ? "eq" : "contains";
 
                 var values = group.Select(rf => rf.Value).ToList();
 
@@ -178,14 +182,14 @@ public class RunReportQueryHandler
                 {
                     runtimeNodes.Add(new FilterNode
                     {
-                        Condition = new FilterCondition { FieldId = group.Key, Operator = operatorName, Value = values[0] }
+                        Condition = new FilterCondition { FieldId = group.Key.FieldId, Operator = operatorName, Value = values[0], SubField = firstSubField }
                     });
                 }
                 else
                 {
                     var orNodes = values.Select(v => new FilterNode
                     {
-                        Condition = new FilterCondition { FieldId = group.Key, Operator = operatorName, Value = v }
+                        Condition = new FilterCondition { FieldId = group.Key.FieldId, Operator = operatorName, Value = v, SubField = firstSubField }
                     }).ToList();
                     
                     runtimeNodes.Add(new FilterNode
