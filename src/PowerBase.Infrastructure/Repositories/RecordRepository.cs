@@ -361,23 +361,22 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         else if (field.TypeCode == "Phone")
         {
             // Extract just the phone number from stored JSON {"number":"...","ext":"..."}
+            // Ignore the extension completely for dropdown filters, as requested by user
             processedValues = processedValues.Select(v =>
             {
                 try
                 {
                     var numMatch = System.Text.RegularExpressions.Regex.Match(v, @"number[^:]*:\s*\\?""([^\\""]*)");
-                    var extMatch = System.Text.RegularExpressions.Regex.Match(v, @"ext[^:]*:\s*\\?""([^\\""]*)");
                     if (numMatch.Success)
                     {
                         var num = numMatch.Groups[1].Value;
-                        var ext = extMatch.Success ? extMatch.Groups[1].Value : "";
-                        var formatted = string.IsNullOrWhiteSpace(ext) ? num : $"{num} ext. {ext}";
-                        return $"{v}|{formatted}";
+                        if (string.IsNullOrWhiteSpace(num)) return null;
+                        return $"{v}|{num}";
                     }
                 }
                 catch { }
                 return v;
-            }).Where(v => !string.IsNullOrWhiteSpace(v));
+            }).Where(v => v != null && !string.IsNullOrWhiteSpace(v));
         }
         else if (field.TypeCode == "Address" && string.IsNullOrWhiteSpace(subField))
         {

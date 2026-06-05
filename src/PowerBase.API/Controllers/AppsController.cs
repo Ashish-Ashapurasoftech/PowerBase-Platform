@@ -119,7 +119,7 @@ public class AppsController : ControllerBase
         }
 
         var filtered = allItems
-            .Where(a => string.IsNullOrEmpty(name) || a.Name.Contains(name, StringComparison.OrdinalIgnoreCase))
+            .Where(a => string.IsNullOrEmpty(name) || a.Name.Contains(name.Trim(), StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         var paginated = filtered
