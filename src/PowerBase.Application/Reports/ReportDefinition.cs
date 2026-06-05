@@ -22,6 +22,8 @@ public class ReportDefinition
     // Dynamic Filters
     public string DynamicFilterType { get; set; } = "Default"; // Default, Custom, None
     public List<long> CustomDynamicFilterFields { get; set; } = [];
+    /// <summary>New: structured filter items with optional SubField for Address fields.</summary>
+    public List<CustomDynamicFilterItem> CustomDynamicFilterItems { get; set; } = [];
     public bool AllowQuickSearch { get; set; } = true;
 
     // Legacy compat — kept so old JSON deserializes without data loss
@@ -52,6 +54,8 @@ public class FilterCondition
     /// <summary>eq, ne, contains, startsWith, gt, gte, lt, lte</summary>
     public string Operator { get; set; } = "eq";
     public string? Value { get; set; }
+    /// <summary>Optional JSON sub-field for complex types (e.g. Address). When set, SQL uses JSON_VALUE(col,'$.subfield').</summary>
+    public string? SubField { get; set; }
 }
 
 // ── Sort ─────────────────────────────────────────────────────────────────────
@@ -81,4 +85,17 @@ public class SummaryAggregation
     public string Function { get; set; } = "Sum";
     /// <summary>Normal (default) or PercentOfColumnTotal</summary>
     public string DisplayAs { get; set; } = "Normal";
+}
+
+// ── Custom Dynamic Filter Item ────────────────────────────────────────────────
+
+/// <summary>
+/// A single dynamic filter slot. For Address fields, SubField specifies
+/// which JSON property to filter by (city, country, state, zip, street1, street2).
+/// </summary>
+public class CustomDynamicFilterItem
+{
+    public long FieldId { get; set; }
+    /// <summary>Optional JSON sub-field for Address types (e.g. "city", "country", "zip").</summary>
+    public string? SubField { get; set; }
 }

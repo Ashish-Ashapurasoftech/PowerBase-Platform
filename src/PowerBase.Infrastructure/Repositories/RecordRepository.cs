@@ -279,30 +279,60 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     {
         var col = PhysicalNaming.ColumnName(cond.FieldId);
         var pname = $"fv{i++}";
+        
+        // For JSON sub-field (Address sub-field filtering)
+        string colExpr;
+        if (!string.IsNullOrWhiteSpace(cond.SubField))
+        {
+            // Sanitize sub-field name to prevent SQL injection (only allow alphanumeric)
+            var safeSubField = System.Text.RegularExpressions.Regex.Replace(cond.SubField, "[^a-zA-Z0-9_]", "");
+            colExpr = $"JSON_VALUE({col}, '$.{safeSubField}')";
+        }
+        else
+        {
+            colExpr = col;
+        }
+        
         switch (cond.Operator)
         {
-            case "eq":         p.Add(pname, cond.Value);        return $"{col} = @{pname}";
-            case "ne":         p.Add(pname, cond.Value);        return $"{col} <> @{pname}";
-            case "gt":         p.Add(pname, cond.Value);        return $"{col} > @{pname}";
-            case "gte":        p.Add(pname, cond.Value);        return $"{col} >= @{pname}";
-            case "lt":         p.Add(pname, cond.Value);        return $"{col} < @{pname}";
-            case "lte":        p.Add(pname, cond.Value);        return $"{col} <= @{pname}";
-            case "contains":   p.Add(pname, $"%{cond.Value}%"); return $"{col} LIKE @{pname}";
-            case "startsWith": p.Add(pname, $"{cond.Value}%");  return $"{col} LIKE @{pname}";
-            case "isEmpty":    i--; return $"({col} IS NULL OR {col} = '')";
-            case "isNotEmpty": i--; return $"({col} IS NOT NULL AND {col} <> '')";
+            case "eq":         p.Add(pname, cond.Value);        return $"{colExpr} = @{pname}";
+            case "ne":         p.Add(pname, cond.Value);        return $"{colExpr} <> @{pname}";
+            case "gt":         p.Add(pname, cond.Value);        return $"{colExpr} > @{pname}";
+            case "gte":        p.Add(pname, cond.Value);        return $"{colExpr} >= @{pname}";
+            case "lt":         p.Add(pname, cond.Value);        return $"{colExpr} < @{pname}";
+            case "lte":        p.Add(pname, cond.Value);        return $"{colExpr} <= @{pname}";
+            case "contains":   p.Add(pname, $"%{cond.Value}%"); return $"{colExpr} LIKE @{pname}";
+            case "startsWith": p.Add(pname, $"{cond.Value}%");  return $"{colExpr} LIKE @{pname}";
+            case "isEmpty":    i--; return $"({colExpr} IS NULL OR {colExpr} = '')";
+            case "isNotEmpty": i--; return $"({colExpr} IS NOT NULL AND {colExpr} <> '')";
             default: i--; return null;
         }
     }
 
     public async Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
-        AppTable table, AppField field, int limit, CancellationToken ct = default)
+        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(field.Id);
+        
+        string selectExpr;
+        string whereExtra = "";
+        
+        // For Address with a sub-field, use JSON_VALUE
+        if (field.TypeCode == "Address" && !string.IsNullOrWhiteSpace(subField))
+        {
+            var safeSubField = System.Text.RegularExpressions.Regex.Replace(subField, "[^a-zA-Z0-9_]", "");
+            selectExpr = $"JSON_VALUE({col}, '$.{safeSubField}')";
+            whereExtra = $" AND JSON_VALUE({col}, '$.{safeSubField}') IS NOT NULL AND JSON_VALUE({col}, '$.{safeSubField}') <> ''";
+        }
+        else
+        {
+            selectExpr = col;
+        }
+        
         var sql = $"""
-            SELECT DISTINCT {col} 
+            SELECT DISTINCT {selectExpr} 
             FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''
+            WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''{whereExtra}
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -327,6 +357,58 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 })
                 .Select(v => v.Trim())
                 .Where(v => !string.IsNullOrWhiteSpace(v));
+        }
+        else if (field.TypeCode == "Phone")
+        {
+            // Extract just the phone number from stored JSON {"number":"...","ext":"..."}
+            processedValues = processedValues.Select(v =>
+            {
+                try
+                {
+                    var numMatch = System.Text.RegularExpressions.Regex.Match(v, @"number[^:]*:\s*\\?""([^\\""]*)");
+                    var extMatch = System.Text.RegularExpressions.Regex.Match(v, @"ext[^:]*:\s*\\?""([^\\""]*)");
+                    if (numMatch.Success)
+                    {
+                        var num = numMatch.Groups[1].Value;
+                        var ext = extMatch.Success ? extMatch.Groups[1].Value : "";
+                        var formatted = string.IsNullOrWhiteSpace(ext) ? num : $"{num} ext. {ext}";
+                        return $"{v}|{formatted}";
+                    }
+                }
+                catch { }
+                return v;
+            }).Where(v => !string.IsNullOrWhiteSpace(v));
+        }
+        else if (field.TypeCode == "Address" && string.IsNullOrWhiteSpace(subField))
+        {
+            // No sub-field specified: return empty so the frontend uses text mode
+            return (new List<string>(), false);
+        }
+        else if (field.TypeCode == "User")
+        {
+            // Resolve stored PublicId GUIDs to UserName via meta.AppUser
+            var guidList = processedValues.ToList();
+            if (guidList.Count > 0)
+            {
+                var inList = string.Join(",", guidList.Select((_, idx) => $"@uid{idx}"));
+                var userNameSql = $"""
+                    SELECT CAST(UserPublicId AS NVARCHAR(36)) AS UserPublicId, UserName
+                    FROM meta.AppUser
+                    WHERE CAST(UserPublicId AS NVARCHAR(36)) IN ({inList}) AND IsDeleted = 0
+                    """;
+                var nameParams = new DynamicParameters();
+                for (int idx = 0; idx < guidList.Count; idx++)
+                    nameParams.Add($"uid{idx}", guidList[idx]);
+                
+                var userRows = await connection.QueryAsync<(string UserPublicId, string UserName)>(
+                    new CommandDefinition(userNameSql, nameParams, cancellationToken: ct));
+                var nameMap = userRows.ToDictionary(r => r.UserPublicId, r => r.UserName, StringComparer.OrdinalIgnoreCase);
+                processedValues = guidList.Select(id => 
+                {
+                    var name = nameMap.TryGetValue(id, out var n) ? n : id;
+                    return $"{id}|{name}";
+                });
+            }
         }
 
         var distinctList = processedValues.Distinct().ToList();

@@ -100,6 +100,7 @@ public class ReportsController : ControllerBase
             request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function, a.DisplayAs)).ToList(),
             request.DynamicFilterType,
             request.CustomDynamicFilterFields,
+            request.CustomDynamicFilterItems?.Select(i => new CustomDynamicFilterItem { FieldId = i.FieldId, SubField = i.SubField }).ToList(),
             request.AllowQuickSearch,
             request.VisibleToRoleIds ?? []);
         var result = await _createHandler.HandleAsync(command, ct);
@@ -195,6 +196,7 @@ public class ReportsController : ControllerBase
             request.Aggregations.Select(a => new SummaryAggregationCommand(a.FieldId, a.Function, a.DisplayAs)).ToList(),
             request.DynamicFilterType,
             request.CustomDynamicFilterFields,
+            request.CustomDynamicFilterItems?.Select(i => new CustomDynamicFilterItem { FieldId = i.FieldId, SubField = i.SubField }).ToList(),
             request.AllowQuickSearch,
             request.VisibleToRoleIds ?? []);
         await _updateHandler.HandleAsync(command, ct);
@@ -341,15 +343,24 @@ public class ReportsController : ControllerBase
         return File(result.Content, result.ContentType, result.FileName);
     }
 
-    private static IReadOnlyList<(long FieldId, string Value)>? ParseDynamicFilters(List<string>? raw)
+    private static IReadOnlyList<(long FieldId, string Value, string? SubField)>? ParseDynamicFilters(List<string>? raw)
     {
         if (raw is null or { Count: 0 }) return null;
-        var result = new List<(long, string)>();
+        var result = new List<(long, string, string?)>();
         foreach (var item in raw)
         {
+            // Format: "fieldId:value" OR "fieldId__subfield:value" (for address sub-fields)
             var idx = item.IndexOf(':');
-            if (idx > 0 && long.TryParse(item[..idx], out var fid))
-                result.Add((fid, item[(idx + 1)..]));
+            if (idx > 0 && long.TryParse(item[..idx].Split("__")[0], out var fid))
+            {
+                var fieldPart = item[..idx];
+                var value = item[(idx + 1)..];
+                string? subField = null;
+                var dunderIdx = fieldPart.IndexOf("__");
+                if (dunderIdx > 0)
+                    subField = fieldPart[(dunderIdx + 2)..];
+                result.Add((fid, value, subField));
+            }
         }
         return result.Count > 0 ? result : null;
     }
@@ -388,6 +399,11 @@ public class ReportsController : ControllerBase
             }).ToList(),
             DynamicFilterType = r.Definition.DynamicFilterType,
             CustomDynamicFilterFields = r.Definition.CustomDynamicFilterFields,
+            CustomDynamicFilterItems = r.Definition.CustomDynamicFilterItems?.Select(i => new CustomDynamicFilterItemDto
+            {
+                FieldId = i.FieldId,
+                SubField = i.SubField
+            }).ToList() ?? [],
             AllowQuickSearch = r.Definition.AllowQuickSearch,
         },
         IsDefault = r.IsDefault,

@@ -124,7 +124,7 @@ public class ExportReportQueryHandler
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
 
-        var columns = selectedFields.Select(f => new ColumnInfo(f.Id, f.Name)).ToList();
+        var columns = selectedFields.Select(f => new ColumnInfo(f.Id, string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label)).ToList();
         return BuildExport(columns, items.Select(r => r.Fields).ToList(), safeName, format);
     }
 
@@ -173,16 +173,17 @@ public class ExportReportQueryHandler
 
         var columns = new List<ColumnInfo>
         {
-            new(groupByField.Id, groupByField.Name),
+            new(groupByField.Id, string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label),
             new(0, "Count"),
         };
         foreach (var agg in visibleAggregations)
         {
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
             {
+                var fieldName = string.IsNullOrWhiteSpace(aggField.Label) ? aggField.Name : aggField.Label;
                 var label = agg.DisplayAs == "PercentOfColumnTotal"
-                    ? $"{agg.Function} of {aggField.Name} (%)"
-                    : $"{agg.Function} of {aggField.Name}";
+                    ? $"{agg.Function} of {fieldName} (%)"
+                    : $"{agg.Function} of {fieldName}";
                 columns.Add(new ColumnInfo(aggField.Id, label));
             }
         }

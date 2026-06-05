@@ -103,6 +103,7 @@ public class CreateReportCommandHandler
             }).ToList(),
             DynamicFilterType = string.IsNullOrWhiteSpace(command.DynamicFilterType) ? "Default" : command.DynamicFilterType,
             CustomDynamicFilterFields = command.CustomDynamicFilterFields ?? [],
+            CustomDynamicFilterItems = command.CustomDynamicFilterItems ?? [],
             AllowQuickSearch = command.AllowQuickSearch,
         };
 

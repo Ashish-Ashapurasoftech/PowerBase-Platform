@@ -44,5 +44,5 @@ public interface IRecordRepository
         CancellationToken ct = default);
 
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
-        AppTable table, AppField field, int limit, CancellationToken ct = default);
+        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default);
 }
