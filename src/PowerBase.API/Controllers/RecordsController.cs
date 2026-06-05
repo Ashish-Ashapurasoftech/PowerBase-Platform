@@ -12,8 +12,6 @@ using PowerBase.Application.Records.Commands.UpdateRecord;
 using PowerBase.Application.Records.Queries.GetRecord;
 using PowerBase.Application.Records.Queries.ListRecords;
 using PowerBase.Application.Records.Queries.GetDistinctFieldValues;
-using PowerBase.Domain.Constants;
-
 namespace PowerBase.API.Controllers;
 
 [ApiController]
@@ -50,7 +48,7 @@ public class RecordsController : ControllerBase
 
     /// <summary>Get distinct values for a field in a table.</summary>
     [HttpGet("tables/{tableId:guid}/records/distinct/{fieldId:long}")]
-    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<DistinctValuesResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
