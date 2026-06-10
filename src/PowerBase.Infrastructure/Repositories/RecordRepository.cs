@@ -340,7 +340,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         
         var sql = $"""
-            SELECT DISTINCT {selectExpr} 
+            SELECT DISTINCT CAST({selectExpr} AS NVARCHAR(MAX)) 
             FROM {PhysicalNaming.FullTableName(table.Id)}
             WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''{whereExtra}
             """;
@@ -376,14 +376,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             {
                 try
                 {
-                    var numMatch = System.Text.RegularExpressions.Regex.Match(v, @"number[^:]*:\s*\\?""([^\\""]*)");
-                    if (numMatch.Success)
+                     using var doc = System.Text.Json.JsonDocument.Parse(v);
+                    if (doc.RootElement.TryGetProperty("number", out var numProp))
                     {
-                        var num = numMatch.Groups[1].Value;
-                        if (string.IsNullOrWhiteSpace(num)) return null;
-                        return $"{v}|{num}";
+                       var num = numProp.GetString();
+                    if (!string.IsNullOrWhiteSpace(num)) return $"{v}|{num}";
                     }
-                }
+                }   
                 catch { }
                 return v;
             }).Where(v => v != null && !string.IsNullOrWhiteSpace(v));

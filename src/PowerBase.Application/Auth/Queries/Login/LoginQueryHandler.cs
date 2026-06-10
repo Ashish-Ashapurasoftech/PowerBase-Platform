@@ -51,7 +51,7 @@ public class LoginQueryHandler
         {
             await _auditRepo.RecordLoginAttemptAsync(query.Email, query.IpAddress, wasSuccessful: false,
                 userId: user?.Id, failureReason: "Invalid credentials", ct);
-            throw new UnauthorizedActionException("login");
+            throw new BadRequestException("INVALID_CREDENTIALS", "Invalid email or password.");
         }
 
         await _auditRepo.RecordLoginAttemptAsync(query.Email, query.IpAddress, wasSuccessful: true, userId: user.Id, ct: ct);
