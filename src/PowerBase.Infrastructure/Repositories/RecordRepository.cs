@@ -25,8 +25,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         parameters.Add("offset", (page - 1) * pageSize);
         parameters.Add("pageSize", pageSize);
 
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters) + BuildOwnerWhere(restrictToCreatedBy, parameters);
-        var fieldLookup = fields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var orderBy = sortFields?.Count > 0
             ? string.Join(", ", sortFields.Select(s =>
             {
@@ -248,27 +248,29 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return " AND CreatedBy = @ownerUserId";
     }
 
-    private static string BuildFilterTreeWhere(FilterGroup? group, DynamicParameters parameters)
+    private static string BuildFilterTreeWhere(FilterGroup? group, DynamicParameters parameters,
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null)
     {
         if (group is null || group.Nodes.Count == 0) return string.Empty;
         var paramIdx = 0;
-        var fragment = BuildTreeFragment(group, parameters, ref paramIdx);
+        var fragment = BuildTreeFragment(group, parameters, ref paramIdx, fieldLookup);
         return string.IsNullOrEmpty(fragment) ? string.Empty : $" AND ({fragment})";
     }
 
-    private static string BuildTreeFragment(FilterGroup group, DynamicParameters parameters, ref int paramIdx)
+    private static string BuildTreeFragment(FilterGroup group, DynamicParameters parameters, ref int paramIdx,
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null)
     {
         var parts = new List<string>();
         foreach (var node in group.Nodes)
         {
             if (node.Condition is { } cond)
             {
-                var clause = BuildConditionClause(cond, parameters, ref paramIdx);
+                var clause = BuildConditionClause(cond, parameters, ref paramIdx, fieldLookup);
                 if (clause is not null) parts.Add(clause);
             }
             else if (node.Group is { } sub && sub.Nodes.Count > 0)
             {
-                var subSql = BuildTreeFragment(sub, parameters, ref paramIdx);
+                var subSql = BuildTreeFragment(sub, parameters, ref paramIdx, fieldLookup);
                 if (!string.IsNullOrEmpty(subSql)) parts.Add($"({subSql})");
             }
         }
@@ -277,9 +279,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return string.Join(joiner, parts);
     }
 
-    private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i)
+    private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null)
     {
-        var col = PhysicalNaming.ColumnName((int)cond.FieldId);
+        // Use the physical column name for system fields (Id, CreatedOn, etc.) rather than f_{fid}
+        var col = fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var f) && f.IsSystem
+            ? f.PhysicalColumnName!
+            : PhysicalNaming.ColumnName((int)cond.FieldId);
         var pname = $"fv{i++}";
         
         // For JSON sub-field (Address sub-field filtering)

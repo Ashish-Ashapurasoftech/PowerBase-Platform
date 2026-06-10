@@ -100,9 +100,10 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
         {
             if (!byPublicId.TryGetValue(c.FieldPublicId, out var field)) continue;
             var value = c.UseCurrentUser ? appUser.UserPublicId?.ToString() : c.Value;
+            var fieldId = field.Fid.HasValue ? (long)field.Fid.Value : field.Id;
             nodes.Add(new FilterNode
             {
-                Condition = new FilterCondition { FieldId = field.Id, Operator = c.Operator, Value = value },
+                Condition = new FilterCondition { FieldId = fieldId, Operator = c.Operator, Value = value },
             });
         }
         if (nodes.Count == 0) return null;
