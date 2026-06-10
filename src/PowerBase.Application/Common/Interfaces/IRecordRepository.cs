@@ -32,6 +32,12 @@ public interface IRecordRepository
     /// whose value is currently NULL or empty. Used when an optional field becomes required. Returns rows affected.</summary>
     Task<int> BackfillDefaultAsync(AppTable table, AppField field, string defaultValue, CancellationToken ct = default);
 
+    /// <summary>Returns true if any non-deleted rows have a duplicate non-null value in the field's column.</summary>
+    Task<bool> HasDuplicatesAsync(AppTable table, AppField field, CancellationToken ct = default);
+
+    /// <summary>Returns true if any non-deleted rows have a non-null, non-empty value in the field's column.</summary>
+    Task<bool> HasAnyDataAsync(AppTable table, AppField field, CancellationToken ct = default);
+
     /// <summary>Run a GROUP BY aggregation query for Summary reports.</summary>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table,

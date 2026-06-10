@@ -10,4 +10,5 @@ public record UpdateFieldRequest(
     bool IsSortable,
     bool IsFilterable,
     bool IsReportable,
+    bool IsUnique,
     string? Settings);

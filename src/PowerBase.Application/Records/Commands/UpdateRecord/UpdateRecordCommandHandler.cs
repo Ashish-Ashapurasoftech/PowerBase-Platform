@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using static PowerBase.Domain.Constants.PhysicalNaming;
 
 namespace PowerBase.Application.Records.Commands.UpdateRecord;
 
@@ -39,7 +40,7 @@ public class UpdateRecordCommandHandler
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 
-        var tableFieldIds = new HashSet<long>(fields.Select(f => f.Id));
+        var tableFieldIds = new HashSet<long>(fields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value));
         var unknownIds = command.FieldValues.Keys.Where(k => !tableFieldIds.Contains(k)).ToList();
         if (unknownIds.Count > 0)
             throw new ValidationException(
@@ -64,12 +65,13 @@ public class UpdateRecordCommandHandler
 
         // Build field-level diff — only fields where value actually changed, keyed by display label
         var candidateFields = fields.Where(f =>
-            command.FieldValues.ContainsKey(f.Id) && !f.IsSystem && f.PhysicalColumnName is not null).ToList();
+            f.Fid.HasValue && command.FieldValues.ContainsKey((long)f.Fid.Value) && !f.IsSystem && f.PhysicalColumnName is not null).ToList();
 
         var actuallyChanged = candidateFields.Where(f =>
         {
-            var oldVal = oldRecord.TryGetValue(f.PhysicalColumnName!, out var ov) ? ov?.ToString() : null;
-            var newVal = command.FieldValues.TryGetValue(f.Id, out var nv) ? nv?.ToString() : null;
+            var colKey = PhysicalNaming.ColumnName(f.Fid!.Value);
+            var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov?.ToString() : null;
+            var newVal = command.FieldValues.TryGetValue((long)f.Fid.Value, out var nv) ? nv?.ToString() : null;
             return oldVal != newVal;
         }).ToList();
 
@@ -104,11 +106,11 @@ public class UpdateRecordCommandHandler
 
         var oldValuesDict = actuallyChanged.ToDictionary(
             f => f.Label ?? f.Name,
-            f => ResolveDisplay(f, oldRecord.TryGetValue(f.PhysicalColumnName!, out var v) ? v?.ToString() : null)
+            f => ResolveDisplay(f, oldRecord.TryGetValue(PhysicalNaming.ColumnName(f.Fid!.Value), out var v) ? v?.ToString() : null)
         );
         var newValuesDict = actuallyChanged.ToDictionary(
             f => f.Label ?? f.Name,
-            f => ResolveDisplay(f, command.FieldValues.TryGetValue(f.Id, out var v) ? v?.ToString() : null)
+            f => ResolveDisplay(f, command.FieldValues.TryGetValue((long)f.Fid!.Value, out var v) ? v?.ToString() : null)
         );
 
         await _auditRepo.LogActivityAsync(

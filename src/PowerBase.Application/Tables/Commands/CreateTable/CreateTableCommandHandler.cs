@@ -98,17 +98,18 @@ public class CreateTableCommandHandler
         var numberTypeId = await _fieldTypeRepo.GetIdByCodeAsync("Number", ct);
         var dateTimeTypeId = await _fieldTypeRepo.GetIdByCodeAsync("DateTime", ct);
 
-        (string Name, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order)[] systemFieldDefs =
+        // Fid values match Quickbase conventions: Record ID# = 3, system fields occupy 1–5.
+        (string Name, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order, int Fid)[] systemFieldDefs =
         [
-            ("Record ID#",       numberTypeId,   "Id",         true,  false, 1),
-            ("Date Created",     dateTimeTypeId, "CreatedOn",  true,  true,  2),
-            ("Date Modified",    dateTimeTypeId, "ModifiedOn", true,  true,  3),
-            ("Record Owner",     userTypeId,     "CreatedBy",  false, false, 4),
-            ("Last Modified By", userTypeId,     "ModifiedBy", false, false, 5),
+            ("Record ID#",       numberTypeId,   "Id",         true,  false, 1, 3),
+            ("Date Created",     dateTimeTypeId, "CreatedOn",  true,  true,  2, 1),
+            ("Date Modified",    dateTimeTypeId, "ModifiedOn", true,  true,  3, 2),
+            ("Record Owner",     userTypeId,     "CreatedBy",  false, false, 4, 4),
+            ("Last Modified By", userTypeId,     "ModifiedBy", false, false, 5, 5),
         ];
 
-        var seededIds = new Dictionary<string, long>();
-        foreach (var (name, typeId, physCol, sortable, filterable, order) in systemFieldDefs)
+        var seededFids = new Dictionary<string, int>();
+        foreach (var (name, typeId, physCol, sortable, filterable, order, fid) in systemFieldDefs)
         {
             var f = new AppField
             {
@@ -122,13 +123,14 @@ public class CreateTableCommandHandler
                 IsFilterable = filterable,
                 IsSearchable = false,
                 DisplayOrder = order,
+                Fid = fid,
             };
-            var (fieldId, _) = await _fieldRepo.CreateAsync(f, ct);
-            seededIds[name] = fieldId;
+            await _fieldRepo.CreateAsync(f, ct);
+            seededFids[name] = fid;
         }
 
-        // Seed default reports
-        var dateModifiedFieldId = seededIds["Date Modified"];
+        // Seed default reports — sort/filter use FIDs, not internal Ids
+        var dateModifiedFid = seededFids["Date Modified"];  // FID 2
 
         await _reportRepo.CreateAsync(new Report
         {
@@ -151,7 +153,7 @@ public class CreateTableCommandHandler
             Visibility = "Shared",
             Definition = JsonSerializer.Serialize(new ReportDefinition
             {
-                SortFields = [new SortSpec { FieldId = dateModifiedFieldId, Desc = true }],
+                SortFields = [new SortSpec { FieldId = dateModifiedFid, Desc = true }],
             }),
             IsDefault = false,
             DisplayOrder = 2,
@@ -171,13 +173,11 @@ public class CreateTableCommandHandler
         };
         var (formId, _) = await _formRepo.CreateAsync(mainForm, ct);
 
-        var defaultSection = new FormSection
+        var defaultBlock = new FormSectionBlock
         {
-            FormId      = formId,
-            Name        = "Section 1",
-            ColumnCount = 2,
+            Width        = 1,
             DisplayOrder = 1,
-            Elements    = seededIds.Select((kvp, i) => new FormElement
+            Elements     = seededFids.Select((kvp, i) => new FormElement
             {
                 AppFieldId   = kvp.Value,
                 LabelMode    = "Default",
@@ -190,6 +190,13 @@ public class CreateTableCommandHandler
                 IsRequired   = false,
                 DisplayOrder = i + 1,
             }).ToList(),
+        };
+        var defaultSection = new FormSection
+        {
+            FormId       = formId,
+            Name         = "Section 1",
+            DisplayOrder = 1,
+            Blocks       = [defaultBlock],
         };
         await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
 

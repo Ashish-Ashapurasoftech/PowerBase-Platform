@@ -26,13 +26,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         parameters.Add("pageSize", pageSize);
 
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters) + BuildOwnerWhere(restrictToCreatedBy, parameters);
-        var fieldLookup = fields.ToDictionary(f => f.Id);
+        var fieldLookup = fields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
         var orderBy = sortFields?.Count > 0
             ? string.Join(", ", sortFields.Select(s =>
             {
                 var colName = fieldLookup.TryGetValue(s.FieldId, out var sf) && sf.IsSystem
                     ? sf.PhysicalColumnName!
-                    : PhysicalNaming.ColumnName(s.FieldId);
+                    : PhysicalNaming.ColumnName((int)s.FieldId);
                 return $"{colName} {(s.Desc ? "DESC" : "ASC")}";
             }))
             : "Id";
@@ -80,7 +80,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<Guid> CreateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
     {
-        var relevantFields = fields.Where(f => values.ContainsKey(f.Id)).ToList();
+        var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value)).ToList();
         var parameters = new DynamicParameters();
         parameters.Add("createdBy", QueryContext.UserId);
 
@@ -95,10 +95,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            var colList = string.Join(", ", relevantFields.Select(f => PhysicalNaming.ColumnName(f.Id)));
-            var paramList = string.Join(", ", relevantFields.Select(f => $"@{PhysicalNaming.ColumnName(f.Id)}"));
+            var colList = string.Join(", ", relevantFields.Select(f => PhysicalNaming.ColumnName(f.Fid!.Value)));
+            var paramList = string.Join(", ", relevantFields.Select(f => $"@{PhysicalNaming.ColumnName(f.Fid!.Value)}"));
             foreach (var f in relevantFields)
-                parameters.Add(PhysicalNaming.ColumnName(f.Id), values[f.Id]);
+                parameters.Add(PhysicalNaming.ColumnName(f.Fid!.Value), values[(long)f.Fid.Value]);
 
             sql = $"""
                 INSERT INTO {PhysicalNaming.FullTableName(table.Id)} (CreatedBy, {colList})
@@ -115,10 +115,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId,
         IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
     {
-        var relevantFields = fields.Where(f => values.ContainsKey(f.Id)).ToList();
+        var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value)).ToList();
         if (relevantFields.Count == 0) return;
 
-        var setClauses = string.Join(", ", relevantFields.Select(f => $"{PhysicalNaming.ColumnName(f.Id)} = @{PhysicalNaming.ColumnName(f.Id)}"));
+        var setClauses = string.Join(", ", relevantFields.Select(f => $"{PhysicalNaming.ColumnName(f.Fid!.Value)} = @{PhysicalNaming.ColumnName(f.Fid!.Value)}"));
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET {setClauses}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
@@ -129,7 +129,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         parameters.Add("publicId", publicId);
         parameters.Add("modifiedBy", QueryContext.UserId);
         foreach (var f in relevantFields)
-            parameters.Add(PhysicalNaming.ColumnName(f.Id), values[f.Id]);
+            parameters.Add(PhysicalNaming.ColumnName(f.Fid!.Value), values[(long)f.Fid.Value]);
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
@@ -166,7 +166,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     {
         var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
             ? field.PhysicalColumnName!
-            : PhysicalNaming.ColumnName(field.Id);
+            : PhysicalNaming.ColumnName(field.Fid!.Value);
 
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
@@ -188,15 +188,17 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         long? restrictToCreatedBy = null,
         CancellationToken ct = default)
     {
-        var groupCol = PhysicalNaming.ColumnName(groupByField.Id);
+        var groupCol = groupByField.IsSystem && !string.IsNullOrEmpty(groupByField.PhysicalColumnName)
+            ? groupByField.PhysicalColumnName!
+            : PhysicalNaming.ColumnName(groupByField.Fid!.Value);
         var groupExpr = BuildGroupByExpr(groupCol, groupByMode);
-        var fieldMap = allFields.ToDictionary(f => f.Id);
+        var fieldMap = allFields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
 
         var aggClauses = new List<string> { "COUNT(*) AS [Count]" };
         foreach (var agg in aggregations)
         {
             if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
-            var col = PhysicalNaming.ColumnName(agg.FieldId);
+            var col = PhysicalNaming.ColumnName((int)agg.FieldId);
             var alias = $"[{agg.Function}_{aggField.Name.Replace(" ", "_")}]";
             var clause = agg.Function switch
             {
@@ -235,7 +237,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     private static string BuildFieldColumnList(IReadOnlyList<AppField> fields)
     {
-        var customCols = fields.Where(f => !f.IsSystem).Select(f => PhysicalNaming.ColumnName(f.Id)).ToList();
+        var customCols = fields.Where(f => !f.IsSystem && f.Fid.HasValue).Select(f => PhysicalNaming.ColumnName(f.Fid!.Value)).ToList();
         return customCols.Count > 0 ? ", " + string.Join(", ", customCols) : string.Empty;
     }
 
@@ -277,7 +279,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i)
     {
-        var col = PhysicalNaming.ColumnName(cond.FieldId);
+        var col = PhysicalNaming.ColumnName((int)cond.FieldId);
         var pname = $"fv{i++}";
         
         // For JSON sub-field (Address sub-field filtering)
@@ -312,8 +314,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
         AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default)
     {
-        var col = PhysicalNaming.ColumnName(field.Id);
-        
+        var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
+            ? field.PhysicalColumnName!
+            : PhysicalNaming.ColumnName(field.Fid!.Value);
+
         string selectExpr;
         string whereExtra = "";
         
@@ -416,6 +420,33 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var results = distinctList.Take(limit).OrderBy(v => v).ToList();
         
         return (results, exceedsLimit);
+    }
+
+    public async Task<bool> HasDuplicatesAsync(AppTable table, AppField field, CancellationToken ct = default)
+    {
+        var col = PhysicalNaming.ColumnName(field.Fid!.Value);
+        var sql = $"""
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT {col} FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0 AND {col} IS NOT NULL
+                GROUP BY {col} HAVING COUNT(*) > 1
+            ) THEN 1 ELSE 0 END AS BIT)
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
+    public async Task<bool> HasAnyDataAsync(AppTable table, AppField field, CancellationToken ct = default)
+    {
+        var col = PhysicalNaming.ColumnName(field.Fid!.Value);
+        var sql = $"""
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1 FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''
+            ) THEN 1 ELSE 0 END AS BIT)
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
     }
 
     private static IReadOnlyDictionary<string, object?> ToDictionary(dynamic row)

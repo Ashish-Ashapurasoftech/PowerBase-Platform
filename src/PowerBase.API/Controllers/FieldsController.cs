@@ -61,30 +61,31 @@ public class FieldsController : ControllerBase
     }
 
     /// <summary>Update a field's properties (name, label, required, searchable, reportable, etc.).</summary>
-    [HttpPatch("tables/{tableId:guid}/fields/{fieldId:guid}")]
+    [HttpPatch("tables/{tableId:guid}/fields/{fieldId:int}")]
     [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Update(Guid tableId, Guid fieldId, [FromBody] UpdateFieldRequest request, CancellationToken ct)
+    public async Task<IActionResult> Update(Guid tableId, int fieldId, [FromBody] UpdateFieldRequest request, CancellationToken ct)
     {
         await _updateHandler.HandleAsync(new UpdateFieldCommand(
             tableId, fieldId,
             request.Name, request.Label, request.Description,
             request.IsRequired, request.DefaultValue,
             request.IsSearchable, request.IsSortable,
-            request.IsFilterable, request.IsReportable, request.Settings), ct);
+            request.IsFilterable, request.IsReportable,
+            request.IsUnique, request.Settings), ct);
         return NoContent();
     }
 
     /// <summary>Soft-delete a field (does not run DROP COLUMN).</summary>
-    [HttpDelete("tables/{tableId:guid}/fields/{fieldId:guid}")]
+    [HttpDelete("tables/{tableId:guid}/fields/{fieldId:int}")]
     [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Delete(Guid tableId, Guid fieldId, CancellationToken ct)
+    public async Task<IActionResult> Delete(Guid tableId, int fieldId, CancellationToken ct)
     {
         await _deleteHandler.HandleAsync(new DeleteFieldCommand(tableId, fieldId), ct);
         return NoContent();
@@ -114,6 +115,7 @@ public class FieldsController : ControllerBase
         PhysicalColumnName = r.PhysicalColumnName,
         IsRequired = r.IsRequired,
         IsSystem = false,
+        Fid = r.Fid,
         Settings = r.Settings,
         CreatedOn = r.CreatedOn,
     };
@@ -135,6 +137,7 @@ public class FieldsController : ControllerBase
         IsReportable = f.IsReportable,
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
+        Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,
     };

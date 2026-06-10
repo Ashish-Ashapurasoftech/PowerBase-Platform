@@ -31,7 +31,7 @@ public class CreateRecordCommandHandler
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 
-        var tableFieldIds = new HashSet<long>(fields.Select(f => f.Id));
+        var tableFieldIds = new HashSet<long>(fields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value));
         var unknownIds = command.FieldValues.Keys.Where(k => !tableFieldIds.Contains(k)).ToList();
         if (unknownIds.Count > 0)
             throw new ValidationException(
@@ -52,10 +52,10 @@ public class CreateRecordCommandHandler
         var effectiveValues = new Dictionary<long, object?>(command.FieldValues);
         foreach (var field in fields)
         {
-            if (field.IsSystem || field.IsDeleted) continue;
-            if (effectiveValues.ContainsKey(field.Id)) continue;
+            if (field.IsSystem || field.IsDeleted || !field.Fid.HasValue) continue;
+            if (effectiveValues.ContainsKey((long)field.Fid.Value)) continue;
             if (!string.IsNullOrWhiteSpace(field.DefaultValue))
-                effectiveValues[field.Id] = field.DefaultValue;
+                effectiveValues[(long)field.Fid.Value] = field.DefaultValue;
         }
 
         var publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, ct);
@@ -66,8 +66,8 @@ public class CreateRecordCommandHandler
         await _tableRepo.IncrementRecordCountAsync(table.Id, ct);
 
         var fieldData = new Dictionary<string, object?>();
-        foreach (var field in fields.Where(f => effectiveValues.ContainsKey(f.Id)))
-            fieldData[field.Id.ToString()] = effectiveValues[field.Id];
+        foreach (var field in fields.Where(f => f.Fid.HasValue && effectiveValues.ContainsKey((long)f.Fid.Value)))
+            fieldData[field.Fid!.Value.ToString()] = effectiveValues[(long)field.Fid.Value];
 
         return new RecordResult
         {

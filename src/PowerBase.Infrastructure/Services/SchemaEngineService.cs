@@ -57,7 +57,7 @@ public class SchemaEngineService : ISchemaEngineService
             ?? throw new InvalidOperationException($"Unknown or inactive field type id: {field.FieldTypeId}");
 
         var physicalTable = PhysicalNaming.FullTableName(table.Id);
-        var physicalColumn = PhysicalNaming.ColumnName(field.Id);
+        var physicalColumn = PhysicalNaming.ColumnName(field.Fid!.Value);
 
         // Columns always created as NULL — requiredness is enforced by validators, not DDL
         var sql = $"""
@@ -73,6 +73,32 @@ public class SchemaEngineService : ISchemaEngineService
             END
             """;
 
+        await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
+    public async Task SetUniqueAsync(AppTable table, AppField field, bool enable, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var physicalColumn = PhysicalNaming.ColumnName(field.Fid!.Value);
+        var indexName = $"UX_{PhysicalNaming.TableName(table.Id)}_{physicalColumn}";
+
+        string sql;
+        if (enable)
+        {
+            sql = $"""
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = '{indexName}')
+                    CREATE UNIQUE NONCLUSTERED INDEX {indexName}
+                        ON {physicalTable}({physicalColumn})
+                        WHERE {physicalColumn} IS NOT NULL AND IsDeleted = 0;
+                """;
+        }
+        else
+        {
+            sql = $"DROP INDEX IF EXISTS {indexName} ON {physicalTable};";
+        }
+
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
     }
 }

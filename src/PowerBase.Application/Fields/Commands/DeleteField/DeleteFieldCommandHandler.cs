@@ -21,17 +21,17 @@ public class DeleteFieldCommandHandler
     {
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
-        var field = await _fieldRepo.GetByPublicIdAsync(command.FieldPublicId, ct)
-            ?? throw new NotFoundException("Field", command.FieldPublicId);
+        var field = await _fieldRepo.GetByFidInTableAsync(table.Id, command.FieldFid, ct)
+            ?? throw new NotFoundException("Field", command.FieldFid);
 
         if (field.IsSystem)
             throw new UnauthorizedActionException("System fields cannot be deleted.");
 
-        var affected = await _fieldRepo.DeleteAsync(command.FieldPublicId, table.Id, ct);
+        var affected = await _fieldRepo.DeleteAsync(field.PublicId, table.Id, ct);
         if (affected == 0)
-            throw new NotFoundException("Field", command.FieldPublicId);
-            
+            throw new NotFoundException("Field", command.FieldFid);
+
         await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppField, command.FieldPublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
+            AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
     }
 }

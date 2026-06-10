@@ -55,8 +55,8 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
 
         var visibleFields = fields.Where(f => !hidden.Contains(f.Id)).ToList();
         var editableFieldIds = visibleFields
-            .Where(f => !f.IsSystem && !viewOnly.Contains(f.Id))
-            .Select(f => f.Id)
+            .Where(f => !f.IsSystem && !viewOnly.Contains(f.Id) && f.Fid.HasValue)
+            .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
         // ── Record filter (role-defined conditions) ──

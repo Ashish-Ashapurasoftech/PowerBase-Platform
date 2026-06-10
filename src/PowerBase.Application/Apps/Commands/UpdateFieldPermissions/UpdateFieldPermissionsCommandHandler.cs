@@ -43,17 +43,19 @@ public class UpdateFieldPermissionsCommandHandler
             var field = await _fieldRepo.GetByPublicIdAsync(f.FieldPublicId, ct);
             if (field is null || field.AppTableId != table.Id) continue;
 
-            // Invariant: a required field with no default value cannot be hidden (None) from a role —
-            // those users could never create a record.
-            if (access == FieldAccessLevels.None && field.IsRequired && string.IsNullOrWhiteSpace(field.DefaultValue))
+            // Invariant: a required field with no default value cannot be hidden (None) or read-only (View)
+            // for a role — those users could never submit a record.
+            if ((access == FieldAccessLevels.None || access == FieldAccessLevels.View)
+                && field.IsRequired && string.IsNullOrWhiteSpace(field.DefaultValue))
             {
                 var name = field.Label ?? field.Name;
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
                     ["Access"] =
                     [
-                        $"'{name}' is a required field with no default value, so it cannot be set to None " +
-                        "for this role. Add a default value to the field first."
+                        $"'{name}' is a required field with no default value. It cannot be set to '{access}' " +
+                        "for this role because users would be unable to submit records. " +
+                        "Add a default value to the field first."
                     ],
                 });
             }

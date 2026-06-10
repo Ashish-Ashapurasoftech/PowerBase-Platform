@@ -2,7 +2,7 @@ namespace PowerBase.Application.Fields.Commands.UpdateField;
 
 public record UpdateFieldCommand(
     Guid TablePublicId,
-    Guid FieldPublicId,
+    int FieldFid,
     string Name,
     string? Label,
     string? Description,
@@ -12,4 +12,5 @@ public record UpdateFieldCommand(
     bool IsSortable,
     bool IsFilterable,
     bool IsReportable,
+    bool IsUnique,
     string? Settings);

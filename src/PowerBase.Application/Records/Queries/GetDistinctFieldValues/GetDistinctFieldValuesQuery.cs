@@ -6,7 +6,7 @@ namespace PowerBase.Application.Records.Queries.GetDistinctFieldValues;
 
 public record DistinctValuesResponse(IReadOnlyList<string> Values, bool ExceedsLimit);
 
-public record GetDistinctFieldValuesQuery(Guid TableId, long FieldId, int Limit = 25, string? SubField = null);
+public record GetDistinctFieldValuesQuery(Guid TableId, int FieldFid, int Limit = 25, string? SubField = null);
 
 public class GetDistinctFieldValuesQueryHandler
 {
@@ -30,7 +30,7 @@ public class GetDistinctFieldValuesQueryHandler
         if (table == null) return new DistinctValuesResponse(new List<string>(), false);
 
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
-        var field = fields.FirstOrDefault(f => f.Id == query.FieldId);
+        var field = fields.FirstOrDefault(f => f.Fid == query.FieldFid);
         if (field == null) return new DistinctValuesResponse(new List<string>(), false);
 
         var (values, exceedsLimit) = await _recordRepo.GetDistinctFieldValuesAsync(table, field, query.Limit, query.SubField, ct);

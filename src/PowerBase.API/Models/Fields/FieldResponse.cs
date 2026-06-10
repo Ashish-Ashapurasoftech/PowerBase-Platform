@@ -17,6 +17,7 @@ public class FieldResponse
     public bool IsReportable { get; init; }
     public bool IsUnique { get; init; }
     public bool IsSystem { get; init; }
+    public int? Fid { get; init; }
     public string? Settings { get; init; }
     public DateTime CreatedOn { get; init; }
 }

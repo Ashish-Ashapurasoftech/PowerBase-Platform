@@ -116,11 +116,14 @@ public class RunReportQueryHandler
         CancellationToken ct)
     {
         // Intersect report columns with fields the role can see (drop None-access fields)
-        var visibleFieldIds = access.VisibleFields.Select(f => f.Id).ToHashSet();
+        var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
         IReadOnlyList<AppField> selectedFields;
         if (definition.Columns.Count > 0)
         {
-            var fieldMap = allFields.ToDictionary(f => f.Id);
+            var fieldMap = allFields
+                .Where(f => f.Fid.HasValue)
+                .GroupBy(f => (long)f.Fid!.Value)
+                .ToDictionary(g => g.Key, g => g.First());
             selectedFields = definition.Columns
                 .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
                 .Select(id => fieldMap[id])
@@ -128,7 +131,7 @@ public class RunReportQueryHandler
         }
         else
         {
-            selectedFields = allFields.Where(f => f.IsReportable && visibleFieldIds.Contains(f.Id)).ToList();
+            selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
 
         // Merge role record filter into the report's filter tree
@@ -148,7 +151,7 @@ public class RunReportQueryHandler
         {
             var runtimeNodes = new List<FilterNode>();
             
-            var fieldDict = allFields.ToDictionary(f => f.Id);
+            var fieldDict = allFields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
             
             // Group by (FieldId, SubField) to support:
             //  - Same-field multi-select → OR'd together
@@ -216,7 +219,7 @@ public class RunReportQueryHandler
             {
                 var qsNodes = textFields.Select(f => new FilterNode
                 {
-                    Condition = new FilterCondition { FieldId = f.Id, Operator = "contains", Value = quickSearch }
+                    Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = "contains", Value = quickSearch }
                 }).ToList();
 
                 var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
@@ -235,7 +238,7 @@ public class RunReportQueryHandler
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
-            FieldId = f.Id,
+            FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id,
             Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label,
             TypeCode = f.TypeCode,
         }).ToList();
@@ -265,11 +268,14 @@ public class RunReportQueryHandler
             return new PagedReportRunResult { Page = page, PageSize = pageSize };
         }
 
-        var visibleFieldIds = access.VisibleFields.Select(f => f.Id).ToHashSet();
-        var fieldMap = allFields.ToDictionary(f => f.Id);
+        var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
+        var fieldMap = allFields
+            .Where(f => f.Fid.HasValue)
+            .GroupBy(f => (long)f.Fid!.Value)
+            .ToDictionary(g => g.Key, g => g.First());
 
         // If the group-by field is hidden, cannot produce a meaningful summary
-        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField) || !visibleFieldIds.Contains(groupByField.Id))
+        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField) || !visibleFieldIds.Contains(definition.GroupByFieldId.Value))
         {
             return new PagedReportRunResult { Page = page, PageSize = pageSize };
         }
@@ -305,7 +311,7 @@ public class RunReportQueryHandler
         var items = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
-            fields[groupByField.Id.ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
+            fields[(groupByField.Fid ?? groupByField.Id).ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
             foreach (var (alias, fieldId) in aggAliasToFieldId)
             {

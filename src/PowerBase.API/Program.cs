@@ -79,6 +79,7 @@ using PowerBase.Application.Users.Commands.ChangeUserRole;
 using PowerBase.Application.Users.Commands.InviteUser;
 using PowerBase.Application.Users.Commands.RemoveUser;
 using PowerBase.Application.Users.Queries.ListUsers;
+using PowerBase.Application.Fields.Settings;
 using PowerBase.Infrastructure.Persistence;
 using PowerBase.Infrastructure.Provisioning;
 using PowerBase.Infrastructure.Repositories;
@@ -149,6 +150,17 @@ builder.Services.AddScoped<IRolePermissionEnforcer, RolePermissionEnforcer>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
+
+// Field Settings Validators
+builder.Services.AddScoped<IFieldSettingsValidator, TextSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, NumberSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, CurrencySettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, PercentSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, RatingSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, DateSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, DurationSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, UrlSettingsValidator>();
+builder.Services.AddScoped<FieldSettingsValidatorRegistry>();
 
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();

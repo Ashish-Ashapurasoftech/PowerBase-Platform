@@ -363,11 +363,11 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         await tx.CommitAsync(ct);
     }
 
-    public async Task AppendFieldToLastSectionAsync(long formId, long fieldId, CancellationToken ct = default)
+    public async Task AppendFieldToLastSectionAsync(long formId, int fieldFid, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.ExecuteAsync(
-            new CommandDefinition(AppendFieldSql, new { formId, fieldId }, cancellationToken: ct));
+            new CommandDefinition(AppendFieldSql, new { formId, fieldId = fieldFid }, cancellationToken: ct));
     }
 
     public async Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default)

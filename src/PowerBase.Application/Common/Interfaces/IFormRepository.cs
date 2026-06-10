@@ -13,7 +13,7 @@ public interface IFormRepository
     Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<FormSection>> GetLayoutAsync(long formId, CancellationToken ct = default);
     Task SaveLayoutAsync(long formId, IReadOnlyList<FormSection> sections, CancellationToken ct = default);
-    Task AppendFieldToLastSectionAsync(long formId, long fieldId, CancellationToken ct = default);
+    Task AppendFieldToLastSectionAsync(long formId, int fieldFid, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default);
     Task SetDefaultAsync(Guid tablePublicId, Guid formPublicId, CancellationToken ct = default);
     Task<IReadOnlyList<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)>> GetRoleFormOverridesAsync(Guid tablePublicId, CancellationToken ct = default);

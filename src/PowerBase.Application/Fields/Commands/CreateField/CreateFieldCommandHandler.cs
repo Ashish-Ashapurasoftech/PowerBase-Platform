@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Fields.Settings;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -15,6 +16,7 @@ public class CreateFieldResult
     public string TypeCode { get; init; } = string.Empty;
     public string PhysicalColumnName { get; init; } = string.Empty;
     public bool IsRequired { get; init; }
+    public int? Fid { get; init; }
     public string? Settings { get; init; }
     public DateTime CreatedOn { get; init; }
 }
@@ -28,6 +30,7 @@ public class CreateFieldCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
     private readonly IFormRepository _formRepo;
+    private readonly FieldSettingsValidatorRegistry _settingsRegistry;
 
     public CreateFieldCommandHandler(
         IAppTableRepository tableRepo,
@@ -36,7 +39,8 @@ public class CreateFieldCommandHandler
         ISchemaEngineService schemaEngine,
         IQueryContext queryContext,
         IAuditRepository auditRepo,
-        IFormRepository formRepo)
+        IFormRepository formRepo,
+        FieldSettingsValidatorRegistry settingsRegistry)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -45,6 +49,7 @@ public class CreateFieldCommandHandler
         _queryContext = queryContext;
         _auditRepo = auditRepo;
         _formRepo = formRepo;
+        _settingsRegistry = settingsRegistry;
     }
 
     public async Task<CreateFieldResult> HandleAsync(CreateFieldCommand command, CancellationToken ct = default)
@@ -57,6 +62,9 @@ public class CreateFieldCommandHandler
                     .GroupBy(e => e.PropertyName)
                     .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
 
+        // Validate per-type Settings JSON before touching the database.
+        CreateFieldCommandValidator.ValidateSettings(command.TypeCode, command.Settings, _settingsRegistry);
+
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
         if (await _fieldRepo.NameExistsInTableAsync(table.Id, command.Name, ct))
@@ -68,6 +76,8 @@ public class CreateFieldCommandHandler
         // Note: the required+None+default invariant is enforced on update and on field-permission
         // changes. A brand-new field has no field-permission rows yet, so there is nothing to check here.
 
+        var nextFid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
+
         var field = new AppField
         {
             AppTableId = table.Id,
@@ -77,6 +87,7 @@ public class CreateFieldCommandHandler
             Description = command.Description,
             IsRequired = command.IsRequired,
             DefaultValue = command.DefaultValue,
+            Fid = nextFid,
             Settings = command.Settings,
             CreatedBy = _queryContext.UserId,
         };
@@ -85,7 +96,7 @@ public class CreateFieldCommandHandler
         field.Id = id;
         field.PublicId = publicId;
 
-        var physicalColumn = PhysicalNaming.ColumnName(id);
+        var physicalColumn = PhysicalNaming.ColumnName(field.Fid!.Value);
         await _fieldRepo.UpdatePhysicalColumnNameAsync(id, physicalColumn, ct);
         field.PhysicalColumnName = physicalColumn;
 
@@ -95,7 +106,7 @@ public class CreateFieldCommandHandler
         var formsForTable = await _formRepo.ListByTableAsync(table.PublicId, ct);
         foreach (var form in formsForTable.Where(f => f.AutoAddNewFields))
         {
-            await _formRepo.AppendFieldToLastSectionAsync(form.Id, id, ct);
+            await _formRepo.AppendFieldToLastSectionAsync(form.Id, field.Fid!.Value, ct);
         }
 
         await _auditRepo.LogActivityAsync(
@@ -111,6 +122,7 @@ public class CreateFieldCommandHandler
             TypeCode = command.TypeCode,
             PhysicalColumnName = physicalColumn,
             IsRequired = field.IsRequired,
+            Fid = field.Fid,
             Settings = field.Settings,
             CreatedOn = DateTime.UtcNow,
         };

@@ -47,12 +47,12 @@ public class RecordsController : ControllerBase
     }
 
     /// <summary>Get distinct values for a field in a table.</summary>
-    [HttpGet("tables/{tableId:guid}/records/distinct/{fieldId:long}")]
+    [HttpGet("tables/{tableId:guid}/records/distinct/{fieldId:int}")]
     [RequireAppMember(AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<DistinctValuesResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> GetDistinct(Guid tableId, long fieldId, [FromQuery] int limit = 25, [FromQuery] string? subField = null, CancellationToken ct = default)
+    public async Task<IActionResult> GetDistinct(Guid tableId, int fieldId, [FromQuery] int limit = 25, [FromQuery] string? subField = null, CancellationToken ct = default)
     {
         var result = await _distinctHandler.HandleAsync(new GetDistinctFieldValuesQuery(tableId, fieldId, limit, subField), ct);
         return Ok(new ApiResponse<DistinctValuesResponse>(result));

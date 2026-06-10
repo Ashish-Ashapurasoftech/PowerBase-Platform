@@ -19,9 +19,9 @@ public class RecordResult
         {
             var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
                 ? field.PhysicalColumnName
-                : PhysicalNaming.ColumnName(field.Id);
+                : PhysicalNaming.ColumnName(field.Fid!.Value);
             if (row.TryGetValue(col, out var val))
-                fieldData[field.Id.ToString()] = val;
+                fieldData[(field.Fid ?? field.Id).ToString()] = val;
         }
 
         var createdBy = row.TryGetValue("CreatedBy", out var cb) && cb is not null ? Convert.ToInt64(cb) : 0L;

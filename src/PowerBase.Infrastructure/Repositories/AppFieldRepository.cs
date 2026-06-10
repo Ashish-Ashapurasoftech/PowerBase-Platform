@@ -12,7 +12,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         af.Id, af.PublicId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName, af.DefaultValue,
         af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable,
-        af.IsUnique, af.IsSystem, af.Settings, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
     private const string GetByIdInTableSql = $"""
@@ -44,11 +44,22 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         INSERT INTO meta.AppField
             (AppTableId, FieldTypeId, Name, Label, Description, IsRequired, DefaultValue,
              IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable,
-             Settings, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
+             Fid, Settings, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES (@tableId, @fieldTypeId, @name, @label, @description, @isRequired, @defaultValue,
                 @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable,
-                @settings, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
+                @fid, @settings, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
+        """;
+
+    private const string GetNextFidSql = """
+        SELECT ISNULL(MAX(Fid), 5) + 1 FROM meta.AppField WHERE AppTableId = @tableId AND IsDeleted = 0
+        """;
+
+    private const string GetByFidInTableSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId AND af.Fid = @fid AND af.IsDeleted = 0
         """;
 
     private const string UpdatePhysicalColumnNameSql = """
@@ -68,6 +79,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             IsRequired = @isRequired, DefaultValue = @defaultValue,
             IsSearchable = @isSearchable, IsSortable = @isSortable,
             IsFilterable = @isFilterable, IsReportable = @isReportable,
+            IsUnique = @isUnique,
             Settings = @settings,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
@@ -111,6 +123,20 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             new CommandDefinition(NameExistsSql, new { tableId, name }, cancellationToken: ct));
     }
 
+    public async Task<int> GetNextFidAsync(long tableId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(GetNextFidSql, new { tableId }, cancellationToken: ct));
+    }
+
+    public async Task<AppField?> GetByFidInTableAsync(long tableId, int fid, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<AppField>(
+            new CommandDefinition(GetByFidInTableSql, new { tableId, fid }, cancellationToken: ct));
+    }
+
     public async Task<(long Id, Guid PublicId)> CreateAsync(AppField field, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -130,6 +156,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 isSortable = field.IsSortable,
                 isFilterable = field.IsFilterable,
                 isReportable = field.IsReportable,
+                fid = field.Fid,
                 settings = field.Settings,
                 displayOrder = field.DisplayOrder,
                 createdBy = QueryContext.UserId,
@@ -153,7 +180,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<int> UpdateAsync(Guid publicId, long tableId, string name, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
-        bool isFilterable, bool isReportable, string? settings, CancellationToken ct = default)
+        bool isFilterable, bool isReportable, bool isUnique, string? settings, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
@@ -161,7 +188,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             {
                 publicId, tableId, name, label, description,
                 isRequired, defaultValue, isSearchable, isSortable,
-                isFilterable, isReportable, settings,
+                isFilterable, isReportable, isUnique, settings,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }
