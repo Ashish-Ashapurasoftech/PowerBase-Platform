@@ -177,19 +177,7 @@ public class CreateTableCommandHandler
         {
             Width        = 1,
             DisplayOrder = 1,
-            Elements     = seededFids.Select((kvp, i) => new FormElement
-            {
-                AppFieldId   = kvp.Value,
-                LabelMode    = "Default",
-                ShowOnAdd    = true,
-                ShowOnEdit   = true,
-                ShowOnView   = true,
-                WidthMode    = "Auto",
-                IsReadOnly   = kvp.Key is "Record ID#" or "Date Created" or "Date Modified"
-                                   or "Record Owner" or "Last Modified By",
-                IsRequired   = false,
-                DisplayOrder = i + 1,
-            }).ToList(),
+            Elements     = [],
         };
         var defaultSection = new FormSection
         {
@@ -204,7 +192,7 @@ public class CreateTableCommandHandler
         await _permRepo.SeedDefaultsForTableAsync(id, app.Id, ct);
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppTable, publicId.ToString(), $"Table added: {table.Name}", appId: app.Id, ct: ct);
+            AuditActions.Created, AuditEntityTypes.AppTable, publicId.ToString(), $"Table added: {table.Name}", appId: app.Id, ct: ct);
 
         return new CreateTableResult
         {

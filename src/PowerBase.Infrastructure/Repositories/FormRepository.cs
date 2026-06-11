@@ -136,7 +136,9 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                fe.IsRequired, fe.DisplayAs, fe.DisplayOrder
         FROM meta.FormElement fe
         JOIN meta.FormSection fs ON fs.Id = fe.FormSectionId
+        LEFT JOIN meta.AppField af ON af.Id = fe.AppFieldId
         WHERE fs.FormId = @formId
+          AND (fe.AppFieldId IS NULL OR af.IsDeleted = 0)
         ORDER BY fe.FormSectionId, fe.FormSectionBlockId, fe.DisplayOrder
         """;
 

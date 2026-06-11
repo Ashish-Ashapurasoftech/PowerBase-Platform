@@ -268,25 +268,20 @@ public class CreateAppCommandHandler
             };
             var (formId, _) = await _formRepo.CreateAsync(mainForm, ct);
 
+            var defaultBlock = new FormSectionBlock
+            {
+                Width        = 1,
+                DisplayOrder = 1,
+                Elements     = [],
+            };
+
             var defaultSection = new FormSection
             {
                 FormId      = formId,
                 Name        = "Section 1",
                 ColumnCount = 2,
                 DisplayOrder = 1,
-                Elements    = seededFids.Select((kvp, i) => new FormElement
-                {
-                    AppFieldId   = kvp.Value,
-                    LabelMode    = "Default",
-                    ShowOnAdd    = true,
-                    ShowOnEdit   = true,
-                    ShowOnView   = true,
-                    WidthMode    = "Auto",
-                    IsReadOnly   = kvp.Key is "Record ID#" or "Date Created" or "Date Modified"
-                                       or "Record Owner" or "Last Modified By",
-                    IsRequired   = false,
-                    DisplayOrder = i + 1,
-                }).ToList(),
+                Blocks      = [defaultBlock],
             };
             await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
 

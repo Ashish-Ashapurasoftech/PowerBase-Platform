@@ -24,16 +24,32 @@ public class UpdateTableCommandHandler
         if (command.Name.Length > 200)
             throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name must be 200 characters or fewer."] });
 
+        var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
+        if (table == null)
+            throw new NotFoundException("Table", command.TablePublicId);
+
+        var changes = new List<string>();
+        if (table.Name != command.Name)
+            changes.Add($"Name to '{command.Name}'");
+        if (table.SingularLabel != command.SingularLabel)
+            changes.Add($"Singular Label to '{command.SingularLabel}'");
+        if (table.PluralLabel != command.PluralLabel)
+            changes.Add($"Plural Label to '{command.PluralLabel}'");
+        if (table.Description != command.Description)
+            changes.Add("Description");
+        if (table.Icon != command.Icon)
+            changes.Add($"Icon to '{command.Icon}'");
+
         var affected = await _tableRepo.UpdateAsync(
             command.TablePublicId, command.Name,
             command.SingularLabel, command.PluralLabel,
             command.Description, command.Icon, ct);
 
-        if (affected == 0)
-            throw new NotFoundException("Table", command.TablePublicId);
-
-        var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
-        await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppTable, command.TablePublicId.ToString(), $"Table name changed to {command.Name}", appId: table.AppId, ct: ct);
+        if (affected > 0 && changes.Count > 0)
+        {
+            var logMessage = $"Table updated: {string.Join(", ", changes)}";
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Updated, AuditEntityTypes.AppTable, command.TablePublicId.ToString(), logMessage, appId: table.AppId, ct: ct);
+        }
     }
 }
