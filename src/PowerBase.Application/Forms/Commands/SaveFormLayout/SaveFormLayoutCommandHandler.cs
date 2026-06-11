@@ -36,7 +36,7 @@ public class SaveFormLayoutCommandHandler
         var form = await _formRepo.GetByPublicIdAsync(command.FormPublicId, ct);
 
         var tableFields = await _fieldRepo.ListByTableAsync(form.AppTableId, ct);
-        var validFieldIds = tableFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid.Value).ToHashSet();
+        var validFieldIds = tableFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
 
         // Collect all field element IDs across all blocks
         var fieldElementIds = command.Sections

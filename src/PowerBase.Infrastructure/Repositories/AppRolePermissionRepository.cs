@@ -231,8 +231,15 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
             (AppRoleId, AppTableId, ViewScope, ModifyScope, CanAdd, CanDelete,
              CanSaveSharedReports, CanEditFieldProperties, FieldAccessLevel)
         SELECT @appRoleId, t.Id,
-               'AllRecords', 'None', 0, 0, 0, 0, 'FullAccess'
+               'AllRecords', 
+               CASE WHEN r.Name = 'Administrator' THEN 'AllRecords' ELSE 'None' END, 
+               CASE WHEN r.Name = 'Administrator' THEN 1 ELSE 0 END, 
+               CASE WHEN r.Name = 'Administrator' THEN 1 ELSE 0 END, 
+               CASE WHEN r.Name = 'Administrator' THEN 1 ELSE 0 END, 
+               CASE WHEN r.Name = 'Administrator' THEN 1 ELSE 0 END, 
+               'FullAccess'
         FROM meta.AppTable t
+        JOIN meta.AppRole r ON r.Id = @appRoleId
         WHERE t.AppId = @appId
           AND t.IsDeleted = 0
           AND NOT EXISTS (
@@ -246,7 +253,13 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
             (AppRoleId, AppTableId, ViewScope, ModifyScope, CanAdd, CanDelete,
              CanSaveSharedReports, CanEditFieldProperties, FieldAccessLevel)
         SELECT r.Id, @appTableId,
-               'AllRecords', 'None', 0, 0, 0, 0, 'FullAccess'
+               'AllRecords', 
+               CASE WHEN r.Name = 'Administrator' THEN 'AllRecords' ELSE 'None' END, 
+               CASE WHEN r.Name = 'Administrator' THEN 1 ELSE 0 END, 
+               CASE WHEN r.Name = 'Administrator' THEN 1 ELSE 0 END, 
+               CASE WHEN r.Name = 'Administrator' THEN 1 ELSE 0 END, 
+               CASE WHEN r.Name = 'Administrator' THEN 1 ELSE 0 END, 
+               'FullAccess'
         FROM meta.AppRole r
         WHERE r.AppId = @appId
           AND r.IsDeleted = 0
