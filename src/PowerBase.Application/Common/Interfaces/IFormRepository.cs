@@ -6,6 +6,8 @@ public interface IFormRepository
 {
     Task<Form> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<long> GetAppIdByPublicIdAsync(Guid formPublicId, CancellationToken ct = default);
+    /// <summary>The internal AppTable id the form belongs to, or null if the form is missing.</summary>
+    Task<long?> GetTableIdByFormIdAsync(long formId, CancellationToken ct = default);
     Task<IReadOnlyList<Form>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> CreateAsync(Form form, CancellationToken ct = default);
     Task<int> UpdateSettingsAsync(Guid publicId, string name, bool autoAddNewFields, bool showBuiltInFields,

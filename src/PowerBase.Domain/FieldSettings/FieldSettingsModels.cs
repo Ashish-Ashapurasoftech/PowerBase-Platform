@@ -113,3 +113,29 @@ public sealed class NumericRangeSettings
     public int? Decimals { get; set; }
     public string? Separator { get; set; }
 }
+
+/// <summary>
+/// Configuration for a Formula field: the declared result type and the expression
+/// text. A Formula field is computed at read time and stores no physical column.
+/// </summary>
+public sealed class FormulaSettings
+{
+    /// <summary>One of <see cref="FormulaResultTypes"/>; maps to the engine's FormulaType.</summary>
+    public string? ResultType { get; set; }
+
+    /// <summary>The Quickbase-style formula expression text.</summary>
+    public string? Expression { get; set; }
+}
+
+public static class FormulaResultTypes
+{
+    public const string Text = "Text";
+    public const string Number = "Number";
+    public const string Date = "Date";
+    public const string DateTime = "DateTime";
+    public const string Duration = "Duration";
+    public const string Bool = "Bool";
+    public const string User = "User";
+
+    public static readonly string[] All = [Text, Number, Date, DateTime, Duration, Bool, User];
+}

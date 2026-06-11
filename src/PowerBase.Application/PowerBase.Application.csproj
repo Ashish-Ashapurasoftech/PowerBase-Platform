@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PowerBase.Domain\PowerBase.Domain.csproj" />
+    <ProjectReference Include="..\PowerBase.Formula\PowerBase.Formula.csproj" />
   </ItemGroup>
 
   <ItemGroup>

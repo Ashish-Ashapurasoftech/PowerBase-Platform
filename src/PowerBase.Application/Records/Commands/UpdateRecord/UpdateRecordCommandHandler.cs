@@ -46,6 +46,13 @@ public class UpdateRecordCommandHandler
             throw new ValidationException(
                 new Dictionary<string, string[]> { ["fields"] = [$"Unknown field IDs: {string.Join(", ", unknownIds)}"] });
 
+        var computedIds = command.FieldValues.Keys
+            .Where(k => fields.Any(f => f.Fid.HasValue && (long)f.Fid.Value == k && PhysicalNaming.IsComputedTypeCode(f.TypeCode)))
+            .ToList();
+        if (computedIds.Count > 0)
+            throw new ValidationException(
+                new Dictionary<string, string[]> { ["fields"] = [$"Formula fields are read-only and cannot be set: {string.Join(", ", computedIds)}"] });
+
         var access = await _enforcer.GetTableAccessAsync(table, fields, ct);
         if (!access.Unrestricted)
         {

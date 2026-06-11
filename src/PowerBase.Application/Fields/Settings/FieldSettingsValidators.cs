@@ -201,3 +201,28 @@ public sealed class NumericRangeSettingsValidator : FieldSettingsValidatorBase<N
         return errors;
     }
 }
+
+// ─── Formula ──────────────────────────────────────────────────────────────────
+
+public sealed class FormulaSettingsValidator : FieldSettingsValidatorBase<FormulaSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula"];
+
+    // Shape-only validation here (no table schema). The expression is compiled
+    // against the table's fields in the create/update handler and the validate API.
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (string.IsNullOrWhiteSpace(s.ResultType))
+            AddError(errors, "Settings.ResultType", "A formula result type is required.");
+        else if (!FormulaResultTypes.All.Contains(s.ResultType))
+            AddError(errors, "Settings.ResultType",
+                $"Result type must be one of: {string.Join(", ", FormulaResultTypes.All)}.");
+
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+
+        return errors;
+    }
+}

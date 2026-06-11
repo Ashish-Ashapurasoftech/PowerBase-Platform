@@ -24,5 +24,6 @@ public enum FieldTypeCode
     User,
     MultiUser,
     DateRange,
-    NumericRange
+    NumericRange,
+    Formula
 }   

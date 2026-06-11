@@ -82,7 +82,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<Guid> CreateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
     {
-        var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value)).ToList();
+        var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
         var parameters = new DynamicParameters();
         parameters.Add("createdBy", QueryContext.UserId);
 
@@ -130,7 +130,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId,
         IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
     {
-        var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value)).ToList();
+        var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
         if (relevantFields.Count == 0) return;
 
         var parameters = new DynamicParameters();
@@ -267,7 +267,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private static string BuildFieldColumnList(IReadOnlyList<AppField> fields)
     {
         var cols = new List<string>();
-        foreach (var f in fields.Where(f => !f.IsSystem && f.Fid.HasValue))
+        // Computed (Formula) fields have no physical column — they are projected in at read time.
+        foreach (var f in fields.Where(f => !f.IsSystem && f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)))
         {
             cols.Add(PhysicalNaming.ColumnName(f.Fid!.Value));
             if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))

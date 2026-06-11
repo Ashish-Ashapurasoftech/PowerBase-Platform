@@ -162,7 +162,16 @@ builder.Services.AddScoped<IFieldSettingsValidator, DurationSettingsValidator>()
 builder.Services.AddScoped<IFieldSettingsValidator, UrlSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, DateRangeSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, NumericRangeSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaSettingsValidator>();
 builder.Services.AddScoped<FieldSettingsValidatorRegistry>();
+
+// Formula engine (stateless, shared) + compute-on-read projector + authoring query handlers
+builder.Services.AddSingleton<PowerBase.Formula.FormulaEngine>();
+builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaProjector, PowerBase.Application.Formulas.FormulaProjector>();
+builder.Services.AddScoped<PowerBase.Application.Formulas.Queries.ValidateFormulaQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Formulas.Queries.EvaluateFormulaQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaDefaultResolver, PowerBase.Application.Formulas.FormulaDefaultResolver>();
+builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaExpressionValidator, PowerBase.Application.Formulas.FormulaExpressionValidator>();
 
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();

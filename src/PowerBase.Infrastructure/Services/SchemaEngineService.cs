@@ -49,6 +49,10 @@ public class SchemaEngineService : ISchemaEngineService
 
     public async Task AddColumnAsync(AppTable table, AppField field, CancellationToken ct = default)
     {
+        // Computed fields (Formula) are evaluated at read time and have no physical column.
+        if (PhysicalNaming.IsComputedTypeCode(field.TypeCode))
+            return;
+
         await using var connection = await _connectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
 

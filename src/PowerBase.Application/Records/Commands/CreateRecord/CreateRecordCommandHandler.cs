@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Formulas;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -11,19 +12,22 @@ public class CreateRecordCommandHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFormulaDefaultResolver _formulaDefaults;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFormulaDefaultResolver formulaDefaults)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _enforcer = enforcer;
         _auditRepo = auditRepo;
+        _formulaDefaults = formulaDefaults;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -36,6 +40,13 @@ public class CreateRecordCommandHandler
         if (unknownIds.Count > 0)
             throw new ValidationException(
                 new Dictionary<string, string[]> { ["fields"] = [$"Unknown field IDs: {string.Join(", ", unknownIds)}"] });
+
+        var computedIds = command.FieldValues.Keys
+            .Where(k => fields.Any(f => f.Fid.HasValue && (long)f.Fid.Value == k && PhysicalNaming.IsComputedTypeCode(f.TypeCode)))
+            .ToList();
+        if (computedIds.Count > 0)
+            throw new ValidationException(
+                new Dictionary<string, string[]> { ["fields"] = [$"Formula fields are read-only and cannot be set: {string.Join(", ", computedIds)}"] });
 
         var access = await _enforcer.GetTableAccessAsync(table, fields, ct);
         if (!access.Unrestricted)
@@ -52,10 +63,10 @@ public class CreateRecordCommandHandler
         var effectiveValues = new Dictionary<long, object?>(command.FieldValues);
         foreach (var field in fields)
         {
-            if (field.IsSystem || field.IsDeleted || !field.Fid.HasValue) continue;
+            if (field.IsSystem || field.IsDeleted || !field.Fid.HasValue || PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
             if (effectiveValues.ContainsKey((long)field.Fid.Value)) continue;
             if (!string.IsNullOrWhiteSpace(field.DefaultValue))
-                effectiveValues[(long)field.Fid.Value] = field.DefaultValue;
+                effectiveValues[(long)field.Fid.Value] = _formulaDefaults.Resolve(field.DefaultValue, field, fields, effectiveValues);
         }
 
         var publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, ct);

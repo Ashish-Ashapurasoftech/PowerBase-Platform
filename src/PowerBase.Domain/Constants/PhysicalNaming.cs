@@ -10,4 +10,8 @@ public static class PhysicalNaming
 
     public static bool IsRangeTypeCode(string typeCode) =>
         typeCode is "DateRange" or "NumericRange";
+
+    /// <summary>Field types computed at read time (Formula) — they have no physical storage column.</summary>
+    public static bool IsComputedTypeCode(string typeCode) =>
+        typeCode is "Formula";
 }

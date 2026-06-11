@@ -11,6 +11,14 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     public FormRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
+    public async Task<long?> GetTableIdByFormIdAsync(long formId, CancellationToken ct = default)
+    {
+        const string sql = "SELECT AppTableId FROM meta.Form WHERE Id = @formId AND IsDeleted = 0";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<long?>(
+            new CommandDefinition(sql, new { formId }, cancellationToken: ct));
+    }
+
     private const string SelectColumns = """
         Id, PublicId, AppTableId, Name, IsDefault, AutoAddNewFields,
         ShowBuiltInFields, SaveOptions, DisplayOrder, IsDeleted,

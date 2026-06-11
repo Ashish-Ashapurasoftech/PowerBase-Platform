@@ -15,11 +15,21 @@ public class RecordResult
     public static RecordResult FromRow(
         IReadOnlyDictionary<string, object?> row,
         IReadOnlyList<AppField> fields,
-        IReadOnlyDictionary<long, string>? userNames = null)
+        IReadOnlyDictionary<long, string>? userNames = null,
+        IReadOnlyDictionary<long, object?>? computedValues = null)
     {
         var fieldData = new Dictionary<string, object?>();
         foreach (var field in fields)
         {
+            // Computed (Formula) fields have no physical column — take the projected value.
+            if (PhysicalNaming.IsComputedTypeCode(field.TypeCode))
+            {
+                var cfid = (field.Fid ?? field.Id).ToString();
+                fieldData[cfid] = computedValues != null && field.Fid.HasValue
+                    && computedValues.TryGetValue(field.Fid.Value, out var cv) ? cv : null;
+                continue;
+            }
+
             var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
                 ? field.PhysicalColumnName
                 : PhysicalNaming.ColumnName(field.Fid!.Value);

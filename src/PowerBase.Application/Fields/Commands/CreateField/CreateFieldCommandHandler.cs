@@ -97,11 +97,15 @@ public class CreateFieldCommandHandler
         field.Id = id;
         field.PublicId = publicId;
 
-        var physicalColumn = PhysicalNaming.ColumnName(field.Fid!.Value);
-        await _fieldRepo.UpdatePhysicalColumnNameAsync(id, physicalColumn, ct);
-        field.PhysicalColumnName = physicalColumn;
-
-        await _schemaEngine.AddColumnAsync(table, field, ct);
+        // Computed fields (Formula) have no physical column — skip column naming and DDL.
+        var physicalColumn = string.Empty;
+        if (!PhysicalNaming.IsComputedTypeCode(field.TypeCode))
+        {
+            physicalColumn = PhysicalNaming.ColumnName(field.Fid!.Value);
+            await _fieldRepo.UpdatePhysicalColumnNameAsync(id, physicalColumn, ct);
+            field.PhysicalColumnName = physicalColumn;
+            await _schemaEngine.AddColumnAsync(table, field, ct);
+        }
 
         // Auto-append the new field to all forms on this table where AutoAddNewFields=true
         var formsForTable = await _formRepo.ListByTableAsync(table.PublicId, ct);
