@@ -160,6 +160,8 @@ builder.Services.AddScoped<IFieldSettingsValidator, RatingSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, DateSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, DurationSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, UrlSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, DateRangeSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, NumericRangeSettingsValidator>();
 builder.Services.AddScoped<FieldSettingsValidatorRegistry>();
 
 // Repositories

@@ -101,3 +101,15 @@ public static class DurationDisplays
         "Weeks", "Days", "Hours", "Minutes", "Seconds",
     ];
 }
+
+public sealed class DateRangeSettings
+{
+    /// <summary>Display format applied to both start and end dates (same options as DateSettings).</summary>
+    public string? Format { get; set; }
+}
+
+public sealed class NumericRangeSettings
+{
+    public int? Decimals { get; set; }
+    public string? Separator { get; set; }
+}

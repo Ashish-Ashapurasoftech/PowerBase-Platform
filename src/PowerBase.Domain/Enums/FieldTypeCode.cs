@@ -22,5 +22,7 @@ public enum FieldTypeCode
     File,
     Address,
     User,
-    MultiUser
+    MultiUser,
+    DateRange,
+    NumericRange
 }   

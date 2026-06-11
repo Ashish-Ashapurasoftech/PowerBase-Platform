@@ -57,6 +57,7 @@ public class SchemaEngineService : ISchemaEngineService
             ?? throw new InvalidOperationException($"Unknown or inactive field type id: {field.FieldTypeId}");
 
         var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var tableName = PhysicalNaming.TableName(table.Id);
         var physicalColumn = PhysicalNaming.ColumnName(field.Fid!.Value);
 
         // Columns always created as NULL — requiredness is enforced by validators, not DDL
@@ -66,7 +67,7 @@ public class SchemaEngineService : ISchemaEngineService
                 JOIN sys.tables t ON t.object_id = c.object_id
                 JOIN sys.schemas s ON s.schema_id = t.schema_id
                 WHERE s.name = 'data'
-                  AND t.name = '{PhysicalNaming.TableName(table.Id)}'
+                  AND t.name = '{tableName}'
                   AND c.name = '{physicalColumn}')
             BEGIN
                 ALTER TABLE {physicalTable} ADD {physicalColumn} {sqlDataType} NULL;
@@ -74,6 +75,25 @@ public class SchemaEngineService : ISchemaEngineService
             """;
 
         await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+
+        // Range fields get a second column for the end/max value
+        if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
+        {
+            var endColumn = PhysicalNaming.EndColumnName(field.Fid!.Value);
+            var endSql = $"""
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.columns c
+                    JOIN sys.tables t ON t.object_id = c.object_id
+                    JOIN sys.schemas s ON s.schema_id = t.schema_id
+                    WHERE s.name = 'data'
+                      AND t.name = '{tableName}'
+                      AND c.name = '{endColumn}')
+                BEGIN
+                    ALTER TABLE {physicalTable} ADD {endColumn} {sqlDataType} NULL;
+                END
+                """;
+            await connection.ExecuteAsync(new CommandDefinition(endSql, cancellationToken: ct));
+        }
     }
 
     public async Task SetUniqueAsync(AppTable table, AppField field, bool enable, CancellationToken ct = default)

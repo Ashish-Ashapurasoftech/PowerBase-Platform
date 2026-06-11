@@ -20,8 +20,19 @@ public class RecordResult
             var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
                 ? field.PhysicalColumnName
                 : PhysicalNaming.ColumnName(field.Fid!.Value);
-            if (row.TryGetValue(col, out var val))
+
+            if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
+            {
+                var endCol = PhysicalNaming.EndColumnName(field.Fid!.Value);
+                var startVal = row.TryGetValue(col, out var sv) ? sv : null;
+                var endVal   = row.TryGetValue(endCol, out var ev) ? ev : null;
+                fieldData[(field.Fid ?? field.Id).ToString()] = new Dictionary<string, object?>
+                    { ["start"] = startVal, ["end"] = endVal };
+            }
+            else if (row.TryGetValue(col, out var val))
+            {
                 fieldData[(field.Fid ?? field.Id).ToString()] = val;
+            }
         }
 
         var createdBy = row.TryGetValue("CreatedBy", out var cb) && cb is not null ? Convert.ToInt64(cb) : 0L;

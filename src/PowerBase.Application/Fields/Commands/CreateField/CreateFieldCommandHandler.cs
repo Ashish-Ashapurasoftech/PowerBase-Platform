@@ -82,6 +82,7 @@ public class CreateFieldCommandHandler
         {
             AppTableId = table.Id,
             FieldTypeId = fieldType.Id,
+            TypeCode = fieldType.Code,
             Name = command.Name,
             Label = command.Label,
             Description = command.Description,

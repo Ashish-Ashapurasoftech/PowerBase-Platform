@@ -174,3 +174,30 @@ public sealed class UrlSettingsValidator : FieldSettingsValidatorBase<UrlSetting
         return errors;
     }
 }
+
+// ─── DateRange ────────────────────────────────────────────────────────────────
+
+public sealed class DateRangeSettingsValidator : FieldSettingsValidatorBase<DateRangeSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["DateRange"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(DateRangeSettings s) =>
+        new Dictionary<string, string[]>();
+}
+
+// ─── NumericRange ─────────────────────────────────────────────────────────────
+
+public sealed class NumericRangeSettingsValidator : FieldSettingsValidatorBase<NumericRangeSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["NumericRange"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(NumericRangeSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (s.Decimals is < 0 or > 10)
+            AddError(errors, "Settings.Decimals", "Decimals must be between 0 and 10.");
+
+        return errors;
+    }
+}

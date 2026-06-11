@@ -46,7 +46,7 @@ public class ListRecordsQueryHandler
             table, visibleFields, page, pageSize,
             filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
         var total = await _recordRepo.CountAsync(
-            table, filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            table, fields, filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         return new PagedRecordResult
         {

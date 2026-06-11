@@ -156,6 +156,7 @@ public class RecordsController : ControllerBase
                 JsonValueKind.False => false,
                 JsonValueKind.Array => JsonSerializer.Serialize(el),
                 JsonValueKind.Null => null,
+                JsonValueKind.Object => el, // passed as JsonElement; SplitRangeValue handles {start,end}
                 _ => null,
             };
         }

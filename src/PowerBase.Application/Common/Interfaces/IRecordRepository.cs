@@ -12,7 +12,7 @@ public interface IRecordRepository
         long? restrictToCreatedBy = null,
         CancellationToken ct = default);
 
-    Task<int> CountAsync(AppTable table, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
+    Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default);

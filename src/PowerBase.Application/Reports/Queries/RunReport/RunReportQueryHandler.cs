@@ -165,7 +165,9 @@ public class RunReportQueryHandler
                 // Use eq for SingleSelect/Boolean/User, contains for everything else
                 // For Address sub-fields (JSON path), use eq by default
                 var firstSubField = string.IsNullOrEmpty(group.Key.Item2) ? null : group.Key.Item2;
-                var operatorName = field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address" ? "eq" : "contains";
+                var operatorName = field?.TypeCode is "Date" or "DateTime"
+                    ? "date_eq"
+                    : field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address" ? "eq" : "contains";
 
                 var values = group.Select(rf => rf.Value).ToList();
 
@@ -232,7 +234,7 @@ public class RunReportQueryHandler
 
         var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterTree, sortFields,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-        var total = await _recordRepo.CountAsync(table, filterTree,
+        var total = await _recordRepo.CountAsync(table, allFields, filterTree,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();

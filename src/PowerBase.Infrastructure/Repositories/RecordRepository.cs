@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Reports;
@@ -50,10 +51,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return rows.Select(ToDictionary).ToList();
     }
 
-    public async Task<int> CountAsync(AppTable table, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
+    public async Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
     {
         var parameters = new DynamicParameters();
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+        var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
@@ -95,15 +97,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            var colList = string.Join(", ", relevantFields.Select(f => PhysicalNaming.ColumnName(f.Fid!.Value)));
-            var paramList = string.Join(", ", relevantFields.Select(f => $"@{PhysicalNaming.ColumnName(f.Fid!.Value)}"));
+            var colParts = new List<string>();
+            var paramParts = new List<string>();
             foreach (var f in relevantFields)
-                parameters.Add(PhysicalNaming.ColumnName(f.Fid!.Value), values[(long)f.Fid.Value]);
+            {
+                var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+                if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
+                {
+                    var endCol = PhysicalNaming.EndColumnName(f.Fid!.Value);
+                    var (startVal, endVal) = SplitRangeValue(values[(long)f.Fid.Value]);
+                    colParts.Add(col); paramParts.Add($"@{col}"); parameters.Add(col, startVal);
+                    colParts.Add(endCol); paramParts.Add($"@{endCol}"); parameters.Add(endCol, endVal);
+                }
+                else
+                {
+                    colParts.Add(col); paramParts.Add($"@{col}"); parameters.Add(col, values[(long)f.Fid.Value]);
+                }
+            }
 
             sql = $"""
-                INSERT INTO {PhysicalNaming.FullTableName(table.Id)} (CreatedBy, {colList})
+                INSERT INTO {PhysicalNaming.FullTableName(table.Id)} (CreatedBy, {string.Join(", ", colParts)})
                 OUTPUT INSERTED.PublicId
-                VALUES (@createdBy, {paramList})
+                VALUES (@createdBy, {string.Join(", ", paramParts)})
                 """;
         }
 
@@ -118,18 +133,32 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value)).ToList();
         if (relevantFields.Count == 0) return;
 
-        var setClauses = string.Join(", ", relevantFields.Select(f => $"{PhysicalNaming.ColumnName(f.Fid!.Value)} = @{PhysicalNaming.ColumnName(f.Fid!.Value)}"));
-        var sql = $"""
-            UPDATE {PhysicalNaming.FullTableName(table.Id)}
-            SET {setClauses}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
-            WHERE PublicId = @publicId AND IsDeleted = 0
-            """;
-
         var parameters = new DynamicParameters();
         parameters.Add("publicId", publicId);
         parameters.Add("modifiedBy", QueryContext.UserId);
+
+        var setClauses = new List<string>();
         foreach (var f in relevantFields)
-            parameters.Add(PhysicalNaming.ColumnName(f.Fid!.Value), values[(long)f.Fid.Value]);
+        {
+            var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+            if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
+            {
+                var endCol = PhysicalNaming.EndColumnName(f.Fid!.Value);
+                var (startVal, endVal) = SplitRangeValue(values[(long)f.Fid.Value]);
+                setClauses.Add($"{col} = @{col}"); parameters.Add(col, startVal);
+                setClauses.Add($"{endCol} = @{endCol}"); parameters.Add(endCol, endVal);
+            }
+            else
+            {
+                setClauses.Add($"{col} = @{col}"); parameters.Add(col, values[(long)f.Fid.Value]);
+            }
+        }
+
+        var sql = $"""
+            UPDATE {PhysicalNaming.FullTableName(table.Id)}
+            SET {string.Join(", ", setClauses)}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+            WHERE PublicId = @publicId AND IsDeleted = 0
+            """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
@@ -237,8 +266,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     private static string BuildFieldColumnList(IReadOnlyList<AppField> fields)
     {
-        var customCols = fields.Where(f => !f.IsSystem && f.Fid.HasValue).Select(f => PhysicalNaming.ColumnName(f.Fid!.Value)).ToList();
-        return customCols.Count > 0 ? ", " + string.Join(", ", customCols) : string.Empty;
+        var cols = new List<string>();
+        foreach (var f in fields.Where(f => !f.IsSystem && f.Fid.HasValue))
+        {
+            cols.Add(PhysicalNaming.ColumnName(f.Fid!.Value));
+            if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
+                cols.Add(PhysicalNaming.EndColumnName(f.Fid!.Value));
+        }
+        return cols.Count > 0 ? ", " + string.Join(", ", cols) : string.Empty;
     }
 
     private static string BuildOwnerWhere(long? restrictToCreatedBy, DynamicParameters parameters)
@@ -279,20 +314,61 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return string.Join(joiner, parts);
     }
 
+    /// <summary>
+    /// Splits a range field value (sent as JSON object or IDictionary) into start and end SQL parameters.
+    /// Accepts: JsonElement {"start":x,"end":y}, Dictionary, or null.
+    /// </summary>
+    private static (object? start, object? end) SplitRangeValue(object? value)
+    {
+        if (value is null) return (null, null);
+        if (value is JsonElement je)
+        {
+            var startVal = je.TryGetProperty("start", out var s) ? (object?)s.ToString() : null;
+            var endVal   = je.TryGetProperty("end",   out var e) ? (object?)e.ToString() : null;
+            // Normalise empty strings to null
+            if (startVal is string ss && string.IsNullOrEmpty(ss)) startVal = null;
+            if (endVal   is string es && string.IsNullOrEmpty(es)) endVal   = null;
+            return (startVal, endVal);
+        }
+        if (value is System.Collections.IDictionary dict)
+        {
+            return (dict.Contains("start") ? dict["start"] : null,
+                    dict.Contains("end")   ? dict["end"]   : null);
+        }
+        // Scalar fallback — treat as start only
+        return (value, null);
+    }
+
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
         IReadOnlyDictionary<long, AppField>? fieldLookup = null)
     {
         // Use the physical column name for system fields (Id, CreatedOn, etc.) rather than f_{fid}
-        var col = fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var f) && f.IsSystem
-            ? f.PhysicalColumnName!
-            : PhysicalNaming.ColumnName((int)cond.FieldId);
-        var pname = $"fv{i++}";
-        
-        // For JSON sub-field (Address sub-field filtering)
-        string colExpr;
-        if (!string.IsNullOrWhiteSpace(cond.SubField))
+        AppField? resolvedField = null;
+        string col;
+        if (fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var f))
         {
-            // Sanitize sub-field name to prevent SQL injection (only allow alphanumeric)
+            resolvedField = f;
+            col = f.IsSystem ? f.PhysicalColumnName! : PhysicalNaming.ColumnName((int)cond.FieldId);
+        }
+        else
+        {
+            col = PhysicalNaming.ColumnName((int)cond.FieldId);
+        }
+
+        // Range field: SubField "start" targets f_{fid}, "end" targets f_{fid}_e
+        if (resolvedField != null && PhysicalNaming.IsRangeTypeCode(resolvedField.TypeCode) && !string.IsNullOrWhiteSpace(cond.SubField))
+        {
+            col = cond.SubField == "end"
+                ? PhysicalNaming.EndColumnName((int)cond.FieldId)
+                : PhysicalNaming.ColumnName((int)cond.FieldId);
+        }
+        var pname = $"fv{i++}";
+
+        // For Address JSON sub-fields use JSON_VALUE; range fields already have the correct column resolved above
+        string colExpr;
+        var isRangeSubField = resolvedField != null && PhysicalNaming.IsRangeTypeCode(resolvedField.TypeCode);
+        if (!string.IsNullOrWhiteSpace(cond.SubField) && !isRangeSubField)
+        {
             var safeSubField = System.Text.RegularExpressions.Regex.Replace(cond.SubField, "[^a-zA-Z0-9_]", "");
             colExpr = $"JSON_VALUE({col}, '$.{safeSubField}')";
         }
@@ -309,6 +385,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             case "gte":        p.Add(pname, cond.Value);        return $"{colExpr} >= @{pname}";
             case "lt":         p.Add(pname, cond.Value);        return $"{colExpr} < @{pname}";
             case "lte":        p.Add(pname, cond.Value);        return $"{colExpr} <= @{pname}";
+            case "date_eq":    p.Add(pname, cond.Value);        return $"CAST({colExpr} AS DATE) = @{pname}";
             case "contains":   p.Add(pname, $"%{cond.Value}%"); return $"{colExpr} LIKE @{pname}";
             case "startsWith": p.Add(pname, $"{cond.Value}%");  return $"{colExpr} LIKE @{pname}";
             case "isEmpty":    i--; return $"({colExpr} IS NULL OR {colExpr} = '')";
