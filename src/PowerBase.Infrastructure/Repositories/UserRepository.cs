@@ -95,6 +95,18 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
         }
     }
 
+    public async Task<IReadOnlyDictionary<long, string>> GetNamesByIdsAsync(IEnumerable<long> ids, CancellationToken ct = default)
+    {
+        var idList = ids.Distinct().ToList();
+        if (idList.Count == 0) return new Dictionary<long, string>();
+        await using var connection = ConnectionFactory.Create();
+        var rows = await connection.QueryAsync<(long Id, string Name)>(
+            new CommandDefinition(
+                "SELECT Id, Name FROM core.[User] WHERE Id IN @ids AND IsDeleted = 0",
+                new { ids = idList }, cancellationToken: ct));
+        return rows.ToDictionary(r => r.Id, r => r.Name);
+    }
+
     public async Task ActivateAsync(long userId, string name, string hashedPassword, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();

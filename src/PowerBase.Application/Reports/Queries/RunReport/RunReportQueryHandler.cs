@@ -30,19 +30,22 @@ public class RunReportQueryHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
+    private readonly IUserRepository _userRepo;
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
-        IRolePermissionEnforcer enforcer)
+        IRolePermissionEnforcer enforcer,
+        IUserRepository userRepo)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _enforcer = enforcer;
+        _userRepo = userRepo;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -237,7 +240,8 @@ public class RunReportQueryHandler
         var total = await _recordRepo.CountAsync(table, allFields, filterTree,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
-        var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
+        var userNames = await ResolveUserNamesAsync(rows, selectedFields, _userRepo, ct);
+        var items = rows.Select(row => RecordResult.FromRow(row, selectedFields, userNames)).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
             FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id,
@@ -352,5 +356,48 @@ public class RunReportQueryHandler
             Page = 1,
             PageSize = rows.Count > 0 ? rows.Count : pageSize,
         };
+    }
+
+    internal static async Task<IReadOnlyDictionary<long, string>> ResolveUserNamesAsync(
+        IEnumerable<IReadOnlyDictionary<string, object?>> rows,
+        IReadOnlyList<AppField> fields,
+        IUserRepository userRepo,
+        CancellationToken ct)
+    {
+        var hasUserFields = fields.Any(f =>
+            f.TypeCode is "User" or "MultiUser" ||
+            (f.IsSystem && f.PhysicalColumnName is "CreatedBy" or "ModifiedBy"));
+
+        if (!hasUserFields) return new Dictionary<long, string>();
+
+        var ids = new HashSet<long>();
+        foreach (var row in rows)
+        {
+            // System user columns (stored as long)
+            foreach (var col in new[] { "CreatedBy", "ModifiedBy" })
+            {
+                if (row.TryGetValue(col, out var v) && v is not null && long.TryParse(v.ToString(), out var id))
+                    ids.Add(id);
+            }
+            // User/MultiUser field columns
+            foreach (var f in fields.Where(f => f.TypeCode is "User" or "MultiUser" && f.Fid.HasValue))
+            {
+                var col = PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value);
+                if (!row.TryGetValue(col, out var val) || val is null) continue;
+                var str = val.ToString()!;
+                if (str.TrimStart().StartsWith('['))
+                {
+                    try
+                    {
+                        var parsed = System.Text.Json.JsonSerializer.Deserialize<List<long>>(str);
+                        if (parsed != null) foreach (var pid in parsed) ids.Add(pid);
+                    }
+                    catch { }
+                }
+                else if (long.TryParse(str, out var uid)) ids.Add(uid);
+            }
+        }
+
+        return await userRepo.GetNamesByIdsAsync(ids, ct);
     }
 }

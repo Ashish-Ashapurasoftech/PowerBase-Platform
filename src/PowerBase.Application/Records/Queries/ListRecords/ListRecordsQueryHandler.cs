@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Reports.Queries.RunReport;
 
 namespace PowerBase.Application.Records.Queries.ListRecords;
 
@@ -16,17 +17,20 @@ public class ListRecordsQueryHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
+    private readonly IUserRepository _userRepo;
 
     public ListRecordsQueryHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
-        IRolePermissionEnforcer enforcer)
+        IRolePermissionEnforcer enforcer,
+        IUserRepository userRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _enforcer = enforcer;
+        _userRepo = userRepo;
     }
 
     public async Task<PagedRecordResult> HandleAsync(ListRecordsQuery query, CancellationToken ct = default)
@@ -48,9 +52,11 @@ public class ListRecordsQueryHandler
         var total = await _recordRepo.CountAsync(
             table, fields, filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
+        var userNames = await RunReportQueryHandler.ResolveUserNamesAsync(rows, visibleFields, _userRepo, ct);
+
         return new PagedRecordResult
         {
-            Items = rows.Select(r => Records.RecordResult.FromRow(r, visibleFields)).ToList(),
+            Items = rows.Select(r => Records.RecordResult.FromRow(r, visibleFields, userNames)).ToList(),
             TotalCount = total,
             Page = page,
             PageSize = pageSize,

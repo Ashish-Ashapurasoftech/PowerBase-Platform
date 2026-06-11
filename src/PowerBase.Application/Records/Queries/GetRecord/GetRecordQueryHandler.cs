@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -10,17 +11,20 @@ public class GetRecordQueryHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
+    private readonly IUserRepository _userRepo;
 
     public GetRecordQueryHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
-        IRolePermissionEnforcer enforcer)
+        IRolePermissionEnforcer enforcer,
+        IUserRepository userRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _enforcer = enforcer;
+        _userRepo = userRepo;
     }
 
     public async Task<Records.RecordResult> HandleAsync(GetRecordQuery query, CancellationToken ct = default)
@@ -36,6 +40,7 @@ public class GetRecordQueryHandler
 
         var visibleFields = access.VisibleFields;
         var row = await _recordRepo.GetByPublicIdAsync(table, visibleFields, query.RecordPublicId, ct);
-        return Records.RecordResult.FromRow(row, visibleFields);
+        var userNames = await RunReportQueryHandler.ResolveUserNamesAsync([row], visibleFields, _userRepo, ct);
+        return Records.RecordResult.FromRow(row, visibleFields, userNames);
     }
 }

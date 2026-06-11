@@ -4,6 +4,7 @@ using ClosedXML.Excel;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
+using RunReport = PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Reports.Queries.ExportReport;
@@ -15,19 +16,22 @@ public class ExportReportQueryHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
+    private readonly IUserRepository _userRepo;
 
     public ExportReportQueryHandler(
         IReportRepository reportRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
-        IRolePermissionEnforcer enforcer)
+        IRolePermissionEnforcer enforcer,
+        IUserRepository userRepo)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _enforcer = enforcer;
+        _userRepo = userRepo;
     }
 
     public async Task<ExportResult> HandleAsync(ExportReportQuery query, CancellationToken ct = default)
@@ -122,9 +126,10 @@ public class ExportReportQueryHandler
 
         var rows = await _recordRepo.ListAsync(table, selectedFields, 1, 50_000, filterTree, sortFields,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-        var items = rows.Select(row => RecordResult.FromRow(row, selectedFields)).ToList();
+        var userNames = await RunReport.RunReportQueryHandler.ResolveUserNamesAsync(rows, selectedFields, _userRepo, ct);
+        var items = rows.Select(row => RecordResult.FromRow(row, selectedFields, userNames)).ToList();
 
-        var columns = selectedFields.Select(f => new ColumnInfo(f.Id, string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label)).ToList();
+        var columns = selectedFields.Select(f => new ColumnInfo(f.Id, string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, f.TypeCode)).ToList();
         return BuildExport(columns, items.Select(r => r.Fields).ToList(), safeName, format);
     }
 
@@ -228,7 +233,7 @@ public class ExportReportQueryHandler
         foreach (var row in rows)
         {
             sb.AppendLine(string.Join(",", columns.Select(c =>
-                EscapeCsvField(row.TryGetValue(c.Key, out var v) ? v?.ToString() : null))));
+                EscapeCsvField(FormatFieldValue(row.TryGetValue(c.Key, out var v) ? v : null, c.TypeCode)))));
         }
         return new ExportResult
         {
@@ -258,7 +263,8 @@ public class ExportReportQueryHandler
             for (var ci = 0; ci < columns.Count; ci++)
             {
                 var raw = rows[ri].TryGetValue(columns[ci].Key, out var v) ? v : null;
-                ws.Cell(ri + 2, ci + 1).Value = raw is null ? XLCellValue.FromObject(string.Empty) : XLCellValue.FromObject(raw);
+                var formatted = FormatFieldValue(raw, columns[ci].TypeCode);
+                ws.Cell(ri + 2, ci + 1).Value = formatted is null ? XLCellValue.FromObject(string.Empty) : XLCellValue.FromObject(formatted);
             }
         }
 
@@ -282,7 +288,42 @@ public class ExportReportQueryHandler
         return value;
     }
 
-    private record ColumnInfo(long Id, string Name)
+    private static string? FormatFieldValue(object? value, string typeCode)
+    {
+        if (value is null) return null;
+
+        if (typeCode is "DateRange" or "NumericRange")
+        {
+            string? start = null, end = null;
+            if (value is System.Collections.IDictionary dict)
+            {
+                start = dict["start"]?.ToString();
+                end   = dict["end"]?.ToString();
+            }
+            else if (value is string s)
+            {
+                try
+                {
+                    var je = JsonSerializer.Deserialize<JsonElement>(s);
+                    start = je.TryGetProperty("start", out var sv) ? sv.GetString() : null;
+                    end   = je.TryGetProperty("end",   out var ev) ? ev.GetString() : null;
+                }
+                catch { }
+            }
+            if (string.IsNullOrEmpty(start) && string.IsNullOrEmpty(end)) return null;
+            // Strip time component from date strings
+            if (typeCode == "DateRange")
+            {
+                start = start?.Split('T')[0];
+                end   = end?.Split('T')[0];
+            }
+            return $"{start ?? "…"} – {end ?? "…"}";
+        }
+
+        return value.ToString();
+    }
+
+    private record ColumnInfo(long Id, string Name, string TypeCode = "")
     {
         public string Key => Id.ToString();
     }

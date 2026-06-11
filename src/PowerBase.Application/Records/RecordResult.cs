@@ -12,7 +12,10 @@ public class RecordResult
     public long CreatedBy { get; init; }
     public Dictionary<string, object?> Fields { get; init; } = new();
 
-    public static RecordResult FromRow(IReadOnlyDictionary<string, object?> row, IReadOnlyList<AppField> fields)
+    public static RecordResult FromRow(
+        IReadOnlyDictionary<string, object?> row,
+        IReadOnlyList<AppField> fields,
+        IReadOnlyDictionary<long, string>? userNames = null)
     {
         var fieldData = new Dictionary<string, object?>();
         foreach (var field in fields)
@@ -31,7 +34,22 @@ public class RecordResult
             }
             else if (row.TryGetValue(col, out var val))
             {
-                fieldData[(field.Fid ?? field.Id).ToString()] = val;
+                // Resolve internal user IDs to display names for User/MultiUser and system user fields
+                var fid = (field.Fid ?? field.Id).ToString();
+                if (userNames != null && field.TypeCode is "User" or "MultiUser")
+                {
+                    fieldData[fid] = ResolveUserValue(val, userNames);
+                }
+                else if (userNames != null && field.IsSystem &&
+                         field.PhysicalColumnName is "CreatedBy" or "ModifiedBy" &&
+                         val is not null && long.TryParse(val.ToString(), out var uid))
+                {
+                    fieldData[fid] = userNames.TryGetValue(uid, out var name) ? name : val;
+                }
+                else
+                {
+                    fieldData[fid] = val;
+                }
             }
         }
 
@@ -45,5 +63,26 @@ public class RecordResult
             CreatedBy = createdBy,
             Fields = fieldData,
         };
+    }
+
+    private static object? ResolveUserValue(object? val, IReadOnlyDictionary<long, string> userNames)
+    {
+        if (val is null) return null;
+        // MultiUser stored as JSON array of IDs
+        var str = val.ToString()!;
+        if (str.TrimStart().StartsWith('['))
+        {
+            try
+            {
+                var ids = System.Text.Json.JsonSerializer.Deserialize<List<long>>(str);
+                if (ids != null)
+                    return ids.Select(id => userNames.TryGetValue(id, out var n) ? n : id.ToString()).ToList();
+            }
+            catch { }
+        }
+        // Single user — stored as long or GUID string; try long first
+        if (long.TryParse(str, out var uid))
+            return userNames.TryGetValue(uid, out var name) ? name : val;
+        return val;
     }
 }
