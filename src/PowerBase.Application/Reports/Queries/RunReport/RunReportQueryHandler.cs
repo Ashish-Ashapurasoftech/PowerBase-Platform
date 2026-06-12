@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Formulas;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
@@ -31,6 +32,7 @@ public class RunReportQueryHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IUserRepository _userRepo;
+    private readonly IFormulaProjector _formulaProjector;
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
@@ -38,7 +40,8 @@ public class RunReportQueryHandler
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
-        IUserRepository userRepo)
+        IUserRepository userRepo,
+        IFormulaProjector formulaProjector)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -46,6 +49,7 @@ public class RunReportQueryHandler
         _recordRepo = recordRepo;
         _enforcer = enforcer;
         _userRepo = userRepo;
+        _formulaProjector = formulaProjector;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -241,7 +245,8 @@ public class RunReportQueryHandler
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         var userNames = await ResolveUserNamesAsync(rows, selectedFields, _userRepo, ct);
-        var items = rows.Select(row => RecordResult.FromRow(row, selectedFields, userNames)).ToList();
+        var computed = _formulaProjector.Project(selectedFields, rows);
+        var items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
             FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id,
