@@ -11,4 +11,5 @@ public interface IUserRepository
     Task<IReadOnlyDictionary<long, string>> GetNamesByIdsAsync(IEnumerable<long> ids, CancellationToken ct = default);
     Task<long> CreateAsync(User user, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task ActivateAsync(long userId, string name, string hashedPassword, CancellationToken ct = default);
+    Task UpdatePasswordAsync(long userId, string hashedPassword, CancellationToken ct = default);
 }

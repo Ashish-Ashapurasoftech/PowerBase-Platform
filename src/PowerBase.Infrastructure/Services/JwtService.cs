@@ -123,4 +123,58 @@ public class JwtService : IJwtService
             return false;
         }
     }
+
+    public string GeneratePasswordResetToken(User user)
+    {
+        var expiresAt = DateTime.UtcNow.AddMinutes(30);
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secretKey));
+        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+        var claims = new List<Claim>
+        {
+            new("pr_sub", user.Id.ToString()),
+            new("pr_hash", user.HashedPassword)
+        }.ToArray();
+
+        var token = new JwtSecurityToken(
+            issuer: _issuer,
+            audience: _audience,
+            claims: claims,
+            expires: expiresAt,
+            signingCredentials: credentials);
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    public bool ValidatePasswordResetToken(string token, out long userId, out string passwordHash)
+    {
+        userId = 0; passwordHash = string.Empty;
+        try
+        {
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secretKey));
+            var handler = new JwtSecurityTokenHandler
+            {
+                MapInboundClaims = false
+            };
+            var principal = handler.ValidateToken(token, new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = key,
+                ValidateIssuer = true,
+                ValidIssuer = _issuer,
+                ValidateAudience = true,
+                ValidAudience = _audience,
+                ValidateLifetime = true,
+                ClockSkew = TimeSpan.Zero
+            }, out _);
+
+            userId = long.Parse(principal.FindFirst("pr_sub")!.Value);
+            passwordHash = principal.FindFirst("pr_hash")!.Value;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

@@ -239,13 +239,13 @@ public class RunReportQueryHandler
             }
         }
 
-        var rows = await _recordRepo.ListAsync(table, selectedFields, page, pageSize, filterTree, sortFields,
+        var rows = await _recordRepo.ListAsync(table, allFields, page, pageSize, filterTree, sortFields,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
         var total = await _recordRepo.CountAsync(table, allFields, filterTree,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
-        var userNames = await ResolveUserNamesAsync(rows, selectedFields, _userRepo, ct);
-        var computed = _formulaProjector.Project(selectedFields, rows);
+        var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct);
+        var computed = _formulaProjector.Project(allFields, rows);
         var items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {

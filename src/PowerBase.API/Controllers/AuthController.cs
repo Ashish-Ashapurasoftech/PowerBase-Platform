@@ -7,6 +7,8 @@ using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
 using PowerBase.Application.Auth.Queries.Login;
+using PowerBase.Application.Auth.Commands.ResetPassword;
+using PowerBase.Application.Auth.Commands.ForgotPassword;
 using PowerBase.Application.Common.Interfaces;
 
 namespace PowerBase.API.Controllers;
@@ -20,19 +22,25 @@ public class AuthController : ControllerBase
     private readonly GetMeQueryHandler _getMeHandler;
     private readonly SelectTenantCommandHandler _selectTenantHandler;
     private readonly AcceptInviteCommandHandler _acceptInviteHandler;
+    private readonly ForgotPasswordCommandHandler _forgotPasswordHandler;
+    private readonly ResetPasswordCommandHandler _resetPasswordHandler;
 
     public AuthController(
         SignupCommandHandler signupHandler,
         LoginQueryHandler loginHandler,
         GetMeQueryHandler getMeHandler,
         SelectTenantCommandHandler selectTenantHandler,
-        AcceptInviteCommandHandler acceptInviteHandler)
+        AcceptInviteCommandHandler acceptInviteHandler,
+        ForgotPasswordCommandHandler forgotPasswordHandler,
+        ResetPasswordCommandHandler resetPasswordHandler)
     {
         _signupHandler = signupHandler;
         _loginHandler = loginHandler;
         _getMeHandler = getMeHandler;
         _selectTenantHandler = selectTenantHandler;
         _acceptInviteHandler = acceptInviteHandler;
+        _forgotPasswordHandler = forgotPasswordHandler;
+        _resetPasswordHandler = resetPasswordHandler;
     }
 
     /// <summary>Register a new user account. Returns an identity token (no tenant context yet).</summary>
@@ -143,6 +151,37 @@ public class AuthController : ControllerBase
     {
         return Ok(new ApiResponse<IReadOnlySet<string>>(queryContext.Permissions));
     }
+
+    [HttpPost("forgot-password")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest request, CancellationToken ct)
+    {
+        var baseUrl = $"{Request.Scheme}://{Request.Host}{Request.PathBase}";
+        // It's usually better to use a configured frontend URL if the backend and frontend are hosted separately.
+        // For Powerbase, we'll try to get it from Origin or referer headers if possible, or fallback to config
+        var origin = Request.Headers["Origin"].ToString();
+        var appBaseUrl = !string.IsNullOrEmpty(origin) ? origin : baseUrl;
+
+        var command = new ForgotPasswordCommand(request.Email);
+        await _forgotPasswordHandler.HandleAsync(command, appBaseUrl, ct);
+        // Always return OK so as not to reveal whether an email exists
+        return Ok(new { Message = "If that email address exists in our system, you will receive a password reset link shortly." });
+    }
+
+    [HttpPost("reset-password")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest request, CancellationToken ct)
+    {
+        var command = new ResetPasswordCommand(request.Token, request.NewPassword);
+        await _resetPasswordHandler.HandleAsync(command, ct);
+        return Ok(new { Message = "Password has been reset successfully." });
+    }
+
+    public record ForgotPasswordRequest(string Email);
+    public record ResetPasswordRequest(string Token, string NewPassword);
 
     private static AuthResponse MapToAuthResponse(string token, DateTime expiresAt, Guid publicId,
         string email, string name, Guid tenantPublicId, string tenantName)

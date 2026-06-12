@@ -146,6 +146,9 @@ public sealed class TypeChecker
     {
         if (IsError(lt) || IsError(rt)) return FormulaType.Bool;
         if (lt == rt && IsOrderable(lt)) return FormulaType.Bool;
+        if ((lt == FormulaType.Number && rt == FormulaType.Duration) || 
+            (lt == FormulaType.Duration && rt == FormulaType.Number))
+            return FormulaType.Bool;
         Mismatch(b.Span, $"Operator '{Sym(b.Op)}' cannot compare {lt} and {rt}.");
         return FormulaType.Bool;
     }
@@ -154,6 +157,9 @@ public sealed class TypeChecker
     {
         if (IsError(lt) || IsError(rt)) return FormulaType.Bool;
         if (lt == rt && IsEquatable(lt)) return FormulaType.Bool;
+        if ((lt == FormulaType.Number && rt == FormulaType.Duration) || 
+            (lt == FormulaType.Duration && rt == FormulaType.Number))
+            return FormulaType.Bool;
         Mismatch(b.Span, $"Operator '{Sym(b.Op)}' cannot compare {lt} and {rt}.");
         return FormulaType.Bool;
     }

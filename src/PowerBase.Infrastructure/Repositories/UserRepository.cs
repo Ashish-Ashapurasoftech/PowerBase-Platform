@@ -47,6 +47,12 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
         WHERE Id = @userId AND IsActive = 0 AND IsDeleted = 0
         """;
 
+    private const string UpdatePasswordSql = """
+        UPDATE core.[User]
+        SET HashedPassword = @hashedPassword, ModifiedOn = SYSUTCDATETIME()
+        WHERE Id = @userId AND IsDeleted = 0
+        """;
+
     public UserRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
@@ -112,6 +118,13 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(ActivateSql, new { userId, name, hashedPassword }, cancellationToken: ct));
+    }
+
+    public async Task UpdatePasswordAsync(long userId, string hashedPassword, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdatePasswordSql, new { userId, hashedPassword }, cancellationToken: ct));
     }
 
 }

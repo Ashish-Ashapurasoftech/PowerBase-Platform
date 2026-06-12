@@ -50,18 +50,58 @@ public sealed class FormulaProjector : IFormulaProjector
             compiled.Add(((long)f.Fid!.Value, formula));
         }
 
+        var compiledDict = compiled.ToDictionary(c => c.Fid);
+        var sorted = new List<(long Fid, CompiledFormula? Formula)>(compiled.Count);
+        var visited = new HashSet<long>();
+        var visiting = new HashSet<long>();
+
+        void Visit(long fid)
+        {
+            if (visited.Contains(fid)) return;
+            if (visiting.Contains(fid)) return;
+
+            visiting.Add(fid);
+
+            if (compiledDict.TryGetValue(fid, out var item))
+            {
+                if (item.Formula != null)
+                {
+                    foreach (var depFid in item.Formula.ReferencedFieldIds)
+                    {
+                        Visit(depFid);
+                    }
+                }
+
+                visiting.Remove(fid);
+                visited.Add(fid);
+                sorted.Add(item);
+            }
+            else
+            {
+                visiting.Remove(fid);
+                visited.Add(fid);
+            }
+        }
+
+        foreach (var item in compiled)
+        {
+            Visit(item.Fid);
+        }
+
         var options = BuildOptions();
         var output = new List<IReadOnlyDictionary<long, object?>>(rows.Count);
         foreach (var row in rows)
         {
             var ctx = new RowRecordContext(row);
-            var map = new Dictionary<long, object?>(compiled.Count);
-            foreach (var (fid, formula) in compiled)
+            var map = new Dictionary<long, object?>(sorted.Count);
+            var projCtx = new ProjectorRecordContext(ctx, map);
+
+            foreach (var (fid, formula) in sorted)
             {
                 object? value = null;
                 if (formula is not null)
                 {
-                    try { value = FormulaRawValue.ToRaw(_engine.Evaluate(formula, ctx, options)); }
+                    try { value = FormulaRawValue.ToRaw(_engine.Evaluate(formula, projCtx, options)); }
                     catch (FormulaEvaluationException) { value = null; }
                 }
                 map[fid] = value;
@@ -78,4 +118,22 @@ public sealed class FormulaProjector : IFormulaProjector
             ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
             : null,
     };
+
+    private sealed class ProjectorRecordContext : IRecordContext
+    {
+        private readonly IRecordContext _inner;
+        private readonly Dictionary<long, object?> _computed;
+
+        public ProjectorRecordContext(IRecordContext inner, Dictionary<long, object?> computed)
+        {
+            _inner = inner;
+            _computed = computed;
+        }
+
+        public object? GetValue(long fid)
+        {
+            if (_computed.TryGetValue(fid, out var v)) return v;
+            return _inner.GetValue(fid);
+        }
+    }
 }

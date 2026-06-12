@@ -7,6 +7,7 @@ using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Application.Reports.Queries.GetReport;
 using PowerBase.Application.Reports.Queries.ListReports;
 using PowerBase.Application.Reports.Queries.RunReport;
+using PowerBase.Application.Formulas;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -24,6 +25,7 @@ public class ReportHandlerTests
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
     private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
+    private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
 
     private static AppTable MakeTable(long id = 5) => new()
     {
@@ -184,7 +186,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -220,7 +222,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 

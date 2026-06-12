@@ -13,6 +13,12 @@ internal static class ValueOps
     {
         if (l.IsNull && r.IsNull) return true;
         if (l.IsNull || r.IsNull) return false;
+
+        if (l.Type == FormulaType.Duration && r.Type == FormulaType.Number)
+            return l.AsDuration().TotalDays == (double)r.AsNumber();
+        if (l.Type == FormulaType.Number && r.Type == FormulaType.Duration)
+            return (double)l.AsNumber() == r.AsDuration().TotalDays;
+
         if (l.Type != r.Type) return false;
 
         return l.Type switch
@@ -28,14 +34,22 @@ internal static class ValueOps
         };
     }
 
-    /// <summary>Compares two non-null values of the same orderable type.</summary>
-    public static int Compare(FormulaValue l, FormulaValue r) => l.Type switch
+    /// <summary>Compares two non-null values of the same orderable type, or Duration and Number.</summary>
+    public static int Compare(FormulaValue l, FormulaValue r) 
     {
-        FormulaType.Number => l.AsNumber().CompareTo(r.AsNumber()),
-        FormulaType.Date => l.AsDate().CompareTo(r.AsDate()),
-        FormulaType.DateTime => l.AsDateTime().CompareTo(r.AsDateTime()),
-        FormulaType.Duration => l.AsDuration().CompareTo(r.AsDuration()),
-        FormulaType.Text => string.CompareOrdinal(l.AsText(), r.AsText()),
-        _ => 0,
-    };
+        if (l.Type == FormulaType.Duration && r.Type == FormulaType.Number)
+            return l.AsDuration().TotalDays.CompareTo((double)r.AsNumber());
+        if (l.Type == FormulaType.Number && r.Type == FormulaType.Duration)
+            return ((double)l.AsNumber()).CompareTo(r.AsDuration().TotalDays);
+
+        return l.Type switch
+        {
+            FormulaType.Number => l.AsNumber().CompareTo(r.AsNumber()),
+            FormulaType.Date => l.AsDate().CompareTo(r.AsDate()),
+            FormulaType.DateTime => l.AsDateTime().CompareTo(r.AsDateTime()),
+            FormulaType.Duration => l.AsDuration().CompareTo(r.AsDuration()),
+            FormulaType.Text => string.CompareOrdinal(l.AsText(), r.AsText()),
+            _ => 0,
+        };
+    }
 }

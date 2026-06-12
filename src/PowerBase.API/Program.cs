@@ -17,6 +17,8 @@ using PowerBase.Application.Apps.Queries.ListAppRoles;
 using PowerBase.Application.Apps.Queries.ListApps;
 using PowerBase.Application.Apps.Queries.ListAppUsers;
 using PowerBase.Application.Auth.Commands.AcceptInvite;
+using PowerBase.Application.Auth.Commands.ResetPassword;
+using PowerBase.Application.Auth.Commands.ForgotPassword;
 using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
@@ -196,6 +198,8 @@ builder.Services.AddScoped<IAdminRepository, AdminRepository>();
 
 // Handlers
 builder.Services.AddScoped<SignupCommandHandler>();
+builder.Services.AddScoped<ForgotPasswordCommandHandler>();
+builder.Services.AddScoped<ResetPasswordCommandHandler>();
 builder.Services.AddScoped<AcceptInviteCommandHandler>();
 builder.Services.AddScoped<LoginQueryHandler>();
 builder.Services.AddScoped<GetMeQueryHandler>();
