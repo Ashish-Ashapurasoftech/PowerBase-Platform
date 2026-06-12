@@ -10,17 +10,20 @@ public class BulkDeleteRecordsCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
+    private readonly IAuditRepository _auditRepo;
 
     public BulkDeleteRecordsCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
-        IRolePermissionEnforcer enforcer)
+        IRolePermissionEnforcer enforcer,
+        IAuditRepository auditRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _enforcer = enforcer;
+        _auditRepo = auditRepo;
     }
 
     public async Task HandleAsync(BulkDeleteRecordsCommand command, CancellationToken ct = default)
@@ -46,5 +49,13 @@ public class BulkDeleteRecordsCommandHandler
         }
 
         await _recordRepo.BulkDeleteAsync(table, command.RecordPublicIds, ct);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Deleted,
+            AuditEntityTypes.Record,
+            command.TablePublicId.ToString(),
+            $"{command.RecordPublicIds.Count} record(s) bulk-deleted from {table.Name}",
+            appId: table.AppId,
+            ct: ct);
     }
 }
