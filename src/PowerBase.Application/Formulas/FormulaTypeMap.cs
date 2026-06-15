@@ -1,4 +1,5 @@
 using System.Text.Json;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.FieldSettings;
 using PowerBase.Formula.Types;
 
@@ -48,4 +49,20 @@ internal static class FormulaTypeMap
         try { return JsonSerializer.Deserialize<FormulaSettings>(settingsJson, JsonOpts); }
         catch (JsonException) { return null; }
     }
+
+    /// <summary>The template of a Url field configured as a formula variant, or null otherwise.</summary>
+    public static string? UrlFormulaTemplate(string? settingsJson)
+    {
+        if (string.IsNullOrWhiteSpace(settingsJson)) return null;
+        try
+        {
+            var s = JsonSerializer.Deserialize<UrlSettings>(settingsJson, JsonOpts);
+            return s?.Variant == UrlVariants.Formula && !string.IsNullOrWhiteSpace(s.Template) ? s.Template : null;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>A field whose value is computed at read time: a Formula field, or a Url field with a formula template.</summary>
+    public static bool IsComputedField(string typeCode, string? settingsJson) =>
+        PhysicalNaming.IsComputedTypeCode(typeCode) || (typeCode == "Url" && UrlFormulaTemplate(settingsJson) != null);
 }

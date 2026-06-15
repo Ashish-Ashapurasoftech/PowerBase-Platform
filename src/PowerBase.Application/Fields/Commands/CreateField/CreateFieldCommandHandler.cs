@@ -91,6 +91,10 @@ public class CreateFieldCommandHandler
             Fid = nextFid,
             Settings = command.Settings,
             CreatedBy = _queryContext.UserId,
+            IsSearchable = true,
+            IsSortable = true,
+            IsFilterable = true,
+            IsReportable = true,
         };
 
         var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);

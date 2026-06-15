@@ -30,7 +30,7 @@ public sealed class FormulaProjector : IFormulaProjector
         IReadOnlyList<AppField> fields,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
     {
-        var formulaFields = fields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
+        var formulaFields = fields.Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings)).ToList();
         if (formulaFields.Count == 0 || rows.Count == 0)
             return rows.Select(_ => EmptyMap).ToList();
 
@@ -40,12 +40,24 @@ public sealed class FormulaProjector : IFormulaProjector
         var compiled = new List<(long Fid, CompiledFormula? Formula)>(formulaFields.Count);
         foreach (var f in formulaFields)
         {
-            var settings = FormulaTypeMap.ParseSettings(f.Settings);
             CompiledFormula? formula = null;
-            if (!string.IsNullOrWhiteSpace(settings?.Expression))
+            if (f.TypeCode == "Url")
             {
-                var c = _engine.Compile(settings!.Expression!, schema, FormulaTypeMap.ResultType(settings.ResultType));
-                formula = c.HasErrors ? null : c;
+                var tpl = FormulaTypeMap.UrlFormulaTemplate(f.Settings);
+                if (!string.IsNullOrWhiteSpace(tpl))
+                {
+                    var c = _engine.Compile(tpl!, schema, FormulaType.Text);
+                    formula = c.HasErrors ? null : c;
+                }
+            }
+            else
+            {
+                var settings = FormulaTypeMap.ParseSettings(f.Settings);
+                if (!string.IsNullOrWhiteSpace(settings?.Expression))
+                {
+                    var c = _engine.Compile(settings!.Expression!, schema, FormulaTypeMap.ResultType(settings.ResultType));
+                    formula = c.HasErrors ? null : c;
+                }
             }
             compiled.Add(((long)f.Fid!.Value, formula));
         }
