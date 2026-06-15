@@ -20,7 +20,13 @@ public sealed class AppFieldSchema : IFieldSchema
             if (!f.Fid.HasValue) continue;
             var type = FormulaTypeMap.FieldType(f.TypeCode, f.Settings);
             if (type is null) continue;
-            _byName[f.Name] = new FieldRef((long)f.Fid.Value, f.Name, type.Value);
+
+            var fid = (long)f.Fid.Value;
+            // Always register by internal name.
+            _byName[f.Name] = new FieldRef(fid, f.Name, type.Value);
+            // Also register by label when it differs, so [Label] and [Name] both resolve.
+            if (!string.IsNullOrWhiteSpace(f.Label) && !string.Equals(f.Label, f.Name, StringComparison.OrdinalIgnoreCase))
+                _byName[f.Label] = new FieldRef(fid, f.Label, type.Value);
         }
     }
 
