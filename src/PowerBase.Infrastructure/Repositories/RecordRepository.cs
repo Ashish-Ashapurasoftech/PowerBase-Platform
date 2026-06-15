@@ -29,13 +29,16 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var orderBy = sortFields?.Count > 0
-            ? string.Join(", ", sortFields.Select(s =>
-            {
-                var colName = fieldLookup.TryGetValue(s.FieldId, out var sf) && sf.IsSystem
-                    ? sf.PhysicalColumnName!
-                    : PhysicalNaming.ColumnName((int)s.FieldId);
-                return $"{colName} {(s.Desc ? "DESC" : "ASC")}";
-            }))
+            ? string.Join(", ", sortFields
+                .Where(s => !fieldLookup.TryGetValue(s.FieldId, out var sf2) || !PhysicalNaming.IsComputedTypeCode(sf2.TypeCode))
+                .Select(s =>
+                {
+                    var colName = fieldLookup.TryGetValue(s.FieldId, out var sf) && sf.IsSystem
+                        ? sf.PhysicalColumnName!
+                        : PhysicalNaming.ColumnName((int)s.FieldId);
+                    return $"{colName} {(s.Desc ? "DESC" : "ASC")}";
+                })
+                .DefaultIfEmpty("Id"))
             : "Id";
 
         var sql = $"""
@@ -343,6 +346,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
         IReadOnlyDictionary<long, AppField>? fieldLookup = null)
     {
+        // Skip formula/computed fields — they have no physical column; filtered in-memory instead.
+        if (fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var checkField)
+            && PhysicalNaming.IsComputedTypeCode(checkField.TypeCode))
+            return null;
+
         // Use the physical column name for system fields (Id, CreatedOn, etc.) rather than f_{fid}
         AppField? resolvedField = null;
         string col;

@@ -239,14 +239,62 @@ public class RunReportQueryHandler
             }
         }
 
-        var rows = await _recordRepo.ListAsync(table, allFields, page, pageSize, filterTree, sortFields,
-            restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-        var total = await _recordRepo.CountAsync(table, allFields, filterTree,
-            restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+        // Determine which field IDs are formula (compute-on-read, no physical column)
+        var formulaFids = allFields
+            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
 
-        var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct);
-        var computed = _formulaProjector.Project(allFields, rows);
-        var items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
+        var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(filterTree, formulaFids);
+        var hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
+
+        IReadOnlyList<RecordResult> items;
+        int total;
+
+        if (hasFormulaFilters || hasFormulaSorts)
+        {
+            // Strip formula conditions from the SQL filter tree; keep them for in-memory pass.
+            var (physicalFilterTree, formulaConditions) = FormulaFilterSorter.SplitFilterTree(filterTree, formulaFids);
+
+            // When sorts include formula fields, skip SQL ORDER BY (we'll re-sort everything in-memory).
+            IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
+
+            // Fetch ALL rows matching the physical filters (no SQL pagination).
+            const int maxRows = 50_000;
+            var allRows = await _recordRepo.ListAsync(table, allFields, 1, maxRows,
+                physicalFilterTree, sqlSorts,
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+
+            var allComputed = _formulaProjector.Project(allFields, allRows);
+            var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
+
+            // Apply formula-field conditions in memory.
+            if (formulaConditions.Count > 0)
+                pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions);
+
+            // If any sort key is a formula field, re-sort all rows in memory (covers all sort keys).
+            if (hasFormulaSorts)
+                pairs = FormulaFilterSorter.ApplySort(pairs, sortFields, allFields);
+
+            total = pairs.Count;
+
+            // Paginate in memory.
+            var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            var userNames = await ResolveUserNamesAsync(pagePairs.Select(p => p.Row), allFields, _userRepo, ct);
+            items = pagePairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
+        }
+        else
+        {
+            // Normal path — SQL handles pagination, sorting, and filtering entirely.
+            var rows = await _recordRepo.ListAsync(table, allFields, page, pageSize, filterTree, sortFields,
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            total = await _recordRepo.CountAsync(table, allFields, filterTree,
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+
+            var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct);
+            var computed = _formulaProjector.Project(allFields, rows);
+            items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
+        }
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
             FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id,
