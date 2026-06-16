@@ -101,10 +101,12 @@ public sealed class FormulaProjector : IFormulaProjector
         }
 
         var options = BuildOptions();
+        var fidToColMap = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value, f => f.PhysicalColumnName ?? string.Empty);
+
         var output = new List<IReadOnlyDictionary<long, object?>>(rows.Count);
         foreach (var row in rows)
         {
-            var ctx = new RowRecordContext(row);
+            var ctx = new RowRecordContext(row, fidToColMap);
             var map = new Dictionary<long, object?>(sorted.Count);
             var projCtx = new ProjectorRecordContext(ctx, map);
 

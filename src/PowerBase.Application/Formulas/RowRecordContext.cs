@@ -11,9 +11,19 @@ namespace PowerBase.Application.Formulas;
 public sealed class RowRecordContext : IRecordContext
 {
     private readonly IReadOnlyDictionary<string, object?> _row;
+    private readonly IReadOnlyDictionary<long, string> _fidToColMap;
 
-    public RowRecordContext(IReadOnlyDictionary<string, object?> row) => _row = row;
+    public RowRecordContext(IReadOnlyDictionary<string, object?> row, IReadOnlyDictionary<long, string> fidToColMap)
+    {
+        _row = row;
+        _fidToColMap = fidToColMap;
+    }
 
     public object? GetValue(long fid)
-        => _row.TryGetValue(PhysicalNaming.ColumnName((int)fid), out var v) ? v : null;
+    {
+        if (_fidToColMap.TryGetValue(fid, out var colName) && !string.IsNullOrEmpty(colName))
+            return _row.TryGetValue(colName, out var v) ? v : null;
+            
+        return _row.TryGetValue(PhysicalNaming.ColumnName((int)fid), out var fbv) ? fbv : null;
+    }
 }

@@ -220,10 +220,10 @@ public class RunReportQueryHandler
                 };
         }
 
-        // Apply Quick Search across all text fields (OR)
+        // Apply Quick Search across all searchable text fields (OR)
         if (!string.IsNullOrWhiteSpace(quickSearch))
         {
-            var textFields = allFields.Where(f => f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect").ToList();
+            var textFields = allFields.Where(f => f.IsSearchable && (f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")).ToList();
             if (textFields.Count > 0)
             {
                 var qsNodes = textFields.Select(f => new FilterNode
