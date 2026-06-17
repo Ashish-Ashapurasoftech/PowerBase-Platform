@@ -90,7 +90,7 @@ public class UpdateFieldCommandHandler
             command.Name, command.Label, command.Description,
             command.IsRequired, command.DefaultValue,
             command.IsSearchable, command.IsSortable,
-            command.IsFilterable, command.IsReportable,
+            command.IsFilterable, command.IsReportable, command.IsAuditable,
             command.IsUnique, command.Settings, ct);
 
         if (affected == 0)

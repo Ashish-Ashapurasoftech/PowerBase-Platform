@@ -165,6 +165,7 @@ public class TablesController : ControllerBase
         IsSortable = f.IsSortable,
         IsFilterable = f.IsFilterable,
         IsReportable = f.IsReportable,
+        IsAuditable = f.IsAuditable,
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
         Fid = f.Fid,

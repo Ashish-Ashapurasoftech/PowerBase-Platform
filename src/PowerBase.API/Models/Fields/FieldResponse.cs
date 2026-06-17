@@ -15,6 +15,7 @@ public class FieldResponse
     public bool IsSortable { get; init; }
     public bool IsFilterable { get; init; }
     public bool IsReportable { get; init; }
+    public bool IsAuditable { get; init; }
     public bool IsUnique { get; init; }
     public bool IsSystem { get; init; }
     public int? Fid { get; init; }

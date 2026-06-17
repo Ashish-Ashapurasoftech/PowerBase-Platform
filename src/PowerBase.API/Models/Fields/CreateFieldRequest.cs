@@ -8,5 +8,6 @@ public class CreateFieldRequest
     public string? Description { get; set; }
     public bool IsRequired { get; set; }
     public string? DefaultValue { get; set; }
+    public bool IsAuditable { get; set; } = true;
     public string? Settings { get; set; }
 }

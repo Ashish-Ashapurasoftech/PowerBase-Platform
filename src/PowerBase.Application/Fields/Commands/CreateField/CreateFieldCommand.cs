@@ -7,5 +7,6 @@ public record CreateFieldCommand(
     string? Label,
     string? Description,
     bool IsRequired,
+    bool IsAuditable = true,
     string? Settings = null,
     string? DefaultValue = null);
