@@ -31,8 +31,29 @@ internal static class FormulaTypeMap
         "User" => FormulaType.User,
         "MultiUser" => FormulaType.UserList,
         "Formula" => ResultType(ParseSettings(settingsJson)?.ResultType),
+        "Lookup" => LookupResultType(settingsJson),
+        "Summary" => SummaryResultType(settingsJson),
         _ => null,
     };
+
+    /// <summary>A Lookup presents the FormulaType of the parent field it pulls down (captured at creation).</summary>
+    private static FormulaType? LookupResultType(string? settingsJson)
+    {
+        var s = ParseLookupSettings(settingsJson);
+        return string.IsNullOrWhiteSpace(s?.SourceTypeCode) ? FormulaType.Text : FieldType(s!.SourceTypeCode!, null);
+    }
+
+    /// <summary>Count/Sum/Avg present as Number; Min/Max present as the aggregated field's type.</summary>
+    private static FormulaType? SummaryResultType(string? settingsJson)
+    {
+        var s = ParseSummarySettings(settingsJson);
+        if (s is null) return FormulaType.Number;
+        return s.Function switch
+        {
+            "Min" or "Max" when !string.IsNullOrWhiteSpace(s.TargetTypeCode) => FieldType(s.TargetTypeCode!, null),
+            _ => FormulaType.Number,
+        };
+    }
 
     /// <summary>Maps a <see cref="FormulaSettings.ResultType"/> string to a FormulaType (defaults to Text).</summary>
     public static FormulaType ResultType(string? resultType) =>
@@ -50,6 +71,27 @@ internal static class FormulaTypeMap
         catch (JsonException) { return null; }
     }
 
+    public static LookupSettings? ParseLookupSettings(string? settingsJson)
+    {
+        if (string.IsNullOrWhiteSpace(settingsJson)) return null;
+        try { return JsonSerializer.Deserialize<LookupSettings>(settingsJson, JsonOpts); }
+        catch (JsonException) { return null; }
+    }
+
+    public static SummarySettings? ParseSummarySettings(string? settingsJson)
+    {
+        if (string.IsNullOrWhiteSpace(settingsJson)) return null;
+        try { return JsonSerializer.Deserialize<SummarySettings>(settingsJson, JsonOpts); }
+        catch (JsonException) { return null; }
+    }
+
+    public static ReferenceSettings? ParseReferenceSettings(string? settingsJson)
+    {
+        if (string.IsNullOrWhiteSpace(settingsJson)) return null;
+        try { return JsonSerializer.Deserialize<ReferenceSettings>(settingsJson, JsonOpts); }
+        catch (JsonException) { return null; }
+    }
+
     /// <summary>The template of a Url field configured as a formula variant, or null otherwise.</summary>
     public static string? UrlFormulaTemplate(string? settingsJson)
     {
@@ -62,7 +104,19 @@ internal static class FormulaTypeMap
         catch (JsonException) { return null; }
     }
 
-    /// <summary>A field whose value is computed at read time: a Formula field, or a Url field with a formula template.</summary>
+    /// <summary>
+    /// A field whose value is computed at read time and has no physical column: a Formula,
+    /// Lookup or Summary field, or a Url field with a formula template. Used for the
+    /// in-memory filter/sort split (these fields cannot be filtered/sorted in SQL).
+    /// </summary>
     public static bool IsComputedField(string typeCode, string? settingsJson) =>
         PhysicalNaming.IsComputedTypeCode(typeCode) || (typeCode == "Url" && UrlFormulaTemplate(settingsJson) != null);
+
+    /// <summary>
+    /// A field computed specifically by the formula engine: a Formula field, or a Url field
+    /// with a formula template. Excludes Lookup/Summary (computed by the relationship
+    /// projector instead), so the formula projector never tries to compile them.
+    /// </summary>
+    public static bool IsFormulaComputed(string typeCode, string? settingsJson) =>
+        typeCode == "Formula" || (typeCode == "Url" && UrlFormulaTemplate(settingsJson) != null);
 }

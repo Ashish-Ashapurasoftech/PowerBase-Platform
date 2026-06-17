@@ -1,5 +1,6 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Relationships;
 using PowerBase.Application.Reports.Queries.RunReport;
 
 namespace PowerBase.Application.Records.Queries.ListRecords;
@@ -20,6 +21,7 @@ public class ListRecordsQueryHandler
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IUserRepository _userRepo;
     private readonly IFormulaProjector _formulaProjector;
+    private readonly IRelationalProjector _relationalProjector;
 
     public ListRecordsQueryHandler(
         IAppTableRepository tableRepo,
@@ -27,7 +29,8 @@ public class ListRecordsQueryHandler
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
         IUserRepository userRepo,
-        IFormulaProjector formulaProjector)
+        IFormulaProjector formulaProjector,
+        IRelationalProjector relationalProjector)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -35,6 +38,7 @@ public class ListRecordsQueryHandler
         _enforcer = enforcer;
         _userRepo = userRepo;
         _formulaProjector = formulaProjector;
+        _relationalProjector = relationalProjector;
     }
 
     public async Task<PagedRecordResult> HandleAsync(ListRecordsQuery query, CancellationToken ct = default)
@@ -57,7 +61,8 @@ public class ListRecordsQueryHandler
             table, fields, filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         var userNames = await RunReportQueryHandler.ResolveUserNamesAsync(rows, visibleFields, _userRepo, ct);
-        var computed = _formulaProjector.Project(visibleFields, rows);
+        var relational = await _relationalProjector.ProjectAsync(table, visibleFields, rows, ct);
+        var computed = _formulaProjector.Project(visibleFields, rows, relational);
 
         return new PagedRecordResult
         {

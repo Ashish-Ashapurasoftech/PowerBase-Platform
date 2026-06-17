@@ -1,5 +1,6 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -57,6 +58,9 @@ public class CreateRecordCommandHandler
             if (blocked.Count > 0)
                 throw new UnauthorizedActionException("You do not have permission to write to one or more of the specified fields.");
         }
+
+        // Reference fields must point at an existing parent record.
+        await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _recordRepo, ct);
 
         // Inject default values for fields that were not submitted (e.g. hidden None-access fields).
         // This ensures required fields with defaults are always populated regardless of role restrictions.

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Relationships;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -62,6 +63,131 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+    }
+
+    public async Task<bool> ExistsAsync(AppTable table, long recordId, CancellationToken ct = default)
+    {
+        var sql = $"""
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1 FROM {PhysicalNaming.FullTableName(table.Id)} WHERE Id = @recordId AND IsDeleted = 0
+            ) THEN 1 ELSE 0 END AS BIT)
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, new { recordId }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<long>> GetIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default)
+    {
+        if (publicIds.Count == 0) return [];
+        var sql = $"SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @publicIds AND IsDeleted = 0";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var ids = await connection.QueryAsync<long>(new CommandDefinition(sql, new { publicIds }, cancellationToken: ct));
+        return ids.AsList();
+    }
+
+    public async Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default)
+    {
+        var col = PhysicalNaming.ColumnName(referenceFid);
+        var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(childTable.Id)} WHERE IsDeleted = 0 AND {col} = @parentRecordId";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, new { parentRecordId }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
+        AppTable parentTable, AppField? labelField, string? search, int take, CancellationToken ct = default)
+    {
+        take = Math.Clamp(take, 1, 200);
+        var labelExpr = LabelColumnExpr(labelField);
+
+        var parameters = new DynamicParameters();
+        var where = "IsDeleted = 0";
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            parameters.Add("search", $"%{search}%");
+            where += $" AND {labelExpr} LIKE @search";
+        }
+        parameters.Add("take", take);
+
+        var sql = $"""
+            SELECT TOP (@take) Id, {labelExpr} AS Label
+            FROM {PhysicalNaming.FullTableName(parentTable.Id)}
+            WHERE {where}
+            ORDER BY {labelExpr}
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<ReferenceOption>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> ids, CancellationToken ct = default)
+    {
+        var result = new Dictionary<long, IReadOnlyDictionary<string, object?>>();
+        if (ids.Count == 0) return result;
+
+        var fieldCols = BuildFieldColumnList(fields);
+        var sql = $"""
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND Id IN @ids
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, new { ids }, cancellationToken: ct));
+        foreach (var row in rows)
+        {
+            IReadOnlyDictionary<string, object?> dict = ToDictionary(row);
+            if (dict.TryGetValue("Id", out var idVal) && idVal is not null)
+                result[Convert.ToInt64(idVal)] = dict;
+        }
+        return result;
+    }
+
+    public async Task<IReadOnlyDictionary<long, object?>> AggregateByReferenceAsync(
+        AppTable childTable, int referenceFid, string function, int? targetFid,
+        IReadOnlyCollection<long> parentIds, FilterGroup? filterTree, CancellationToken ct = default)
+    {
+        var result = new Dictionary<long, object?>();
+        if (parentIds.Count == 0) return result;
+
+        var refCol = PhysicalNaming.ColumnName(referenceFid);
+        var aggExpr = function switch
+        {
+            "Count" => "COUNT(*)",
+            "Sum" when targetFid.HasValue => $"SUM(CAST({PhysicalNaming.ColumnName(targetFid.Value)} AS DECIMAL(18,4)))",
+            "Avg" when targetFid.HasValue => $"AVG(CAST({PhysicalNaming.ColumnName(targetFid.Value)} AS DECIMAL(18,4)))",
+            "Min" when targetFid.HasValue => $"MIN({PhysicalNaming.ColumnName(targetFid.Value)})",
+            "Max" when targetFid.HasValue => $"MAX({PhysicalNaming.ColumnName(targetFid.Value)})",
+            _ => "COUNT(*)",
+        };
+
+        var parameters = new DynamicParameters();
+        parameters.Add("parentIds", parentIds);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
+
+        var sql = $"""
+            SELECT {refCol} AS ParentId, {aggExpr} AS Value
+            FROM {PhysicalNaming.FullTableName(childTable.Id)}
+            WHERE IsDeleted = 0 AND {refCol} IN @parentIds{filterWhere}
+            GROUP BY {refCol}
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        foreach (var row in rows)
+        {
+            var dict = (IDictionary<string, object>)row;
+            if (dict.TryGetValue("ParentId", out var pid) && pid is not null && pid != DBNull.Value)
+                result[Convert.ToInt64(pid)] = dict.TryGetValue("Value", out var v) && v != DBNull.Value ? v : null;
+        }
+        return result;
+    }
+
+    private static string LabelColumnExpr(AppField? labelField)
+    {
+        if (labelField is null) return "CAST(Id AS NVARCHAR(400))";
+        var col = labelField.IsSystem && !string.IsNullOrEmpty(labelField.PhysicalColumnName)
+            ? labelField.PhysicalColumnName!
+            : PhysicalNaming.ColumnName(labelField.Fid!.Value);
+        return $"CAST({col} AS NVARCHAR(400))";
     }
 
     public async Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(

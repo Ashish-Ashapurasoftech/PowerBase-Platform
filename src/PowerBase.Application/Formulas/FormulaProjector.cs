@@ -28,11 +28,12 @@ public sealed class FormulaProjector : IFormulaProjector
 
     public IReadOnlyList<IReadOnlyDictionary<long, object?>> Project(
         IReadOnlyList<AppField> fields,
-        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
+        IReadOnlyList<IReadOnlyDictionary<long, object?>>? seed = null)
     {
-        var formulaFields = fields.Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings)).ToList();
+        var formulaFields = fields.Where(f => f.Fid.HasValue && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)).ToList();
         if (formulaFields.Count == 0 || rows.Count == 0)
-            return rows.Select(_ => EmptyMap).ToList();
+            return seed ?? rows.Select(_ => EmptyMap).ToList();
 
         var schema = new AppFieldSchema(fields);
 
@@ -104,10 +105,15 @@ public sealed class FormulaProjector : IFormulaProjector
         var fidToColMap = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value, f => f.PhysicalColumnName ?? string.Empty);
 
         var output = new List<IReadOnlyDictionary<long, object?>>(rows.Count);
-        foreach (var row in rows)
+        for (var i = 0; i < rows.Count; i++)
         {
+            var row = rows[i];
             var ctx = new RowRecordContext(row, fidToColMap);
-            var map = new Dictionary<long, object?>(sorted.Count);
+            // Seed with relational (Lookup/Summary) values so the final map carries them through
+            // AND formulas can reference a lookup's value.
+            var map = seed != null && i < seed.Count
+                ? new Dictionary<long, object?>(seed[i])
+                : new Dictionary<long, object?>(sorted.Count);
             var projCtx = new ProjectorRecordContext(ctx, map);
 
             foreach (var (fid, formula) in sorted)

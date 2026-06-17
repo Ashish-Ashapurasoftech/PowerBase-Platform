@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using ClosedXML.Excel;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Formulas;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using RunReport = PowerBase.Application.Reports.Queries.RunReport;
@@ -17,6 +18,8 @@ public class ExportReportQueryHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IUserRepository _userRepo;
+    private readonly IFormulaProjector _formulaProjector;
+    private readonly Relationships.IRelationalProjector _relationalProjector;
 
     public ExportReportQueryHandler(
         IReportRepository reportRepo,
@@ -24,7 +27,9 @@ public class ExportReportQueryHandler
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
-        IUserRepository userRepo)
+        IUserRepository userRepo,
+        IFormulaProjector formulaProjector,
+        Relationships.IRelationalProjector relationalProjector)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -32,6 +37,8 @@ public class ExportReportQueryHandler
         _recordRepo = recordRepo;
         _enforcer = enforcer;
         _userRepo = userRepo;
+        _formulaProjector = formulaProjector;
+        _relationalProjector = relationalProjector;
     }
 
     public async Task<ExportResult> HandleAsync(ExportReportQuery query, CancellationToken ct = default)
@@ -124,10 +131,30 @@ public class ExportReportQueryHandler
                 };
         }
 
-        var rows = await _recordRepo.ListAsync(table, selectedFields, 1, 50_000, filterTree, sortFields,
+        // Formula fields have no physical column — strip them from the SQL filter/sort and
+        // apply them in-memory after projection (same approach as RunReportQueryHandler).
+        var formulaFids = allFields
+            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
+
+        var (physicalFilterTree, formulaConditions) = FormulaFilterSorter.SplitFilterTree(filterTree, formulaFids);
+        var hasFormulaSorts = sortFields.Any(s => formulaFids.Contains(s.FieldId));
+        IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
+
+        var rows = await _recordRepo.ListAsync(table, allFields, 1, 50_000, physicalFilterTree, sqlSorts,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-        var userNames = await RunReport.RunReportQueryHandler.ResolveUserNamesAsync(rows, selectedFields, _userRepo, ct);
-        var items = rows.Select(row => RecordResult.FromRow(row, selectedFields, userNames)).ToList();
+        var relational = await _relationalProjector.ProjectAsync(table, allFields, rows, ct);
+        var computed = _formulaProjector.Project(allFields, rows, relational);
+        var pairs = rows.Zip(computed, (r, c) => (Row: r, Computed: c)).ToList();
+
+        if (formulaConditions.Count > 0)
+            pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions);
+        if (hasFormulaSorts)
+            pairs = FormulaFilterSorter.ApplySort(pairs, sortFields, allFields);
+
+        var userNames = await RunReport.RunReportQueryHandler.ResolveUserNamesAsync(pairs.Select(p => p.Row), allFields, _userRepo, ct);
+        var items = pairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
 
         var columns = selectedFields.Select(f => new ColumnInfo(f.Id, string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, f.TypeCode)).ToList();
         return BuildExport(columns, items.Select(r => r.Fields).ToList(), safeName, format);

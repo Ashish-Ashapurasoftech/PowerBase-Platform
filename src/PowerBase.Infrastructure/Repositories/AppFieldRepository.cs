@@ -66,6 +66,10 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         UPDATE meta.AppField SET PhysicalColumnName = @physicalColumnName WHERE Id = @id
         """;
 
+    private const string UpdateSettingsSql = """
+        UPDATE meta.AppField SET Settings = @settings, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy WHERE Id = @id
+        """;
+
     private const string GetByPublicIdSql = $"""
         SELECT {SelectColumns}
         FROM meta.AppField af
@@ -169,6 +173,13 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePhysicalColumnNameSql, new { id, physicalColumnName }, cancellationToken: ct));
+    }
+
+    public async Task UpdateSettingsAsync(long id, string? settings, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateSettingsSql, new { id, settings, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
     public async Task<AppField?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)

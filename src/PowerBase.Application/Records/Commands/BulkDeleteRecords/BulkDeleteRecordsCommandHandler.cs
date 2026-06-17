@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -11,19 +12,22 @@ public class BulkDeleteRecordsCommandHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
+    private readonly IRelationshipRepository _relRepo;
 
     public BulkDeleteRecordsCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IRelationshipRepository relRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _enforcer = enforcer;
         _auditRepo = auditRepo;
+        _relRepo = relRepo;
     }
 
     public async Task HandleAsync(BulkDeleteRecordsCommand command, CancellationToken ct = default)
@@ -46,6 +50,14 @@ public class BulkDeleteRecordsCommandHandler
                 foreach (var id in command.RecordPublicIds)
                     await _enforcer.EnsureRecordOwnedAsync(table, id, ct);
             }
+        }
+
+        // One-to-many restrict: block deletion while child records still reference these parents.
+        var parentRels = await _relRepo.ListByParentTableAsync(table.Id, ct);
+        if (parentRels.Count > 0)
+        {
+            var ids = await _recordRepo.GetIdsByPublicIdsAsync(table, command.RecordPublicIds, ct);
+            await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _recordRepo, ct);
         }
 
         await _recordRepo.BulkDeleteAsync(table, command.RecordPublicIds, ct);

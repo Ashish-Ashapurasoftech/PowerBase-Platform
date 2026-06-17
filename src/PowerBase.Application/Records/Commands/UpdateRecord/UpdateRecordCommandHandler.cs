@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -64,6 +65,9 @@ public class UpdateRecordCommandHandler
             if (blocked.Count > 0)
                 throw new UnauthorizedActionException("You do not have permission to write to one or more of the specified fields.");
         }
+
+        // Reference fields must point at an existing parent record.
+        await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _recordRepo, ct);
 
         // Fetch old values before update so we can diff them
         var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, command.RecordPublicId, ct);

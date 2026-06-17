@@ -25,6 +25,8 @@ public class RecordHandlerTests
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
     private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
     private readonly IFormulaDefaultResolver _formulaDefaults = Substitute.For<IFormulaDefaultResolver>();
+    private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
+    private readonly PowerBase.Application.Relationships.IRelationalProjector _relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
 
     public RecordHandlerTests()
     {
@@ -37,9 +39,17 @@ public class RecordHandlerTests
             });
 
         // Default: no formula fields — an empty computed-value map per row.
-        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>())
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>())
             .Returns(ci => ci.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
                 .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+
+        // Default: no relationship fields — an empty computed-value map per row.
+        _relationalProjector.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)ci.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
+                .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+
+        // Default: no relationships where this table is the parent (delete restrict is a no-op).
+        _relRepo.ListByParentTableAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(new List<Relationship>());
     }
 
     private static AppTable MakeTable(long id = 5) => new()
@@ -135,7 +145,7 @@ public class RecordHandlerTests
         var table = MakeTable();
         var recordId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
-        var sut = new DeleteRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo);
+        var sut = new DeleteRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _relRepo);
 
         await sut.HandleAsync(new DeleteRecordCommand(table.PublicId, recordId));
 
@@ -155,7 +165,7 @@ public class RecordHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
         _recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordPublicId)
             .Returns(row);
-        var sut = new GetRecordQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector);
+        var sut = new GetRecordQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
 
         var result = await sut.HandleAsync(new GetRecordQuery(table.PublicId, recordPublicId));
 
@@ -175,7 +185,7 @@ public class RecordHandlerTests
         _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20)
             .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
         _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>()).Returns(1);
-        var sut = new ListRecordsQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector);
+        var sut = new ListRecordsQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
 
         var result = await sut.HandleAsync(new ListRecordsQuery(table.PublicId, 1, 20));
 
@@ -196,7 +206,7 @@ public class RecordHandlerTests
         _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>())
             .Returns(new List<IReadOnlyDictionary<string, object?>>());
         _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>()).Returns(0);
-        var sut = new ListRecordsQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector);
+        var sut = new ListRecordsQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
 
         var result = await sut.HandleAsync(new ListRecordsQuery(table.PublicId, inputPage, 20));
 

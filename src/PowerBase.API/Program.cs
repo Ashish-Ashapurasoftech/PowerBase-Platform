@@ -171,6 +171,7 @@ builder.Services.AddScoped<FieldSettingsValidatorRegistry>();
 // Formula engine (stateless, shared) + compute-on-read projector + authoring query handlers
 builder.Services.AddSingleton<PowerBase.Formula.FormulaEngine>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaProjector, PowerBase.Application.Formulas.FormulaProjector>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.IRelationalProjector, PowerBase.Application.Relationships.RelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.Queries.ValidateFormulaQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.Queries.EvaluateFormulaQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaDefaultResolver, PowerBase.Application.Formulas.FormulaDefaultResolver>();
@@ -195,6 +196,7 @@ builder.Services.AddScoped<IPermissionRepository, PermissionRepository>();
 builder.Services.AddScoped<IUserPermissionRepository, UserPermissionRepository>();
 builder.Services.AddScoped<IFormRepository, FormRepository>();
 builder.Services.AddScoped<IFormRuleRepository, FormRuleRepository>();
+builder.Services.AddScoped<IRelationshipRepository, RelationshipRepository>();
 builder.Services.AddScoped<IAdminRepository, AdminRepository>();
 
 // Handlers
@@ -248,6 +250,10 @@ builder.Services.AddScoped<BulkDeleteRecordsCommandHandler>();
 builder.Services.AddScoped<ListRecordsQueryHandler>();
 builder.Services.AddScoped<GetRecordQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetDistinctFieldValues.GetDistinctFieldValuesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.CreateRelationship.CreateRelationshipCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.DeleteRelationship.DeleteRelationshipCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentOptionsQueryHandler>();
 builder.Services.AddScoped<CreateReportCommandHandler>();
 builder.Services.AddScoped<UpdateReportCommandHandler>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();

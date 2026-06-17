@@ -33,6 +33,7 @@ public class RunReportQueryHandler
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IUserRepository _userRepo;
     private readonly IFormulaProjector _formulaProjector;
+    private readonly Relationships.IRelationalProjector _relationalProjector;
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
@@ -41,7 +42,8 @@ public class RunReportQueryHandler
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
         IUserRepository userRepo,
-        IFormulaProjector formulaProjector)
+        IFormulaProjector formulaProjector,
+        Relationships.IRelationalProjector relationalProjector)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -50,6 +52,7 @@ public class RunReportQueryHandler
         _enforcer = enforcer;
         _userRepo = userRepo;
         _formulaProjector = formulaProjector;
+        _relationalProjector = relationalProjector;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -265,7 +268,8 @@ public class RunReportQueryHandler
                 physicalFilterTree, sqlSorts,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
-            var allComputed = _formulaProjector.Project(allFields, allRows);
+            var allRelational = await _relationalProjector.ProjectAsync(table, allFields, allRows, ct);
+            var allComputed = _formulaProjector.Project(allFields, allRows, allRelational);
             var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
 
             // Apply formula-field conditions in memory.
@@ -292,7 +296,8 @@ public class RunReportQueryHandler
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
             var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct);
-            var computed = _formulaProjector.Project(allFields, rows);
+            var relational = await _relationalProjector.ProjectAsync(table, allFields, rows, ct);
+            var computed = _formulaProjector.Project(allFields, rows, relational);
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
         }
         var columns = selectedFields.Select(f => new ReportColumnInfo

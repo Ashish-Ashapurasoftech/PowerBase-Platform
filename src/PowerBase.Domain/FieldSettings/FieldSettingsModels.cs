@@ -139,3 +139,69 @@ public static class FormulaResultTypes
 
     public static readonly string[] All = [Text, Number, Date, DateTime, Duration, Bool, User];
 }
+
+// ── Relationship field settings ──────────────────────────────────────────────
+
+/// <summary>
+/// Settings for a Reference field (lives on the child table). A Reference is a physical
+/// BIGINT column holding the parent row Id; these settings record which relationship and
+/// parent table it belongs to so the picker and projector can resolve it.
+/// </summary>
+public sealed class ReferenceSettings
+{
+    public long? RelationshipId { get; set; }
+    /// <summary>The parent table's <see cref="Entities.AppTable.Id"/>.</summary>
+    public long? ParentTableId { get; set; }
+}
+
+/// <summary>
+/// Settings for a Lookup field (lives on the child table). Pulls one parent field's value
+/// onto each child via the reference. Computed at read time, no physical column.
+/// Field references are <c>Fid</c> values (the per-table field number used in physical
+/// columns <c>f_{fid}</c>), matching the data/report plane.
+/// </summary>
+public sealed class LookupSettings
+{
+    public long? RelationshipId { get; set; }
+    /// <summary>The child reference field's Fid (its <c>f_{fid}</c> column holds the parent row Id).</summary>
+    public int? ReferenceFid { get; set; }
+    /// <summary>The parent table's <see cref="Entities.AppTable.Id"/>.</summary>
+    public long? SourceTableId { get; set; }
+    /// <summary>The parent field's Fid whose value is pulled down.</summary>
+    public int? SourceFid { get; set; }
+    /// <summary>The source field's TypeCode, captured at creation so the value can be rendered/typed
+    /// without a cross-table lookup (e.g. for formula type-mapping).</summary>
+    public string? SourceTypeCode { get; set; }
+}
+
+/// <summary>
+/// Settings for a Summary field (lives on the parent table). Aggregates related child
+/// records back up onto the parent. Computed at read time, no physical column.
+/// </summary>
+public sealed class SummarySettings
+{
+    public long? RelationshipId { get; set; }
+    /// <summary>The child table's <see cref="Entities.AppTable.Id"/>.</summary>
+    public long? ChildTableId { get; set; }
+    /// <summary>The child reference field's Fid that points back to this parent.</summary>
+    public int? ReferenceFid { get; set; }
+    /// <summary>One of <see cref="SummaryFunctions"/>.</summary>
+    public string? Function { get; set; }
+    /// <summary>The child field's Fid to aggregate; null ⇒ Count.</summary>
+    public int? TargetFid { get; set; }
+    /// <summary>The target field's TypeCode (for Min/Max result typing/rendering); null for Count.</summary>
+    public string? TargetTypeCode { get; set; }
+    /// <summary>Optional child-record filter (serialized FilterGroup JSON) applied before aggregating.</summary>
+    public string? FilterTree { get; set; }
+}
+
+public static class SummaryFunctions
+{
+    public const string Count = "Count";
+    public const string Sum = "Sum";
+    public const string Avg = "Avg";
+    public const string Min = "Min";
+    public const string Max = "Max";
+
+    public static readonly string[] All = [Count, Sum, Avg, Min, Max];
+}

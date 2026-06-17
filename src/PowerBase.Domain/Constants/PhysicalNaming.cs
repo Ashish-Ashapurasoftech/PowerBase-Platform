@@ -11,7 +11,12 @@ public static class PhysicalNaming
     public static bool IsRangeTypeCode(string typeCode) =>
         typeCode is "DateRange" or "NumericRange";
 
-    /// <summary>Field types computed at read time (Formula) — they have no physical storage column.</summary>
+    /// <summary>
+    /// Field types computed at read time — they have no physical storage column.
+    /// Formula values come from the formula engine; Lookup/Summary values come from the
+    /// relationship projector (cross-table). Reference is NOT computed — it is a physical
+    /// BIGINT foreign-key column.
+    /// </summary>
     public static bool IsComputedTypeCode(string typeCode) =>
-        typeCode is "Formula";
+        typeCode is "Formula" or "Lookup" or "Summary";
 }

@@ -26,6 +26,7 @@ public class ReportHandlerTests
     private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
     private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
+    private readonly PowerBase.Application.Relationships.IRelationalProjector _relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
 
     private static AppTable MakeTable(long id = 5) => new()
     {
@@ -64,6 +65,11 @@ public class ReportHandlerTests
     {
         _queryContext.TenantId.Returns(1L);
         _queryContext.UserId.Returns(1L);
+
+        // Default: no relationship fields — an empty computed-value map per row.
+        _relationalProjector.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => (IReadOnlyList<IReadOnlyDictionary<long, object?>>)ci.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
+                .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
     }
 
     // --- CreateReportCommandHandler ---
@@ -186,7 +192,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -222,7 +228,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
