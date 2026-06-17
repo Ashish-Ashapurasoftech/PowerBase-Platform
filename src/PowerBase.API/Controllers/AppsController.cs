@@ -14,6 +14,7 @@ using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.ValueObjects;
 using System.Text.Json;
+using PowerBase.Application.Apps.Queries.GetAppStorageUsage;
 
 namespace PowerBase.API.Controllers;
 
@@ -29,6 +30,7 @@ public class AppsController : ControllerBase
     private readonly PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler _getPermissionsHandler;
     private readonly GetRolesReportsMatrixQueryHandler _getRolesReportsMatrixHandler;
     private readonly UpdateReportVisibilityMatrixCommandHandler _updateReportVisibilityMatrixHandler;
+    private readonly GetAppStorageUsageQueryHandler _getStorageUsageHandler;
     private readonly IAppRepository _appRepo;
     private readonly IQueryContext _queryContext;
 
@@ -41,6 +43,7 @@ public class AppsController : ControllerBase
         PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler getPermissionsHandler,
         GetRolesReportsMatrixQueryHandler getRolesReportsMatrixHandler,
         UpdateReportVisibilityMatrixCommandHandler updateReportVisibilityMatrixHandler,
+        GetAppStorageUsageQueryHandler getStorageUsageHandler,
         IAppRepository appRepo,
         IQueryContext queryContext)
     {
@@ -52,6 +55,7 @@ public class AppsController : ControllerBase
         _getPermissionsHandler = getPermissionsHandler;
         _getRolesReportsMatrixHandler = getRolesReportsMatrixHandler;
         _updateReportVisibilityMatrixHandler = updateReportVisibilityMatrixHandler;
+        _getStorageUsageHandler = getStorageUsageHandler;
         _appRepo = appRepo;
         _queryContext = queryContext;
     }
@@ -187,6 +191,18 @@ public class AppsController : ControllerBase
     {
         var app = await _getHandler.HandleAsync(new GetAppQuery(publicId), ct);
         return Ok(new ApiResponse<AppResponse>(MapToAppResponse(app)));
+    }
+
+    /// <summary>Get dynamic storage usage for the database and files directory of this app.</summary>
+    [HttpGet("{publicId:guid}/storage-usage")]
+    [RequirePermission(PermissionCodes.AppsRead)]
+    [ProducesResponseType(typeof(ApiResponse<AppStorageUsageResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetStorageUsage(Guid publicId, CancellationToken ct)
+    {
+        var result = await _getStorageUsageHandler.HandleAsync(new GetAppStorageUsageQuery(publicId), ct);
+        return Ok(new ApiResponse<AppStorageUsageResult>(result));
     }
 
     /// <summary>Get current user's active permissions for this app.</summary>

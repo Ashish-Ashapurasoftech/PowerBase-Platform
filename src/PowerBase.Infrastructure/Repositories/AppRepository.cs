@@ -1,4 +1,7 @@
 using Dapper;
+using Microsoft.Extensions.Configuration;
+using System.IO;
+using System.Linq;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
 using PowerBase.Application.Common.Models;
@@ -119,8 +122,13 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
           AND IsDeleted = 0
         """;
 
-    public AppRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IConfiguration _configuration;
+
+    public AppRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IConfiguration configuration)
+        : base(connectionFactory, queryContext)
+    {
+        _configuration = configuration;
+    }
 
     public async Task<App> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
@@ -239,6 +247,33 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
                 publicId, name, description, icon, color, formatting, securityOptions,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
+    }
+
+    public async Task<long> GetDatabaseSizeBytesAsync(CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<long>(
+            "SELECT SUM(CAST(size AS BIGINT)) * 8192 FROM sys.database_files"
+        );
+    }
+
+    public Task<long> GetFileStorageSizeBytesAsync(CancellationToken ct = default)
+    {
+        var localPath = _configuration["Storage:LocalPath"] ?? "C:\\PowerbaseUploads";
+        long size = 0;
+        try
+        {
+            if (Directory.Exists(localPath))
+            {
+                var dirInfo = new DirectoryInfo(localPath);
+                size = dirInfo.EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length);
+            }
+        }
+        catch
+        {
+            size = 0;
+        }
+        return Task.FromResult(size);
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)

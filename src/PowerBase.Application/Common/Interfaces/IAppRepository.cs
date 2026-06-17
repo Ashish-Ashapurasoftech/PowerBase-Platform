@@ -18,5 +18,7 @@ public interface IAppRepository
     Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, string? formatting, string? securityOptions, CancellationToken ct = default);
     Task SetDefaultRoleAsync(long appId, long roleId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<long?> GetDefaultRoleIdAsync(long appId, CancellationToken ct = default);
+    Task<long> GetDatabaseSizeBytesAsync(CancellationToken ct = default);
+    Task<long> GetFileStorageSizeBytesAsync(CancellationToken ct = default);
     Task DeleteAsync(Guid publicId, CancellationToken ct = default);
 }

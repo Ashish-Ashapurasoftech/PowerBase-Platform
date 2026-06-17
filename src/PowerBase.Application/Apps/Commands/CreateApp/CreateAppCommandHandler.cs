@@ -33,6 +33,7 @@ public class CreateAppCommandHandler
     private readonly IFieldTypeRepository _fieldTypeRepo;
     private readonly IFormRepository _formRepo;
     private readonly IUserRepository _userRepo;
+    private readonly IAppRolePermissionRepository _permRepo;
 
     public CreateAppCommandHandler(
         IAppRepository appRepo,
@@ -47,7 +48,8 @@ public class CreateAppCommandHandler
         IReportRepository reportRepo,
         IFieldTypeRepository fieldTypeRepo,
         IFormRepository formRepo,
-        IUserRepository userRepo)
+        IUserRepository userRepo,
+        IAppRolePermissionRepository permRepo)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
@@ -62,6 +64,7 @@ public class CreateAppCommandHandler
         _fieldTypeRepo = fieldTypeRepo;
         _formRepo = formRepo;
         _userRepo = userRepo;
+        _permRepo = permRepo;
     }
 
     public async Task<CreateAppResult> HandleAsync(CreateAppCommand command, CancellationToken ct = default)
@@ -284,6 +287,8 @@ public class CreateAppCommandHandler
                 Blocks      = [defaultBlock],
             };
             await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
+
+            await _permRepo.SeedDefaultsForTableAsync(tableId, appId, ct);
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), $"Application added: {command.Name}", appId: appId, ct: ct);

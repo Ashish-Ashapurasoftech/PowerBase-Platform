@@ -238,6 +238,7 @@ builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetRecordFilters.G
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.UpdateRecordFilters.UpdateRecordFiltersCommandHandler>();
 builder.Services.AddScoped<DeleteAppCommandHandler>();
 builder.Services.AddScoped<GetAppQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetAppStorageUsage.GetAppStorageUsageQueryHandler>();
 builder.Services.AddScoped<ListAppsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler>();
 builder.Services.AddScoped<ListAppVariablesQueryHandler>();
