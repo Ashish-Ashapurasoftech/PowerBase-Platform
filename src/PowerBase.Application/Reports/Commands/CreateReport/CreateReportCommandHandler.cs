@@ -66,7 +66,9 @@ public class CreateReportCommandHandler
 
         if (command.Columns.Count > 0)
         {
-            var validIds = tableFields.Select(f => f.Id).ToHashSet();
+            // Report columns carry per-table field IDs (AppField.Fid), matching what the client sends
+            // and how RunReport/ExportReport resolve them — not the global AppField.Id.
+            var validIds = tableFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
             var invalid = command.Columns.Where(id => !validIds.Contains(id)).ToList();
             if (invalid.Count > 0)
                 throw new ValidationException(

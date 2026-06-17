@@ -53,7 +53,10 @@ public class AdminTenantsController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateTenantRequest request, CancellationToken ct)
     {
-        var result = await _createTenantHandler.HandleAsync(new CreateTenantCommand(request.Name), ct);
+        var serverConfig = request.ServerConfig is { } sc
+            ? new TenantServerConfig(sc.Host, sc.Port, sc.AdminLogin, sc.AdminPassword, sc.Encrypt)
+            : null;
+        var result = await _createTenantHandler.HandleAsync(new CreateTenantCommand(request.Name, serverConfig), ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<object>(new
         {
             publicId = result.TenantPublicId,

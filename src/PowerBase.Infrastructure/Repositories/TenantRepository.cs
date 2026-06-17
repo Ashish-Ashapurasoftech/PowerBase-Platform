@@ -64,10 +64,12 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     private const string UpdateProvisioningSql = """
         UPDATE meta.Tenant
-        SET ProvisioningState = @provisioningState,
-            DatabaseName      = @databaseName,
-            SchemaVersion     = @schemaVersion,
-            ModifiedOn        = SYSUTCDATETIME()
+        SET ProvisioningState    = @provisioningState,
+            DatabaseName         = @databaseName,
+            SchemaVersion        = @schemaVersion,
+            ServerRef            = @serverRef,
+            ConnectionSecretRef  = @connectionSecretRef,
+            ModifiedOn           = SYSUTCDATETIME()
         WHERE Id = @tenantId
         """;
 
@@ -450,7 +452,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
         return tenant ?? throw new NotFoundException("Tenant", tenantPublicId);
     }
 
-    public async Task UpdateProvisioningAsync(long tenantId, string provisioningState, string? databaseName, int schemaVersion = 0, CancellationToken ct = default)
+    public async Task UpdateProvisioningAsync(long tenantId, string provisioningState, string? databaseName, int schemaVersion = 0, string? serverRef = null, string? connectionSecretRef = null, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(new CommandDefinition(UpdateProvisioningSql, new
@@ -459,6 +461,8 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
             provisioningState,
             databaseName,
             schemaVersion,
+            serverRef,
+            connectionSecretRef,
         }, cancellationToken: ct));
     }
 

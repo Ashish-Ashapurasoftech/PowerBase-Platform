@@ -26,7 +26,10 @@ public class TenantsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Create([FromBody] CreateTenantRequest request, CancellationToken ct)
     {
-        var result = await _createTenantHandler.HandleAsync(new CreateTenantCommand(request.Name), ct);
+        var serverConfig = request.ServerConfig is { } sc
+            ? new TenantServerConfig(sc.Host, sc.Port, sc.AdminLogin, sc.AdminPassword, sc.Encrypt)
+            : null;
+        var result = await _createTenantHandler.HandleAsync(new CreateTenantCommand(request.Name, serverConfig), ct);
         var response = new AuthResponse
         {
             Token = result.Token,

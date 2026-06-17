@@ -29,7 +29,8 @@ public static class MigrationRunner
         string connectionString,
         string migrationsFolder,
         string label = "",
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int commandTimeoutSeconds = 120)
     {
         var scripts = Directory
             .GetFiles(migrationsFolder, "*.sql")
@@ -45,7 +46,7 @@ public static class MigrationRunner
         await using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync(ct);
 
-        await EnsureMigrationsTableAsync(connection, ct);
+        await EnsureMigrationsTableAsync(connection, commandTimeoutSeconds, ct);
 
         var applied = 0;
         var skipped = 0;
@@ -54,7 +55,7 @@ public static class MigrationRunner
         {
             var scriptName = Path.GetFileName(scriptPath);
 
-            if (await IsAppliedAsync(connection, scriptName, ct))
+            if (await IsAppliedAsync(connection, scriptName, commandTimeoutSeconds, ct))
             {
                 Console.WriteLine($"  [skip]  {scriptName}");
                 skipped++;
@@ -62,7 +63,7 @@ public static class MigrationRunner
             }
 
             Console.Write($"  [run]   {scriptName} ... ");
-            await RunScriptAsync(connection, scriptPath, scriptName, ct);
+            await RunScriptAsync(connection, scriptPath, scriptName, commandTimeoutSeconds, ct);
             Console.WriteLine("done");
             applied++;
         }
@@ -74,21 +75,21 @@ public static class MigrationRunner
         return applied;
     }
 
-    private static async Task EnsureMigrationsTableAsync(SqlConnection connection, CancellationToken ct)
+    private static async Task EnsureMigrationsTableAsync(SqlConnection connection, int commandTimeout, CancellationToken ct)
     {
-        await using var cmd = new SqlCommand(EnsureTableSql, connection);
+        await using var cmd = new SqlCommand(EnsureTableSql, connection) { CommandTimeout = commandTimeout };
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<bool> IsAppliedAsync(SqlConnection connection, string scriptName, CancellationToken ct)
+    private static async Task<bool> IsAppliedAsync(SqlConnection connection, string scriptName, int commandTimeout, CancellationToken ct)
     {
-        await using var cmd = new SqlCommand(IsAppliedSql, connection);
+        await using var cmd = new SqlCommand(IsAppliedSql, connection) { CommandTimeout = commandTimeout };
         cmd.Parameters.AddWithValue("@scriptName", scriptName);
         var count = (int)(await cmd.ExecuteScalarAsync(ct))!;
         return count > 0;
     }
 
-    private static async Task RunScriptAsync(SqlConnection connection, string scriptPath, string scriptName, CancellationToken ct)
+    private static async Task RunScriptAsync(SqlConnection connection, string scriptPath, string scriptName, int commandTimeout, CancellationToken ct)
     {
         var sql = await File.ReadAllTextAsync(scriptPath, ct);
 
@@ -104,7 +105,7 @@ public static class MigrationRunner
             foreach (var batch in batches)
             {
                 await using var cmd = new SqlCommand(batch, connection, transaction);
-                cmd.CommandTimeout = 120;
+                cmd.CommandTimeout = commandTimeout;
                 await cmd.ExecuteNonQueryAsync(ct);
             }
 

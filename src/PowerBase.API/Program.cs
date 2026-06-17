@@ -131,7 +131,18 @@ builder.Services.AddSwaggerGen(c =>
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<DbConnectionFactory>(); // shim — kept for compatibility
 builder.Services.AddSingleton<IControlConnectionFactory, ControlConnectionFactory>();
-builder.Services.AddSingleton<ISecretResolver, ConfigSecretResolver>();
+if (!string.IsNullOrEmpty(builder.Configuration["KeyVault:Uri"]))
+{
+    builder.Services.AddSingleton<KeyVaultSecretResolver>();
+    builder.Services.AddSingleton<ISecretResolver>(sp => sp.GetRequiredService<KeyVaultSecretResolver>());
+    builder.Services.AddSingleton<ISecretStore>(sp => sp.GetRequiredService<KeyVaultSecretResolver>());
+}
+else
+{
+    // Local dev: shared-server tenants work normally; BYO-server creation will throw clearly.
+    builder.Services.AddSingleton<ISecretResolver, ConfigSecretResolver>();
+    builder.Services.AddSingleton<ISecretStore, NoOpSecretStore>();
+}
 builder.Services.AddSingleton<ITenantConnectionResolver, TenantConnectionResolver>();
 builder.Services.AddScoped<ITenantConnectionFactory, TenantConnectionFactory>();
 builder.Services.AddScoped<ControlUnitOfWork>();

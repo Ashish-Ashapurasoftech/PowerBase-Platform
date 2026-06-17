@@ -13,7 +13,7 @@ public interface ITenantRepository
     Task<IReadOnlyList<TenantItem>> ListTenantsForUserAsync(long userId, CancellationToken ct = default);
     Task<Tenant> GetTenantForUserAsync(Guid tenantPublicId, long userId, CancellationToken ct = default);
     Task<long> CreateAsync(Tenant tenant, IDbTransaction? transaction = null, CancellationToken ct = default);
-    Task UpdateProvisioningAsync(long tenantId, string provisioningState, string? databaseName, int schemaVersion = 0, CancellationToken ct = default);
+    Task UpdateProvisioningAsync(long tenantId, string provisioningState, string? databaseName, int schemaVersion = 0, string? serverRef = null, string? connectionSecretRef = null, CancellationToken ct = default);
     Task<long> CreateRoleAsync(TenantRole role, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task CreateTenantUserAsync(TenantUser tenantUser, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task UpsertTenantUserAsync(TenantUser tenantUser, CancellationToken ct = default);
