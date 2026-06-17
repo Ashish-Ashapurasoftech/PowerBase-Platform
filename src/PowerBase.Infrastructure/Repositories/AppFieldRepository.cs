@@ -11,7 +11,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string SelectColumns = """
         af.Id, af.PublicId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName, af.DefaultValue,
-        af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable,
+        af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
         af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
@@ -43,11 +43,11 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string InsertSql = """
         INSERT INTO meta.AppField
             (AppTableId, FieldTypeId, Name, Label, Description, IsRequired, DefaultValue,
-             IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable,
+             IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable, IsAuditable,
              Fid, Settings, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES (@tableId, @fieldTypeId, @name, @label, @description, @isRequired, @defaultValue,
-                @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable,
+                @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable, @isAuditable,
                 @fid, @settings, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
@@ -82,7 +82,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         SET Name = @name, Label = @label, Description = @description,
             IsRequired = @isRequired, DefaultValue = @defaultValue,
             IsSearchable = @isSearchable, IsSortable = @isSortable,
-            IsFilterable = @isFilterable, IsReportable = @isReportable,
+            IsFilterable = @isFilterable, IsReportable = @isReportable, IsAuditable = @isAuditable,
             IsUnique = @isUnique,
             Settings = @settings,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
@@ -160,6 +160,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 isSortable = field.IsSortable,
                 isFilterable = field.IsFilterable,
                 isReportable = field.IsReportable,
+                isAuditable = field.IsAuditable,
                 fid = field.Fid,
                 settings = field.Settings,
                 displayOrder = field.DisplayOrder,
@@ -191,7 +192,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<int> UpdateAsync(Guid publicId, long tableId, string name, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
-        bool isFilterable, bool isReportable, bool isUnique, string? settings, CancellationToken ct = default)
+        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, string? settings, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
@@ -199,7 +200,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             {
                 publicId, tableId, name, label, description,
                 isRequired, defaultValue, isSearchable, isSortable,
-                isFilterable, isReportable, isUnique, settings,
+                isFilterable, isReportable, isAuditable, isUnique, settings,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

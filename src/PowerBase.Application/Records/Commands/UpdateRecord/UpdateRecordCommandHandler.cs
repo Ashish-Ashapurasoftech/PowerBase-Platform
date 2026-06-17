@@ -76,7 +76,7 @@ public class UpdateRecordCommandHandler
 
         // Build field-level diff — only fields where value actually changed, keyed by display label
         var candidateFields = fields.Where(f =>
-            f.Fid.HasValue && command.FieldValues.ContainsKey((long)f.Fid.Value) && !f.IsSystem && f.PhysicalColumnName is not null).ToList();
+            f.Fid.HasValue && command.FieldValues.ContainsKey((long)f.Fid.Value) && !f.IsSystem && f.PhysicalColumnName is not null && f.IsAuditable).ToList();
 
         var actuallyChanged = candidateFields.Where(f =>
         {

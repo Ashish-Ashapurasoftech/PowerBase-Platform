@@ -27,6 +27,7 @@ public class AppField
     public bool IsSortable { get; set; }
     public bool IsFilterable { get; set; }
     public bool IsReportable { get; set; }
+    public bool IsAuditable { get; set; } = true;
     public int? Fid { get; set; }
     public string? Settings { get; set; }
     public bool IsDeleted { get; set; }

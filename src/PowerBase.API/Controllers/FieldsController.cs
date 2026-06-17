@@ -42,7 +42,7 @@ public class FieldsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Create(Guid tableId, [FromBody] CreateFieldRequest request, CancellationToken ct)
     {
-        var command = new CreateFieldCommand(tableId, request.TypeCode, request.Name, request.Label, request.Description, request.IsRequired, request.Settings, request.DefaultValue);
+        var command = new CreateFieldCommand(tableId, request.TypeCode, request.Name, request.Label, request.Description, request.IsRequired, request.IsAuditable, request.Settings, request.DefaultValue);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<FieldResponse>(MapToResponse(result)));
     }
@@ -74,7 +74,7 @@ public class FieldsController : ControllerBase
             request.Name, request.Label, request.Description,
             request.IsRequired, request.DefaultValue,
             request.IsSearchable, request.IsSortable,
-            request.IsFilterable, request.IsReportable,
+            request.IsFilterable, request.IsReportable, request.IsAuditable,
             request.IsUnique, request.Settings), ct);
         return NoContent();
     }
@@ -114,6 +114,7 @@ public class FieldsController : ControllerBase
         TypeCode = r.TypeCode,
         PhysicalColumnName = r.PhysicalColumnName,
         IsRequired = r.IsRequired,
+        IsAuditable = r.IsAuditable,
         IsSystem = false,
         Fid = r.Fid,
         Settings = r.Settings,
@@ -135,6 +136,7 @@ public class FieldsController : ControllerBase
         IsSortable = f.IsSortable,
         IsFilterable = f.IsFilterable,
         IsReportable = f.IsReportable,
+        IsAuditable = f.IsAuditable,
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
         Fid = f.Fid,
