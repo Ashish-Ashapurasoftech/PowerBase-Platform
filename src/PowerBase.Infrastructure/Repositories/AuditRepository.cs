@@ -28,12 +28,12 @@ public class AuditRepository : IAuditRepository
         """;
 
     private const string InsertInviteTokenSql = """
-        INSERT INTO audit.InviteToken (UserId, TenantId, TenantRoleId, TokenHash, InvitedBy, ExpiresOn, CreatedOn)
-        VALUES (@userId, @tenantId, @tenantRoleId, @tokenHash, @invitedBy, @expiresOn, SYSUTCDATETIME())
+        INSERT INTO audit.InviteToken (UserId, TenantId, TenantRoleId, AppId, AppRoleId, TokenHash, InvitedBy, ExpiresOn, CreatedOn)
+        VALUES (@userId, @tenantId, @tenantRoleId, @appId, @appRoleId, @tokenHash, @invitedBy, @expiresOn, SYSUTCDATETIME())
         """;
 
     private const string GetInviteTokenByHashSql = """
-        SELECT Id, UserId, TenantId, TenantRoleId, TokenHash, InvitedBy, ExpiresOn, UsedOn, CreatedOn
+        SELECT Id, UserId, TenantId, TenantRoleId, AppId, AppRoleId, TokenHash, InvitedBy, ExpiresOn, UsedOn, CreatedOn
         FROM audit.InviteToken
         WHERE TokenHash = @tokenHash
         """;
@@ -79,11 +79,11 @@ public class AuditRepository : IAuditRepository
             new CommandDefinition(InsertSessionSql, new { userId, tenantId, jwtId, ipAddress, expiresOn }, cancellationToken: ct));
     }
 
-    public async Task CreateInviteTokenAsync(long userId, long? tenantId, long? tenantRoleId, string tokenHash, DateTime expiresOn, long invitedBy, CancellationToken ct = default)
+    public async Task CreateInviteTokenAsync(long userId, long? tenantId, long? tenantRoleId, string tokenHash, DateTime expiresOn, long invitedBy, long? appId = null, long? appRoleId = null, CancellationToken ct = default)
     {
         await using var connection = _controlFactory.Create();
         await connection.ExecuteAsync(
-            new CommandDefinition(InsertInviteTokenSql, new { userId, tenantId, tenantRoleId, tokenHash, invitedBy, expiresOn }, cancellationToken: ct));
+            new CommandDefinition(InsertInviteTokenSql, new { userId, tenantId, tenantRoleId, appId, appRoleId, tokenHash, invitedBy, expiresOn }, cancellationToken: ct));
     }
 
     public async Task<InviteTokenRecord?> GetInviteTokenByHashAsync(string tokenHash, CancellationToken ct = default)

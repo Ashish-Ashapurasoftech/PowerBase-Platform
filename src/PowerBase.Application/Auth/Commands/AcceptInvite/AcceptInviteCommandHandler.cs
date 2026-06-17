@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Tenants;
+using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Auth.Commands.AcceptInvite;
@@ -21,6 +22,7 @@ public class AcceptInviteCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly IUserRepository _userRepo;
     private readonly ITenantRepository _tenantRepo;
+    private readonly IAppUserRepository _appUserRepo;
     private readonly IPasswordService _passwordService;
     private readonly IJwtService _jwtService;
 
@@ -28,12 +30,14 @@ public class AcceptInviteCommandHandler
         IAuditRepository auditRepo,
         IUserRepository userRepo,
         ITenantRepository tenantRepo,
+        IAppUserRepository appUserRepo,
         IPasswordService passwordService,
         IJwtService jwtService)
     {
         _auditRepo = auditRepo;
         _userRepo = userRepo;
         _tenantRepo = tenantRepo;
+        _appUserRepo = appUserRepo;
         _passwordService = passwordService;
         _jwtService = jwtService;
     }
@@ -59,9 +63,31 @@ public class AcceptInviteCommandHandler
         // TenantId is null for platform-level invites (no tenant pre-assigned)
         if (tokenRecord.TenantId.HasValue)
             await _tenantRepo.ActivateTenantUserAsync(tokenRecord.UserId, tokenRecord.TenantId.Value, ct);
-        await _auditRepo.ConsumeInviteTokenAsync(tokenRecord.Id, ct);
 
         var user = await _userRepo.GetByIdAsync(tokenRecord.UserId, ct);
+
+        if (tokenRecord.AppId.HasValue && tokenRecord.AppRoleId.HasValue)
+        {
+            // check if user is already in app to prevent duplicates if somehow triggered twice
+            var existingAppUser = await _appUserRepo.GetByAppAndUserAsync(tokenRecord.AppId.Value, user.Id, ct);
+            if (existingAppUser is null)
+            {
+                await _appUserRepo.CreateAsync(new AppUser
+                {
+                    AppId = tokenRecord.AppId.Value,
+                    UserId = user.Id,
+                    UserPublicId = user.PublicId,
+                    UserName = user.Name,
+                    UserEmail = user.Email,
+                    AppRoleId = tokenRecord.AppRoleId.Value,
+                    Status = "Active",
+                    AddedBy = tokenRecord.InvitedBy
+                }, ct: ct);
+            }
+        }
+
+        await _auditRepo.ConsumeInviteTokenAsync(tokenRecord.Id, ct);
+
         var tenants = await _tenantRepo.ListTenantsForUserAsync(tokenRecord.UserId, ct);
         var identityToken = _jwtService.GenerateIdentityToken(user, out _, out var expiresAt);
 

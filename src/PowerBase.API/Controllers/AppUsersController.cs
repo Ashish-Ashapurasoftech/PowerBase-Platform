@@ -4,6 +4,7 @@ using PowerBase.API.Models;
 using PowerBase.API.Models.Apps;
 using PowerBase.Application.Apps.Commands.AddAppUser;
 using PowerBase.Application.Apps.Commands.ChangeAppUserRole;
+using PowerBase.Application.Apps.Commands.InviteAppUser;
 using PowerBase.Application.Apps.Commands.RemoveAppUser;
 using PowerBase.Application.Apps.Queries.ListAppUsers;
 
@@ -16,19 +17,25 @@ public class AppUsersController : ControllerBase
 {
     private readonly ListAppUsersQueryHandler _listHandler;
     private readonly AddAppUserCommandHandler _addHandler;
+    private readonly InviteAppUserCommandHandler _inviteHandler;
     private readonly ChangeAppUserRoleCommandHandler _changeRoleHandler;
     private readonly RemoveAppUserCommandHandler _removeHandler;
+    private readonly string _frontendBaseUrl;
 
     public AppUsersController(
         ListAppUsersQueryHandler listHandler,
         AddAppUserCommandHandler addHandler,
+        InviteAppUserCommandHandler inviteHandler,
         ChangeAppUserRoleCommandHandler changeRoleHandler,
-        RemoveAppUserCommandHandler removeHandler)
+        RemoveAppUserCommandHandler removeHandler,
+        IConfiguration config)
     {
         _listHandler = listHandler;
         _addHandler = addHandler;
+        _inviteHandler = inviteHandler;
         _changeRoleHandler = changeRoleHandler;
         _removeHandler = removeHandler;
+        _frontendBaseUrl = config["Frontend:BaseUrl"] ?? "http://localhost:4200";
     }
 
     /// <summary>List all users with access to this app.</summary>
@@ -92,7 +99,7 @@ public class AppUsersController : ControllerBase
     }
 
 
-    /// <summary>Add a user to this app by email.</summary>
+    /// <summary>Add a user to this app by email (must already be a tenant member).</summary>
     [HttpPost]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -100,6 +107,21 @@ public class AppUsersController : ControllerBase
     public async Task<IActionResult> Add([FromRoute] Guid appId, [FromBody] AddAppUserRequest request, CancellationToken ct)
     {
         await _addHandler.HandleAsync(new AddAppUserCommand(appId, request.Email, request.RolePublicId), ct);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Invite a user to this app by email.
+    /// If the user already has an active PowerBase account they are added immediately
+    /// and receive an informational email. Otherwise a setup email is sent.
+    /// </summary>
+    [HttpPost("invite")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> Invite([FromRoute] Guid appId, [FromBody] InviteAppUserRequest request, CancellationToken ct)
+    {
+        await _inviteHandler.HandleAsync(
+            new InviteAppUserCommand(appId, request.Email, request.RolePublicId, _frontendBaseUrl), ct);
         return NoContent();
     }
 
@@ -127,3 +149,5 @@ public class AppUsersController : ControllerBase
         return NoContent();
     }
 }
+
+public record InviteAppUserRequest(string Email, Guid? RolePublicId);

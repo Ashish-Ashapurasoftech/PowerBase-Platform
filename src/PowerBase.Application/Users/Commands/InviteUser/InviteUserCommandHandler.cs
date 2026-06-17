@@ -82,7 +82,7 @@ public class InviteUserCommandHandler
             await _auditRepo.CreateInviteTokenAsync(
                 user.Id, _queryContext.TenantId, role.Id,
                 tokenHash, DateTime.UtcNow.AddDays(7),
-                _queryContext.UserId, ct);
+                _queryContext.UserId, ct: ct);
 
             var baseUrl = command.FrontendBaseUrl.TrimEnd('/');
             var setupLink = $"{baseUrl}/auth/accept-invite?token={rawToken}";
