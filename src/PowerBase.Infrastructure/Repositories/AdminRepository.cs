@@ -76,10 +76,12 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
             SELECT u.Id, u.PublicId, u.Email, u.Name, u.IsActive, u.IsEmailVerified,
                    sr.Code AS SystemRoleCode,
                    COUNT(DISTINCT tu.TenantId) AS TenantCount,
+                   ISNULL(STRING_AGG(t.Name, '|'), '') AS TenantsString,
                    u.CreatedOn, u.LastLoginOn
             FROM core.[User] u
             LEFT JOIN core.SystemRole sr ON sr.Id = u.SystemRoleId
             LEFT JOIN meta.TenantUser tu ON tu.UserId = u.Id AND tu.IsDeleted = 0
+            LEFT JOIN meta.Tenant t ON t.Id = tu.TenantId AND t.IsDeleted = 0
             {where}
             GROUP BY u.Id, u.PublicId, u.Email, u.Name, u.IsActive, u.IsEmailVerified,
                      sr.Code, u.CreatedOn, u.LastLoginOn
@@ -221,7 +223,7 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
 
         var sql = $"""
             SELECT TOP 50 u.Id, u.PublicId, u.Email, u.Name, u.IsActive, u.IsEmailVerified,
-                   sr.Code AS SystemRoleCode, 0 AS TenantCount, u.CreatedOn, u.LastLoginOn
+                   sr.Code AS SystemRoleCode, 0 AS TenantCount, '' AS TenantsString, u.CreatedOn, u.LastLoginOn
             FROM core.[User] u
             LEFT JOIN core.SystemRole sr ON sr.Id = u.SystemRoleId
             {where}

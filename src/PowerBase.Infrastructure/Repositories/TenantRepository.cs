@@ -93,7 +93,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
         JOIN core.[User] u ON u.Id = tu.UserId
         LEFT JOIN meta.TenantRole r ON r.Id = tu.TenantRoleId AND r.IsDeleted = 0
         WHERE tu.TenantId = @tenantId
-          AND tu.IsDeleted = 0
+          AND tu.IsDeleted = 0 AND tu.IsActive = 1
         """;
     private const string GetTenantUserByUserPublicIdSql = """
         SELECT tu.Id, tu.TenantId, tu.UserId, tu.TenantRoleId, tu.IsOwner, tu.IsActive, tu.IsDeleted,
