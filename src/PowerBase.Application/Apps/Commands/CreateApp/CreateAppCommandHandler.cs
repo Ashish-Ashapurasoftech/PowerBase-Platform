@@ -116,7 +116,8 @@ public class CreateAppCommandHandler
                 PermissionCodes.RecordsCreate, PermissionCodes.RecordsRead, PermissionCodes.RecordsUpdate, PermissionCodes.RecordsDelete,
                 PermissionCodes.ReportsCreate, PermissionCodes.ReportsRead, PermissionCodes.ReportsUpdate, PermissionCodes.ReportsDelete, PermissionCodes.ReportsRun,
                 PermissionCodes.FormsCreate, PermissionCodes.FormsRead, PermissionCodes.FormsUpdate, PermissionCodes.FormsDelete, PermissionCodes.FormsRulesManage,
-                PermissionCodes.UsersInvite, PermissionCodes.UsersManage, PermissionCodes.RolesManage
+                PermissionCodes.UsersInvite, PermissionCodes.UsersManage, PermissionCodes.RolesManage,
+                PermissionCodes.AuditLogsRead,PermissionCodes.AuditLogsReadOfStream,
             }, _uow.Transaction, ct);
 
             var (participantRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole

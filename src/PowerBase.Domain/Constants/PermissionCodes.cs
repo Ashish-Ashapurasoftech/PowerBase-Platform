@@ -33,6 +33,7 @@ public static class PermissionCodes
     public const string RolesManage  = "roles:manage";
 
     public const string AuditLogsRead = "audit:read";
+    public const string AuditLogsReadOfStream = "records:stream";
 
     public const string FormsCreate      = "forms:create";
     public const string FormsRead        = "forms:read";
