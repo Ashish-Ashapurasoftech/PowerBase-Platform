@@ -3,6 +3,7 @@ using PowerBase.API.Attributes;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Fields;
+using PowerBase.Application.Fields.Commands.BulkCreateFields;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Commands.DeleteField;
 using PowerBase.Application.Fields.Commands.UpdateField;
@@ -16,17 +17,20 @@ namespace PowerBase.API.Controllers;
 public class FieldsController : ControllerBase
 {
     private readonly CreateFieldCommandHandler _createHandler;
+    private readonly BulkCreateFieldsCommandHandler _bulkCreateHandler;
     private readonly UpdateFieldCommandHandler _updateHandler;
     private readonly DeleteFieldCommandHandler _deleteHandler;
     private readonly ListFieldsQueryHandler _listHandler;
 
     public FieldsController(
         CreateFieldCommandHandler createHandler,
+        BulkCreateFieldsCommandHandler bulkCreateHandler,
         UpdateFieldCommandHandler updateHandler,
         DeleteFieldCommandHandler deleteHandler,
         ListFieldsQueryHandler listHandler)
     {
         _createHandler = createHandler;
+        _bulkCreateHandler = bulkCreateHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _listHandler = listHandler;
@@ -45,6 +49,25 @@ public class FieldsController : ControllerBase
         var command = new CreateFieldCommand(tableId, request.TypeCode, request.Name, request.Label, request.Description, request.IsRequired, request.IsAuditable, request.Settings, request.DefaultValue);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<FieldResponse>(MapToResponse(result)));
+    }
+
+    /// <summary>Bulk-add multiple fields to a table in one call.</summary>
+    [HttpPost("tables/{tableId:guid}/fields/bulk")]
+    [RequireAppPermission(PermissionCodes.FieldsCreate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiListResponse<FieldResponse>), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> BulkCreate(Guid tableId, [FromBody] BulkCreateFieldsRequest request, CancellationToken ct)
+    {
+        var items = request.Fields
+            .Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name, f.Label, f.Description, f.IsRequired, f.IsAuditable, f.Settings, f.DefaultValue))
+            .ToList();
+        var command = new BulkCreateFieldsCommand(tableId, items);
+        var results = await _bulkCreateHandler.HandleAsync(command, ct);
+        var responses = results.Select(MapToResponse).ToList();
+        return StatusCode(StatusCodes.Status201Created, new ApiListResponse<FieldResponse>(responses, responses.Count, 1, responses.Count));
     }
 
     /// <summary>List all fields for a table.</summary>

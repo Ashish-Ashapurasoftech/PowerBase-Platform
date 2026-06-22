@@ -251,6 +251,7 @@ builder.Services.AddScoped<DeleteTableCommandHandler>();
 builder.Services.AddScoped<GetTableQueryHandler>();
 builder.Services.AddScoped<ListTablesQueryHandler>();
 builder.Services.AddScoped<CreateFieldCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler>();
 builder.Services.AddScoped<UpdateFieldCommandHandler>();
 builder.Services.AddScoped<DeleteFieldCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.BulkDeleteFields.BulkDeleteFieldsCommandHandler>();
