@@ -63,16 +63,22 @@ public class InviteAppUserCommandHandler
 
         // Resolve app role
         long appRoleId;
+        string appRoleName;
         if (command.AppRolePublicId.HasValue)
         {
             var role = await _appRoleRepo.GetByPublicIdAsync(command.AppRolePublicId.Value, ct)
                 ?? throw new NotFoundException("AppRole", command.AppRolePublicId.Value);
             appRoleId = role.Id;
+            appRoleName = role.Name;
         }
         else
         {
             appRoleId = await _appRepo.GetDefaultRoleIdAsync(appId, ct)
                 ?? throw new NotFoundException("DefaultAppRole", appId);
+            var roles = await _appRoleRepo.ListDetailsByAppIdAsync(appId, ct);
+            var role = roles.FirstOrDefault(r => r.Id == appRoleId)
+                ?? throw new InvalidOperationException("Default app role not found.");
+            appRoleName = role.Name;
         }
 
         var user = await _userRepo.GetByEmailAsync(command.Email, ct);
@@ -96,11 +102,21 @@ public class InviteAppUserCommandHandler
                     ?? tenantRoles.FirstOrDefault()
                     ?? throw new InvalidOperationException("No tenant roles found.");
 
+                var targetTenantRole = defaultTenantRole;
+                if (string.Equals(appRoleName, "Administrator", StringComparison.OrdinalIgnoreCase))
+                {
+                    var adminRole = tenantRoles.FirstOrDefault(r => string.Equals(r.Name, "Administrator", StringComparison.OrdinalIgnoreCase));
+                    if (adminRole != null)
+                    {
+                        targetTenantRole = adminRole;
+                    }
+                }
+
                 await _tenantRepo.UpsertTenantUserAsync(new TenantUser
                 {
                     TenantId     = _queryContext.TenantId,
                     UserId       = user.Id,
-                    TenantRoleId = defaultTenantRole.Id,
+                    TenantRoleId = targetTenantRole.Id,
                     IsOwner      = false,
                     IsActive     = true,
                     InvitedBy    = _queryContext.UserId,
@@ -154,12 +170,22 @@ public class InviteAppUserCommandHandler
                 ?? tenantRoles.FirstOrDefault()
                 ?? throw new InvalidOperationException("No tenant roles found.");
 
+            var targetTenantRole = defaultTenantRole;
+            if (string.Equals(appRoleName, "Administrator", StringComparison.OrdinalIgnoreCase))
+            {
+                var adminRole = tenantRoles.FirstOrDefault(r => string.Equals(r.Name, "Administrator", StringComparison.OrdinalIgnoreCase));
+                if (adminRole != null)
+                {
+                    targetTenantRole = adminRole;
+                }
+            }
+
             // 3. Add to tenant as inactive (will activate when they accept the invite)
             await _tenantRepo.UpsertTenantUserAsync(new TenantUser
             {
                 TenantId     = _queryContext.TenantId,
                 UserId       = user!.Id,
-                TenantRoleId = defaultTenantRole.Id,
+                TenantRoleId = targetTenantRole.Id,
                 IsOwner      = false,
                 IsActive     = false,
                 InvitedBy    = _queryContext.UserId,
@@ -169,7 +195,7 @@ public class InviteAppUserCommandHandler
             var rawToken  = Guid.NewGuid().ToString("N");
             var tokenHash = ComputeSha256(rawToken);
             await _auditRepo.CreateInviteTokenAsync(
-                user.Id, _queryContext.TenantId, defaultTenantRole.Id,
+                user.Id, _queryContext.TenantId, targetTenantRole.Id,
                 tokenHash, DateTime.UtcNow.AddDays(7),
                 _queryContext.UserId, appId, appRoleId, ct);
 
