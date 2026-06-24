@@ -146,8 +146,18 @@ public class CreateRelationshipCommandHandler
     private async Task<AppField> CreateFieldAsync(
         AppTable table, FieldType fieldType, string name, string? label, bool isRequired, object settingsObj, CancellationToken ct)
     {
-        if (await _fieldRepo.NameExistsInTableAsync(table.Id, name, ct))
-            throw new DuplicateException("Field", "name", name);
+        var originalName = name;
+        var originalLabel = label;
+        var counter = 1;
+        while (await _fieldRepo.NameExistsInTableAsync(table.Id, name, ct))
+        {
+            name = $"{originalName} {counter}";
+            if (originalLabel is not null)
+            {
+                label = $"{originalLabel} {counter}";
+            }
+            counter++;
+        }
 
         var fid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
         var field = new AppField
