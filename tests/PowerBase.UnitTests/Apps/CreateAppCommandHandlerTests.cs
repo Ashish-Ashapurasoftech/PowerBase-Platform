@@ -23,8 +23,9 @@ public class CreateAppCommandHandlerTests
     private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
     private readonly IAppRolePermissionRepository _permRepo = Substitute.For<IAppRolePermissionRepository>();
+    private readonly PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler _bulkCreateHandler = Substitute.For<PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler>(Substitute.For<PowerBase.Application.Common.Interfaces.IAppTableRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAppFieldRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFieldTypeRepository>(), Substitute.For<PowerBase.Application.Fields.Commands.CreateField.CreateFieldCommandHandler>(Substitute.For<PowerBase.Application.Common.Interfaces.IAppTableRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAppFieldRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFieldTypeRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.ISchemaEngineService>(), Substitute.For<PowerBase.Application.Common.Interfaces.IQueryContext>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAuditRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFormRepository>(), new PowerBase.Application.Fields.Settings.FieldSettingsValidatorRegistry(System.Array.Empty<PowerBase.Application.Fields.Settings.IFieldSettingsValidator>())));
 
-    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo, _userRepo, _permRepo);
+    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo, _userRepo, _permRepo, _bulkCreateHandler);
 
     public CreateAppCommandHandlerTests()
     {
@@ -54,7 +55,7 @@ public class CreateAppCommandHandlerTests
         SetupHappyPath(expected);
         var sut = CreateSut();
 
-        var result = await sut.HandleAsync(new CreateAppCommand("My App", null, null, null));
+        var result = await sut.HandleAsync(new CreateAppCommand("My App", null, null, null, new[] { new TableSpec("Table 1") }));
 
         result.PublicId.Should().Be(expected);
         result.Name.Should().Be("My App");
@@ -67,7 +68,7 @@ public class CreateAppCommandHandlerTests
         SetupHappyPath(Guid.NewGuid());
         var sut = CreateSut();
 
-        await sut.HandleAsync(new CreateAppCommand("My App", null, null, null));
+        await sut.HandleAsync(new CreateAppCommand("My App", null, null, null, new[] { new TableSpec("Table 1") }));
 
         await _appRoleRepo.Received(3).CreateAsync(Arg.Any<AppRole>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
         await _appUserRepo.Received(1).CreateAsync(Arg.Any<AppUser>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
@@ -79,7 +80,7 @@ public class CreateAppCommandHandlerTests
         _appRepo.NameExistsAsync("Taken").Returns(true);
         var sut = CreateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new CreateAppCommand("Taken", null, null, null)))
+        await sut.Invoking(s => s.HandleAsync(new CreateAppCommand("Taken", null, null, null, Array.Empty<TableSpec>())))
             .Should().ThrowAsync<DuplicateException>();
     }
 
@@ -88,7 +89,7 @@ public class CreateAppCommandHandlerTests
     {
         var sut = CreateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new CreateAppCommand("", null, null, null)))
+        await sut.Invoking(s => s.HandleAsync(new CreateAppCommand("", null, null, null, Array.Empty<TableSpec>())))
             .Should().ThrowAsync<ValidationException>();
     }
 
@@ -97,7 +98,7 @@ public class CreateAppCommandHandlerTests
     {
         var sut = CreateSut();
 
-        await sut.Invoking(s => s.HandleAsync(new CreateAppCommand(new string('x', 201), null, null, null)))
+        await sut.Invoking(s => s.HandleAsync(new CreateAppCommand(new string('x', 201), null, null, null, Array.Empty<TableSpec>())))
             .Should().ThrowAsync<ValidationException>();
     }
 }
