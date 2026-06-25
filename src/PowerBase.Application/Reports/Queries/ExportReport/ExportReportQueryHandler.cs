@@ -104,11 +104,14 @@ public class ExportReportQueryHandler
         IReadOnlyList<SortSpec> sortFields,
         CancellationToken ct)
     {
-        var visibleFieldIds = access.VisibleFields.Select(f => f.Id).ToHashSet();
+        var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
         IReadOnlyList<AppField> selectedFields;
         if (definition.Columns.Count > 0)
         {
-            var fieldMap = allFields.ToDictionary(f => f.Id);
+            var fieldMap = allFields
+                .Where(f => f.Fid.HasValue)
+                .GroupBy(f => (long)f.Fid!.Value)
+                .ToDictionary(g => g.Key, g => g.First());
             selectedFields = definition.Columns
                 .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
                 .Select(id => fieldMap[id])
@@ -116,7 +119,7 @@ public class ExportReportQueryHandler
         }
         else
         {
-            selectedFields = allFields.Where(f => f.IsReportable && visibleFieldIds.Contains(f.Id)).ToList();
+            selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
 
         // Merge role record filter into the report's filter tree
@@ -156,7 +159,7 @@ public class ExportReportQueryHandler
         var userNames = await RunReport.RunReportQueryHandler.ResolveUserNamesAsync(pairs.Select(p => p.Row), allFields, _userRepo, ct);
         var items = pairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
 
-        var columns = selectedFields.Select(f => new ColumnInfo(f.Id, string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, f.TypeCode)).ToList();
+        var columns = selectedFields.Select(f => new ColumnInfo((f.Fid ?? f.Id).ToString(), string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, f.TypeCode)).ToList();
         return BuildExport(columns, items.Select(r => r.Fields).ToList(), safeName, format);
     }
 
@@ -172,9 +175,12 @@ public class ExportReportQueryHandler
         if (!definition.GroupByFieldId.HasValue)
             return BuildExport([], [], safeName, format);
 
-        var visibleFieldIds = access.VisibleFields.Select(f => f.Id).ToHashSet();
-        var fieldMap = allFields.ToDictionary(f => f.Id);
-        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField) || !visibleFieldIds.Contains(groupByField.Id))
+        var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
+        var fieldMap = allFields
+            .Where(f => f.Fid.HasValue)
+            .GroupBy(f => (long)f.Fid!.Value)
+            .ToDictionary(g => g.Key, g => g.First());
+        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField) || !visibleFieldIds.Contains(definition.GroupByFieldId.Value))
             return BuildExport([], [], safeName, format);
 
         var visibleAggregations = definition.Aggregations
@@ -205,8 +211,8 @@ public class ExportReportQueryHandler
 
         var columns = new List<ColumnInfo>
         {
-            new(groupByField.Id, string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label),
-            new(0, "Count"),
+            new(groupByField.Id.ToString(), string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label),
+            new("0", "Count"),
         };
         foreach (var agg in visibleAggregations)
         {
@@ -216,7 +222,7 @@ public class ExportReportQueryHandler
                 var label = agg.DisplayAs == "PercentOfColumnTotal"
                     ? $"{agg.Function} of {fieldName} (%)"
                     : $"{agg.Function} of {fieldName}";
-                columns.Add(new ColumnInfo(aggField.Id, label));
+                columns.Add(new ColumnInfo(aggField.Id.ToString(), label));
             }
         }
 
@@ -350,8 +356,5 @@ public class ExportReportQueryHandler
         return value.ToString();
     }
 
-    private record ColumnInfo(long Id, string Name, string TypeCode = "")
-    {
-        public string Key => Id.ToString();
-    }
+    private record ColumnInfo(string Key, string Name, string TypeCode = "");
 }
