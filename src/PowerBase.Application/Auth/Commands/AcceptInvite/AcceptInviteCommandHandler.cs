@@ -25,6 +25,7 @@ public class AcceptInviteCommandHandler
     private readonly IAppUserRepository _appUserRepo;
     private readonly IPasswordService _passwordService;
     private readonly IJwtService _jwtService;
+    private readonly IQueryContext _queryContext;
 
     public AcceptInviteCommandHandler(
         IAuditRepository auditRepo,
@@ -32,7 +33,8 @@ public class AcceptInviteCommandHandler
         ITenantRepository tenantRepo,
         IAppUserRepository appUserRepo,
         IPasswordService passwordService,
-        IJwtService jwtService)
+        IJwtService jwtService,
+        IQueryContext queryContext)
     {
         _auditRepo = auditRepo;
         _userRepo = userRepo;
@@ -40,6 +42,7 @@ public class AcceptInviteCommandHandler
         _appUserRepo = appUserRepo;
         _passwordService = passwordService;
         _jwtService = jwtService;
+        _queryContext = queryContext;
     }
 
     public async Task<AcceptInviteResult> HandleAsync(AcceptInviteCommand command, CancellationToken ct = default)
@@ -66,8 +69,10 @@ public class AcceptInviteCommandHandler
 
         var user = await _userRepo.GetByIdAsync(tokenRecord.UserId, ct);
 
-        if (tokenRecord.AppId.HasValue && tokenRecord.AppRoleId.HasValue)
+        if (tokenRecord.AppId.HasValue && tokenRecord.AppRoleId.HasValue && tokenRecord.TenantId.HasValue)
         {
+            _queryContext.SetTenantId(tokenRecord.TenantId.Value);
+
             // check if user is already in app to prevent duplicates if somehow triggered twice
             var existingAppUser = await _appUserRepo.GetByAppAndUserAsync(tokenRecord.AppId.Value, user.Id, ct);
             if (existingAppUser is null)

@@ -220,9 +220,6 @@ public sealed class FormulaSettingsValidator : FieldSettingsValidatorBase<Formul
             AddError(errors, "Settings.ResultType",
                 $"Result type must be one of: {string.Join(", ", FormulaResultTypes.All)}.");
 
-        if (string.IsNullOrWhiteSpace(s.Expression))
-            AddError(errors, "Settings.Expression", "A formula expression is required.");
-
         return errors;
     }
 }

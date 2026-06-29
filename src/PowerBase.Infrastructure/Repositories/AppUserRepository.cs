@@ -28,12 +28,24 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
     private const string GetByAppAndUserSql = """
         SELECT Id, PublicId, AppId, UserId, UserPublicId, AppRoleId, Status, AddedBy, CreatedOn, UpdatedOn, IsDeleted
         FROM meta.AppUser
-        WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
+        WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0 And Status = 'Active'
         """;
 
     private const string InsertSql = """
-        INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, AddedBy, CreatedOn)
-        VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, @addedBy, SYSUTCDATETIME())
+        IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId)
+        BEGIN
+            UPDATE meta.AppUser
+            SET Status = 'Active',
+                IsDeleted = 0,
+                AppRoleId = @appRoleId,
+                UpdatedOn = SYSUTCDATETIME()
+            WHERE AppId = @appId AND UserId = @userId
+        END
+        ELSE
+        BEGIN
+            INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, AddedBy, CreatedOn)
+            VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, @addedBy, SYSUTCDATETIME())
+        END
         """;
 
     private const string UpdateRoleSql = """
@@ -76,7 +88,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
 
     private const string RemoveSql = """
         UPDATE meta.AppUser
-        SET IsDeleted = 1, UpdatedOn = SYSUTCDATETIME()
+        SET IsDeleted = 1, Status = 'InActive', UpdatedOn = SYSUTCDATETIME()
         WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
         """;
 

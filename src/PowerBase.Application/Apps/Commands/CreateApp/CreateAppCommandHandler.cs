@@ -7,6 +7,8 @@ using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Apps.Commands.CreateApp;
 
+using PowerBase.Application.Fields.Commands.BulkCreateFields;
+
 public class CreateAppResult
 {
     public Guid PublicId { get; init; }
@@ -34,6 +36,7 @@ public class CreateAppCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly IUserRepository _userRepo;
     private readonly IAppRolePermissionRepository _permRepo;
+    private readonly BulkCreateFieldsCommandHandler _bulkCreateHandler;
 
     public CreateAppCommandHandler(
         IAppRepository appRepo,
@@ -49,7 +52,8 @@ public class CreateAppCommandHandler
         IFieldTypeRepository fieldTypeRepo,
         IFormRepository formRepo,
         IUserRepository userRepo,
-        IAppRolePermissionRepository permRepo)
+        IAppRolePermissionRepository permRepo,
+        BulkCreateFieldsCommandHandler bulkCreateHandler)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
@@ -65,6 +69,7 @@ public class CreateAppCommandHandler
         _formRepo = formRepo;
         _userRepo = userRepo;
         _permRepo = permRepo;
+        _bulkCreateHandler = bulkCreateHandler;
     }
 
     public async Task<CreateAppResult> HandleAsync(CreateAppCommand command, CancellationToken ct = default)
@@ -116,7 +121,8 @@ public class CreateAppCommandHandler
                 PermissionCodes.RecordsCreate, PermissionCodes.RecordsRead, PermissionCodes.RecordsUpdate, PermissionCodes.RecordsDelete,
                 PermissionCodes.ReportsCreate, PermissionCodes.ReportsRead, PermissionCodes.ReportsUpdate, PermissionCodes.ReportsDelete, PermissionCodes.ReportsRun,
                 PermissionCodes.FormsCreate, PermissionCodes.FormsRead, PermissionCodes.FormsUpdate, PermissionCodes.FormsDelete, PermissionCodes.FormsRulesManage,
-                PermissionCodes.UsersInvite, PermissionCodes.UsersManage, PermissionCodes.RolesManage
+                PermissionCodes.UsersInvite, PermissionCodes.UsersManage, PermissionCodes.RolesManage,
+                PermissionCodes.AuditLogsRead,PermissionCodes.AuditLogsReadOfStream,
             }, _uow.Transaction, ct);
 
             var (participantRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
@@ -167,128 +173,13 @@ public class CreateAppCommandHandler
 
             await _uow.CommitAsync(ct);
 
-            // Create the first table associated with the new app
-            if (await _tableRepo.NameExistsInAppAsync(appId, command.TableName, ct))
-                throw new DuplicateException("Table", "name", command.TableName);
-
-            var table = new AppTable
+            if (command.Tables != null && command.Tables.Any())
             {
-                AppId = appId,
-                Name = command.TableName,
-                SingularLabel = command.TableSingularLabel,
-                PluralLabel = command.TablePluralLabel,
-                Description = command.TableDescription,
-                Icon = command.TableIcon,
-                CreatedBy = _queryContext.UserId,
-            };
-
-            var (tableId, tablePublicId) = await _tableRepo.CreateAsync(table, ct);
-            table.Id = tableId;
-            table.PublicId = tablePublicId;
-
-            var physicalName = PhysicalNaming.TableName(tableId);
-            await _tableRepo.UpdatePhysicalNameAsync(tableId, physicalName, ct);
-            table.PhysicalTableName = physicalName;
-
-            await _schemaEngine.CreateTableAsync(table, ct);
-
-            // Seed system fields (FIDs match Quickbase conventions: Record ID#=3, system fields occupy 1–5)
-            var userTypeId     = await _fieldTypeRepo.GetIdByCodeAsync("User", ct);
-            var numberTypeId   = await _fieldTypeRepo.GetIdByCodeAsync("Number", ct);
-            var dateTimeTypeId = await _fieldTypeRepo.GetIdByCodeAsync("DateTime", ct);
-
-            (string Name, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order, int Fid)[] systemFieldDefs =
-            [
-                ("Record ID#",       numberTypeId,   "Id",         true,  false, 1, 3),
-                ("Date Created",     dateTimeTypeId, "CreatedOn",  true,  true,  2, 1),
-                ("Date Modified",    dateTimeTypeId, "ModifiedOn", true,  true,  3, 2),
-                ("Record Owner",     userTypeId,     "CreatedBy",  false, false, 4, 4),
-                ("Last Modified By", userTypeId,     "ModifiedBy", false, false, 5, 5),
-            ];
-
-            var seededFids = new Dictionary<string, int>();
-            foreach (var (name, typeId, physCol, sortable, filterable, order, fid) in systemFieldDefs)
-            {
-                var f = new AppField
+                foreach (var spec in command.Tables)
                 {
-                    AppTableId = table.Id,
-                    FieldTypeId = typeId,
-                    Name = name,
-                    PhysicalColumnName = physCol,
-                    IsSystem = true,
-                    IsReportable = true,
-                    IsSortable = sortable,
-                    IsFilterable = filterable,
-                    IsSearchable = false,
-                    DisplayOrder = order,
-                    Fid = fid,
-                };
-                await _fieldRepo.CreateAsync(f, ct);
-                seededFids[name] = fid;
+                    await SeedTableAsync(appId, _queryContext.UserId, spec, ct);
+                }
             }
-
-            // Seed default reports — sort/filter use FIDs, not internal Ids
-            var dateModifiedFid = seededFids["Date Modified"];  // FID 2
-
-            await _reportRepo.CreateAsync(new Report
-            {
-                AppTableId = table.Id,
-                OwnerId = _queryContext.UserId,
-                Name = "List All",
-                ReportType = "Table",
-                Visibility = "Shared",
-                Definition = JsonSerializer.Serialize(new ReportDefinition()),
-                IsDefault = true,
-                DisplayOrder = 1,
-            }, ct);
-
-            await _reportRepo.CreateAsync(new Report
-            {
-                AppTableId = table.Id,
-                OwnerId = _queryContext.UserId,
-                Name = "List Changes",
-                ReportType = "Table",
-                Visibility = "Shared",
-                Definition = JsonSerializer.Serialize(new ReportDefinition
-                {
-                    SortFields = [new SortSpec { FieldId = dateModifiedFid, Desc = true }],
-                }),
-                IsDefault = false,
-                DisplayOrder = 2,
-            }, ct);
-
-            // Auto-create "Main Form" with all seeded system fields in a default section
-            var mainForm = new Form
-            {
-                AppTableId        = table.Id,
-                Name              = "Main Form",
-                IsDefault         = true,
-                AutoAddNewFields  = true,
-                ShowBuiltInFields = false,
-                SaveOptions       = "SaveKeepWorking,SaveNew,SaveNext,SaveView",
-                DisplayOrder      = 1,
-                CreatedBy         = _queryContext.UserId,
-            };
-            var (formId, _) = await _formRepo.CreateAsync(mainForm, ct);
-
-            var defaultBlock = new FormSectionBlock
-            {
-                Width        = 1,
-                DisplayOrder = 1,
-                Elements     = [],
-            };
-
-            var defaultSection = new FormSection
-            {
-                FormId      = formId,
-                Name        = "Section 1",
-                ColumnCount = 2,
-                DisplayOrder = 1,
-                Blocks      = [defaultBlock],
-            };
-            await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
-
-            await _permRepo.SeedDefaultsForTableAsync(tableId, appId, ct);
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), $"Application added: {command.Name}", appId: appId, ct: ct);
@@ -309,5 +200,137 @@ public class CreateAppCommandHandler
             await _uow.RollbackAsync(ct);
             throw;
         }
+    }
+
+    private async Task SeedTableAsync(long appId, long userId, TableSpec spec, CancellationToken ct)
+    {
+        if (await _tableRepo.NameExistsInAppAsync(appId, spec.Name, ct))
+            throw new DuplicateException("Table", "name", spec.Name);
+
+        var table = new AppTable
+        {
+            AppId = appId,
+            Name = spec.Name,
+            SingularLabel = spec.SingularLabel,
+            PluralLabel = spec.PluralLabel,
+            Description = spec.Description,
+            Icon = spec.Icon,
+            CreatedBy = userId,
+        };
+
+        var (tableId, tablePublicId) = await _tableRepo.CreateAsync(table, ct);
+        table.Id = tableId;
+        table.PublicId = tablePublicId;
+
+        var physicalName = PhysicalNaming.TableName(tableId);
+        await _tableRepo.UpdatePhysicalNameAsync(tableId, physicalName, ct);
+        table.PhysicalTableName = physicalName;
+
+        await _schemaEngine.CreateTableAsync(table, ct);
+
+        // Seed system fields
+        var userTypeId     = await _fieldTypeRepo.GetIdByCodeAsync("User", ct);
+        var numberTypeId   = await _fieldTypeRepo.GetIdByCodeAsync("Number", ct);
+        var dateTimeTypeId = await _fieldTypeRepo.GetIdByCodeAsync("DateTime", ct);
+
+        (string Name, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order, int Fid)[] systemFieldDefs =
+        [
+            ("Record ID#",       numberTypeId,   "Id",         true,  false, 1, 3),
+            ("Date Created",     dateTimeTypeId, "CreatedOn",  true,  true,  2, 1),
+            ("Date Modified",    dateTimeTypeId, "ModifiedOn", true,  true,  3, 2),
+            ("Record Owner",     userTypeId,     "CreatedBy",  false, false, 4, 4),
+            ("Last Modified By", userTypeId,     "ModifiedBy", false, false, 5, 5),
+        ];
+
+        var seededFids = new Dictionary<string, int>();
+        foreach (var (name, typeId, physCol, sortable, filterable, order, fid) in systemFieldDefs)
+        {
+            var f = new AppField
+            {
+                AppTableId = table.Id,
+                FieldTypeId = typeId,
+                Name = name,
+                PhysicalColumnName = physCol,
+                IsSystem = true,
+                IsReportable = true,
+                IsSortable = sortable,
+                IsFilterable = filterable,
+                IsSearchable = false,
+                DisplayOrder = order,
+                Fid = fid,
+            };
+            await _fieldRepo.CreateAsync(f, ct);
+            seededFids[name] = fid;
+        }
+
+        // Seed default reports
+        var dateModifiedFid = seededFids["Date Modified"];
+
+        await _reportRepo.CreateAsync(new Report
+        {
+            AppTableId = table.Id,
+            OwnerId = userId,
+            Name = "List All",
+            ReportType = "Table",
+            Visibility = "Shared",
+            Definition = JsonSerializer.Serialize(new ReportDefinition()),
+            IsDefault = true,
+            DisplayOrder = 1,
+        }, ct);
+
+        await _reportRepo.CreateAsync(new Report
+        {
+            AppTableId = table.Id,
+            OwnerId = userId,
+            Name = "List Changes",
+            ReportType = "Table",
+            Visibility = "Shared",
+            Definition = JsonSerializer.Serialize(new ReportDefinition
+            {
+                SortFields = [new SortSpec { FieldId = dateModifiedFid, Desc = true }],
+            }),
+            IsDefault = false,
+            DisplayOrder = 2,
+        }, ct);
+
+        // Auto-create "Main Form"
+        var mainForm = new Form
+        {
+            AppTableId        = table.Id,
+            Name              = "Main Form",
+            IsDefault         = true,
+            AutoAddNewFields  = true,
+            ShowBuiltInFields = false,
+            SaveOptions       = "SaveKeepWorking,SaveNew,SaveNext,SaveView",
+            DisplayOrder      = 1,
+            CreatedBy         = userId,
+        };
+        var (formId, _) = await _formRepo.CreateAsync(mainForm, ct);
+
+        // Process Custom Fields
+        if (spec.Fields != null && spec.Fields.Any())
+        {
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name)).ToList();
+            await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(tablePublicId, items), ct);
+        }
+
+        var defaultBlock = new FormSectionBlock
+        {
+            Width        = 1,
+            DisplayOrder = 1,
+            Elements     = [],
+        };
+
+        var defaultSection = new FormSection
+        {
+            FormId      = formId,
+            Name        = "Section 1",
+            ColumnCount = 2,
+            DisplayOrder = 1,
+            Blocks      = [defaultBlock],
+        };
+        await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
+
+        await _permRepo.SeedDefaultsForTableAsync(tableId, appId, ct);
     }
 }

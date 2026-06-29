@@ -13,6 +13,7 @@ internal static class TextFunctions
     {
         r.Add(Fn.Exact("Length", FormulaType.Number, new[] { P.Text }, (a, _) => FormulaValue.Number(a[0].AsText().Length)));
         r.Add(Fn.Exact("Trim", FormulaType.Text, new[] { P.Text }, (a, _) => FormulaValue.Text(a[0].AsText().Trim())));
+        //r.Add(Fn.Exact("Trim", FormulaType.Text, new[] { P.Text }, (a, _) => FormulaValue.Text(a[0].AsText().())));
         r.Add(Fn.Exact("Lower", FormulaType.Text, new[] { P.Text }, (a, _) => FormulaValue.Text(a[0].AsText().ToLowerInvariant())));
         r.Add(Fn.Exact("Upper", FormulaType.Text, new[] { P.Text }, (a, _) => FormulaValue.Text(a[0].AsText().ToUpperInvariant())));
         r.Add(Fn.Exact("Left", FormulaType.Text, new[] { P.Text, P.Number }, (a, _) => FormulaValue.Text(Left(a[0].AsText(), ToInt(a[1])))));

@@ -74,11 +74,14 @@ public class AppsController : ControllerBase
             request.Description,
             request.Icon,
             request.Color,
-            request.TableName,
-            request.TableSingularLabel,
-            request.TablePluralLabel,
-            request.TableIcon,
-            request.TableDescription);
+            request.Tables.Select(t => new TableSpec(
+                t.Name,
+                t.SingularLabel,
+                t.PluralLabel,
+                t.Icon,
+                t.Description,
+                t.Config,
+                t.Fields?.Select(f => new AppFieldSpec(f.Name, f.TypeCode)).ToList())).ToList());
         var result = await _createHandler.HandleAsync(command, ct);
         var response = MapToAppResponse(result);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<AppResponse>(response));

@@ -21,6 +21,7 @@ public record AdminUserDto(
     bool IsEmailVerified,
     string? SystemRoleCode,
     int TenantCount,
+    string? TenantsString,
     DateTime CreatedOn,
     DateTime? LastLoginOn);
 
