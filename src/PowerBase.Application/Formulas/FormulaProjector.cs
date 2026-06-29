@@ -19,17 +19,28 @@ public sealed class FormulaProjector : IFormulaProjector
 
     private readonly FormulaEngine _engine;
     private readonly IQueryContext _queryContext;
+    private readonly IFormulaRuntimeContext _runtime;
+    private readonly IAppTableRepository _tableRepo;
+    private readonly IAppFieldRepository _fieldRepo;
+    private readonly IRecordRepository _recordRepo;
 
-    public FormulaProjector(FormulaEngine engine, IQueryContext queryContext)
+    public FormulaProjector(
+        FormulaEngine engine, IQueryContext queryContext, IFormulaRuntimeContext runtime,
+        IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo)
     {
         _engine = engine;
         _queryContext = queryContext;
+        _runtime = runtime;
+        _tableRepo = tableRepo;
+        _fieldRepo = fieldRepo;
+        _recordRepo = recordRepo;
     }
 
     public IReadOnlyList<IReadOnlyDictionary<long, object?>> Project(
         IReadOnlyList<AppField> fields,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
-        IReadOnlyList<IReadOnlyDictionary<long, object?>>? seed = null)
+        IReadOnlyList<IReadOnlyDictionary<long, object?>>? seed = null,
+        AppTable? table = null)
     {
         var formulaFields = fields.Where(f => f.Fid.HasValue && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)).ToList();
         if (formulaFields.Count == 0 || rows.Count == 0)
@@ -101,7 +112,9 @@ public sealed class FormulaProjector : IFormulaProjector
             Visit(item.Fid);
         }
 
-        var options = BuildOptions();
+        var options = BuildOptions(table);
+        // Shared across rows so cross-table (GetRecords/…) metadata is resolved once and budgeted.
+        var crossTable = new CrossTableQueryContext(_tableRepo, _fieldRepo, _recordRepo, table);
         var fidToColMap = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value, f => f.PhysicalColumnName ?? string.Empty);
 
         var output = new List<IReadOnlyDictionary<long, object?>>(rows.Count);
@@ -115,13 +128,14 @@ public sealed class FormulaProjector : IFormulaProjector
                 ? new Dictionary<long, object?>(seed[i])
                 : new Dictionary<long, object?>(sorted.Count);
             var projCtx = new ProjectorRecordContext(ctx, map);
+            var evalCtx = new CrossTableRecordContext(projCtx, crossTable);
 
             foreach (var (fid, formula) in sorted)
             {
                 object? value = null;
                 if (formula is not null)
                 {
-                    try { value = FormulaRawValue.ToRaw(_engine.Evaluate(formula, projCtx, options)); }
+                    try { value = FormulaRawValue.ToRaw(_engine.Evaluate(formula, evalCtx, options)); }
                     catch (FormulaEvaluationException) { value = null; }
                 }
                 map[fid] = value;
@@ -131,12 +145,15 @@ public sealed class FormulaProjector : IFormulaProjector
         return output;
     }
 
-    private EvaluationOptions BuildOptions() => new()
+    private EvaluationOptions BuildOptions(AppTable? table) => new()
     {
         UtcNow = DateTime.UtcNow,
         CurrentUser = _queryContext.UserId > 0
             ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
             : null,
+        AppId = table is null ? string.Empty : table.AppId.ToString(CultureInfo.InvariantCulture),
+        TableId = table?.PublicId.ToString() ?? string.Empty,
+        UrlRoot = _runtime.UrlRoot,
     };
 
     private sealed class ProjectorRecordContext : IRecordContext

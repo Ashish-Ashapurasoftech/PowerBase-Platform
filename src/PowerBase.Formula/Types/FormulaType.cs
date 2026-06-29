@@ -17,5 +17,7 @@ public enum FormulaType
     Bool,
     User,
     UserList,
+    TextList,
+    RecordList,
     Null,
 }

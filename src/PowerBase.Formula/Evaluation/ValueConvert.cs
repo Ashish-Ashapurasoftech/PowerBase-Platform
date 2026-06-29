@@ -46,6 +46,8 @@ internal static class ValueConvert
         FormulaType.Duration => ((decimal)v.AsDuration().TotalMinutes).ToString(NumberFormat, CultureInfo.InvariantCulture),
         FormulaType.User => v.AsUser().Email ?? v.AsUser().UserId,
         FormulaType.UserList => string.Join(";", v.AsUserList().Select(u => u.Email ?? u.UserId)),
+        FormulaType.TextList => string.Join("\n", v.AsTextList()),
+        FormulaType.RecordList => string.Join(";", v.AsRecordList().RecordIds.Select(id => id.ToString(CultureInfo.InvariantCulture))),
         _ => string.Empty,
     };
 
@@ -77,6 +79,21 @@ internal static class ValueConvert
                     ? FormulaValue.Date(dt)
                     : FormulaValue.Null(FormulaType.Date);
             default: return FormulaValue.Null(FormulaType.Date);
+        }
+    }
+
+    public static FormulaValue ToDateTimeValue(FormulaValue v)
+    {
+        if (v.IsNull) return FormulaValue.Null(FormulaType.DateTime);
+        switch (v.Type)
+        {
+            case FormulaType.DateTime: return v;
+            case FormulaType.Date: return FormulaValue.DateTime(v.AsDate().ToDateTime(TimeOnly.MinValue));
+            case FormulaType.Text:
+                return DateTime.TryParse(v.AsText(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt)
+                    ? FormulaValue.DateTime(dt)
+                    : FormulaValue.Null(FormulaType.DateTime);
+            default: return FormulaValue.Null(FormulaType.DateTime);
         }
     }
 

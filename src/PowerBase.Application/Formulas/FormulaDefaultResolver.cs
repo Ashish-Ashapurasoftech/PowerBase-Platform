@@ -21,11 +21,13 @@ public sealed class FormulaDefaultResolver : IFormulaDefaultResolver
 {
     private readonly FormulaEngine _engine;
     private readonly IQueryContext _queryContext;
+    private readonly IFormulaRuntimeContext _runtime;
 
-    public FormulaDefaultResolver(FormulaEngine engine, IQueryContext queryContext)
+    public FormulaDefaultResolver(FormulaEngine engine, IQueryContext queryContext, IFormulaRuntimeContext runtime)
     {
         _engine = engine;
         _queryContext = queryContext;
+        _runtime = runtime;
     }
 
     public object? Resolve(string defaultValue, AppField field, IReadOnlyList<AppField> allFields, IReadOnlyDictionary<long, object?> values)
@@ -47,6 +49,7 @@ public sealed class FormulaDefaultResolver : IFormulaDefaultResolver
             CurrentUser = _queryContext.UserId > 0
                 ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
                 : null,
+            UrlRoot = _runtime.UrlRoot,
         };
 
         try { return FormulaRawValue.ToRaw(_engine.Evaluate(compiled, new ValuesRecordContext(values), options)); }

@@ -269,7 +269,7 @@ public class RunReportQueryHandler
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
             var allRelational = await _relationalProjector.ProjectAsync(table, allFields, allRows, ct);
-            var allComputed = _formulaProjector.Project(allFields, allRows, allRelational);
+            var allComputed = _formulaProjector.Project(allFields, allRows, allRelational, table);
             var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
 
             // Apply formula-field conditions in memory.
@@ -297,7 +297,7 @@ public class RunReportQueryHandler
 
             var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct);
             var relational = await _relationalProjector.ProjectAsync(table, allFields, rows, ct);
-            var computed = _formulaProjector.Project(allFields, rows, relational);
+            var computed = _formulaProjector.Project(allFields, rows, relational, table);
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
         }
         var columns = selectedFields.Select(f => new ReportColumnInfo

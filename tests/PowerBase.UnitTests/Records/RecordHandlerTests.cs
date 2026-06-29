@@ -39,7 +39,7 @@ public class RecordHandlerTests
             });
 
         // Default: no formula fields — an empty computed-value map per row.
-        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>())
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
             .Returns(ci => ci.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
                 .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
 

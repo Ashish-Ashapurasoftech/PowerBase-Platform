@@ -29,7 +29,7 @@ public class TenantUnitOfWork : ITenantUnitOfWork
         _committed = false;
     }
 
-    public async Task CommitAsync(CancellationToken ct = default)
+    public async Task CommitAsync(CancellationToken ct = default) 
     {
         if (_transaction is null) throw new InvalidOperationException("No active transaction.");
         await _transaction.CommitAsync(ct);

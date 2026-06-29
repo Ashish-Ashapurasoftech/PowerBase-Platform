@@ -19,6 +19,8 @@ internal static class FormulaRawValue
             FormulaType.Duration => (decimal)v.AsDuration().TotalMinutes,
             FormulaType.User => v.AsUser().UserId,
             FormulaType.UserList => v.AsUserList().Select(u => u.UserId).ToList(),
+            FormulaType.TextList => v.AsTextList().ToList(),
+            FormulaType.RecordList => v.AsRecordList().RecordIds.ToList(),
             _ => null,
         };
     }

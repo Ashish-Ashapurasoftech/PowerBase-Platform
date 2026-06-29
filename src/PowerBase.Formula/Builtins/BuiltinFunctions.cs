@@ -12,5 +12,8 @@ internal static class BuiltinFunctions
         NumberFunctions.Register(registry);
         DateFunctions.Register(registry);
         UserFunctions.Register(registry);
+        ListFunctions.Register(registry);
+        SystemFunctions.Register(registry);
+        RecordFunctions.Register(registry);
     }
 }

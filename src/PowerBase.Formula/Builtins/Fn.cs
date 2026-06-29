@@ -7,6 +7,8 @@ namespace PowerBase.Formula.Builtins;
 
 internal delegate FormulaValue EagerImpl(IReadOnlyList<FormulaValue> args, EvaluationOptions options);
 
+internal delegate FormulaValue EagerCtxImpl(IReadOnlyList<FormulaValue> args, EvaluationOptions options, IRecordContext context);
+
 /// <summary>
 /// Declarative builders for <see cref="FormulaFunction"/>s, plus the shared
 /// arity/parameter/result-type checking helpers. Keeps each function definition to
@@ -60,6 +62,35 @@ internal static class Fn
     /// <summary>Full control over both type-checking and (lazy) evaluation — for If/Case/Nz.</summary>
     public static DelegateFunction Lazy(string name, FunctionTypeCheck check, FunctionEval eval) => new(name, check, eval);
 
+    /// <summary>
+    /// Fixed arity, eager, with access to the <see cref="IRecordContext"/> — for the cross-table
+    /// record functions (GetRecords/GetFieldValues/…).
+    /// </summary>
+    public static DelegateFunction ExactCtx(string name, FormulaType ret, Param[] ps, EagerCtxImpl impl) =>
+        new(name,
+            (args, span, d) =>
+            {
+                RequireArity(name, args.Count, ps.Length, ps.Length, span, d);
+                for (int i = 0; i < Math.Min(args.Count, ps.Length); i++) RequireParam(name, i, ps[i], args[i], span, d);
+                return ret;
+            },
+            EagerCtx(impl));
+
+    /// <summary>Arity in [required, required+optional], eager, with <see cref="IRecordContext"/> access.</summary>
+    public static DelegateFunction RangeCtx(string name, FormulaType ret, Param[] required, Param[] optional, EagerCtxImpl impl) =>
+        new(name,
+            (args, span, d) =>
+            {
+                RequireArity(name, args.Count, required.Length, required.Length + optional.Length, span, d);
+                for (int i = 0; i < args.Count; i++)
+                {
+                    if (i < required.Length) RequireParam(name, i, required[i], args[i], span, d);
+                    else if (i - required.Length < optional.Length) RequireParam(name, i, optional[i - required.Length], args[i], span, d);
+                }
+                return ret;
+            },
+            EagerCtx(impl));
+
     // ── Shared checking helpers (used by Lazy functions too) ─────────────────
 
     public static void RequireArity(string name, int count, int min, int max, TextSpan span, List<FormulaDiagnostic> d)
@@ -90,5 +121,12 @@ internal static class Fn
         var values = new FormulaValue[thunks.Count];
         for (int i = 0; i < thunks.Count; i++) values[i] = thunks[i]();
         return impl(values, opt);
+    };
+
+    private static FunctionEvalWithContext EagerCtx(EagerCtxImpl impl) => (thunks, opt, ctx) =>
+    {
+        var values = new FormulaValue[thunks.Count];
+        for (int i = 0; i < thunks.Count; i++) values[i] = thunks[i]();
+        return impl(values, opt, ctx);
     };
 }

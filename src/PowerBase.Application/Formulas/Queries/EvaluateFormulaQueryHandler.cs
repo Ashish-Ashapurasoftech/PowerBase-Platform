@@ -31,17 +31,23 @@ public sealed class EvaluateFormulaQueryHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly FormulaEngine _engine;
     private readonly IQueryContext _queryContext;
+    private readonly IFormulaRuntimeContext _runtime;
+    private readonly IRecordRepository _recordRepo;
 
     public EvaluateFormulaQueryHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         FormulaEngine engine,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IFormulaRuntimeContext runtime,
+        IRecordRepository recordRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _engine = engine;
         _queryContext = queryContext;
+        _runtime = runtime;
+        _recordRepo = recordRepo;
     }
 
     public async Task<EvaluateFormulaResult> HandleAsync(EvaluateFormulaQuery query, CancellationToken ct = default)
@@ -56,13 +62,17 @@ public sealed class EvaluateFormulaQueryHandler
         if (compiled.HasErrors)
             return new EvaluateFormulaResult { Valid = false, ResultType = compiled.ResultType.ToString(), Value = null, Diagnostics = diagnostics };
 
-        var context = new ValuesRecordContext(query.Values);
+        var crossTable = new CrossTableQueryContext(_tableRepo, _fieldRepo, _recordRepo, table);
+        var context = new CrossTableRecordContext(new ValuesRecordContext(query.Values), crossTable);
         var options = new EvaluationOptions
         {
             UtcNow = DateTime.UtcNow,
             CurrentUser = _queryContext.UserId > 0
                 ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
                 : null,
+            AppId = table.AppId.ToString(CultureInfo.InvariantCulture),
+            TableId = table.PublicId.ToString(),
+            UrlRoot = _runtime.UrlRoot,
         };
 
         object? value;

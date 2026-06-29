@@ -62,7 +62,7 @@ public class ListRecordsQueryHandler
 
         var userNames = await RunReportQueryHandler.ResolveUserNamesAsync(rows, visibleFields, _userRepo, ct);
         var relational = await _relationalProjector.ProjectAsync(table, visibleFields, rows, ct);
-        var computed = _formulaProjector.Project(visibleFields, rows, relational);
+        var computed = _formulaProjector.Project(visibleFields, rows, relational, table);
 
         return new PagedRecordResult
         {

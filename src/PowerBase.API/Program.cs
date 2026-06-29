@@ -181,6 +181,7 @@ builder.Services.AddScoped<FieldSettingsValidatorRegistry>();
 
 // Formula engine (stateless, shared) + compute-on-read projector + authoring query handlers
 builder.Services.AddSingleton<PowerBase.Formula.FormulaEngine>();
+builder.Services.AddSingleton<PowerBase.Application.Common.Interfaces.IFormulaRuntimeContext, PowerBase.API.Services.FormulaRuntimeContext>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaProjector, PowerBase.Application.Formulas.FormulaProjector>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.IRelationalProjector, PowerBase.Application.Relationships.RelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.Queries.ValidateFormulaQueryHandler>();
