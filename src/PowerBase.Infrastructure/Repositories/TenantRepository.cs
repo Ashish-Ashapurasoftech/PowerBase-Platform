@@ -56,6 +56,13 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
           AND t.IsDeleted  = 0
         """;
 
+    private const string GetByIdSql = """
+        SELECT t.Id, t.PublicId, t.Name, t.Slug, t.PlanCode, t.Status, t.IsDeleted,
+               t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy
+        FROM meta.Tenant t
+        WHERE t.Id = @id AND t.IsDeleted = 0
+        """;
+
     private const string InsertTenantSql = """
         INSERT INTO meta.Tenant (PublicId, Name, Slug, PlanCode, Status, ProvisioningState, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
@@ -439,9 +446,21 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
     public async Task<IReadOnlyList<TenantItem>> ListTenantsForUserAsync(long userId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        var rows = await connection.QueryAsync<TenantItem>(
+        var result = await connection.QueryAsync<TenantItem>(
             new CommandDefinition(ListTenantsForUserSql, new { userId }, cancellationToken: ct));
-        return rows.ToList();
+        return result.AsList();
+    }
+
+    public async Task<Tenant> GetByIdAsync(long id, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var tenant = await connection.QuerySingleOrDefaultAsync<Tenant>(
+            new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
+
+        if (tenant == null)
+            throw new NotFoundException(nameof(Tenant), id);
+
+        return tenant;
     }
 
     public async Task<Tenant> GetTenantForUserAsync(Guid tenantPublicId, long userId, CancellationToken ct = default)
