@@ -153,6 +153,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var aggExpr = function switch
         {
             "Count" => "COUNT(*)",
+            "Exists" => "CAST(CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS BIT)",
             "Sum" when targetFid.HasValue => $"SUM(CAST({PhysicalNaming.ColumnName(targetFid.Value)} AS DECIMAL(18,4)))",
             "Avg" when targetFid.HasValue => $"AVG(CAST({PhysicalNaming.ColumnName(targetFid.Value)} AS DECIMAL(18,4)))",
             "Min" when targetFid.HasValue => $"MIN({PhysicalNaming.ColumnName(targetFid.Value)})",

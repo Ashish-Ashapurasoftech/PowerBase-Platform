@@ -15,4 +15,4 @@ public sealed class RelationshipDto
 }
 
 /// <summary>A field participating in a relationship. <paramref name="Role"/> is "reference", "lookup" or "summary".</summary>
-public sealed record RelationshipFieldDto(Guid PublicId, int Fid, string Name, string Role);
+public sealed record RelationshipFieldDto(Guid PublicId, int Fid, string Name, string Role, string TypeCode = "");

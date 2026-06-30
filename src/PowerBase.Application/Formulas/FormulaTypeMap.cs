@@ -50,6 +50,7 @@ internal static class FormulaTypeMap
         if (s is null) return FormulaType.Number;
         return s.Function switch
         {
+            "Exists" => FormulaType.Bool,
             "Min" or "Max" when !string.IsNullOrWhiteSpace(s.TargetTypeCode) => FieldType(s.TargetTypeCode!, null),
             _ => FormulaType.Number,
         };

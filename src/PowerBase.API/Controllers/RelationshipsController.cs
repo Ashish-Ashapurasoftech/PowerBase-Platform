@@ -3,8 +3,11 @@ using PowerBase.API.Attributes;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Relationships;
 using PowerBase.Application.Relationships;
+using PowerBase.Application.Relationships.Commands.AddLookupFields;
+using PowerBase.Application.Relationships.Commands.AddSummaryField;
 using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Relationships.Commands.DeleteRelationship;
+using PowerBase.Application.Relationships.Commands.RemoveRelationshipField;
 using PowerBase.Application.Relationships.Queries;
 using PowerBase.Domain.Constants;
 
@@ -17,17 +20,26 @@ public class RelationshipsController : ControllerBase
     private readonly DeleteRelationshipCommandHandler _deleteHandler;
     private readonly RelationshipQueriesHandler _queries;
     private readonly GetParentOptionsQueryHandler _parentOptions;
+    private readonly AddLookupFieldsCommandHandler _addLookups;
+    private readonly AddSummaryFieldCommandHandler _addSummary;
+    private readonly RemoveRelationshipFieldCommandHandler _removeField;
 
     public RelationshipsController(
         CreateRelationshipCommandHandler createHandler,
         DeleteRelationshipCommandHandler deleteHandler,
         RelationshipQueriesHandler queries,
-        GetParentOptionsQueryHandler parentOptions)
+        GetParentOptionsQueryHandler parentOptions,
+        AddLookupFieldsCommandHandler addLookups,
+        AddSummaryFieldCommandHandler addSummary,
+        RemoveRelationshipFieldCommandHandler removeField)
     {
         _createHandler = createHandler;
         _deleteHandler = deleteHandler;
         _queries = queries;
         _parentOptions = parentOptions;
+        _addLookups = addLookups;
+        _addSummary = addSummary;
+        _removeField = removeField;
     }
 
     /// <summary>Create a one-to-many relationship (provisions the reference, lookup and summary fields).</summary>
@@ -71,6 +83,58 @@ public class RelationshipsController : ControllerBase
     {
         var items = await _queries.ByTableAsync(tableId, ct);
         return Ok(new ApiListResponse<RelationshipDto>(items, items.Count, 1, items.Count));
+    }
+
+    /// <summary>Get one relationship with its participating fields (drives the relationship detail page).</summary>
+    [HttpGet("apps/{appId:guid}/relationships/{id:guid}")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Get(Guid appId, Guid id, CancellationToken ct)
+    {
+        var dto = await _queries.GetAsync(id, ct);
+        return Ok(new ApiResponse<RelationshipDto>(dto));
+    }
+
+    /// <summary>Add lookup fields to an existing relationship's child table.</summary>
+    [HttpPost("apps/{appId:guid}/relationships/{id:guid}/lookups")]
+    [RequireAppPermission(PermissionCodes.FieldsCreate, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> AddLookups(Guid appId, Guid id, [FromBody] AddLookupFieldsRequest request, CancellationToken ct)
+    {
+        var command = new AddLookupFieldsCommand(id,
+            request.Lookups.Select(l => new AddLookupSpec(l.SourceFid, l.Name, l.Label)).ToList());
+        var result = await _addLookups.HandleAsync(command, ct);
+        return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
+    /// <summary>Add a summary field to an existing relationship's parent table.</summary>
+    [HttpPost("apps/{appId:guid}/relationships/{id:guid}/summaries")]
+    [RequireAppPermission(PermissionCodes.FieldsCreate, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> AddSummary(Guid appId, Guid id, [FromBody] AddSummaryFieldRequest request, CancellationToken ct)
+    {
+        var command = new AddSummaryFieldCommand(id, request.Name, request.Label, request.Function, request.TargetFid, request.MatchingCriteria);
+        var result = await _addSummary.HandleAsync(command, ct);
+        return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
+    /// <summary>Remove a single lookup or summary field from a relationship.</summary>
+    [HttpDelete("apps/{appId:guid}/relationships/{id:guid}/fields/{fieldId:guid}")]
+    [RequireAppPermission(PermissionCodes.FieldsDelete, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> RemoveField(Guid appId, Guid id, Guid fieldId, CancellationToken ct)
+    {
+        var result = await _removeField.HandleAsync(new RemoveRelationshipFieldCommand(id, fieldId), ct);
+        return Ok(new ApiResponse<RelationshipDto>(result));
     }
 
     /// <summary>Delete a relationship and its reference/lookup/summary fields.</summary>

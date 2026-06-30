@@ -198,10 +198,12 @@ public sealed class SummarySettings
 public static class SummaryFunctions
 {
     public const string Count = "Count";
+    /// <summary>True/False — whether any related child records exist.</summary>
+    public const string Exists = "Exists";
     public const string Sum = "Sum";
     public const string Avg = "Avg";
     public const string Min = "Min";
     public const string Max = "Max";
 
-    public static readonly string[] All = [Count, Sum, Avg, Min, Max];
+    public static readonly string[] All = [Count, Exists, Sum, Avg, Min, Max];
 }

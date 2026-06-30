@@ -73,15 +73,24 @@ public class RelationshipQueriesHandler
             var refField = childFields.FirstOrDefault(f => f.Id == rel.ReferenceFieldId);
             var fields = new List<RelationshipFieldDto>();
             if (refField is not null)
-                fields.Add(new(refField.PublicId, refField.Fid ?? 0, refField.Name, "reference"));
+                fields.Add(new(refField.PublicId, refField.Fid ?? 0, refField.Name, "reference", "Reference"));
 
+            // Lookups (child); the proxy lookup gets the distinct "proxy" role. TypeCode = looked-up source type.
             foreach (var f in childFields.Where(f => f.TypeCode == "Lookup"
                 && FormulaTypeMap.ParseLookupSettings(f.Settings)?.RelationshipId == rel.Id))
-                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "lookup"));
+            {
+                var role = f.Id == rel.ProxyFieldId ? "proxy" : "lookup";
+                var srcType = FormulaTypeMap.ParseLookupSettings(f.Settings)?.SourceTypeCode ?? "Text";
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, role, srcType));
+            }
 
+            // Summaries (parent). TypeCode = the aggregate function (Count/Exists/Sum/…).
             foreach (var f in parentFields.Where(f => f.TypeCode == "Summary"
                 && FormulaTypeMap.ParseSummarySettings(f.Settings)?.RelationshipId == rel.Id))
-                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "summary"));
+            {
+                var fn = FormulaTypeMap.ParseSummarySettings(f.Settings)?.Function ?? "Count";
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "summary", fn));
+            }
 
             var proxyFid = rel.ProxyFieldId.HasValue
                 ? childFields.FirstOrDefault(f => f.Id == rel.ProxyFieldId.Value)?.Fid
