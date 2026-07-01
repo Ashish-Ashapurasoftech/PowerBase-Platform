@@ -11,6 +11,7 @@ public interface ITenantRepository
     Task<string?> GetTenantNameByIdAsync(long tenantId, CancellationToken ct = default);
     Task<long> GetActiveTenantIdByUserIdAsync(long userId, CancellationToken ct = default);
     Task<IReadOnlyList<TenantItem>> ListTenantsForUserAsync(long userId, CancellationToken ct = default);
+    Task<Tenant> GetByIdAsync(long id, CancellationToken ct = default);
     Task<Tenant> GetTenantForUserAsync(Guid tenantPublicId, long userId, CancellationToken ct = default);
     Task<long> CreateAsync(Tenant tenant, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task UpdateProvisioningAsync(long tenantId, string provisioningState, string? databaseName, int schemaVersion = 0, string? serverRef = null, string? connectionSecretRef = null, CancellationToken ct = default);

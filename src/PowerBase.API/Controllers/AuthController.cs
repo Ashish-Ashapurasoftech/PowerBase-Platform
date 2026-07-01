@@ -4,6 +4,7 @@ using PowerBase.API.Models;
 using PowerBase.API.Models.Auth;
 using PowerBase.Application.Auth.Commands.AcceptInvite;
 using PowerBase.Application.Auth.Commands.SelectTenant;
+using PowerBase.Application.Auth.Commands.RefreshToken;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
 using PowerBase.Application.Auth.Queries.Login;
@@ -24,6 +25,7 @@ public class AuthController : ControllerBase
     private readonly AcceptInviteCommandHandler _acceptInviteHandler;
     private readonly ForgotPasswordCommandHandler _forgotPasswordHandler;
     private readonly ResetPasswordCommandHandler _resetPasswordHandler;
+    private readonly RefreshTokenCommandHandler _refreshTokenHandler;
 
     public AuthController(
         SignupCommandHandler signupHandler,
@@ -32,7 +34,8 @@ public class AuthController : ControllerBase
         SelectTenantCommandHandler selectTenantHandler,
         AcceptInviteCommandHandler acceptInviteHandler,
         ForgotPasswordCommandHandler forgotPasswordHandler,
-        ResetPasswordCommandHandler resetPasswordHandler)
+        ResetPasswordCommandHandler resetPasswordHandler,
+        RefreshTokenCommandHandler refreshTokenHandler)
     {
         _signupHandler = signupHandler;
         _loginHandler = loginHandler;
@@ -41,6 +44,7 @@ public class AuthController : ControllerBase
         _acceptInviteHandler = acceptInviteHandler;
         _forgotPasswordHandler = forgotPasswordHandler;
         _resetPasswordHandler = resetPasswordHandler;
+        _refreshTokenHandler = refreshTokenHandler;
     }
 
     /// <summary>Register a new user account. Returns an identity token (no tenant context yet).</summary>
@@ -97,6 +101,18 @@ public class AuthController : ControllerBase
     public async Task<IActionResult> SelectTenant([FromBody] SelectTenantRequest request, CancellationToken ct)
     {
         var result = await _selectTenantHandler.HandleAsync(new SelectTenantCommand(request.TenantPublicId), ct);
+        return Ok(new ApiResponse<AuthResponse>(MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId,
+            result.Email, result.Name, result.TenantPublicId, result.TenantName)));
+    }
+
+    /// <summary>Refresh the current tenant token.</summary>
+    [HttpPost("refresh")]
+    [RequireAuth]
+    [ProducesResponseType(typeof(ApiResponse<AuthResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> Refresh(CancellationToken ct)
+    {
+        var result = await _refreshTokenHandler.HandleAsync(new RefreshTokenCommand(), ct);
         return Ok(new ApiResponse<AuthResponse>(MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId,
             result.Email, result.Name, result.TenantPublicId, result.TenantName)));
     }
