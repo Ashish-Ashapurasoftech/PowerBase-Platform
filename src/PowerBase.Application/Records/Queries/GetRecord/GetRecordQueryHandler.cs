@@ -50,7 +50,7 @@ public class GetRecordQueryHandler
         var row = await _recordRepo.GetByPublicIdAsync(table, visibleFields, query.RecordPublicId, ct);
         var userNames = await RunReportQueryHandler.ResolveUserNamesAsync([row], visibleFields, _userRepo, ct);
         var relational = await _relationalProjector.ProjectAsync(table, visibleFields, [row], ct);
-        var computed = _formulaProjector.Project(visibleFields, [row], relational);
+        var computed = _formulaProjector.Project(visibleFields, [row], relational, table);
         return Records.RecordResult.FromRow(row, visibleFields, userNames, computed[0]);
     }
 }

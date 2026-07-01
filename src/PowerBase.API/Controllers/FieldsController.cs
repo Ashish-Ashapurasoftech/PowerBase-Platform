@@ -8,6 +8,7 @@ using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Commands.DeleteField;
 using PowerBase.Application.Fields.Commands.UpdateField;
 using PowerBase.Application.Fields.Queries.ListFields;
+using PowerBase.Application.Fields.Queries.GetFieldUsage;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
@@ -125,6 +126,20 @@ public class FieldsController : ControllerBase
     {
         await bulkDeleteHandler.HandleAsync(new PowerBase.Application.Fields.Commands.BulkDeleteFields.BulkDeleteFieldsCommand(tableId, request.FieldIds), ct);
         return NoContent();
+    }
+
+    /// <summary>Get field usage (where it is referenced in forms, reports, and roles).</summary>
+    [HttpGet("tables/{tableId:guid}/fields/{fieldId:guid}/usage")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<FieldUsageDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Usage(
+        [FromServices] GetFieldUsageQueryHandler usageHandler,
+        Guid tableId, Guid fieldId, [FromRoute(Name = "appId")] Guid? appId, CancellationToken ct)
+    {
+        var dto = await usageHandler.HandleAsync(new GetFieldUsageQuery(tableId, fieldId), ct);
+        return Ok(new ApiResponse<FieldUsageDto>(dto));
     }
 
     private static FieldResponse MapToResponse(CreateFieldResult r) => new()

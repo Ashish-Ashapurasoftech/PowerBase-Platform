@@ -195,13 +195,46 @@ public sealed class SummarySettings
     public string? FilterTree { get; set; }
 }
 
+/// <summary>
+/// Settings for a Report Link field. A Report Link is a value-match hyperlink that opens a
+/// filtered view of a target table — no physical column, not projected by any projector.
+/// Target can be in any app in the same tenant. SourceFid is null for "current record Id".
+/// </summary>
+public sealed class ReportLinkSettings
+{
+    /// <summary>When auto-created for a relationship, the relationship's numeric Id (for the detail page to match it).</summary>
+    public long? RelationshipId { get; set; }
+    /// <summary>The target app's PublicId (any same-tenant app).</summary>
+    public string? TargetAppPublicId { get; set; }
+    /// <summary>The target table's PublicId.</summary>
+    public string? TargetTablePublicId { get; set; }
+    /// <summary>The target table's field Fid to match against.</summary>
+    public int? TargetFid { get; set; }
+    /// <summary>The source field's Fid on THIS table whose value is matched. Null = current record Id.</summary>
+    public int? SourceFid { get; set; }
+    /// <summary>The hyperlink label text shown to the user.</summary>
+    public string? LinkText { get; set; }
+    /// <summary>When true the link opens in a new browser tab.</summary>
+    public bool? OpenInNewWindow { get; set; }
+    /// <summary>When true the match is case-sensitive / exact.</summary>
+    public bool? ValueMatchExact { get; set; }
+    /// <summary>When true render the link text in bold.</summary>
+    public bool? DisplayBold { get; set; }
+    /// <summary>When true disable wrapping on the cell.</summary>
+    public bool? NoWrap { get; set; }
+    /// <summary>Optional fixed column width in pixels for the grid.</summary>
+    public int? ColumnWidth { get; set; }
+}
+
 public static class SummaryFunctions
 {
     public const string Count = "Count";
+    /// <summary>True/False — whether any related child records exist.</summary>
+    public const string Exists = "Exists";
     public const string Sum = "Sum";
     public const string Avg = "Avg";
     public const string Min = "Min";
     public const string Max = "Max";
 
-    public static readonly string[] All = [Count, Sum, Avg, Min, Max];
+    public static readonly string[] All = [Count, Exists, Sum, Avg, Min, Max];
 }

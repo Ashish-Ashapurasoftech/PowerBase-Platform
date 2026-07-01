@@ -50,6 +50,7 @@ internal static class FormulaTypeMap
         if (s is null) return FormulaType.Number;
         return s.Function switch
         {
+            "Exists" => FormulaType.Bool,
             "Min" or "Max" when !string.IsNullOrWhiteSpace(s.TargetTypeCode) => FieldType(s.TargetTypeCode!, null),
             _ => FormulaType.Number,
         };
@@ -82,6 +83,13 @@ internal static class FormulaTypeMap
     {
         if (string.IsNullOrWhiteSpace(settingsJson)) return null;
         try { return JsonSerializer.Deserialize<SummarySettings>(settingsJson, JsonOpts); }
+        catch (JsonException) { return null; }
+    }
+
+    public static ReportLinkSettings? ParseReportLinkSettings(string? settingsJson)
+    {
+        if (string.IsNullOrWhiteSpace(settingsJson)) return null;
+        try { return JsonSerializer.Deserialize<ReportLinkSettings>(settingsJson, JsonOpts); }
         catch (JsonException) { return null; }
     }
 

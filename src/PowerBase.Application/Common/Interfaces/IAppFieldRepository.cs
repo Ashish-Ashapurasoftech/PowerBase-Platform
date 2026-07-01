@@ -1,4 +1,5 @@
 using PowerBase.Domain.Entities;
+using PowerBase.Application.Fields.Queries.GetFieldUsage;
 
 namespace PowerBase.Application.Common.Interfaces;
 
@@ -19,4 +20,5 @@ public interface IAppFieldRepository
         bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, string? settings, CancellationToken ct = default);
     Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default);
     Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default);
+    Task<FieldUsageDto> GetFieldUsageAsync(long tableId, long fieldId, int fid, long appId, CancellationToken ct = default);
 }

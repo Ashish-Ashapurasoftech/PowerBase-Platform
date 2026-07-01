@@ -8,6 +8,7 @@ public interface IAppRepository
 {
     Task<App> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default);
+    Task<Guid> GetPublicIdByIdAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<App>> ListAsync(int page, int pageSize, CancellationToken ct = default);
     Task<int> CountAsync(CancellationToken ct = default);
     Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, CancellationToken ct = default);

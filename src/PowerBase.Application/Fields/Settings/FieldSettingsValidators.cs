@@ -202,6 +202,29 @@ public sealed class NumericRangeSettingsValidator : FieldSettingsValidatorBase<N
     }
 }
 
+// ─── Report Link ─────────────────────────────────────────────────────────────
+
+public sealed class ReportLinkSettingsValidator : FieldSettingsValidatorBase<ReportLinkSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["ReportLink"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(ReportLinkSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (string.IsNullOrWhiteSpace(s.TargetTablePublicId))
+            AddError(errors, "Settings.TargetTablePublicId", "A target table is required.");
+
+        if (s.TargetFid is null)
+            AddError(errors, "Settings.TargetFid", "A target field is required.");
+
+        if (s.ColumnWidth is < 20 or > 2000)
+            AddError(errors, "Settings.ColumnWidth", "Column width must be between 20 and 2000.");
+
+        return errors;
+    }
+}
+
 // ─── Formula ──────────────────────────────────────────────────────────────────
 
 public sealed class FormulaSettingsValidator : FieldSettingsValidatorBase<FormulaSettings>

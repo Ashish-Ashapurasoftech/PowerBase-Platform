@@ -172,7 +172,7 @@ internal sealed class Evaluator
             thunks[i] = () => Eval(arg, ctx, opt);
         }
 
-        var result = fn.Evaluate(thunks, opt);
+        var result = fn.Evaluate(thunks, opt, ctx);
 
         // A typeless null (e.g. Case with no match/default) adopts the call's static type.
         if (result.IsNull && result.Type == FormulaType.Null && c.Type != FormulaType.Null)

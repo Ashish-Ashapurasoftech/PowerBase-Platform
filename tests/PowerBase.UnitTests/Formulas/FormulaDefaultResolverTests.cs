@@ -13,7 +13,9 @@ public class FormulaDefaultResolverTests
     {
         var qc = Substitute.For<IQueryContext>();
         qc.UserId.Returns(0L);
-        return new FormulaDefaultResolver(new FormulaEngine(), qc);
+        var runtime = Substitute.For<IFormulaRuntimeContext>();
+        runtime.UrlRoot.Returns(string.Empty);
+        return new FormulaDefaultResolver(new FormulaEngine(), qc, runtime);
     }
 
     private static AppField Field(int fid, string name, string typeCode) =>

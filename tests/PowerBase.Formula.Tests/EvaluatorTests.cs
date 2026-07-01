@@ -43,6 +43,32 @@ public class EvaluatorTests
     [InlineData("Quarter(ToDate(\"2026-06-11\"))", "2")]
     [InlineData("ToDays(Hours(48))", "2")]
     [InlineData("DateDiff(ToDate(\"2026-06-11\"), ToDate(\"2026-06-01\"))", "10")]
+    // Wave 1 — number
+    [InlineData("Rem(7, 3)", "1")]
+    [InlineData("Ceil(12, 5)", "15")]
+    [InlineData("Ceil(10, 5)", "10")]
+    [InlineData("Floor(12, 5)", "10")]
+    [InlineData("Ceil(2.3)", "3")]            // default multiple 1
+    [InlineData("Floor(2.9)", "2")]
+    [InlineData("Ceil(-12, 5)", "-10")]       // toward +∞
+    [InlineData("Floor(-12, 5)", "-15")]
+    // Wave 1 — text returning numbers
+    [InlineData("Find(\"hello world\", \"world\")", "7")]
+    [InlineData("Find(\"hello\", \"xyz\")", "0")]
+    // Wave 1 — date/time + duration
+    [InlineData("DayOfYear(ToDate(\"2026-06-11\"))", "162")]
+    [InlineData("Hour(ToTimestamp(\"2026-06-11 14:30:45\"))", "14")]
+    [InlineData("Minute(ToTimestamp(\"2026-06-11 14:30:45\"))", "30")]
+    [InlineData("Second(ToTimestamp(\"2026-06-11 14:30:45\"))", "45")]
+    [InlineData("ToHours(Hours(2))", "2")]
+    [InlineData("ToMinutes(Hours(1))", "60")]
+    [InlineData("ToSeconds(Minutes(2))", "120")]
+    [InlineData("ToWeeks(Days(14))", "2")]
+    // Wave 2 — list length
+    [InlineData("Count(Split(\"a,b,c\", \",\"))", "3")]
+    [InlineData("Size(Split(\"a,b,c\", \",\"))", "3")]
+    [InlineData("Count(Split(\"a\", \",\"))", "1")]
+    [InlineData("Count(ToUserList(\"a@b.com;c@d.com\"))", "2")]
     public void Numeric_results(string expr, string expected)
     {
         var v = FormulaEval.Const(expr);
@@ -68,6 +94,24 @@ public class EvaluatorTests
     [InlineData("If(true, \"yes\", \"no\")", "yes")]
     [InlineData("\"x\" & ToText(1 + 2)", "x3")]
     [InlineData("Case(\"b\", \"a\", \"Apple\", \"b\", \"Banana\")", "Banana")]
+    // Wave 1 — text
+    [InlineData("NotLeft(\"hello\", 2)", "llo")]
+    [InlineData("NotRight(\"hello\", 2)", "hel")]
+    [InlineData("RegexExtract(\"order-1234\", \"[0-9]+\")", "1234")]
+    [InlineData("RegexExtract(\"a1b2\", \"([a-z])([0-9])\")", "a")]   // first capture group
+    [InlineData("RegexReplace(\"a1b2c3\", \"[0-9]\", \"-\")", "a-b-c-")]
+    [InlineData("RegexExtract(\"abc\", \"(\")", "")]                  // invalid pattern → empty
+    [InlineData("HTMLToText(\"<b>Hi</b>&amp;Bye\")", "Hi&Bye")]
+    [InlineData("URLEncode(\"a b&c\")", "a%20b%26c")]
+    [InlineData("URLDecode(\"a%20b%26c\")", "a b&c")]
+    [InlineData("Base64Encode(\"hi\")", "aGk=")]
+    [InlineData("Base64Decode(\"aGk=\")", "hi")]
+    [InlineData("NameOfDay(ToDate(\"2026-06-11\"))", "Thursday")]
+    [InlineData("NameOfMonth(ToDate(\"2026-06-11\"))", "June")]
+    // Wave 2 — Split/Join round trips
+    [InlineData("Join(Split(\"a-b-c\", \"-\"), \"+\")", "a+b+c")]
+    [InlineData("Join(Split(\"a,b,c\", \",\"), \"\")", "abc")]
+    [InlineData("ToText(Split(\"a,b\", \",\"))", "a\nb")]   // list → text joins with newline
     public void Text_results(string expr, string expected)
     {
         var v = FormulaEval.Const(expr);
@@ -89,11 +133,78 @@ public class EvaluatorTests
     [InlineData("\"a\" = \"A\"", false)]              // text equality is case-sensitive
     [InlineData("true and false", false)]
     [InlineData("1 < 2 = true", true)]               // (1<2)=true
+    // Wave 1 — text predicates
+    [InlineData("Begins(\"hello\", \"he\")", true)]
+    [InlineData("Begins(\"hello\", \"lo\")", false)]
+    [InlineData("Ends(\"hello\", \"lo\")", true)]
+    [InlineData("Ends(\"hello\", \"he\")", false)]
+    [InlineData("RegexMatch(\"abc123\", \"[0-9]+\")", true)]
+    [InlineData("RegexMatch(\"abc\", \"[0-9]+\")", false)]
+    [InlineData("RegexMatch(\"abc\", \"(\")", false)]   // invalid pattern → false
+    // Wave 1 — date + user predicates
+    [InlineData("IsWeekday(ToDate(\"2026-06-11\"))", true)]    // Thursday
+    [InlineData("IsWeekday(ToDate(\"2026-06-13\"))", false)]   // Saturday
+    [InlineData("IsUserEmail(\"a@b.com\")", true)]
+    [InlineData("IsUserEmail(\"not-an-email\")", false)]
+    [InlineData("IsUserEmail(\"a@b\")", false)]
     public void Bool_results(string expr, bool expected)
     {
         var v = FormulaEval.Const(expr);
         v.Type.Should().Be(FormulaType.Bool);
         v.AsBool().Should().Be(expected);
+    }
+
+    [Theory]
+    // Wave 1 — date-returning functions (June 11 2026 is a Thursday)
+    [InlineData("FirstDayOfMonth(ToDate(\"2026-06-15\"))", "2026-06-01")]
+    [InlineData("LastDayOfMonth(ToDate(\"2026-02-10\"))", "2026-02-28")]   // 2026 not leap
+    [InlineData("FirstDayOfYear(ToDate(\"2026-06-15\"))", "2026-01-01")]
+    [InlineData("LastDayOfYear(ToDate(\"2026-06-15\"))", "2026-12-31")]
+    [InlineData("FirstDayOfWeek(ToDate(\"2026-06-11\"))", "2026-06-07")]   // Sunday start
+    [InlineData("LastDayOfWeek(ToDate(\"2026-06-11\"))", "2026-06-13")]    // Saturday end
+    [InlineData("NextDayOfWeek(ToDate(\"2026-06-11\"), 1)", "2026-06-14")] // next Sunday
+    [InlineData("PrevDayOfWeek(ToDate(\"2026-06-11\"), 1)", "2026-06-07")] // prev Sunday
+    [InlineData("WeekdayAdd(ToDate(\"2026-06-11\"), 1)", "2026-06-12")]    // Thu +1 = Fri
+    [InlineData("WeekdayAdd(ToDate(\"2026-06-12\"), 1)", "2026-06-15")]    // Fri +1 skips weekend → Mon
+    [InlineData("WeekdaySub(ToDate(\"2026-06-15\"), 1)", "2026-06-12")]    // Mon -1 skips weekend → Fri
+    public void Date_results(string expr, string expected)
+    {
+        var v = FormulaEval.Const(expr);
+        v.Type.Should().Be(FormulaType.Date);
+        v.AsDate().Should().Be(DateOnly.Parse(expected, CultureInfo.InvariantCulture));
+    }
+
+    [Fact]
+    public void System_functions_read_runtime_identifiers()
+    {
+        var opt = new EvaluationOptions { AppId = "42", TableId = "abc-guid", UrlRoot = "https://app.example.com" };
+        FormulaEval.Const("AppID()", opt).AsText().Should().Be("42");
+        FormulaEval.Const("Dbid()", opt).AsText().Should().Be("abc-guid");
+        FormulaEval.Const("URLRoot()", opt).AsText().Should().Be("https://app.example.com");
+        FormulaEval.Const("URLRoot() & \"/r/\" & Dbid()", opt).AsText().Should().Be("https://app.example.com/r/abc-guid");
+    }
+
+    [Fact]
+    public void System_functions_default_to_empty_when_unset()
+    {
+        FormulaEval.Const("AppID()").AsText().Should().Be(string.Empty);
+        FormulaEval.Const("URLRoot()").AsText().Should().Be(string.Empty);
+    }
+
+    [Fact]
+    public void Split_produces_a_text_list()
+    {
+        var v = FormulaEval.Const("Split(\"a,b,c\", \",\")");
+        v.Type.Should().Be(FormulaType.TextList);
+        v.AsTextList().Should().Equal("a", "b", "c");
+    }
+
+    [Fact]
+    public void ToUserList_builds_users_from_delimited_text()
+    {
+        var v = FormulaEval.Const("ToUserList(\"a@b.com; c@d.com\")");
+        v.Type.Should().Be(FormulaType.UserList);
+        v.AsUserList().Select(u => u.UserId).Should().Equal("a@b.com", "c@d.com");
     }
 
     [Fact]

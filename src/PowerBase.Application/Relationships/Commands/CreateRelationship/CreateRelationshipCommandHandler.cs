@@ -19,6 +19,7 @@ public class CreateRelationshipCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly IAppRepository _appRepo;
 
     public CreateRelationshipCommandHandler(
         IAppTableRepository tableRepo,
@@ -28,7 +29,8 @@ public class CreateRelationshipCommandHandler
         ISchemaEngineService schemaEngine,
         IFormRepository formRepo,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IAppRepository appRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -38,6 +40,7 @@ public class CreateRelationshipCommandHandler
         _formRepo = formRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
+        _appRepo = appRepo;
     }
 
     public async Task<RelationshipDto> HandleAsync(CreateRelationshipCommand command, CancellationToken ct = default)
@@ -53,6 +56,7 @@ public class CreateRelationshipCommandHandler
         var refType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Reference, ct) ?? throw new NotFoundException("FieldType", "Reference");
         var lookupType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Lookup, ct) ?? throw new NotFoundException("FieldType", "Lookup");
         var summaryType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Summary, ct) ?? throw new NotFoundException("FieldType", "Summary");
+        var reportLinkType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.ReportLink, ct) ?? throw new NotFoundException("FieldType", "ReportLink");
 
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
         var childFields = await _fieldRepo.ListByTableAsync(child.Id, ct);
@@ -121,7 +125,27 @@ public class CreateRelationshipCommandHandler
             parentAddFids.Add(summary.Fid!.Value);
         }
 
-        // 5. Auto-append new fields to forms that opt in.
+        // 5. Auto-create a Report Link on the parent: "See {child.Name}" — navigates to filtered child records.
+        var appPublicId = await _appRepo.GetPublicIdByIdAsync(parent.AppId, ct);
+        var reportLinkName = $"{child.Name} records";
+        if (!await _fieldRepo.NameExistsInTableAsync(parent.Id, reportLinkName, ct))
+        {
+            var reportLink = await CreateFieldAsync(parent, reportLinkType, reportLinkName, null, false,
+                new ReportLinkSettings
+                {
+                    RelationshipId = relId,
+                    TargetAppPublicId = appPublicId.ToString(),
+                    TargetTablePublicId = child.PublicId.ToString(),
+                    TargetFid = refField.Fid!.Value,
+                    SourceFid = null, // null = use Record ID# (Fid 3)
+                    LinkText = $"See related {child.Name}",
+                    OpenInNewWindow = false,
+                }, ct);
+            createdFields.Add(new(reportLink.PublicId, reportLink.Fid!.Value, reportLink.Name, "reportlink", reportLink.TypeCode));
+            parentAddFids.Add(reportLink.Fid!.Value);
+        }
+
+        // 6. Auto-append new fields to forms that opt in.
         await AppendToAutoAddFormsAsync(child.PublicId, childAddFids, ct);
         await AppendToAutoAddFormsAsync(parent.PublicId, parentAddFids, ct);
 
@@ -208,5 +232,6 @@ public class CreateRelationshipCommandHandler
         public const string Reference = nameof(Domain.Enums.FieldTypeCode.Reference);
         public const string Lookup = nameof(Domain.Enums.FieldTypeCode.Lookup);
         public const string Summary = nameof(Domain.Enums.FieldTypeCode.Summary);
+        public const string ReportLink = nameof(Domain.Enums.FieldTypeCode.ReportLink);
     }
 }

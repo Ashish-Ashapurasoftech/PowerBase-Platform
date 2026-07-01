@@ -1,6 +1,7 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Relationships;
+using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Queries.RunReport;
 
 namespace PowerBase.Application.Records.Queries.ListRecords;
@@ -54,15 +55,19 @@ public class ListRecordsQueryHandler
             return new PagedRecordResult { Items = [], TotalCount = 0, Page = page, PageSize = pageSize };
 
         var visibleFields = access.VisibleFields;
+
+        // Merge the permission view-filter with an optional Report Link ad-hoc filter.
+        var effectiveFilter = BuildEffectiveFilter(access.ViewFilter, query.FilterFid, query.FilterValue);
+
         var rows = await _recordRepo.ListAsync(
             table, visibleFields, page, pageSize,
-            filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            filterTree: effectiveFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
         var total = await _recordRepo.CountAsync(
-            table, fields, filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            table, fields, filterTree: effectiveFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
         var userNames = await RunReportQueryHandler.ResolveUserNamesAsync(rows, visibleFields, _userRepo, ct);
         var relational = await _relationalProjector.ProjectAsync(table, visibleFields, rows, ct);
-        var computed = _formulaProjector.Project(visibleFields, rows, relational);
+        var computed = _formulaProjector.Project(visibleFields, rows, relational, table);
 
         return new PagedRecordResult
         {
@@ -70,6 +75,27 @@ public class ListRecordsQueryHandler
             TotalCount = total,
             Page = page,
             PageSize = pageSize,
+        };
+    }
+
+    private static FilterGroup? BuildEffectiveFilter(FilterGroup? viewFilter, int? filterFid, string? filterValue)
+    {
+        if (filterFid is null || filterValue is null)
+            return viewFilter;
+
+        var adHoc = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = filterFid.Value, Operator = "eq", Value = filterValue } }]
+        };
+
+        if (viewFilter is null)
+            return adHoc;
+
+        return new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Group = viewFilter }, new FilterNode { Group = adHoc }]
         };
     }
 }

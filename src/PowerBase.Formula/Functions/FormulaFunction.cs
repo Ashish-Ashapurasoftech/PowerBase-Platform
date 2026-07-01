@@ -28,4 +28,12 @@ public abstract class FormulaFunction
 
     /// <summary>Evaluate the call. Each argument is a thunk; invoke only those you need.</summary>
     public abstract FormulaValue Evaluate(IReadOnlyList<Func<FormulaValue>> args, EvaluationOptions options);
+
+    /// <summary>
+    /// Context-aware evaluation, used by cross-table functions that need to read other
+    /// records via <paramref name="context"/>. Defaults to the context-free overload, so
+    /// ordinary scalar functions need not implement it.
+    /// </summary>
+    public virtual FormulaValue Evaluate(IReadOnlyList<Func<FormulaValue>> args, EvaluationOptions options, IRecordContext context)
+        => Evaluate(args, options);
 }

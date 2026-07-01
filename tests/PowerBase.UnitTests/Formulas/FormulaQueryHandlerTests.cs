@@ -13,6 +13,8 @@ public class FormulaQueryHandlerTests
     private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
     private readonly FormulaEngine _engine = new();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IFormulaRuntimeContext _runtime = Substitute.For<IFormulaRuntimeContext>();
+    private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
 
     private static AppField Field(int fid, string name, string typeCode, string? settings = null) =>
         new() { Id = fid, Fid = fid, Name = name, TypeCode = typeCode, Settings = settings };
@@ -66,7 +68,7 @@ public class FormulaQueryHandlerTests
     public async Task Evaluate_computes_value_from_supplied_values()
     {
         var tableId = SetupTable(Field(1, "Qty", "Number"));
-        var sut = new EvaluateFormulaQueryHandler(_tableRepo, _fieldRepo, _engine, _queryContext);
+        var sut = new EvaluateFormulaQueryHandler(_tableRepo, _fieldRepo, _engine, _queryContext, _runtime, _recordRepo);
         var values = new Dictionary<long, object?> { [1] = 7m };
 
         var result = await sut.HandleAsync(new EvaluateFormulaQuery(tableId, "[Qty] * 3", "Number", values));

@@ -36,12 +36,18 @@ public readonly struct FormulaValue
         => value is null ? Null(FormulaType.User) : new(FormulaType.User, false, value);
     public static FormulaValue UserList(IReadOnlyList<UserRef> value)
         => new(FormulaType.UserList, false, value ?? Array.Empty<UserRef>());
+    public static FormulaValue TextList(IReadOnlyList<string> value)
+        => new(FormulaType.TextList, false, value ?? Array.Empty<string>());
+    public static FormulaValue RecordList(RecordSet value)
+        => new(FormulaType.RecordList, false, value ?? RecordSet.Empty);
 
-    /// <summary>A typed null of the given type. Text/Bool are normalised to ""/false (never null).</summary>
+    /// <summary>A typed null of the given type. Text/Bool/TextList/RecordList are normalised to never-null.</summary>
     public static FormulaValue Null(FormulaType type) => type switch
     {
         FormulaType.Text => Text(string.Empty),
         FormulaType.Bool => Bool(false),
+        FormulaType.TextList => TextList(Array.Empty<string>()),
+        FormulaType.RecordList => RecordList(RecordSet.Empty),
         _ => new(type, true, null),
     };
 
@@ -54,6 +60,8 @@ public readonly struct FormulaValue
     public TimeSpan AsDuration() => (TimeSpan)_value!;
     public UserRef AsUser() => (UserRef)_value!;
     public IReadOnlyList<UserRef> AsUserList() => (IReadOnlyList<UserRef>)_value!;
+    public IReadOnlyList<string> AsTextList() => IsNull ? Array.Empty<string>() : (IReadOnlyList<string>)_value!;
+    public RecordSet AsRecordList() => IsNull ? RecordSet.Empty : (RecordSet)_value!;
 
     public override string ToString() => IsNull ? $"null({Type})" : $"{Type}:{_value}";
 }

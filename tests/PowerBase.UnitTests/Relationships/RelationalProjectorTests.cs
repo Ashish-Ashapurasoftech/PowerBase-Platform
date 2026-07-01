@@ -75,6 +75,29 @@ public class RelationalProjectorTests
     }
 
     [Fact]
+    public async Task Summary_exists_rolls_up_true_false_onto_parent_rows()
+    {
+        // Parent table has an Exists (True/False) summary (fid 21) over child table 77 via reference fid 10.
+        var parentFields = new List<AppField>
+        {
+            Field(21, "Has Items", "Summary", "{\"relationshipId\":1,\"childTableId\":77,\"referenceFid\":10,\"function\":\"Exists\"}"),
+        };
+        var parentRows = Rows(
+            new Dictionary<string, object?> { ["Id"] = 1L },
+            new Dictionary<string, object?> { ["Id"] = 2L });
+
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Invoice Item" });
+        _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Exists", null,
+                Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, object?> { [1L] = true });
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 5 }, parentFields, parentRows);
+
+        result[0][21].Should().Be(true);    // parent 1 has children
+        result[1][21].Should().Be(false);   // parent 2 has none → Exists defaults to false
+    }
+
+    [Fact]
     public async Task No_relationship_fields_yields_empty_maps()
     {
         var fields = new List<AppField> { Field(1, "Qty", "Number") };

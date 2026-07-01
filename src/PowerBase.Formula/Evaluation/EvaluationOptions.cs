@@ -15,6 +15,15 @@ public sealed class EvaluationOptions
 
     public TimeZoneInfo TimeZone { get; init; } = TimeZoneInfo.Utc;
 
+    /// <summary>Identifier of the app the formula runs in, surfaced by <c>AppID()</c>. Empty when unknown.</summary>
+    public string AppId { get; init; } = string.Empty;
+
+    /// <summary>Identifier of the table the formula runs in, surfaced by <c>Dbid()</c>. Empty when unknown.</summary>
+    public string TableId { get; init; } = string.Empty;
+
+    /// <summary>Base URL of the app frontend (no trailing slash), surfaced by <c>URLRoot()</c>. Empty when unknown.</summary>
+    public string UrlRoot { get; init; } = string.Empty;
+
     /// <summary>The current date in <see cref="TimeZone"/>, derived from <see cref="UtcNow"/>.</summary>
     public DateOnly Today => DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(UtcNow, TimeZone));
 

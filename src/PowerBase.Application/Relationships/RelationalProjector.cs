@@ -125,10 +125,12 @@ public sealed class RelationalProjector : IRelationalProjector
             var agg = await _recordRepo.AggregateByReferenceAsync(childTable, refFid, s.Function!, s.TargetFid, parentIds, filter, ct);
 
             var isCount = string.Equals(s.Function, SummaryFunctions.Count, StringComparison.OrdinalIgnoreCase);
+            var isExists = string.Equals(s.Function, SummaryFunctions.Exists, StringComparison.OrdinalIgnoreCase);
             for (var i = 0; i < rows.Count; i++)
             {
+                // No matching children: Count → 0, Exists → false, others → null.
                 if (agg.TryGetValue(rowIds[i], out var v)) maps[i][field.Fid!.Value] = v;
-                else maps[i][field.Fid!.Value] = isCount ? 0 : null;
+                else maps[i][field.Fid!.Value] = isCount ? 0 : isExists ? false : null;
             }
         }
     }

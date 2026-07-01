@@ -35,6 +35,103 @@ internal static class DateFunctions
 
         r.Add(Fn.Exact("DateAdd", FormulaType.Date, new[] { P.Date, P.Text, P.Number }, (a, _) => DateAdd(a)));
         r.Add(Fn.Range("DateDiff", FormulaType.Number, new[] { P.Date, P.Date }, new[] { P.Text }, (a, _) => DateDiff(a)));
+
+        // ── Wave 1: register-only date/time additions ──
+        r.Add(Fn.Exact("DayOfYear", FormulaType.Number, new[] { P.DateLike }, (a, _) => Part(a[0], d => d.DayOfYear)));
+        r.Add(Fn.Exact("Hour", FormulaType.Number, new[] { P.DateLike }, (a, _) => TimePart(a[0], t => t.Hour)));
+        r.Add(Fn.Exact("Minute", FormulaType.Number, new[] { P.DateLike }, (a, _) => TimePart(a[0], t => t.Minute)));
+        r.Add(Fn.Exact("Second", FormulaType.Number, new[] { P.DateLike }, (a, _) => TimePart(a[0], t => t.Second)));
+
+        r.Add(Fn.Exact("NameOfDay", FormulaType.Text, new[] { P.DateLike }, (a, _) => Name(a[0], d => Inv.GetDayName(d.DayOfWeek))));
+        r.Add(Fn.Exact("NameOfMonth", FormulaType.Text, new[] { P.DateLike }, (a, _) => Name(a[0], d => Inv.GetMonthName(d.Month))));
+
+        r.Add(Fn.Exact("FirstDayOfMonth", FormulaType.Date, new[] { P.DateLike }, (a, _) => Map(a[0], d => new DateOnly(d.Year, d.Month, 1))));
+        r.Add(Fn.Exact("LastDayOfMonth", FormulaType.Date, new[] { P.DateLike }, (a, _) => Map(a[0], d => new DateOnly(d.Year, d.Month, DateTime.DaysInMonth(d.Year, d.Month)))));
+        r.Add(Fn.Exact("FirstDayOfWeek", FormulaType.Date, new[] { P.DateLike }, (a, _) => Map(a[0], d => d.AddDays(-(int)d.DayOfWeek))));
+        r.Add(Fn.Exact("LastDayOfWeek", FormulaType.Date, new[] { P.DateLike }, (a, _) => Map(a[0], d => d.AddDays(6 - (int)d.DayOfWeek))));
+        r.Add(Fn.Exact("FirstDayOfYear", FormulaType.Date, new[] { P.DateLike }, (a, _) => Map(a[0], d => new DateOnly(d.Year, 1, 1))));
+        r.Add(Fn.Exact("LastDayOfYear", FormulaType.Date, new[] { P.DateLike }, (a, _) => Map(a[0], d => new DateOnly(d.Year, 12, 31))));
+
+        r.Add(Fn.Exact("NextDayOfWeek", FormulaType.Date, new[] { P.DateLike, P.Number }, (a, _) => NearestDayOfWeek(a, forward: true)));
+        r.Add(Fn.Exact("PrevDayOfWeek", FormulaType.Date, new[] { P.DateLike, P.Number }, (a, _) => NearestDayOfWeek(a, forward: false)));
+
+        r.Add(Fn.Exact("IsWeekday", FormulaType.Bool, new[] { P.DateLike },
+            (a, _) => { var d = AsDateOnly(a[0]); return d is null ? FormulaValue.Bool(false) : FormulaValue.Bool(IsWeekdayDate(d.Value)); }));
+        r.Add(Fn.Exact("WeekdayAdd", FormulaType.Date, new[] { P.DateLike, P.Number }, (a, _) => WeekdayAdd(a[0], ToInt(a[1]))));
+        r.Add(Fn.Exact("WeekdaySub", FormulaType.Date, new[] { P.DateLike, P.Number }, (a, _) => WeekdayAdd(a[0], -ToInt(a[1]))));
+
+        r.Add(Fn.Exact("ToHours", FormulaType.Number, new[] { P.Duration }, (a, _) => DurNum(a[0], t => (decimal)t.TotalHours)));
+        r.Add(Fn.Exact("ToMinutes", FormulaType.Number, new[] { P.Duration }, (a, _) => DurNum(a[0], t => (decimal)t.TotalMinutes)));
+        r.Add(Fn.Exact("ToSeconds", FormulaType.Number, new[] { P.Duration }, (a, _) => DurNum(a[0], t => (decimal)t.TotalSeconds)));
+        r.Add(Fn.Exact("ToWeeks", FormulaType.Number, new[] { P.Duration }, (a, _) => DurNum(a[0], t => (decimal)t.TotalDays / 7)));
+
+        r.Add(Fn.Exact("ToTimestamp", FormulaType.DateTime, new[] { P.Any }, (a, _) => ValueConvert.ToDateTimeValue(a[0])));
+    }
+
+    private static readonly System.Globalization.DateTimeFormatInfo Inv = System.Globalization.CultureInfo.InvariantCulture.DateTimeFormat;
+
+    private static FormulaValue TimePart(FormulaValue v, Func<DateTime, int> f)
+    {
+        var dt = AsDateTimeOrNull(v);
+        return dt is null ? FormulaValue.Null(FormulaType.Number) : FormulaValue.Number(f(dt.Value));
+    }
+
+    private static DateTime? AsDateTimeOrNull(FormulaValue v) => v.IsNull ? null
+        : v.Type == FormulaType.DateTime ? v.AsDateTime()
+        : v.Type == FormulaType.Date ? v.AsDate().ToDateTime(TimeOnly.MinValue)
+        : null;
+
+    private static FormulaValue Name(FormulaValue v, Func<DateOnly, string> f)
+    {
+        var d = AsDateOnly(v);
+        return d is null ? FormulaValue.Text(string.Empty) : FormulaValue.Text(f(d.Value));
+    }
+
+    private static FormulaValue Map(FormulaValue v, Func<DateOnly, DateOnly> f)
+    {
+        var d = AsDateOnly(v);
+        return d is null ? NullDate : FormulaValue.Date(f(d.Value));
+    }
+
+    private static FormulaValue DurNum(FormulaValue v, Func<TimeSpan, decimal> f)
+        => v.IsNull ? FormulaValue.Null(FormulaType.Number) : FormulaValue.Number(f(v.AsDuration()));
+
+    private static bool IsWeekdayDate(DateOnly d) => d.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday);
+
+    // weekday param is 1–7 with Sunday = 1 (matches WeekDay()/DayOfWeek()).
+    private static DayOfWeek? Weekday(FormulaValue v)
+    {
+        if (v.IsNull) return null;
+        int n = ToInt(v);
+        return n is >= 1 and <= 7 ? (DayOfWeek)((n - 1) % 7) : null;
+    }
+
+    private static FormulaValue NearestDayOfWeek(IReadOnlyList<FormulaValue> a, bool forward)
+    {
+        var d = AsDateOnly(a[0]);
+        var target = Weekday(a[1]);
+        if (d is null || target is null) return NullDate;
+        for (int i = 1; i <= 7; i++)
+        {
+            var cand = d.Value.AddDays(forward ? i : -i);
+            if (cand.DayOfWeek == target.Value) return FormulaValue.Date(cand);
+        }
+        return NullDate;
+    }
+
+    private static FormulaValue WeekdayAdd(FormulaValue v, int n)
+    {
+        var d = AsDateOnly(v);
+        if (d is null) return NullDate;
+        var cur = d.Value;
+        int step = n >= 0 ? 1 : -1;
+        int remaining = Math.Abs(n);
+        while (remaining > 0)
+        {
+            cur = cur.AddDays(step);
+            if (IsWeekdayDate(cur)) remaining--;
+        }
+        return FormulaValue.Date(cur);
     }
 
     private static readonly FormulaValue NullDate = FormulaValue.Null(FormulaType.Date);
