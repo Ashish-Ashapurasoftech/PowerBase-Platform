@@ -92,6 +92,13 @@ public class RelationshipQueriesHandler
                 fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "summary", fn));
             }
 
+            // Report Links (parent) auto-created for this relationship.
+            foreach (var f in parentFields.Where(f => f.TypeCode == "ReportLink"
+                && FormulaTypeMap.ParseReportLinkSettings(f.Settings)?.RelationshipId == rel.Id))
+            {
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "reportlink", "ReportLink"));
+            }
+
             var proxyFid = rel.ProxyFieldId.HasValue
                 ? childFields.FirstOrDefault(f => f.Id == rel.ProxyFieldId.Value)?.Fid
                 : null;

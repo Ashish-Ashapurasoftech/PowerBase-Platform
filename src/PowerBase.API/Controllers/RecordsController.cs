@@ -82,9 +82,11 @@ public class RecordsController : ControllerBase
         Guid tableId,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
+        [FromQuery] int? filterFid = null,
+        [FromQuery] string? filterValue = null,
         CancellationToken ct = default)
     {
-        var result = await _listHandler.HandleAsync(new ListRecordsQuery(tableId, page, pageSize), ct);
+        var result = await _listHandler.HandleAsync(new ListRecordsQuery(tableId, page, pageSize, filterFid, filterValue), ct);
         var items = result.Items.Select(MapToResponse).ToList();
         return Ok(new ApiListResponse<RecordResponse>(items, result.TotalCount, result.Page, result.PageSize));
     }

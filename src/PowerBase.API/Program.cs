@@ -177,6 +177,7 @@ builder.Services.AddScoped<IFieldSettingsValidator, UrlSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, DateRangeSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, NumericRangeSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, FormulaSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, ReportLinkSettingsValidator>();
 builder.Services.AddScoped<FieldSettingsValidatorRegistry>();
 
 // Formula engine (stateless, shared) + compute-on-read projector + authoring query handlers

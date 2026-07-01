@@ -18,5 +18,5 @@ public static class PhysicalNaming
     /// BIGINT foreign-key column.
     /// </summary>
     public static bool IsComputedTypeCode(string typeCode) =>
-        typeCode is "Formula" or "Lookup" or "Summary";
+        typeCode is "Formula" or "Lookup" or "Summary" or "ReportLink";
 }

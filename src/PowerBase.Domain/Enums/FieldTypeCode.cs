@@ -28,5 +28,6 @@ public enum FieldTypeCode
     Formula,
     Reference,
     Lookup,
-    Summary
+    Summary,
+    ReportLink
 }

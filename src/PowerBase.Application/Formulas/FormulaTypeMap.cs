@@ -86,6 +86,13 @@ internal static class FormulaTypeMap
         catch (JsonException) { return null; }
     }
 
+    public static ReportLinkSettings? ParseReportLinkSettings(string? settingsJson)
+    {
+        if (string.IsNullOrWhiteSpace(settingsJson)) return null;
+        try { return JsonSerializer.Deserialize<ReportLinkSettings>(settingsJson, JsonOpts); }
+        catch (JsonException) { return null; }
+    }
+
     public static ReferenceSettings? ParseReferenceSettings(string? settingsJson)
     {
         if (string.IsNullOrWhiteSpace(settingsJson)) return null;

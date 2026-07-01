@@ -82,6 +82,11 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
+    private const string GetPublicIdByIdSql = """
+        SELECT PublicId FROM meta.App
+        WHERE Id = @appId AND IsDeleted = 0
+        """;
+
     private const string InsertSql = """
         INSERT INTO meta.App (OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.PublicId, INSERTED.Id
@@ -166,6 +171,14 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         var id = await connection.ExecuteScalarAsync<long?>(
             new CommandDefinition(GetIdByPublicIdSql, new { publicId }, cancellationToken: ct));
         return id ?? throw new NotFoundException("App", publicId);
+    }
+
+    public async Task<Guid> GetPublicIdByIdAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var publicId = await connection.ExecuteScalarAsync<Guid?>(
+            new CommandDefinition(GetPublicIdByIdSql, new { appId }, cancellationToken: ct));
+        return publicId ?? throw new NotFoundException("App", appId);
     }
 
     public async Task<(Guid PublicId, long Id)> CreateAsync(App app, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
