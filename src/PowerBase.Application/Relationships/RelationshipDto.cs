@@ -15,4 +15,15 @@ public sealed class RelationshipDto
 }
 
 /// <summary>A field participating in a relationship. <paramref name="Role"/> is "reference", "lookup" or "summary".</summary>
-public sealed record RelationshipFieldDto(Guid PublicId, int Fid, string Name, string Role, string TypeCode = "");
+public sealed record RelationshipFieldDto(Guid PublicId, int Fid, string Name, string Role, string TypeCode = "")
+{
+    /// <summary>"TableName: FieldName" for the source field.
+    /// Lookup/proxy → the parent field being pulled down.
+    /// ReportLink → the field on this table whose value is matched (null = Record ID#).</summary>
+    public string? SourceFieldLabel { get; init; }
+
+    /// <summary>"TableName: FieldName" for the target field.
+    /// ReportLink → the reference field in the child table.
+    /// Summary → the child field being aggregated (null for Count/Exists).</summary>
+    public string? TargetFieldLabel { get; init; }
+}

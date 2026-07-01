@@ -60,7 +60,8 @@ public class RelationshipsController : ControllerBase
             request.ReferenceFieldLabel,
             request.IsReferenceRequired,
             request.Lookups.Select(l => new CreateLookupSpec(l.SourceFid, l.Name, l.Label)).ToList(),
-            request.Summaries.Select(s => new CreateSummarySpec(s.Name, s.Label, s.Function, s.TargetFid)).ToList());
+            request.Summaries.Select(s => new CreateSummarySpec(s.Name, s.Label, s.Function, s.TargetFid)).ToList(),
+            request.ReferenceFieldFid);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<RelationshipDto>(result));
     }
