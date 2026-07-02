@@ -13,7 +13,8 @@ public record CreateRelationshipCommand(
     string? ReferenceFieldLabel,
     bool IsReferenceRequired,
     IReadOnlyList<CreateLookupSpec> Lookups,
-    IReadOnlyList<CreateSummarySpec> Summaries);
+    IReadOnlyList<CreateSummarySpec> Summaries,
+    int? ReferenceFieldFid = null);
 
 /// <summary>A parent field to pull down onto the child as a Lookup. <paramref name="SourceFid"/> is the parent field's Fid.</summary>
 public record CreateLookupSpec(int SourceFid, string Name, string? Label);

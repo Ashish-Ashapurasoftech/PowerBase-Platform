@@ -45,7 +45,9 @@ public class CreateRelationshipCommandHandler
 
     public async Task<RelationshipDto> HandleAsync(CreateRelationshipCommand command, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(command.ReferenceFieldName))
+        // A name is only required when we're creating a brand-new reference field. When reusing an existing
+        // child field (ReferenceFieldFid set) the field already has a name.
+        if (command.ReferenceFieldFid is null && string.IsNullOrWhiteSpace(command.ReferenceFieldName))
             throw new ValidationException(new Dictionary<string, string[]> { ["referenceFieldName"] = ["Reference field name is required."] });
 
         var parent = await _tableRepo.GetByPublicIdAsync(command.ParentTablePublicId, ct);
@@ -62,10 +64,38 @@ public class CreateRelationshipCommandHandler
         var childFields = await _fieldRepo.ListByTableAsync(child.Id, ct);
 
         // 1. Reference field on the child (physical FK column). Settings get the relationship id after creation.
-        var refField = await CreateFieldAsync(
-            child, refType, command.ReferenceFieldName.Trim(), command.ReferenceFieldLabel?.Trim(),
-            command.IsReferenceRequired,
-            new ReferenceSettings { ParentTableId = parent.Id }, ct);
+        //    Two paths: create a brand-new Reference field, or convert an existing child Number field in place.
+        AppField refField;
+        var referenceIsExistingField = command.ReferenceFieldFid is not null;
+        if (!referenceIsExistingField)
+        {
+            refField = await CreateFieldAsync(
+                child, refType, command.ReferenceFieldName.Trim(), command.ReferenceFieldLabel?.Trim(),
+                command.IsReferenceRequired,
+                new ReferenceSettings { ParentTableId = parent.Id }, ct);
+        }
+        else
+        {
+            var existing = childFields.FirstOrDefault(f => f.Fid == command.ReferenceFieldFid!.Value)
+                ?? throw new NotFoundException("Field", command.ReferenceFieldFid!.Value);
+
+            // Only a plain, non-system Number field may be repurposed as the reference (it holds parent Record IDs).
+            // Number and Reference are both numeric physical columns, so the conversion is metadata-only (no DDL).
+            if (existing.IsSystem || !existing.Fid.HasValue || existing.TypeCode != nameof(Domain.Enums.FieldTypeCode.Number))
+                throw new ValidationException(new Dictionary<string, string[]>
+                {
+                    ["referenceFieldFid"] = ["The reference field must be an existing, non-system Number field on the child table."],
+                });
+
+            await _fieldRepo.UpdateFieldTypeAsync(
+                existing.Id, refType.Id, refType.Code,
+                Serialize(new ReferenceSettings { ParentTableId = parent.Id }),
+                command.IsReferenceRequired, ct);
+            existing.FieldTypeId = refType.Id;
+            existing.TypeCode = refType.Code;
+            existing.IsRequired = command.IsReferenceRequired;
+            refField = existing;
+        }
 
         // 2. Relationship row.
         var (relId, relPublicId) = await _relRepo.CreateAsync(new Relationship
@@ -83,7 +113,8 @@ public class CreateRelationshipCommandHandler
 
         // 3. Lookup fields on the child (first one becomes the proxy).
         var createdFields = new List<RelationshipFieldDto> { new(refField.PublicId, refField.Fid!.Value, refField.Name, "reference") };
-        var childAddFids = new List<int> { refField.Fid!.Value };
+        // Only auto-append the reference to forms when it's newly created; an existing field is likely already placed.
+        var childAddFids = referenceIsExistingField ? new List<int>() : new List<int> { refField.Fid!.Value };
         AppField? firstLookup = null;
         foreach (var spec in command.Lookups)
         {
