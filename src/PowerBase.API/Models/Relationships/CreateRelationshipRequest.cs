@@ -7,6 +7,8 @@ public class CreateRelationshipRequest
     public string ReferenceFieldName { get; set; } = string.Empty;
     public string? ReferenceFieldLabel { get; set; }
     public bool IsReferenceRequired { get; set; }
+    /// <summary>null ⇒ create a new Reference field; set ⇒ convert the existing child field with this Fid into the reference.</summary>
+    public int? ReferenceFieldFid { get; set; }
     public List<LookupSpecRequest> Lookups { get; set; } = new();
     public List<SummarySpecRequest> Summaries { get; set; } = new();
 }

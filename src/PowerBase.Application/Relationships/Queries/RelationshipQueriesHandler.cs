@@ -80,23 +80,65 @@ public class RelationshipQueriesHandler
                 && FormulaTypeMap.ParseLookupSettings(f.Settings)?.RelationshipId == rel.Id))
             {
                 var role = f.Id == rel.ProxyFieldId ? "proxy" : "lookup";
-                var srcType = FormulaTypeMap.ParseLookupSettings(f.Settings)?.SourceTypeCode ?? "Text";
-                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, role, srcType));
+                var ls = FormulaTypeMap.ParseLookupSettings(f.Settings);
+                var srcType = ls?.SourceTypeCode ?? "Text";
+                var srcField = ls?.SourceFid is int sfid ? parentFields.FirstOrDefault(pf => pf.Fid == sfid) : null;
+                var srcLabel = srcField is not null ? (srcField.Label ?? srcField.Name) : null;
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, role, srcType)
+                {
+                    SourceFieldLabel = srcLabel is not null ? $"{parent.Name}: {srcLabel}" : null,
+                });
             }
 
             // Summaries (parent). TypeCode = the aggregate function (Count/Exists/Sum/…).
             foreach (var f in parentFields.Where(f => f.TypeCode == "Summary"
                 && FormulaTypeMap.ParseSummarySettings(f.Settings)?.RelationshipId == rel.Id))
             {
-                var fn = FormulaTypeMap.ParseSummarySettings(f.Settings)?.Function ?? "Count";
-                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "summary", fn));
+                var ss = FormulaTypeMap.ParseSummarySettings(f.Settings);
+                var fn = ss?.Function ?? "Count";
+                var tField = ss?.TargetFid is int tfid ? childFields.FirstOrDefault(cf => cf.Fid == tfid) : null;
+                var tLabel = tField is not null ? (tField.Label ?? tField.Name) : null;
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "summary", fn)
+                {
+                    TargetFieldLabel = tLabel is not null ? $"{child.Name}: {tLabel}" : null,
+                });
             }
 
-            // Report Links (parent) auto-created for this relationship.
-            foreach (var f in parentFields.Where(f => f.TypeCode == "ReportLink"
-                && FormulaTypeMap.ParseReportLinkSettings(f.Settings)?.RelationshipId == rel.Id))
+            // Report Links (parent) for this relationship.
+            // Match by explicit RelationshipId (auto-created by wizard) OR by TargetTablePublicId matching the
+            // child table (handles old relationships created before auto-creation, and manually-configured links).
+            var childPublicIdStr = child.PublicId.ToString();
+            foreach (var f in parentFields.Where(f => f.TypeCode == "ReportLink"))
             {
-                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "reportlink", "ReportLink"));
+                var rls = FormulaTypeMap.ParseReportLinkSettings(f.Settings);
+                if (rls is null) continue;
+                var linkedToRel = rls.RelationshipId == rel.Id;
+                var targetsChild = string.Equals(rls.TargetTablePublicId, childPublicIdStr, StringComparison.OrdinalIgnoreCase);
+                if (!linkedToRel && !targetsChild) continue;
+
+                // Source: null SourceFid → Record ID# on the parent table
+                string srcFLabel;
+                if (rls.SourceFid is int sFid)
+                {
+                    var srcF = parentFields.FirstOrDefault(pf => pf.Fid == sFid);
+                    srcFLabel = $"{parent.Name}: {(srcF is not null ? (srcF.Label ?? srcF.Name) : $"Field {sFid}")}";
+                }
+                else
+                {
+                    srcFLabel = $"{parent.Name}: Record ID#";
+                }
+                // Target: resolve TargetFid against the child table
+                string? tFLabel = null;
+                if (rls.TargetFid is int tFid)
+                {
+                    var tF = childFields.FirstOrDefault(cf => cf.Fid == tFid);
+                    tFLabel = $"{child.Name}: {(tF is not null ? (tF.Label ?? tF.Name) : $"Field {tFid}")}";
+                }
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "reportlink", "ReportLink")
+                {
+                    SourceFieldLabel = srcFLabel,
+                    TargetFieldLabel = tFLabel,
+                });
             }
 
             var proxyFid = rel.ProxyFieldId.HasValue
