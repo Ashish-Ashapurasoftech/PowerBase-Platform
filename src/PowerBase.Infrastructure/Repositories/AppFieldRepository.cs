@@ -53,7 +53,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         """;
 
     private const string GetNextFidSql = """
-        SELECT ISNULL(MAX(Fid), 5) + 1 FROM meta.AppField WHERE AppTableId = @tableId AND IsDeleted = 0
+        SELECT ISNULL(MAX(Fid), 5) + 1 FROM meta.AppField WHERE AppTableId = @tableId
         """;
 
     private const string GetByFidInTableSql = $"""
@@ -91,13 +91,37 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         """;
 
     private const string SoftDeleteFieldSql = """
-        UPDATE meta.AppField
-        SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
-        WHERE PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
+        DECLARE @fid INT = (
+                   SELECT Fid FROM meta.AppField
+                   WHERE PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0);
+               -- Remove orphaned FormElement rows that point to this field's Fid
+               DELETE fe
+               FROM meta.FormElement fe
+               JOIN meta.FormSection fs ON fs.Id = fe.FormSectionId
+               JOIN meta.Form f ON f.Id = fs.FormId
+               WHERE f.AppTableId = @tableId
+                 AND fe.AppFieldId = @fid;
+               -- Soft-delete the field itself
+               UPDATE meta.AppField
+               SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
+               WHERE PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
         """;
 
     private const string SoftBulkDeleteFieldsSql = """
-        UPDATE meta.AppField
+        -- Collect the Fids of all fields being deleted
+        DECLARE @fids TABLE (Fid INT);
+        INSERT INTO @fids
+        SELECT Fid FROM meta.AppField
+        WHERE PublicId IN @publicIds AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0;
+        -- Remove orphaned FormElement rows that point to any of those Fids
+        DELETE fe
+        FROM meta.FormElement fe
+        JOIN meta.FormSection fs ON fs.Id = fe.FormSectionId
+        JOIN meta.Form f ON f.Id = fs.FormId
+        WHERE f.AppTableId = @tableId
+          AND fe.AppFieldId IN (SELECT Fid FROM @fids);
+        -- Soft-delete the fields themselves
+        UPDATE meta.AppField                        
         SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
         WHERE PublicId IN @publicIds AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
         """;
