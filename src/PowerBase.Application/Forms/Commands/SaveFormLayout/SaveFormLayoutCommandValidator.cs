@@ -6,7 +6,7 @@ public class SaveFormLayoutCommandValidator : AbstractValidator<SaveFormLayoutCo
 {
     private static readonly HashSet<string> ValidLabelModes   = ["Default", "Custom", "Hide"];
     private static readonly HashSet<string> ValidWidthModes   = ["Auto", "Half", "Full", "Fixed"];
-    private static readonly HashSet<string> ValidElementTypes = ["Field", "StaticText", "Divider", "Button"];
+    private static readonly HashSet<string> ValidElementTypes = ["Field", "StaticText", "Divider", "Button", "Report"];
     private static readonly System.Text.RegularExpressions.Regex HexColorRegex =
         new(@"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
@@ -36,7 +36,7 @@ public class SaveFormLayoutCommandValidator : AbstractValidator<SaveFormLayoutCo
                 {
                     element.RuleFor(e => e.ElementType)
                         .Must(t => ValidElementTypes.Contains(t))
-                        .WithMessage("ElementType must be Field, StaticText, Divider, or Button.");
+                        .WithMessage("ElementType must be Field, StaticText, Divider, Button, or Report.");
                     element.RuleFor(e => e.AppFieldId)
                         .GreaterThan(0)
                         .When(e => e.ElementType == "Field")
