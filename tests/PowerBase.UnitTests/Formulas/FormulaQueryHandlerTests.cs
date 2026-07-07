@@ -15,6 +15,7 @@ public class FormulaQueryHandlerTests
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IFormulaRuntimeContext _runtime = Substitute.For<IFormulaRuntimeContext>();
     private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
+    private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
 
     private static AppField Field(int fid, string name, string typeCode, string? settings = null) =>
         new() { Id = fid, Fid = fid, Name = name, TypeCode = typeCode, Settings = settings };
@@ -23,8 +24,9 @@ public class FormulaQueryHandlerTests
     {
         var tableId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>())
-            .Returns(new AppTable { Id = 5, PublicId = tableId, Name = "T" });
+            .Returns(new AppTable { Id = 5, AppId = 9, PublicId = tableId, Name = "T" });
         _fieldRepo.ListByTableAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(fields.ToList());
+        _appRepo.GetPublicIdByIdAsync(9, Arg.Any<CancellationToken>()).Returns(Guid.NewGuid());
         return tableId;
     }
 
@@ -68,7 +70,7 @@ public class FormulaQueryHandlerTests
     public async Task Evaluate_computes_value_from_supplied_values()
     {
         var tableId = SetupTable(Field(1, "Qty", "Number"));
-        var sut = new EvaluateFormulaQueryHandler(_tableRepo, _fieldRepo, _engine, _queryContext, _runtime, _recordRepo);
+        var sut = new EvaluateFormulaQueryHandler(_tableRepo, _fieldRepo, _engine, _queryContext, _runtime, _recordRepo, _appRepo);
         var values = new Dictionary<long, object?> { [1] = 7m };
 
         var result = await sut.HandleAsync(new EvaluateFormulaQuery(tableId, "[Qty] * 3", "Number", values));

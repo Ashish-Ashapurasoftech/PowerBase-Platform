@@ -70,7 +70,7 @@ public class CreateRecordCommandHandler
             if (field.IsSystem || field.IsDeleted || !field.Fid.HasValue || PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
             if (effectiveValues.ContainsKey((long)field.Fid.Value)) continue;
             if (!string.IsNullOrWhiteSpace(field.DefaultValue))
-                effectiveValues[(long)field.Fid.Value] = _formulaDefaults.Resolve(field.DefaultValue, field, fields, effectiveValues);
+                effectiveValues[(long)field.Fid.Value] = _formulaDefaults.Resolve(field.DefaultValue, field, fields, effectiveValues, table);
         }
 
         var publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, ct);

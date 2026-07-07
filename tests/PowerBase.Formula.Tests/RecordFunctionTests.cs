@@ -112,7 +112,7 @@ public class RecordFunctionTests
     }
 
     [Fact]
-    public void GetRecord_yields_the_record_when_it_exists()
+    public void     ()
     {
         Eval("Count(GetRecord(\"items\", 2))", TwoTableModel()).AsNumber().Should().Be(1);
         Eval("Count(GetRecord(\"items\", 99))", TwoTableModel()).AsNumber().Should().Be(0);

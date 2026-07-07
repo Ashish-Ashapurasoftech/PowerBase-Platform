@@ -14,7 +14,7 @@ namespace PowerBase.Application.Formulas;
 /// </summary>
 public interface IFormulaDefaultResolver
 {
-    object? Resolve(string defaultValue, AppField field, IReadOnlyList<AppField> allFields, IReadOnlyDictionary<long, object?> values);
+    object? Resolve(string defaultValue, AppField field, IReadOnlyList<AppField> allFields, IReadOnlyDictionary<long, object?> values, AppTable? table = null);
 }
 
 public sealed class FormulaDefaultResolver : IFormulaDefaultResolver
@@ -22,15 +22,17 @@ public sealed class FormulaDefaultResolver : IFormulaDefaultResolver
     private readonly FormulaEngine _engine;
     private readonly IQueryContext _queryContext;
     private readonly IFormulaRuntimeContext _runtime;
+    private readonly IAppRepository _appRepo;
 
-    public FormulaDefaultResolver(FormulaEngine engine, IQueryContext queryContext, IFormulaRuntimeContext runtime)
+    public FormulaDefaultResolver(FormulaEngine engine, IQueryContext queryContext, IFormulaRuntimeContext runtime, IAppRepository appRepo)
     {
         _engine = engine;
         _queryContext = queryContext;
         _runtime = runtime;
+        _appRepo = appRepo;
     }
 
-    public object? Resolve(string defaultValue, AppField field, IReadOnlyList<AppField> allFields, IReadOnlyDictionary<long, object?> values)
+    public object? Resolve(string defaultValue, AppField field, IReadOnlyList<AppField> allFields, IReadOnlyDictionary<long, object?> values, AppTable? table = null)
     {
         // Literal unless it starts with '=' — the formula marker.
         if (string.IsNullOrEmpty(defaultValue) || defaultValue[0] != '=')
@@ -49,7 +51,10 @@ public sealed class FormulaDefaultResolver : IFormulaDefaultResolver
             CurrentUser = _queryContext.UserId > 0
                 ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
                 : null,
+            AppId = table is null ? string.Empty : _appRepo.GetPublicIdByIdAsync(table.AppId).GetAwaiter().GetResult().ToString(),
+            TableId = table?.PublicId.ToString() ?? string.Empty,
             UrlRoot = _runtime.UrlRoot,
+            ReturnUrl = _runtime.ReturnUrl,
         };
 
         try { return FormulaRawValue.ToRaw(_engine.Evaluate(compiled, new ValuesRecordContext(values), options)); }

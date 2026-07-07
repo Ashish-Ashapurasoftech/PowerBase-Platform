@@ -24,6 +24,9 @@ public sealed class EvaluationOptions
     /// <summary>Base URL of the app frontend (no trailing slash), surfaced by <c>URLRoot()</c>. Empty when unknown.</summary>
     public string UrlRoot { get; init; } = string.Empty;
 
+    /// <summary>The page that triggered this evaluation, surfaced by <c>Rurl()</c> for "return here" links. Empty when unknown.</summary>
+    public string ReturnUrl { get; init; } = string.Empty;
+
     /// <summary>The current date in <see cref="TimeZone"/>, derived from <see cref="UtcNow"/>.</summary>
     public DateOnly Today => DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(UtcNow, TimeZone));
 
