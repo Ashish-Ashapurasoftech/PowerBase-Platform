@@ -23,10 +23,12 @@ public sealed class FormulaProjector : IFormulaProjector
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IAppRepository _appRepo;
 
     public FormulaProjector(
         FormulaEngine engine, IQueryContext queryContext, IFormulaRuntimeContext runtime,
-        IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo)
+        IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
+        IAppRepository appRepo)
     {
         _engine = engine;
         _queryContext = queryContext;
@@ -34,6 +36,7 @@ public sealed class FormulaProjector : IFormulaProjector
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
+        _appRepo = appRepo;
     }
 
     public IReadOnlyList<IReadOnlyDictionary<long, object?>> Project(
@@ -151,10 +154,16 @@ public sealed class FormulaProjector : IFormulaProjector
         CurrentUser = _queryContext.UserId > 0
             ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
             : null,
-        AppId = table is null ? string.Empty : table.AppId.ToString(CultureInfo.InvariantCulture),
+        // AppID()/Dbid() surface route-usable identifiers (publicIds), so URL-formula fields can
+        // build links like /app/{AppId}/tables/{Dbid()}/records/new. Blocking here matches the
+        // existing pattern in CrossTableQueryContext (the evaluator itself is synchronous).
+        AppId = table is null ? string.Empty : Block(_appRepo.GetPublicIdByIdAsync(table.AppId)).ToString(),
         TableId = table?.PublicId.ToString() ?? string.Empty,
         UrlRoot = _runtime.UrlRoot,
+        ReturnUrl = _runtime.ReturnUrl,
     };
+
+    private static T Block<T>(Task<T> task) => task.GetAwaiter().GetResult();
 
     private sealed class ProjectorRecordContext : IRecordContext
     {

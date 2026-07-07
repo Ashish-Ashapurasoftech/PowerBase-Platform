@@ -27,4 +27,7 @@ public interface IRecordContext
 
     /// <summary>The raw values of field <paramref name="fid"/> across <paramref name="recordIds"/> in <paramref name="tableId"/>.</summary>
     IReadOnlyList<object?> GetFieldValues(string tableId, IReadOnlyList<long> recordIds, long fid) => System.Array.Empty<object?>();
+
+    /// <summary>The id of the table named <paramref name="tableName"/> within the current app, or "" if not found.</summary>
+    string ResolveTableId(string tableName) => string.Empty;
 }

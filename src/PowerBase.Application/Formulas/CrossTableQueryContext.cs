@@ -29,6 +29,7 @@ public sealed class CrossTableQueryContext
     private readonly IRecordRepository _recordRepo;
     private readonly AppTable? _currentTable;
     private readonly Dictionary<string, Resolved?> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string?> _nameCache = new(StringComparer.OrdinalIgnoreCase);
     private int _budget;
 
     private sealed record Resolved(AppTable Table, IReadOnlyList<AppField> Fields);
@@ -81,6 +82,22 @@ public sealed class CrossTableQueryContext
         foreach (var id in recordIds)
             values.Add(byId.TryGetValue(id, out var row) && row.TryGetValue(col, out var v) ? v : null);
         return values;
+    }
+
+    /// <summary>The PublicId (as text) of the table named <paramref name="tableName"/> within the
+    /// current table's app, or "" when there is no current table or no name match.</summary>
+    public string ResolveTableId(string tableName)
+    {
+        if (string.IsNullOrWhiteSpace(tableName) || _currentTable is null) return string.Empty;
+
+        if (_nameCache.TryGetValue(tableName, out var cached)) return cached ?? string.Empty;
+        if (!TakeBudget()) return string.Empty;
+
+        var tables = Block(_tableRepo.ListByAppAsync(_currentTable.AppId));
+        var match = tables.FirstOrDefault(t => string.Equals(t.Name, tableName, StringComparison.OrdinalIgnoreCase));
+        var id = match?.PublicId.ToString();
+        _nameCache[tableName] = id;
+        return id ?? string.Empty;
     }
 
     // ── Resolution + translation ─────────────────────────────────────────────
@@ -181,4 +198,5 @@ public sealed class CrossTableRecordContext : IRecordContext
     public bool RecordExists(string tableId, long recordId) => _x.RecordExists(tableId, recordId);
     public IReadOnlyList<object?> GetFieldValues(string tableId, IReadOnlyList<long> recordIds, long fid)
         => _x.GetFieldValues(tableId, recordIds, fid);
+    public string ResolveTableId(string tableName) => _x.ResolveTableId(tableName);
 }

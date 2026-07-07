@@ -18,7 +18,8 @@ public class FormulaProjectorTests
         runtime.UrlRoot.Returns(string.Empty);
         return new FormulaProjector(
             new FormulaEngine(), qc, runtime,
-            Substitute.For<IAppTableRepository>(), Substitute.For<IAppFieldRepository>(), Substitute.For<IRecordRepository>());
+            Substitute.For<IAppTableRepository>(), Substitute.For<IAppFieldRepository>(), Substitute.For<IRecordRepository>(),
+            Substitute.For<IAppRepository>());
     }
 
     private static AppField Field(int fid, string name, string typeCode, string? settings = null) => new()
