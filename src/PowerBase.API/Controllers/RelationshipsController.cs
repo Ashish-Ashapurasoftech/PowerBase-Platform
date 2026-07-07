@@ -153,11 +153,11 @@ public class RelationshipsController : ControllerBase
     /// <summary>List selectable parent records for a Reference field picker.</summary>
     [HttpGet("tables/{tableId:guid}/relationships/{relId:guid}/parent-options")]
     [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
-    [ProducesResponseType(typeof(ApiListResponse<ReferenceOption>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<ParentOptionsResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ParentOptions(
         Guid tableId, Guid relId, [FromQuery] string? search, [FromQuery] int take, CancellationToken ct)
     {
-        var items = await _parentOptions.HandleAsync(relId, search, take, ct);
-        return Ok(new ApiListResponse<ReferenceOption>(items, items.Count, 1, items.Count));
+        var result = await _parentOptions.HandleAsync(relId, search, take, ct);
+        return Ok(new ApiResponse<ParentOptionsResponse>(new ParentOptionsResponse(result.Headers, result.Options)));
     }
 }

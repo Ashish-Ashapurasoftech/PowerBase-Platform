@@ -11,8 +11,11 @@ public class TableResponse
     public string? Description { get; init; }
     public string? Icon { get; init; }
     public string? PhysicalTableName { get; init; }
-    public int RecordCount { get; init; }
-    public int? FieldCount { get; init; }
-    public DateTime CreatedOn { get; init; }
+    public int RecordCount { get; set; }
+    public int? FieldCount { get; set; }
+    public long? DefaultRecordPickerField1Id { get; set; }
+    public long? DefaultRecordPickerField2Id { get; set; }
+    public long? DefaultRecordPickerField3Id { get; set; }
+    public DateTime CreatedOn { get; set; }
     public IReadOnlyList<FieldResponse> Fields { get; init; } = [];
 }

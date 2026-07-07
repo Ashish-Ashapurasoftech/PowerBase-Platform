@@ -91,7 +91,9 @@ public class TablesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateTableRequest request, CancellationToken ct)
     {
-        await _updateHandler.HandleAsync(new UpdateTableCommand(publicId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon), ct);
+        await _updateHandler.HandleAsync(new UpdateTableCommand(
+            publicId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon,
+            request.DefaultRecordPickerField1Id, request.DefaultRecordPickerField2Id, request.DefaultRecordPickerField3Id), ct);
         return NoContent();
     }
 
@@ -131,6 +133,9 @@ public class TablesController : ControllerBase
         Description = t.Description,
         Icon = t.Icon,
         PhysicalTableName = t.PhysicalTableName,
+        DefaultRecordPickerField1Id = t.DefaultRecordPickerField1Id,
+        DefaultRecordPickerField2Id = t.DefaultRecordPickerField2Id,
+        DefaultRecordPickerField3Id = t.DefaultRecordPickerField3Id,
         RecordCount = t.RecordCount,
         CreatedOn = t.CreatedOn,
         Fields = t.Fields.Select(MapFieldToResponse).ToList(),
@@ -145,6 +150,9 @@ public class TablesController : ControllerBase
         Description = r.Table.Description,
         Icon = r.Table.Icon,
         PhysicalTableName = r.Table.PhysicalTableName,
+        DefaultRecordPickerField1Id = r.Table.DefaultRecordPickerField1Id,
+        DefaultRecordPickerField2Id = r.Table.DefaultRecordPickerField2Id,
+        DefaultRecordPickerField3Id = r.Table.DefaultRecordPickerField3Id,
         RecordCount = r.Table.RecordCount,
         CreatedOn = r.Table.CreatedOn,
         Fields = r.Fields.Select(MapFieldToResponse).ToList(),

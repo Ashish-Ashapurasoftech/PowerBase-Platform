@@ -17,7 +17,7 @@ public interface IRecordRepository
 
     /// <summary>Search parent records for a Reference picker, returning (row Id, display label) pairs.</summary>
     Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
-        AppTable parentTable, AppField? labelField, string? search, int take, CancellationToken ct = default);
+        AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take, CancellationToken ct = default);
 
     /// <summary>Fetch a label value for each of the given parent row Ids (drives Lookup/Reference label resolution).</summary>
     Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(

@@ -13,6 +13,9 @@ public class AppTable
     public string? PhysicalTableName { get; set; }
     public string DefaultReportSettings { get; set; } = "{}";
     public long? DisplayFieldId { get; set; }
+    public long? DefaultRecordPickerField1Id { get; set; }
+    public long? DefaultRecordPickerField2Id { get; set; }
+    public long? DefaultRecordPickerField3Id { get; set; }
     public int RecordCount { get; set; }
     public bool IsSystem { get; set; }
     public int DisplayOrder { get; set; }

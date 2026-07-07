@@ -94,25 +94,41 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     public async Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
-        AppTable parentTable, AppField? labelField, string? search, int take, CancellationToken ct = default)
+        AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take, CancellationToken ct = default)
     {
         take = Math.Clamp(take, 1, 200);
-        var labelExpr = LabelColumnExpr(labelField);
 
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
+
+        var searchColExpr = labelFields.Count > 0 ? LabelColumnExpr(labelFields[0]) : "CAST(Id AS NVARCHAR(400))";
         if (!string.IsNullOrWhiteSpace(search))
         {
             parameters.Add("search", $"%{search}%");
-            where += $" AND {labelExpr} LIKE @search";
+            if (labelFields.Count > 0)
+            {
+                var searchConditions = labelFields.Select(f => $"{LabelColumnExpr(f)} LIKE @search");
+                where += $" AND ({string.Join(" OR ", searchConditions)})";
+            }
+            else
+            {
+                where += $" AND {searchColExpr} LIKE @search";
+            }
         }
         parameters.Add("take", take);
 
+        var selectCols = new List<string> { "Id" };
+        if (labelFields.Count > 0) selectCols.Add($"{LabelColumnExpr(labelFields[0])} AS Value1");
+        if (labelFields.Count > 1) selectCols.Add($"{LabelColumnExpr(labelFields[1])} AS Value2");
+        if (labelFields.Count > 2) selectCols.Add($"{LabelColumnExpr(labelFields[2])} AS Value3");
+        
+        if (labelFields.Count == 0) selectCols.Add($"{searchColExpr} AS Value1");
+
         var sql = $"""
-            SELECT TOP (@take) Id, {labelExpr} AS Label
+            SELECT TOP (@take) {string.Join(", ", selectCols)}
             FROM {PhysicalNaming.FullTableName(parentTable.Id)}
             WHERE {where}
-            ORDER BY {labelExpr}
+            ORDER BY {searchColExpr}
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync<ReferenceOption>(new CommandDefinition(sql, parameters, cancellationToken: ct));

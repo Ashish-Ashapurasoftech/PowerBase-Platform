@@ -12,7 +12,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 {
     private const string SelectColumns = """
         Id, PublicId, AppId, Name, SingularLabel, PluralLabel, Description,
-        PhysicalTableName, DefaultReportSettings, DisplayFieldId, RecordCount, IsSystem, DisplayOrder,
+        PhysicalTableName, DefaultReportSettings, DisplayFieldId, DefaultRecordPickerField1Id, DefaultRecordPickerField2Id, DefaultRecordPickerField3Id, RecordCount, IsSystem, DisplayOrder,
         IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion, Icon
         """;
 
@@ -37,7 +37,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     private const string ListByAppSql = """
         SELECT t.Id, t.PublicId, t.AppId, t.Name, t.SingularLabel, t.PluralLabel, t.Description,
-               t.PhysicalTableName, t.DisplayFieldId, t.RecordCount, t.IsSystem, t.DisplayOrder,
+               t.PhysicalTableName, t.DisplayFieldId, t.DefaultRecordPickerField1Id, t.DefaultRecordPickerField2Id, t.DefaultRecordPickerField3Id, t.RecordCount, t.IsSystem, t.DisplayOrder,
                t.IsDeleted, t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy, t.RowVersion, t.Icon,
                f.Id, f.PublicId, f.AppTableId, f.FieldTypeId,
                f.Name, f.Label, f.Description, f.PhysicalColumnName, f.DefaultValue,
@@ -74,6 +74,9 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             PluralLabel   = @pluralLabel,
             Description   = @description,
             Icon          = @icon,
+            DefaultRecordPickerField1Id = @defaultRecordPickerField1Id,
+            DefaultRecordPickerField2Id = @defaultRecordPickerField2Id,
+            DefaultRecordPickerField3Id = @defaultRecordPickerField3Id,
             ModifiedOn    = SYSUTCDATETIME(),
             ModifiedBy    = @modifiedBy
         WHERE PublicId = @publicId AND IsDeleted = 0
@@ -189,13 +192,14 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             new CommandDefinition(UpdatePhysicalNameSql, new { id, physicalTableName }, cancellationToken: ct));
     }
 
-    public async Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, CancellationToken ct = default)
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, long? defaultRecordPickerField1Id = null, long? defaultRecordPickerField2Id = null, long? defaultRecordPickerField3Id = null, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
             new CommandDefinition(UpdateTableSql, new
             {
                 publicId, name, singularLabel, pluralLabel, description, icon,
+                defaultRecordPickerField1Id, defaultRecordPickerField2Id, defaultRecordPickerField3Id,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

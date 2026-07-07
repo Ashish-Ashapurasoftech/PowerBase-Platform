@@ -39,11 +39,21 @@ public class UpdateTableCommandHandler
             changes.Add("Description");
         if (table.Icon != command.Icon)
             changes.Add($"Icon to '{command.Icon}'");
+        if (table.DefaultRecordPickerField1Id != command.DefaultRecordPickerField1Id)
+            changes.Add("Default Record Picker Field 1");
+        if (table.DefaultRecordPickerField2Id != command.DefaultRecordPickerField2Id)
+            changes.Add("Default Record Picker Field 2");
+        if (table.DefaultRecordPickerField3Id != command.DefaultRecordPickerField3Id)
+            changes.Add("Default Record Picker Field 3");
 
         var affected = await _tableRepo.UpdateAsync(
             command.TablePublicId, command.Name,
             command.SingularLabel, command.PluralLabel,
-            command.Description, command.Icon, ct);
+            command.Description, command.Icon, 
+            command.DefaultRecordPickerField1Id,
+            command.DefaultRecordPickerField2Id,
+            command.DefaultRecordPickerField3Id,
+            ct);
 
         if (affected > 0 && changes.Count > 0)
         {
