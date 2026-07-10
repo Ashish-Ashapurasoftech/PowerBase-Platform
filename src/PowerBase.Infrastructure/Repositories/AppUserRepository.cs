@@ -17,9 +17,11 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             ar.PublicId AS RolePublicId,
             ar.Name     AS RoleName,
             au.Status,
-            au.CreatedOn
+            au.CreatedOn,
+            CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        JOIN meta.App a ON a.Id = au.AppId
         WHERE au.AppId    = @appId
           AND au.IsDeleted = 0
         ORDER BY au.UserName

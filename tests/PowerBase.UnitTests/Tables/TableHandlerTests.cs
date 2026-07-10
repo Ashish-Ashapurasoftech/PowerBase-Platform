@@ -1,4 +1,5 @@
 using FluentAssertions;
+using PowerBase.Application.Relationships.Commands.DeleteRelationship;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Tables.Commands.CreateTable;
@@ -23,6 +24,8 @@ public class TableHandlerTests
     private readonly IFieldTypeRepository _fieldTypeRepo = Substitute.For<IFieldTypeRepository>();
     private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
     private readonly IAppRolePermissionRepository _permRepo = Substitute.For<IAppRolePermissionRepository>();
+    private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
+    private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
 
     private static App MakeApp(long id = 10) => new() { Id = id, PublicId = Guid.NewGuid(), Name = "App" };
 
@@ -83,7 +86,12 @@ public class TableHandlerTests
     public async Task DeleteTable_CallsDeleteOnRepo()
     {
         var id = Guid.NewGuid();
-        var sut = new DeleteTableCommandHandler(_tableRepo, _auditRepo);
+        var table = MakeTable();
+        _tableRepo.GetByPublicIdAsync(id).Returns(table);
+        _relRepo.ListByTableAsync(table.Id).Returns(new List<Relationship>());
+        
+        var deleteRelHandler = new DeleteRelationshipCommandHandler(_tableRepo, _fieldRepo, _relRepo, _recordRepo, _auditRepo);
+        var sut = new DeleteTableCommandHandler(_tableRepo, _auditRepo, _relRepo, deleteRelHandler);
 
         await sut.HandleAsync(new DeleteTableCommand(id));
 

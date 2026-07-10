@@ -58,6 +58,10 @@ public class DeleteRelationshipCommandHandler
             && FormulaTypeMap.ParseSummarySettings(f.Settings)?.RelationshipId == rel.Id))
             await _fieldRepo.DeleteAsync(f.PublicId, parent.Id, ct);
 
+        foreach (var f in parentFields.Where(f => f.TypeCode == "ReportLink"
+            && FormulaTypeMap.ParseReportLinkSettings(f.Settings)?.RelationshipId == rel.Id))
+            await _fieldRepo.DeleteAsync(f.PublicId, parent.Id, ct);
+
         await _relRepo.SoftDeleteAsync(rel.PublicId, ct);
 
         await _auditRepo.LogActivityAsync(

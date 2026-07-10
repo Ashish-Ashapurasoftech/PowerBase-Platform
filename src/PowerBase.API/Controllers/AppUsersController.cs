@@ -54,6 +54,7 @@ public class AppUsersController : ControllerBase
             RoleName = u.RoleName,
             Status = u.Status,
             AddedOn = u.AddedOn.ToString("o"),
+            IsOwner = u.IsOwner,
         }).ToList();
         return Ok(new ApiResponse<IReadOnlyList<AppUserResponse>>(response));
     }
