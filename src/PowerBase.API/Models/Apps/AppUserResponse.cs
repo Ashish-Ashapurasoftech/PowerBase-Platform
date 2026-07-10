@@ -10,4 +10,5 @@ public class AppUserResponse
     public string RoleName { get; init; } = string.Empty;
     public string Status { get; init; } = string.Empty;
     public string AddedOn { get; init; } = string.Empty;
+    public bool IsOwner { get; init; }
 }

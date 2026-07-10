@@ -11,7 +11,8 @@ public record AppUserDetail(
     Guid RolePublicId,
     string RoleName,
     string Status,
-    DateTime CreatedOn);
+    DateTime CreatedOn,
+    bool IsOwner);
 
 public interface IAppUserRepository
 {

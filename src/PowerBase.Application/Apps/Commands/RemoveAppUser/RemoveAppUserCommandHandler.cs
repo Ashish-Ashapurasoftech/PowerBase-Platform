@@ -31,10 +31,16 @@ public class RemoveAppUserCommandHandler
 
     public async Task HandleAsync(RemoveAppUserCommand command, CancellationToken ct = default)
     {
-        var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
+        var app = await _appRepo.GetByPublicIdAsync(command.AppPublicId, ct);
+        var appId = app.Id;
 
         var user = await _userRepo.GetByPublicIdAsync(command.UserPublicId, ct)
             ?? throw new NotFoundException("User", command.UserPublicId);
+
+        if (app.OwnerId == user.Id)
+        {
+            throw new UnauthorizedActionException("Cannot remove the app owner.");
+        }
 
         if (user.Id == _queryContext.UserId)
             throw new UnauthorizedActionException("Cannot remove yourself from the app.");

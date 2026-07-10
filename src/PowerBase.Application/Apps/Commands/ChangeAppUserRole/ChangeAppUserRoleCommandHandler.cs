@@ -34,10 +34,16 @@ public class ChangeAppUserRoleCommandHandler
 
     public async Task HandleAsync(ChangeAppUserRoleCommand command, CancellationToken ct = default)
     {
-        var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
+        var app = await _appRepo.GetByPublicIdAsync(command.AppPublicId, ct);
+        var appId = app.Id;
 
         var user = await _userRepo.GetByPublicIdAsync(command.UserPublicId, ct)
             ?? throw new NotFoundException("User", command.UserPublicId);
+
+        if (app.OwnerId == user.Id)
+        {
+            throw new UnauthorizedActionException("Cannot change the role of the app owner.");
+        }
 
         var appUser = await _appUserRepo.GetByAppAndUserAsync(appId, user.Id, ct)
             ?? throw new NotFoundException("AppUser", command.UserPublicId);
