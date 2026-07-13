@@ -88,7 +88,7 @@ public class CreateRelationshipCommandHandler
                 });
 
             await _fieldRepo.UpdateFieldTypeAsync(
-                existing.Id, refType.Id, refType.Code,
+                existing.Id, refType.Id,
                 Serialize(new ReferenceSettings { ParentTableId = parent.Id }),
                 command.IsReferenceRequired, ct);
             existing.FieldTypeId = refType.Id;

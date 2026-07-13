@@ -71,9 +71,11 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         UPDATE meta.AppField SET Settings = @settings, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy WHERE Id = @id
         """;
 
+    // TypeCode is not a physical column on meta.AppField — it's derived via the ft.Code join in
+    // SelectColumns, so changing type is just a FieldTypeId swap.
     private const string UpdateFieldTypeSql = """
         UPDATE meta.AppField
-        SET FieldTypeId = @fieldTypeId, TypeCode = @typeCode, Settings = @settings, IsRequired = @isRequired,
+        SET FieldTypeId = @fieldTypeId, Settings = @settings, IsRequired = @isRequired,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE Id = @id
         """;
@@ -215,12 +217,12 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             new CommandDefinition(UpdateSettingsSql, new { id, settings, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
-    public async Task UpdateFieldTypeAsync(long id, long fieldTypeId, string typeCode, string? settings, bool isRequired, CancellationToken ct = default)
+    public async Task UpdateFieldTypeAsync(long id, long fieldTypeId, string? settings, bool isRequired, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateFieldTypeSql,
-                new { id, fieldTypeId, typeCode, settings, isRequired, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+                new { id, fieldTypeId, settings, isRequired, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
     public async Task<AppField?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
