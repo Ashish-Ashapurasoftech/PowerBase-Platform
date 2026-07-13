@@ -16,7 +16,7 @@ public interface IAppFieldRepository
 
     /// <summary>Changes a field's type (and settings/required) in place, keeping its Fid and physical column.
     /// Used when converting an existing physical field into a relationship Reference field.</summary>
-    Task UpdateFieldTypeAsync(long id, long fieldTypeId, string typeCode, string? settings, bool isRequired, CancellationToken ct = default);
+    Task UpdateFieldTypeAsync(long id, long fieldTypeId, string? settings, bool isRequired, CancellationToken ct = default);
     Task<int> GetNextFidAsync(long tableId, CancellationToken ct = default);
     Task<AppField?> GetByFidInTableAsync(long tableId, int fid, CancellationToken ct = default);
     Task<int> UpdateAsync(Guid publicId, long tableId, string name, string? label, string? description,
