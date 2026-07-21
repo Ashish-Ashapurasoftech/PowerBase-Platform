@@ -117,7 +117,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         parameters.Add("take", take);
 
-        var selectCols = new List<string> { "Id" };
+        // Id is returned as text: the row Id by default, or (translated by the caller) the parent
+        // table's Set-Key key-field value — either way, exactly what the reference column stores.
+        var selectCols = new List<string> { "CAST(Id AS NVARCHAR(400)) AS Id" };
         if (labelFields.Count > 0) selectCols.Add($"{LabelColumnExpr(labelFields[0])} AS Value1");
         if (labelFields.Count > 1) selectCols.Add($"{LabelColumnExpr(labelFields[1])} AS Value2");
         if (labelFields.Count > 2) selectCols.Add($"{LabelColumnExpr(labelFields[2])} AS Value3");
@@ -158,12 +160,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return result;
     }
 
-    public async Task<IReadOnlyDictionary<long, object?>> AggregateByReferenceAsync(
+    public async Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
-        IReadOnlyCollection<long> parentIds, FilterGroup? filterTree, CancellationToken ct = default)
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, CancellationToken ct = default)
     {
-        var result = new Dictionary<long, object?>();
-        if (parentIds.Count == 0) return result;
+        var result = new Dictionary<object, object?>();
+        if (parentKeyValues.Count == 0) return result;
 
         var refCol = PhysicalNaming.ColumnName(referenceFid);
         var aggExpr = function switch
@@ -178,13 +180,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         };
 
         var parameters = new DynamicParameters();
-        parameters.Add("parentIds", parentIds);
+        parameters.Add("parentKeyValues", parentKeyValues);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
 
         var sql = $"""
-            SELECT {refCol} AS ParentId, {aggExpr} AS Value
+            SELECT {refCol} AS ParentKey, {aggExpr} AS Value
             FROM {PhysicalNaming.FullTableName(childTable.Id)}
-            WHERE IsDeleted = 0 AND {refCol} IN @parentIds{filterWhere}
+            WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues{filterWhere}
             GROUP BY {refCol}
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -192,8 +194,55 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         foreach (var row in rows)
         {
             var dict = (IDictionary<string, object>)row;
-            if (dict.TryGetValue("ParentId", out var pid) && pid is not null && pid != DBNull.Value)
-                result[Convert.ToInt64(pid)] = dict.TryGetValue("Value", out var v) && v != DBNull.Value ? v : null;
+            if (dict.TryGetValue("ParentKey", out var pk) && pk is not null && pk != DBNull.Value)
+                result[pk] = dict.TryGetValue("Value", out var v) && v != DBNull.Value ? v : null;
+        }
+        return result;
+    }
+
+    public async Task<IReadOnlyDictionary<long, object?>> GetColumnValuesByIdsAsync(
+        AppTable table, string columnName, IReadOnlyCollection<long> ids, CancellationToken ct = default)
+    {
+        var result = new Dictionary<long, object?>();
+        if (ids.Count == 0) return result;
+
+        var sql = $"""
+            SELECT Id, {columnName} AS KeyColumnValue
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND Id IN @ids
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, new { ids }, cancellationToken: ct));
+        foreach (var row in rows)
+        {
+            var dict = (IDictionary<string, object>)row;
+            if (dict.TryGetValue("Id", out var idVal) && idVal is not null)
+                result[Convert.ToInt64(idVal)] = dict.TryGetValue("KeyColumnValue", out var v) && v != DBNull.Value ? v : null;
+        }
+        return result;
+    }
+
+    public async Task<IReadOnlyDictionary<object, long>> GetIdsByColumnValuesAsync(
+        AppTable table, string columnName, IReadOnlyCollection<object> values, CancellationToken ct = default)
+    {
+        var result = new Dictionary<object, long>();
+        if (values.Count == 0) return result;
+
+        // Compare native-typed values directly (no string cast) to avoid any SQL-vs-.NET formatting
+        // mismatch for DECIMAL/DATE columns.
+        var sql = $"""
+            SELECT Id, {columnName} AS KeyColumnValue
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND {columnName} IN @values
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, new { values }, cancellationToken: ct));
+        foreach (var row in rows)
+        {
+            var dict = (IDictionary<string, object>)row;
+            if (dict.TryGetValue("KeyColumnValue", out var kv) && kv is not null && kv != DBNull.Value
+                && dict.TryGetValue("Id", out var idVal) && idVal is not null)
+                result[kv] = Convert.ToInt64(idVal);
         }
         return result;
     }
@@ -668,6 +717,49 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
+    public async Task<bool> HasNullsAsync(AppTable table, AppField field, CancellationToken ct = default)
+    {
+        var col = PhysicalNaming.ColumnName(field.Fid!.Value);
+        var sql = $"""
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1 FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0 AND ({col} IS NULL OR CAST({col} AS NVARCHAR(MAX)) = '')
+            ) THEN 1 ELSE 0 END AS BIT)
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
+    public async Task RewriteReferenceColumnAsync(
+        AppTable childTable, string oldColumn, string newColumn,
+        IReadOnlyDictionary<object, object?> oldToNewValue, CancellationToken ct = default)
+    {
+        if (oldToNewValue.Count == 0) return;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        // Chunked to stay well under SQL Server's ~2100-parameter limit (2 params per mapped row).
+        const int chunkSize = 500;
+        foreach (var chunk in oldToNewValue.Chunk(chunkSize))
+        {
+            var parameters = new DynamicParameters();
+            var valueRows = new List<string>(chunk.Length);
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                parameters.Add($"oldId{i}", chunk[i].Key);
+                parameters.Add($"newVal{i}", chunk[i].Value ?? (object)DBNull.Value);
+                valueRows.Add($"(@oldId{i}, @newVal{i})");
+            }
+
+            var sql = $"""
+                UPDATE t SET t.{newColumn} = m.NewValue
+                FROM {PhysicalNaming.FullTableName(childTable.Id)} t
+                JOIN (VALUES {string.Join(", ", valueRows)}) AS m(OldParentId, NewValue) ON t.{oldColumn} = m.OldParentId
+                WHERE t.IsDeleted = 0
+                """;
+            await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        }
     }
 
     public async Task<bool> HasAnyDataAsync(AppTable table, AppField field, CancellationToken ct = default)

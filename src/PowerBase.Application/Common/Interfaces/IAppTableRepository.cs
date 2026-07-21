@@ -14,6 +14,8 @@ public interface IAppTableRepository
     Task UpdatePhysicalNameAsync(long id, string physicalTableName, CancellationToken ct = default);
     Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, long? defaultRecordPickerField1Id = null, long? defaultRecordPickerField2Id = null, long? defaultRecordPickerField3Id = null, CancellationToken ct = default);
     Task UpdateDefaultReportSettingsAsync(Guid publicId, string defaultReportSettings, CancellationToken ct = default);
+    /// <summary>Sets the table's key field (null = reset to Record ID#, the default).</summary>
+    Task SetKeyFieldAsync(long tableId, long? keyFieldId, CancellationToken ct = default);
     Task DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task IncrementRecordCountAsync(long id, CancellationToken ct = default);
     Task DecrementRecordCountAsync(long id, CancellationToken ct = default);

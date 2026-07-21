@@ -67,7 +67,7 @@ public class UpdateRecordCommandHandler
         }
 
         // Reference fields must point at an existing parent record.
-        await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _recordRepo, ct);
+        await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
 
         // Fetch old values before update so we can diff them
         var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, command.RecordPublicId, ct);

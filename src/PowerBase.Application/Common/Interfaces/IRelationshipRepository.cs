@@ -9,6 +9,9 @@ public interface IRelationshipRepository
     /// <summary>Set the relationship's proxy (display) lookup field after the lookups are created.</summary>
     Task UpdateProxyFieldAsync(long id, long? proxyFieldId, CancellationToken ct = default);
 
+    /// <summary>Repoint the relationship at a new Reference field (Set Key cascade rewire).</summary>
+    Task UpdateReferenceFieldAsync(long id, long referenceFieldId, int referenceFid, CancellationToken ct = default);
+
     Task<Relationship?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<Relationship?> GetByIdAsync(long id, CancellationToken ct = default);
 
