@@ -307,13 +307,6 @@ public class CreateAppCommandHandler
         };
         var (formId, _) = await _formRepo.CreateAsync(mainForm, ct);
 
-        // Process Custom Fields
-        if (spec.Fields != null && spec.Fields.Any())
-        {
-            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name)).ToList();
-            await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(tablePublicId, items), ct);
-        }
-
         var defaultBlock = new FormSectionBlock
         {
             Width        = 1,
@@ -330,6 +323,13 @@ public class CreateAppCommandHandler
             Blocks      = [defaultBlock],
         };
         await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
+
+        // Process Custom Fields
+        if (spec.Fields != null && spec.Fields.Any())
+        {
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name)).ToList();
+            await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(tablePublicId, items), ct);
+        }
 
         await _permRepo.SeedDefaultsForTableAsync(tableId, appId, ct);
     }
