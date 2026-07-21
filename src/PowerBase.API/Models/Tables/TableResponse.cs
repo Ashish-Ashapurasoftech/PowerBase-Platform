@@ -16,6 +16,9 @@ public class TableResponse
     public long? DefaultRecordPickerField1Id { get; set; }
     public long? DefaultRecordPickerField2Id { get; set; }
     public long? DefaultRecordPickerField3Id { get; set; }
+    /// <summary>The Fid of this table's key field (Set Key feature), or null when the key is the
+    /// default Record ID#.</summary>
+    public int? KeyFieldFid { get; set; }
     public DateTime CreatedOn { get; set; }
     public IReadOnlyList<FieldResponse> Fields { get; init; } = [];
 }

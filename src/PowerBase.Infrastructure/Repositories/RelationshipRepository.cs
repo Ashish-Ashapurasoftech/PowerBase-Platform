@@ -24,6 +24,13 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
         WHERE Id = @id
         """;
 
+    private const string UpdateReferenceFieldSql = """
+        UPDATE meta.Relationship
+        SET ReferenceFieldId = @referenceFieldId, ReferenceFid = @referenceFid,
+            ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE Id = @id
+        """;
+
     private const string GetByPublicIdSql = $"SELECT {SelectColumns} FROM meta.Relationship WHERE PublicId = @publicId AND IsDeleted = 0";
     private const string GetByIdSql = $"SELECT {SelectColumns} FROM meta.Relationship WHERE Id = @id AND IsDeleted = 0";
     private const string ListByAppSql = $"SELECT {SelectColumns} FROM meta.Relationship WHERE AppId = @appId AND IsDeleted = 0 ORDER BY Id";
@@ -61,6 +68,13 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateProxyFieldSql, new { id, proxyFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    public async Task UpdateReferenceFieldAsync(long id, long referenceFieldId, int referenceFid, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateReferenceFieldSql, new { id, referenceFieldId, referenceFid, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
     public async Task<Relationship?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)

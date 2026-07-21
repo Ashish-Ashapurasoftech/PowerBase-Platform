@@ -12,6 +12,7 @@ public static class ReferenceWriteValidator
         IReadOnlyList<AppField> fields,
         IReadOnlyDictionary<long, object?> values,
         IAppTableRepository tableRepo,
+        IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         CancellationToken ct)
     {
@@ -21,14 +22,33 @@ public static class ReferenceWriteValidator
             var s = raw.ToString();
             if (string.IsNullOrWhiteSpace(s)) continue;
 
-            if (!long.TryParse(s, out var parentId))
-                throw new ValidationException(new Dictionary<string, string[]> { [field.Name] = ["Invalid reference value."] });
-
             var settings = FormulaTypeMap.ParseReferenceSettings(field.Settings);
             if (settings?.ParentTableId is not long parentTableId) continue;
 
             var parent = await tableRepo.GetByIdAsync(parentTableId, ct);
-            if (!await recordRepo.ExistsAsync(parent, parentId, ct))
+            var keyField = await KeyFieldResolver.ResolveAsync(parent, fieldRepo, ct);
+
+            bool exists;
+            if (keyField is null)
+            {
+                // Default key (Record ID#): the reference column stores the parent row Id, as before.
+                if (!long.TryParse(s, out var parentId))
+                    throw new ValidationException(new Dictionary<string, string[]> { [field.Name] = ["Invalid reference value."] });
+                exists = await recordRepo.ExistsAsync(parent, parentId, ct);
+            }
+            else
+            {
+                // Custom key: the reference column stores the key field's value — resolve it back to a
+                // row Id to confirm a matching, non-deleted parent record exists.
+                var typedValue = KeyFieldResolver.ConvertToColumnType(keyField, s);
+                if (typedValue is null)
+                    throw new ValidationException(new Dictionary<string, string[]> { [field.Name] = ["Invalid reference value."] });
+                var col = KeyFieldResolver.ColumnName(keyField);
+                var matches = await recordRepo.GetIdsByColumnValuesAsync(parent, col, [typedValue], ct);
+                exists = matches.Count > 0;
+            }
+
+            if (!exists)
                 throw new ValidationException(
                     new Dictionary<string, string[]> { [field.Name] = [$"The referenced {parent.Name} record does not exist."] });
         }

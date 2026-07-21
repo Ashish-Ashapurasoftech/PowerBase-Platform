@@ -277,6 +277,7 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.RemoveRe
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipFieldFactory>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentOptionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler>();
 builder.Services.AddScoped<CreateReportCommandHandler>();
 builder.Services.AddScoped<UpdateReportCommandHandler>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();

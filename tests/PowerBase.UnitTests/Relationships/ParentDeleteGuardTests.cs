@@ -10,6 +10,7 @@ namespace PowerBase.UnitTests.Relationships;
 public class ParentDeleteGuardTests
 {
     private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
+    private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
     private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
 
     [Fact]
@@ -19,10 +20,10 @@ public class ParentDeleteGuardTests
         var rels = new List<Relationship> { new() { ChildTableId = 77, ReferenceFid = 10 } };
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Invoice Item" });
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Count", null,
-                Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<long, object?> { [1L] = 2 });
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, object?> { [1L] = 2 });
 
-        var act = () => ParentDeleteGuard.EnsureNotReferencedAsync(parent, rels, new[] { 1L }, _tableRepo, _recordRepo, default);
+        var act = () => ParentDeleteGuard.EnsureNotReferencedAsync(parent, rels, new[] { 1L }, _tableRepo, _fieldRepo, _recordRepo, default);
 
         await act.Should().ThrowAsync<ConflictException>();
     }
@@ -34,10 +35,10 @@ public class ParentDeleteGuardTests
         var rels = new List<Relationship> { new() { ChildTableId = 77, ReferenceFid = 10 } };
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Invoice Item" });
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Count", null,
-                Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<long, object?>());
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, object?>());
 
-        var act = () => ParentDeleteGuard.EnsureNotReferencedAsync(parent, rels, new[] { 1L }, _tableRepo, _recordRepo, default);
+        var act = () => ParentDeleteGuard.EnsureNotReferencedAsync(parent, rels, new[] { 1L }, _tableRepo, _fieldRepo, _recordRepo, default);
 
         await act.Should().NotThrowAsync();
     }
@@ -46,7 +47,7 @@ public class ParentDeleteGuardTests
     public async Task No_relationships_is_a_noop()
     {
         var parent = new AppTable { Id = 5, Name = "Product" };
-        var act = () => ParentDeleteGuard.EnsureNotReferencedAsync(parent, new List<Relationship>(), new[] { 1L }, _tableRepo, _recordRepo, default);
+        var act = () => ParentDeleteGuard.EnsureNotReferencedAsync(parent, new List<Relationship>(), new[] { 1L }, _tableRepo, _fieldRepo, _recordRepo, default);
         await act.Should().NotThrowAsync();
     }
 }

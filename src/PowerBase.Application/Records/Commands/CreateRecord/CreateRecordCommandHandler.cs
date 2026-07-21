@@ -60,7 +60,7 @@ public class CreateRecordCommandHandler
         }
 
         // Reference fields must point at an existing parent record.
-        await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _recordRepo, ct);
+        await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
 
         // Inject default values for fields that were not submitted (e.g. hidden None-access fields).
         // This ensures required fields with defaults are always populated regardless of role restrictions.

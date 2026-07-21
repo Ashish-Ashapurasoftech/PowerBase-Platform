@@ -49,7 +49,7 @@ public class DeleteRecordCommandHandler
         if (parentRels.Count > 0)
         {
             var ids = await _recordRepo.GetIdsByPublicIdsAsync(table, [command.RecordPublicId], ct);
-            await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _recordRepo, ct);
+            await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _fieldRepo, _recordRepo, ct);
         }
 
         await _recordRepo.DeleteAsync(table, command.RecordPublicId, ct);

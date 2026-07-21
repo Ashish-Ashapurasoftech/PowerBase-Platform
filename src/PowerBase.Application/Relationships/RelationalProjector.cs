@@ -44,7 +44,7 @@ public sealed class RelationalProjector : IRelationalProjector
         for (var i = 0; i < rows.Count; i++) maps[i] = new Dictionary<long, object?>();
 
         await ProjectLookupsAsync(lookupFields, rows, maps, ct);
-        await ProjectSummariesAsync(summaryFields, rows, maps, ct);
+        await ProjectSummariesAsync(table, summaryFields, rows, maps, ct);
 
         return maps;
     }
@@ -68,26 +68,61 @@ public sealed class RelationalProjector : IRelationalProjector
 
             var parentTable = await _tableRepo.GetByIdAsync(parentTableId, ct);
             var parentFields = await _fieldRepo.ListByTableAsync(parentTableId, ct);
-
-            // Collect the parent Ids referenced by this page across all reference columns used here.
+            var parentFieldsByFid = parentFields.Where(f => f.Fid.HasValue).ToDictionary(f => f.Fid!.Value);
+            var keyField = await KeyFieldResolver.ResolveAsync(parentTable, _fieldRepo, ct);
             var refFids = lookups.Select(l => l.Settings!.ReferenceFid!.Value).Distinct().ToList();
-            var parentIds = new HashSet<long>();
-            foreach (var row in rows)
-                foreach (var refFid in refFids)
-                    if (TryGetLong(row, PhysicalNaming.ColumnName(refFid), out var pid))
-                        parentIds.Add(pid);
 
-            var parentRows = await _recordRepo.GetRowsByIdsAsync(parentTable, parentFields, parentIds, ct);
+            IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> parentRows;
+            // Per (rowIndex, refFid): the resolved parent row Id, or null when unresolved/blank.
+            var resolvedParentId = new Dictionary<(int RowIndex, int RefFid), long?>();
+
+            if (keyField is null)
+            {
+                // Default key (Record ID#): the reference column already stores the parent row Id —
+                // exact same behavior as before Set Key existed.
+                var parentIds = new HashSet<long>();
+                for (var i = 0; i < rows.Count; i++)
+                    foreach (var refFid in refFids)
+                    {
+                        long? pid = TryGetLong(rows[i], PhysicalNaming.ColumnName(refFid), out var v) ? v : null;
+                        resolvedParentId[(i, refFid)] = pid;
+                        if (pid is long id) parentIds.Add(id);
+                    }
+                parentRows = await _recordRepo.GetRowsByIdsAsync(parentTable, parentFields, parentIds, ct);
+            }
+            else
+            {
+                // Custom key: the reference column stores the key field's raw value — resolve it back
+                // to a row Id first, then reuse the existing Id-based row fetch unchanged.
+                var col = KeyFieldResolver.ColumnName(keyField);
+                var rawByRowRef = new Dictionary<(int, int), object>();
+                for (var i = 0; i < rows.Count; i++)
+                    foreach (var refFid in refFids)
+                        if (rows[i].TryGetValue(PhysicalNaming.ColumnName(refFid), out var raw) && raw is not null)
+                            rawByRowRef[(i, refFid)] = raw;
+
+                var idsByKey = await _recordRepo.GetIdsByColumnValuesAsync(parentTable, col, rawByRowRef.Values.Distinct().ToList(), ct);
+                foreach (var ((i, refFid), raw) in rawByRowRef)
+                    resolvedParentId[(i, refFid)] = idsByKey.TryGetValue(raw, out var id) ? id : (long?)null;
+
+                parentRows = await _recordRepo.GetRowsByIdsAsync(parentTable, parentFields, idsByKey.Values.Distinct().ToList(), ct);
+            }
 
             for (var i = 0; i < rows.Count; i++)
             {
                 foreach (var (field, settings) in lookups)
                 {
                     object? value = null;
-                    if (TryGetLong(rows[i], PhysicalNaming.ColumnName(settings!.ReferenceFid!.Value), out var pid)
-                        && parentRows.TryGetValue(pid, out var prow)
-                        && prow.TryGetValue(PhysicalNaming.ColumnName(settings.SourceFid!.Value), out var v))
-                        value = v;
+                    if (resolvedParentId.TryGetValue((i, settings!.ReferenceFid!.Value), out var pid) && pid is long parentId
+                        && parentRows.TryGetValue(parentId, out var prow))
+                    {
+                        // Resolve via the source field's actual physical column — not always "f_{fid}"
+                        // (e.g. Record ID# is backed by the row's "Id" column, not "f_3").
+                        var srcCol = parentFieldsByFid.TryGetValue(settings.SourceFid!.Value, out var srcField)
+                            ? (srcField.PhysicalColumnName ?? PhysicalNaming.ColumnName(settings.SourceFid.Value))
+                            : PhysicalNaming.ColumnName(settings.SourceFid.Value);
+                        if (prow.TryGetValue(srcCol, out var v)) value = v;
+                    }
                     maps[i][field.Fid!.Value] = value;
                 }
             }
@@ -95,6 +130,7 @@ public sealed class RelationalProjector : IRelationalProjector
     }
 
     private async Task ProjectSummariesAsync(
+        AppTable table,
         IReadOnlyList<AppField> summaryFields,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
         Dictionary<long, object?>[] maps,
@@ -104,12 +140,27 @@ public sealed class RelationalProjector : IRelationalProjector
 
         // This table is the parent — gather its row Ids.
         var rowIds = new long[rows.Count];
-        var parentIds = new HashSet<long>();
+        var idSet = new HashSet<long>();
         for (var i = 0; i < rows.Count; i++)
+            if (TryGetLong(rows[i], "Id", out var id)) { rowIds[i] = id; idSet.Add(id); }
+        if (idSet.Count == 0) return;
+
+        // The per-row value the child's reference column actually stores: the row Id for the default
+        // key, or this table's key-field value for a Set-Key table.
+        var keyField = await KeyFieldResolver.ResolveAsync(table, _fieldRepo, ct);
+        object?[] aggKeys;
+        if (keyField is null)
         {
-            if (TryGetLong(rows[i], "Id", out var id)) { rowIds[i] = id; parentIds.Add(id); }
+            aggKeys = rowIds.Select(id => (object?)id).ToArray();
         }
-        if (parentIds.Count == 0) return;
+        else
+        {
+            var col = KeyFieldResolver.ColumnName(keyField);
+            var keyValues = await _recordRepo.GetColumnValuesByIdsAsync(table, col, idSet, ct);
+            aggKeys = rowIds.Select(id => keyValues.TryGetValue(id, out var v) ? v : null).ToArray();
+        }
+        var parentKeyValues = aggKeys.Where(k => k is not null).Select(k => k!).Distinct().ToList();
+        if (parentKeyValues.Count == 0) return;
 
         foreach (var field in summaryFields)
         {
@@ -122,14 +173,14 @@ public sealed class RelationalProjector : IRelationalProjector
 
             var childTable = await _tableRepo.GetByIdAsync(childId, ct);
             var filter = ParseFilter(s.FilterTree);
-            var agg = await _recordRepo.AggregateByReferenceAsync(childTable, refFid, s.Function!, s.TargetFid, parentIds, filter, ct);
+            var agg = await _recordRepo.AggregateByReferenceAsync(childTable, refFid, s.Function!, s.TargetFid, parentKeyValues, filter, ct);
 
             var isCount = string.Equals(s.Function, SummaryFunctions.Count, StringComparison.OrdinalIgnoreCase);
             var isExists = string.Equals(s.Function, SummaryFunctions.Exists, StringComparison.OrdinalIgnoreCase);
             for (var i = 0; i < rows.Count; i++)
             {
                 // No matching children: Count → 0, Exists → false, others → null.
-                if (agg.TryGetValue(rowIds[i], out var v)) maps[i][field.Fid!.Value] = v;
+                if (aggKeys[i] is object key && agg.TryGetValue(key, out var v)) maps[i][field.Fid!.Value] = v;
                 else maps[i][field.Fid!.Value] = isCount ? 0 : isExists ? false : null;
             }
         }

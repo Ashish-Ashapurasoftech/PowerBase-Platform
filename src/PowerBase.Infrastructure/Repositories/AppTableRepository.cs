@@ -12,7 +12,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 {
     private const string SelectColumns = """
         Id, PublicId, AppId, Name, SingularLabel, PluralLabel, Description,
-        PhysicalTableName, DefaultReportSettings, DisplayFieldId, DefaultRecordPickerField1Id, DefaultRecordPickerField2Id, DefaultRecordPickerField3Id, RecordCount, IsSystem, DisplayOrder,
+        PhysicalTableName, DefaultReportSettings, DisplayFieldId, KeyFieldId, DefaultRecordPickerField1Id, DefaultRecordPickerField2Id, DefaultRecordPickerField3Id, RecordCount, IsSystem, DisplayOrder,
         IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion, Icon
         """;
 
@@ -37,7 +37,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     private const string ListByAppSql = """
         SELECT t.Id, t.PublicId, t.AppId, t.Name, t.SingularLabel, t.PluralLabel, t.Description,
-               t.PhysicalTableName, t.DisplayFieldId, t.DefaultRecordPickerField1Id, t.DefaultRecordPickerField2Id, t.DefaultRecordPickerField3Id, t.RecordCount, t.IsSystem, t.DisplayOrder,
+               t.PhysicalTableName, t.DisplayFieldId, t.KeyFieldId, t.DefaultRecordPickerField1Id, t.DefaultRecordPickerField2Id, t.DefaultRecordPickerField3Id, t.RecordCount, t.IsSystem, t.DisplayOrder,
                t.IsDeleted, t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy, t.RowVersion, t.Icon,
                f.Id, f.PublicId, f.AppTableId, f.FieldTypeId,
                f.Name, f.Label, f.Description, f.PhysicalColumnName, f.DefaultValue,
@@ -80,6 +80,14 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             ModifiedOn    = SYSUTCDATETIME(),
             ModifiedBy    = @modifiedBy
         WHERE PublicId = @publicId AND IsDeleted = 0
+        """;
+
+    private const string SetKeyFieldSql = """
+        UPDATE meta.AppTable
+        SET KeyFieldId = @keyFieldId,
+            ModifiedOn = SYSUTCDATETIME(),
+            ModifiedBy = @modifiedBy
+        WHERE Id = @tableId AND IsDeleted = 0
         """;
 
     private const string UpdateDefaultReportSettingsSql = """
@@ -202,6 +210,13 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
                 defaultRecordPickerField1Id, defaultRecordPickerField2Id, defaultRecordPickerField3Id,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
+    }
+
+    public async Task SetKeyFieldAsync(long tableId, long? keyFieldId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(SetKeyFieldSql, new { tableId, keyFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
     public async Task UpdateDefaultReportSettingsAsync(Guid publicId, string defaultReportSettings, CancellationToken ct = default)

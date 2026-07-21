@@ -136,6 +136,7 @@ public class TablesController : ControllerBase
         DefaultRecordPickerField1Id = t.DefaultRecordPickerField1Id,
         DefaultRecordPickerField2Id = t.DefaultRecordPickerField2Id,
         DefaultRecordPickerField3Id = t.DefaultRecordPickerField3Id,
+        KeyFieldFid = ResolveKeyFieldFid(t.KeyFieldId, t.Fields),
         RecordCount = t.RecordCount,
         CreatedOn = t.CreatedOn,
         Fields = t.Fields.Select(MapFieldToResponse).ToList(),
@@ -153,10 +154,14 @@ public class TablesController : ControllerBase
         DefaultRecordPickerField1Id = r.Table.DefaultRecordPickerField1Id,
         DefaultRecordPickerField2Id = r.Table.DefaultRecordPickerField2Id,
         DefaultRecordPickerField3Id = r.Table.DefaultRecordPickerField3Id,
+        KeyFieldFid = ResolveKeyFieldFid(r.Table.KeyFieldId, r.Fields),
         RecordCount = r.Table.RecordCount,
         CreatedOn = r.Table.CreatedOn,
         Fields = r.Fields.Select(MapFieldToResponse).ToList(),
     };
+
+    private static int? ResolveKeyFieldFid(long? keyFieldId, IReadOnlyList<AppField> fields) =>
+        keyFieldId is null ? null : fields.FirstOrDefault(f => f.Id == keyFieldId.Value)?.Fid;
 
     private static FieldResponse MapFieldToResponse(AppField f) => new()
     {
