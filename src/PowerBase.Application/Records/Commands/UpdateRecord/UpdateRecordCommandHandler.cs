@@ -67,12 +67,16 @@ public class UpdateRecordCommandHandler
         }
 
         // Reference fields must point at an existing parent record.
-        await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
 
         // Fetch old values before update so we can diff them
         var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, command.RecordPublicId, ct);
 
-        await _recordRepo.UpdateAsync(table, fields, command.RecordPublicId, command.FieldValues, ct);
+        var effectiveValues = new Dictionary<long, object?>(command.FieldValues);
+        foreach (var kvp in refOverrides)
+            effectiveValues[kvp.Key] = kvp.Value;
+
+        await _recordRepo.UpdateAsync(table, fields, command.RecordPublicId, effectiveValues, ct);
 
         // Build field-level diff — only fields where value actually changed, keyed by display label
         var candidateFields = fields.Where(f =>

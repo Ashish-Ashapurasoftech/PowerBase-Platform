@@ -57,7 +57,7 @@ public class ListRecordsQueryHandler
         var visibleFields = access.VisibleFields;
 
         // Merge the permission view-filter with an optional Report Link ad-hoc filter.
-        var effectiveFilter = BuildEffectiveFilter(access.ViewFilter, query.FilterFid, query.FilterValue);
+        var effectiveFilter = BuildEffectiveFilter(access.ViewFilter, query.FilterFid, query.FilterValue, table, fields);
 
         var rows = await _recordRepo.ListAsync(
             table, visibleFields, page, pageSize,
@@ -78,15 +78,29 @@ public class ListRecordsQueryHandler
         };
     }
 
-    private static FilterGroup? BuildEffectiveFilter(FilterGroup? viewFilter, int? filterFid, string? filterValue)
+    private static FilterGroup? BuildEffectiveFilter(FilterGroup? viewFilter, int? filterFid, string? filterValue, PowerBase.Domain.Entities.AppTable table, IReadOnlyList<PowerBase.Domain.Entities.AppField> fields)
     {
         if (filterFid is null || filterValue is null)
             return viewFilter;
 
+        var effectiveFid = filterFid.Value;
+
+        // If the query asks for Record ID# (3) but the table has a custom Key Field,
+        // intercept it and search the custom Key Field instead to prevent SQL type errors
+        // and return the correct lookup record.
+        if (effectiveFid == 3 && table.KeyFieldId.HasValue)
+        {
+            var keyField = fields.FirstOrDefault(f => f.Id == table.KeyFieldId.Value);
+            if (keyField?.Fid != null)
+            {
+                effectiveFid = keyField.Fid.Value;
+            }
+        }
+
         var adHoc = new FilterGroup
         {
             Logic = "and",
-            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = filterFid.Value, Operator = "eq", Value = filterValue } }]
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = effectiveFid, Operator = "eq", Value = filterValue } }]
         };
 
         if (viewFilter is null)
