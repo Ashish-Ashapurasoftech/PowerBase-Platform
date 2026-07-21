@@ -40,4 +40,11 @@ public class Relationship
     public long? ModifiedBy { get; set; }
     public DateTime? DeletedOn { get; set; }
     public long? DeletedBy { get; set; }
+
+    /// <summary>
+    /// True when the reference field was an existing child Number field repurposed for this
+    /// relationship. On deletion the field's type will be restored instead of being deleted.
+    /// False (default) means the field was newly created and should be deleted with the relationship.
+    /// </summary>
+    public bool ReferenceFieldIsExisting { get; set; }
 }

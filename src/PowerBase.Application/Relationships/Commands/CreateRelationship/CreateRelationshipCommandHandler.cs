@@ -106,6 +106,7 @@ public class CreateRelationshipCommandHandler
             ReferenceFieldId = refField.Id,
             ReferenceFid = refField.Fid!.Value,
             ProxyFieldId = null,
+            ReferenceFieldIsExisting = referenceIsExistingField,
         }, ct);
 
         await _fieldRepo.UpdateSettingsAsync(refField.Id,

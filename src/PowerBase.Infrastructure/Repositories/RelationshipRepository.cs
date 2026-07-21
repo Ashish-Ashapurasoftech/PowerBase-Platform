@@ -9,14 +9,14 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
 {
     private const string SelectColumns = """
         Id, PublicId, AppId, ParentTableId, ChildTableId, ReferenceFieldId, ReferenceFid, ProxyFieldId,
-        IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy
+        ReferenceFieldIsExisting, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy
         """;
 
     private const string InsertSql = """
         INSERT INTO meta.Relationship
-            (AppId, ParentTableId, ChildTableId, ReferenceFieldId, ReferenceFid, ProxyFieldId, IsDeleted, CreatedOn, CreatedBy)
+            (AppId, ParentTableId, ChildTableId, ReferenceFieldId, ReferenceFid, ProxyFieldId, ReferenceFieldIsExisting, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
-        VALUES (@appId, @parentTableId, @childTableId, @referenceFieldId, @referenceFid, @proxyFieldId, 0, SYSUTCDATETIME(), @createdBy)
+        VALUES (@appId, @parentTableId, @childTableId, @referenceFieldId, @referenceFid, @proxyFieldId, @referenceFieldIsExisting, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string UpdateProxyFieldSql = """
@@ -51,6 +51,7 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
                 referenceFieldId = rel.ReferenceFieldId,
                 referenceFid = rel.ReferenceFid,
                 proxyFieldId = rel.ProxyFieldId,
+                referenceFieldIsExisting = rel.ReferenceFieldIsExisting,
                 createdBy = QueryContext.UserId,
             }, cancellationToken: ct));
         return ((long)row.Id, (Guid)row.PublicId);
