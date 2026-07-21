@@ -231,7 +231,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         
         var numberTypeId = await connection.QuerySingleAsync<long>(
             new CommandDefinition(
-                "SELECT Id FROM meta.FieldType WHERE Code = 'Number' AND IsDeleted = 0",
+                "SELECT Id FROM core.FieldType WHERE Code = 'Number' AND IsActive = 1",
                 cancellationToken: ct));
 
         await connection.ExecuteAsync(
