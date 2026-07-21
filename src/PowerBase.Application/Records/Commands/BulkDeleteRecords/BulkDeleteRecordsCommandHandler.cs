@@ -57,7 +57,7 @@ public class BulkDeleteRecordsCommandHandler
         if (parentRels.Count > 0)
         {
             var ids = await _recordRepo.GetIdsByPublicIdsAsync(table, command.RecordPublicIds, ct);
-            await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _recordRepo, ct);
+            await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _fieldRepo, _recordRepo, ct);
         }
 
         await _recordRepo.BulkDeleteAsync(table, command.RecordPublicIds, ct);

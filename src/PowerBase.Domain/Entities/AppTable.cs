@@ -13,6 +13,10 @@ public class AppTable
     public string? PhysicalTableName { get; set; }
     public string DefaultReportSettings { get; set; } = "{}";
     public long? DisplayFieldId { get; set; }
+    /// <summary>The field designated as this table's unique key for relationships. Null = Record ID# (default).
+    /// Orthogonal to <see cref="DisplayFieldId"/> — the key drives Reference-column identity/joins, the display
+    /// field drives label rendering only. Setting one never implicitly changes the other.</summary>
+    public long? KeyFieldId { get; set; }
     public long? DefaultRecordPickerField1Id { get; set; }
     public long? DefaultRecordPickerField2Id { get; set; }
     public long? DefaultRecordPickerField3Id { get; set; }

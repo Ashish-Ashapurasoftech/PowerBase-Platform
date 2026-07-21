@@ -23,11 +23,26 @@ public interface IRecordRepository
     Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> ids, CancellationToken ct = default);
 
-    /// <summary>Aggregate a child field grouped by the reference column, restricted to the given parent Ids
-    /// (drives Summary projection). Returns parentId → aggregate value.</summary>
-    Task<IReadOnlyDictionary<long, object?>> AggregateByReferenceAsync(
+    /// <summary>Row Id → the raw value of an arbitrary column, for the given row Ids. Used to resolve a
+    /// table's Set-Key key-field value per row (Lookup/Summary/reference-picker/delete-guard), without
+    /// needing SQL-building changes in the existing Id-based methods above.</summary>
+    Task<IReadOnlyDictionary<long, object?>> GetColumnValuesByIdsAsync(
+        AppTable table, string columnName, IReadOnlyCollection<long> ids, CancellationToken ct = default);
+
+    /// <summary>Reverse lookup: the row Id of the non-deleted row whose given column equals each of the
+    /// provided raw values (native-typed — e.g. decimal/DateTime/string — compared directly against the
+    /// column with no string cast, so no format-mismatch risk). Used to translate a submitted or stored
+    /// Set-Key key value back to a row Id so the existing Id-based repository methods can be reused unchanged.</summary>
+    Task<IReadOnlyDictionary<object, long>> GetIdsByColumnValuesAsync(
+        AppTable table, string columnName, IReadOnlyCollection<object> values, CancellationToken ct = default);
+
+    /// <summary>Aggregate a child field grouped by the reference column, restricted to the given parent key
+    /// values (row Ids for the default Record ID# key, or the parent's key-field raw values for a Set-Key
+    /// table — drives Summary projection and the parent-delete restrict check). Returns parentKeyValue →
+    /// aggregate value.</summary>
+    Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
-        IReadOnlyCollection<long> parentIds, FilterGroup? filterTree, CancellationToken ct = default);
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, CancellationToken ct = default);
 
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
@@ -58,6 +73,18 @@ public interface IRecordRepository
 
     /// <summary>Returns true if any non-deleted rows have a duplicate non-null value in the field's column.</summary>
     Task<bool> HasDuplicatesAsync(AppTable table, AppField field, CancellationToken ct = default);
+
+    /// <summary>Returns true if any non-deleted row has a NULL or empty-string value in the field's
+    /// column (a candidate key field must be populated on every row).</summary>
+    Task<bool> HasNullsAsync(AppTable table, AppField field, CancellationToken ct = default);
+
+    /// <summary>Set Key cascade rewire: for every non-deleted child row whose <paramref name="oldColumn"/>
+    /// raw value (native-typed — row Id, or a Set-Key key value of any scalar type) matches a key in
+    /// <paramref name="oldToNewValue"/>, write the mapped value into <paramref name="newColumn"/>.
+    /// Bounded by distinct parent count (chunked), not child row count.</summary>
+    Task RewriteReferenceColumnAsync(
+        AppTable childTable, string oldColumn, string newColumn,
+        IReadOnlyDictionary<object, object?> oldToNewValue, CancellationToken ct = default);
 
     /// <summary>Returns true if any non-deleted rows have a non-null, non-empty value in the field's column.</summary>
     Task<bool> HasAnyDataAsync(AppTable table, AppField field, CancellationToken ct = default);

@@ -9,18 +9,25 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
 {
     private const string SelectColumns = """
         Id, PublicId, AppId, ParentTableId, ChildTableId, ReferenceFieldId, ReferenceFid, ProxyFieldId,
-        IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy
+        ReferenceFieldIsExisting, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy
         """;
 
     private const string InsertSql = """
         INSERT INTO meta.Relationship
-            (AppId, ParentTableId, ChildTableId, ReferenceFieldId, ReferenceFid, ProxyFieldId, IsDeleted, CreatedOn, CreatedBy)
+            (AppId, ParentTableId, ChildTableId, ReferenceFieldId, ReferenceFid, ProxyFieldId, ReferenceFieldIsExisting, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
-        VALUES (@appId, @parentTableId, @childTableId, @referenceFieldId, @referenceFid, @proxyFieldId, 0, SYSUTCDATETIME(), @createdBy)
+        VALUES (@appId, @parentTableId, @childTableId, @referenceFieldId, @referenceFid, @proxyFieldId, @referenceFieldIsExisting, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string UpdateProxyFieldSql = """
         UPDATE meta.Relationship SET ProxyFieldId = @proxyFieldId, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE Id = @id
+        """;
+
+    private const string UpdateReferenceFieldSql = """
+        UPDATE meta.Relationship
+        SET ReferenceFieldId = @referenceFieldId, ReferenceFid = @referenceFid,
+            ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE Id = @id
         """;
 
@@ -51,6 +58,7 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
                 referenceFieldId = rel.ReferenceFieldId,
                 referenceFid = rel.ReferenceFid,
                 proxyFieldId = rel.ProxyFieldId,
+                referenceFieldIsExisting = rel.ReferenceFieldIsExisting,
                 createdBy = QueryContext.UserId,
             }, cancellationToken: ct));
         return ((long)row.Id, (Guid)row.PublicId);
@@ -61,6 +69,13 @@ public class RelationshipRepository : TenantRepositoryBase, IRelationshipReposit
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateProxyFieldSql, new { id, proxyFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    public async Task UpdateReferenceFieldAsync(long id, long referenceFieldId, int referenceFid, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateReferenceFieldSql, new { id, referenceFieldId, referenceFid, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
     public async Task<Relationship?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)

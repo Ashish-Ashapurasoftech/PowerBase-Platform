@@ -68,7 +68,14 @@ public class RecordResult
                 }
                 else
                 {
-                    fieldData[fid] = val;
+                    if (computedValues != null && field.Fid.HasValue && computedValues.TryGetValue(field.Fid.Value, out var cv) && cv != null)
+                    {
+                        fieldData[fid] = cv;
+                    }
+                    else
+                    {
+                        fieldData[fid] = val;
+                    }
                 }
             }
         }

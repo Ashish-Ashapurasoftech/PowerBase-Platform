@@ -65,8 +65,8 @@ public class RelationalProjectorTests
 
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Invoice Item" });
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Count", null,
-                Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<long, object?> { [1L] = 3 });
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, object?> { [1L] = 3 });
 
         var result = await NewProjector().ProjectAsync(new AppTable { Id = 5 }, parentFields, parentRows);
 
@@ -88,8 +88,8 @@ public class RelationalProjectorTests
 
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Invoice Item" });
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Exists", null,
-                Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
-            .Returns(new Dictionary<long, object?> { [1L] = true });
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, object?> { [1L] = true });
 
         var result = await NewProjector().ProjectAsync(new AppTable { Id = 5 }, parentFields, parentRows);
 

@@ -60,11 +60,15 @@ public class CreateRecordCommandHandler
         }
 
         // Reference fields must point at an existing parent record.
-        await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _recordRepo, ct);
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
 
         // Inject default values for fields that were not submitted (e.g. hidden None-access fields).
         // This ensures required fields with defaults are always populated regardless of role restrictions.
         var effectiveValues = new Dictionary<long, object?>(command.FieldValues);
+
+        // Apply translations from the validator (e.g. swapping custom keys for the physical Record ID#).
+        foreach (var kvp in refOverrides)
+            effectiveValues[kvp.Key] = kvp.Value;
         foreach (var field in fields)
         {
             if (field.IsSystem || field.IsDeleted || !field.Fid.HasValue || PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;

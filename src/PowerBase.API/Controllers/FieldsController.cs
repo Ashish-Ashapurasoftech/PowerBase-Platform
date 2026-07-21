@@ -128,6 +128,26 @@ public class FieldsController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Set (or reset) a table's key field. fieldFid = 0 resets to the default Record ID#.
+    /// If the table already has parent-side relationships, retry with force=true to confirm the
+    /// cascade rewire of every related record's reference.</summary>
+    [HttpPost("tables/{tableId:guid}/fields/{fieldFid:int}/set-key")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status422UnprocessableEntity)]
+    public async Task<IActionResult> SetKey(
+        [FromServices] PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler setKeyHandler,
+        Guid tableId, int fieldFid, [FromQuery] bool force, CancellationToken ct)
+    {
+        await setKeyHandler.HandleAsync(new PowerBase.Application.Fields.Commands.SetKey.SetKeyCommand(
+            tableId, fieldFid == 0 ? null : fieldFid, force), ct);
+        return NoContent();
+    }
+
     /// <summary>Get field usage (where it is referenced in forms, reports, and roles).</summary>
     [HttpGet("tables/{tableId:guid}/fields/{fieldId:guid}/usage")]
     [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
