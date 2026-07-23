@@ -9,6 +9,7 @@ public class AppUserResponse
     public Guid RolePublicId { get; init; }
     public string RoleName { get; init; } = string.Empty;
     public string Status { get; init; } = string.Empty;
+    public bool ShowInUserPickers { get; init; } = true;
     public string AddedOn { get; init; } = string.Empty;
     public bool IsOwner { get; init; }
 }

@@ -11,6 +11,7 @@ public class AppUser
     public string? UserEmail { get; set; }
     public long AppRoleId { get; set; }
     public string Status { get; set; } = "Active";
+    public bool ShowInUserPickers { get; set; } = true;
     public long AddedBy { get; set; }
     public DateTime CreatedOn { get; set; }
     public DateTime? UpdatedOn { get; set; }

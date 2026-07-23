@@ -17,6 +17,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             ar.PublicId AS RolePublicId,
             ar.Name     AS RoleName,
             au.Status,
+            ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
             au.CreatedOn,
             CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner
         FROM meta.AppUser au
@@ -28,7 +29,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         """;
 
     private const string GetByAppAndUserSql = """
-        SELECT Id, PublicId, AppId, UserId, UserPublicId, AppRoleId, Status, AddedBy, CreatedOn, UpdatedOn, IsDeleted
+        SELECT Id, PublicId, AppId, UserId, UserPublicId, AppRoleId, Status, ISNULL(ShowInUserPickers, 1) AS ShowInUserPickers, AddedBy, CreatedOn, UpdatedOn, IsDeleted
         FROM meta.AppUser
         WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0 And Status = 'Active'
         """;
@@ -45,14 +46,20 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         END
         ELSE
         BEGIN
-            INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, AddedBy, CreatedOn)
-            VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, @addedBy, SYSUTCDATETIME())
+            INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn)
+            VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, 1, @addedBy, SYSUTCDATETIME())
         END
         """;
 
     private const string UpdateRoleSql = """
         UPDATE meta.AppUser
         SET AppRoleId = @appRoleId, UpdatedOn = SYSUTCDATETIME()
+        WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
+        """;
+
+    private const string UpdateShowInUserPickersSql = """
+        UPDATE meta.AppUser
+        SET ShowInUserPickers = @showInUserPickers, UpdatedOn = SYSUTCDATETIME()
         WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
         """;
 
@@ -142,6 +149,13 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateRoleSql, new { appId, userId, appRoleId = newRoleId }, cancellationToken: ct));
+    }
+
+    public async Task UpdateShowInUserPickersAsync(long appId, long userId, bool showInUserPickers, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateShowInUserPickersSql, new { appId, userId, showInUserPickers }, cancellationToken: ct));
     }
 
     public async Task<string?> GetUserRoleNameAsync(long appId, long userId, CancellationToken ct = default)
