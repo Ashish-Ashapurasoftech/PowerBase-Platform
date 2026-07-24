@@ -26,6 +26,7 @@ using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Queries.GetMe;
 using PowerBase.Application.Auth.Queries.Login;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Services;
 using PowerBase.Application.Tenants.Commands.CreateTenant;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Commands.DeleteField;
@@ -165,6 +166,7 @@ builder.Services.AddScoped<IRolePermissionEnforcer, RolePermissionEnforcer>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
+builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 
 // Field Settings Validators
 builder.Services.AddScoped<IFieldSettingsValidator, TextSettingsValidator>();
@@ -225,6 +227,10 @@ builder.Services.AddScoped<SelectTenantCommandHandler>();
 builder.Services.AddScoped<RefreshTokenCommandHandler>();
 builder.Services.AddScoped<CreateTenantCommandHandler>();
 builder.Services.AddScoped<CreateAppCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Pbl.PblValidator>();
+builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.FormulaTranslator>();
+builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Commands.ImportAppFromPbl.ImportAppFromPblCommandHandler>();
 builder.Services.AddScoped<UpdateAppCommandHandler>();
 builder.Services.AddScoped<ListAppUsersQueryHandler>();
 builder.Services.AddScoped<AddAppUserCommandHandler>();

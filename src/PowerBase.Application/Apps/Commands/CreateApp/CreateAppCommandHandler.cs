@@ -1,6 +1,4 @@
-using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
-using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -28,14 +26,9 @@ public class CreateAppCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly IQueryContext _queryContext;
     private readonly IAppTableRepository _tableRepo;
-    private readonly ISchemaEngineService _schemaEngine;
     private readonly IAuditRepository _auditRepo;
-    private readonly IAppFieldRepository _fieldRepo;
-    private readonly IReportRepository _reportRepo;
-    private readonly IFieldTypeRepository _fieldTypeRepo;
-    private readonly IFormRepository _formRepo;
     private readonly IUserRepository _userRepo;
-    private readonly IAppRolePermissionRepository _permRepo;
+    private readonly IAppSeeder _appSeeder;
     private readonly BulkCreateFieldsCommandHandler _bulkCreateHandler;
 
     public CreateAppCommandHandler(
@@ -45,14 +38,9 @@ public class CreateAppCommandHandler
         ITenantUnitOfWork uow,
         IQueryContext queryContext,
         IAppTableRepository tableRepo,
-        ISchemaEngineService schemaEngine,
         IAuditRepository auditRepo,
-        IAppFieldRepository fieldRepo,
-        IReportRepository reportRepo,
-        IFieldTypeRepository fieldTypeRepo,
-        IFormRepository formRepo,
         IUserRepository userRepo,
-        IAppRolePermissionRepository permRepo,
+        IAppSeeder appSeeder,
         BulkCreateFieldsCommandHandler bulkCreateHandler)
     {
         _appRepo = appRepo;
@@ -61,14 +49,9 @@ public class CreateAppCommandHandler
         _uow = uow;
         _queryContext = queryContext;
         _tableRepo = tableRepo;
-        _schemaEngine = schemaEngine;
         _auditRepo = auditRepo;
-        _fieldRepo = fieldRepo;
-        _reportRepo = reportRepo;
-        _fieldTypeRepo = fieldTypeRepo;
-        _formRepo = formRepo;
         _userRepo = userRepo;
-        _permRepo = permRepo;
+        _appSeeder = appSeeder;
         _bulkCreateHandler = bulkCreateHandler;
     }
 
@@ -218,119 +201,13 @@ public class CreateAppCommandHandler
             CreatedBy = userId,
         };
 
-        var (tableId, tablePublicId) = await _tableRepo.CreateAsync(table, ct);
-        table.Id = tableId;
-        table.PublicId = tablePublicId;
-
-        var physicalName = PhysicalNaming.TableName(tableId);
-        await _tableRepo.UpdatePhysicalNameAsync(tableId, physicalName, ct);
-        table.PhysicalTableName = physicalName;
-
-        await _schemaEngine.CreateTableAsync(table, ct);
-
-        // Seed system fields
-        var userTypeId     = await _fieldTypeRepo.GetIdByCodeAsync("User", ct);
-        var numberTypeId   = await _fieldTypeRepo.GetIdByCodeAsync("Number", ct);
-        var dateTimeTypeId = await _fieldTypeRepo.GetIdByCodeAsync("DateTime", ct);
-
-        (string Name, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order, int Fid)[] systemFieldDefs =
-        [
-            ("Record ID#",       numberTypeId,   "Id",         true,  false, 1, 3),
-            ("Date Created",     dateTimeTypeId, "CreatedOn",  true,  true,  2, 1),
-            ("Date Modified",    dateTimeTypeId, "ModifiedOn", true,  true,  3, 2),
-            ("Record Owner",     userTypeId,     "CreatedBy",  false, false, 4, 4),
-            ("Last Modified By", userTypeId,     "ModifiedBy", false, false, 5, 5),
-        ];
-
-        var seededFids = new Dictionary<string, int>();
-        foreach (var (name, typeId, physCol, sortable, filterable, order, fid) in systemFieldDefs)
-        {
-            var f = new AppField
-            {
-                AppTableId = table.Id,
-                FieldTypeId = typeId,
-                Name = name,
-                PhysicalColumnName = physCol,
-                IsSystem = true,
-                IsReportable = true,
-                IsSortable = sortable,
-                IsFilterable = filterable,
-                IsSearchable = false,
-                DisplayOrder = order,
-                Fid = fid,
-            };
-            await _fieldRepo.CreateAsync(f, ct);
-            seededFids[name] = fid;
-        }
-
-        // Seed default reports
-        var dateModifiedFid = seededFids["Date Modified"];
-
-        await _reportRepo.CreateAsync(new Report
-        {
-            AppTableId = table.Id,
-            OwnerId = userId,
-            Name = "List All",
-            ReportType = "Table",
-            Visibility = "Shared",
-            Definition = JsonSerializer.Serialize(new ReportDefinition()),
-            IsDefault = true,
-            DisplayOrder = 1,
-        }, ct);
-
-        await _reportRepo.CreateAsync(new Report
-        {
-            AppTableId = table.Id,
-            OwnerId = userId,
-            Name = "List Changes",
-            ReportType = "Table",
-            Visibility = "Shared",
-            Definition = JsonSerializer.Serialize(new ReportDefinition
-            {
-                SortFields = [new SortSpec { FieldId = dateModifiedFid, Desc = true }],
-            }),
-            IsDefault = false,
-            DisplayOrder = 2,
-        }, ct);
-
-        // Auto-create "Main Form"
-        var mainForm = new Form
-        {
-            AppTableId        = table.Id,
-            Name              = "Main Form",
-            IsDefault         = true,
-            AutoAddNewFields  = true,
-            ShowBuiltInFields = false,
-            SaveOptions       = "SaveKeepWorking,SaveNew,SaveNext,SaveView",
-            DisplayOrder      = 1,
-            CreatedBy         = userId,
-        };
-        var (formId, _) = await _formRepo.CreateAsync(mainForm, ct);
+        table = await _appSeeder.CreateTableWithDefaultsAsync(table, userId, ct);
 
         // Process Custom Fields
         if (spec.Fields != null && spec.Fields.Any())
         {
-            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name)).ToList();
-            await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(tablePublicId, items), ct);
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name, Settings: f.Settings)).ToList();
+            await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
         }
-
-        var defaultBlock = new FormSectionBlock
-        {
-            Width        = 1,
-            DisplayOrder = 1,
-            Elements     = [],
-        };
-
-        var defaultSection = new FormSection
-        {
-            FormId      = formId,
-            Name        = "Section 1",
-            ColumnCount = 2,
-            DisplayOrder = 1,
-            Blocks      = [defaultBlock],
-        };
-        await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
-
-        await _permRepo.SeedDefaultsForTableAsync(tableId, appId, ct);
     }
 }
