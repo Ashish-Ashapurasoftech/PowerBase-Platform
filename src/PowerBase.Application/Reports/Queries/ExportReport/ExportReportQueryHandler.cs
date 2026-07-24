@@ -87,7 +87,7 @@ public class ExportReportQueryHandler
 
         var safeName = string.Concat(report.Name.Split(Path.GetInvalidFileNameChars()));
 
-        if (report.ReportType == "Summary")
+        if (report.ReportType is "Summary" or "Chart")
             return await ExportSummaryAsync(table, allFields, access, definition, safeName, query.Format, ct);
 
         return await ExportTableAsync(table, allFields, access, definition, safeName, query.Format, filterTree, sortFields, ct);
@@ -187,9 +187,18 @@ public class ExportReportQueryHandler
             .Where(a => visibleFieldIds.Contains(a.FieldId))
             .ToList();
 
+        AppField? seriesField = null;
+        if (definition.Chart?.SeriesFieldId is { } seriesFieldId
+            && fieldMap.TryGetValue(seriesFieldId, out var resolvedSeriesField)
+            && visibleFieldIds.Contains(seriesFieldId))
+        {
+            seriesField = resolvedSeriesField;
+        }
+
         var rows = await _recordRepo.SummarizeAsync(
             table, groupByField, visibleAggregations, allFields, definition.GroupByMode,
-            filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy,
+            seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
 
         // Build alias→fieldId map and percent set (same logic as RunSummaryAsync)
         var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -211,9 +220,13 @@ public class ExportReportQueryHandler
 
         var columns = new List<ColumnInfo>
         {
-            new(groupByField.Id.ToString(), string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label),
+            new((groupByField.Fid ?? groupByField.Id).ToString(), string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label),
             new("0", "Count"),
         };
+        if (seriesField is not null)
+        {
+            columns.Add(new ColumnInfo((seriesField.Fid ?? seriesField.Id).ToString(), string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label));
+        }
         foreach (var agg in visibleAggregations)
         {
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
@@ -222,15 +235,17 @@ public class ExportReportQueryHandler
                 var label = agg.DisplayAs == "PercentOfColumnTotal"
                     ? $"{agg.Function} of {fieldName} (%)"
                     : $"{agg.Function} of {fieldName}";
-                columns.Add(new ColumnInfo(aggField.Id.ToString(), label));
+                columns.Add(new ColumnInfo((aggField.Fid ?? aggField.Id).ToString(), label));
             }
         }
 
         var dataRows = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
-            fields[groupByField.Id.ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
+            fields[(groupByField.Fid ?? groupByField.Id).ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
+            if (seriesField is not null)
+                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = row.TryGetValue("SeriesValue", out var sv) ? sv : null;
             foreach (var (alias, fieldId) in aggAliasToFieldId)
             {
                 if (!row.TryGetValue(alias, out var val)) continue;
