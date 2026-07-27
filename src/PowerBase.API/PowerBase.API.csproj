@@ -19,4 +19,12 @@
     <ProjectReference Include="..\PowerBase.Infrastructure\PowerBase.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\database\migrations\tenant\**\*.sql">
+      <Link>database\migrations\tenant\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
