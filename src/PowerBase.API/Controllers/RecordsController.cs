@@ -8,6 +8,7 @@ using PowerBase.Application.Records;
 using PowerBase.Application.Records.Commands.BulkDeleteRecords;
 using PowerBase.Application.Records.Commands.CreateRecord;
 using PowerBase.Application.Records.Commands.DeleteRecord;
+using PowerBase.Application.Records.Commands.InvokeButtonAction;
 using PowerBase.Application.Records.Commands.UpdateRecord;
 using PowerBase.Application.Records.Queries.GetRecord;
 using PowerBase.Application.Records.Queries.ListRecords;
@@ -24,6 +25,7 @@ public class RecordsController : ControllerBase
     private readonly ListRecordsQueryHandler _listHandler;
     private readonly GetRecordQueryHandler _getHandler;
     private readonly GetDistinctFieldValuesQueryHandler _distinctHandler;
+    private readonly InvokeButtonActionCommandHandler _invokeButtonHandler;
     private readonly IAppAccessService _appAccessService;
 
     public RecordsController(
@@ -34,6 +36,7 @@ public class RecordsController : ControllerBase
         ListRecordsQueryHandler listHandler,
         GetRecordQueryHandler getHandler,
         GetDistinctFieldValuesQueryHandler distinctHandler,
+        InvokeButtonActionCommandHandler invokeButtonHandler,
         IAppAccessService appAccessService)
     {
         _createHandler = createHandler;
@@ -43,6 +46,7 @@ public class RecordsController : ControllerBase
         _listHandler = listHandler;
         _getHandler = getHandler;
         _distinctHandler = distinctHandler;
+        _invokeButtonHandler = invokeButtonHandler;
         _appAccessService = appAccessService;
     }
 
@@ -115,6 +119,36 @@ public class RecordsController : ControllerBase
         var command = new UpdateRecordCommand(tableId, id, ParseFieldValues(request.Fields));
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
+    }
+
+    /// <summary>Invoke an Action Button field on a record: resolves its configured gates and
+    /// writes, applies them under the Rule-1 privileged-write exception (works without normal
+    /// field-edit permission for exactly the button's configured targets), and returns the
+    /// updated values for an in-place UI update (Rule 2 — no page refresh).</summary>
+    [HttpPost("tables/{tableId:guid}/records/{id:guid}/actions/{fid:int}")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<InvokeButtonActionResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status410Gone)]
+    [ProducesResponseType(422)]
+    public async Task<IActionResult> InvokeButtonAction(Guid tableId, Guid id, int fid, [FromBody] InvokeButtonActionRequest request, CancellationToken ct)
+    {
+        var command = new InvokeButtonActionCommand(
+            tableId, id, fid,
+            request.PromptValue, request.CapturedFileRef, request.Password,
+            request.GeoLat, request.GeoLng, request.GeoState, request.ClientNow);
+
+        var result = await _invokeButtonHandler.HandleAsync(command, ct);
+
+        var response = new InvokeButtonActionResponse
+        {
+            UpdatedFields = result.UpdatedFields.ToDictionary(kv => kv.Key.ToString(), kv => kv.Value),
+            Redirect = result.Redirect,
+        };
+        return Ok(new ApiResponse<InvokeButtonActionResponse>(response));
     }
 
     /// <summary>Bulk soft-delete up to 500 records by public ID.</summary>

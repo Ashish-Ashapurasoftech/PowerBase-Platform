@@ -36,4 +36,20 @@ public interface IRolePermissionEnforcer
 
     /// <summary>Throw if OwnRecords scope applies and the record was not created by the current user.</summary>
     Task EnsureRecordOwnedAsync(AppTable table, Guid recordPublicId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Privileged-write check for Action Button invocations (Field-Type spec Rule 1): a user
+    /// with view-only / zero edit rights must still be able to use a button that writes data,
+    /// without a field-edit-permission error — but ONLY to the fields the button is explicitly
+    /// configured to set. This method enforces record-level visibility exactly like
+    /// <see cref="GetTableAccessAsync"/> (a user who cannot see the record cannot act on it, and
+    /// OwnRecords scope still requires ownership) but — unlike normal edits — does NOT require
+    /// <c>ModifyScope != None</c> and does NOT check <c>EditableFieldIds</c>. Callers MUST ensure
+    /// the write set passed to the record-write path is exactly <paramref name="buttonTargetFids"/>
+    /// (the button's configured Capture/AddData/Timestamp/IP/Geo targets) — this is not a general
+    /// edit grant.
+    /// </summary>
+    Task EnsureButtonWriteAllowedAsync(
+        AppTable table, IReadOnlyList<AppField> fields, Guid recordPublicId,
+        IReadOnlySet<long> buttonTargetFids, CancellationToken ct = default);
 }

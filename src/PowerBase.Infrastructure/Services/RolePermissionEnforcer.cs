@@ -84,6 +84,30 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             throw new UnauthorizedActionException("You can only modify records you created.");
     }
 
+    public async Task EnsureButtonWriteAllowedAsync(
+        AppTable table, IReadOnlyList<AppField> fields, Guid recordPublicId,
+        IReadOnlySet<long> buttonTargetFids, CancellationToken ct = default)
+    {
+        if (buttonTargetFids.Count == 0)
+            throw new UnauthorizedActionException("This button has no configured fields to write.");
+
+        var access = await GetTableAccessAsync(table, fields, ct);
+        if (access.Unrestricted)
+            return;
+
+        // Record-level visibility is never bypassed: a user who cannot see the record cannot
+        // act on it, regardless of what the button is configured to write.
+        if (!access.CanView)
+            throw new UnauthorizedActionException("You do not have permission to view this record.");
+
+        if (access.ViewScope == RecordScopes.OwnRecords || access.ModifyScope == RecordScopes.OwnRecords)
+            await EnsureRecordOwnedAsync(table, recordPublicId, ct);
+
+        // Deliberately no EditableFieldIds / ModifyScope==None check here — the button's
+        // configured target fields are writable by design (Rule 1 permission exception).
+        // The caller is responsible for ensuring the write set is exactly buttonTargetFids.
+    }
+
     private async Task<FilterGroup?> BuildViewFilterAsync(AppUser appUser, AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct)
     {
         var stored = await _permRepo.GetRecordFilterAsync(appUser.AppRoleId, table.Id, ct);

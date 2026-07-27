@@ -166,6 +166,8 @@ builder.Services.AddScoped<IRolePermissionEnforcer, RolePermissionEnforcer>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
+builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
+builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService, PowerBase.Application.Records.RecordWriteService>();
 
 // Field Settings Validators
 builder.Services.AddScoped<IFieldSettingsValidator, TextSettingsValidator>();
@@ -180,6 +182,7 @@ builder.Services.AddScoped<IFieldSettingsValidator, DateRangeSettingsValidator>(
 builder.Services.AddScoped<IFieldSettingsValidator, NumericRangeSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, FormulaSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, ReportLinkSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, ActionButtonSettingsValidator>();
 builder.Services.AddScoped<FieldSettingsValidatorRegistry>();
 
 // Formula engine (stateless, shared) + compute-on-read projector + authoring query handlers
@@ -192,6 +195,11 @@ builder.Services.AddScoped<PowerBase.Application.Formulas.Queries.ValidateFormul
 builder.Services.AddScoped<PowerBase.Application.Formulas.Queries.EvaluateFormulaQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaDefaultResolver, PowerBase.Application.Formulas.FormulaDefaultResolver>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaExpressionValidator, PowerBase.Application.Formulas.FormulaExpressionValidator>();
+
+// Action Buttons (Field-Type spec)
+builder.Services.AddScoped<PowerBase.Application.Records.Commands.InvokeButtonAction.IActionButtonValueResolver,
+    PowerBase.Application.Records.Commands.InvokeButtonAction.ActionButtonValueResolver>();
+builder.Services.AddScoped<PowerBase.Application.Records.Commands.InvokeButtonAction.InvokeButtonActionCommandHandler>();
 
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
