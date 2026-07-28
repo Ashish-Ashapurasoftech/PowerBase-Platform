@@ -53,19 +53,26 @@ public class SaveFormLayoutCommandHandler
                 ["Elements"] = [$"AppFieldId(s) {string.Join(", ", invalidIds)} do not belong to this table."]
             });
 
+        // PublicId is carried through so a caller can keep a saved section/block/element's
+        // identity across this save — the layout is re-inserted wholesale, so without it every
+        // row would come back with a new id. Absent (null) means "generate one", which is what
+        // newly-added rows send. Guid.Empty is the entity-level stand-in for that absence.
         var sections = command.Sections.Select(s => new FormSection
         {
+            PublicId    = s.PublicId ?? Guid.Empty,
             FormId      = form.Id,
             Name        = s.Name,
             ColumnCount = s.Blocks.Count,
             IsCollapsed = s.IsCollapsed,
             Blocks      = s.Blocks.Select(b => new FormSectionBlock
             {
+                PublicId        = b.PublicId ?? Guid.Empty,
                 Heading         = b.Heading,
                 BackgroundColor = b.BackgroundColor,
                 Width           = b.Width,
                 Elements        = b.Elements.Select(e => new FormElement
                 {
+                    PublicId         = e.PublicId ?? Guid.Empty,
                     AppFieldId       = e.ElementType == "Field" ? e.AppFieldId : null,
                     ElementType      = e.ElementType,
                     ElementContent   = e.ElementContent,

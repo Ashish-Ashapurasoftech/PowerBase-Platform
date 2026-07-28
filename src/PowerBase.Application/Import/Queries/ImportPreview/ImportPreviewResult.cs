@@ -35,11 +35,40 @@ public sealed class ImportPreviewTableItem
     public List<string> Reports { get; init; } = [];
 }
 
+public sealed class ImportPreviewRelationshipItem
+{
+    public string LogicalRef { get; init; } = string.Empty;
+    public string ParentTableRef { get; init; } = string.Empty;
+    public string ChildTableRef { get; init; } = string.Empty;
+    public string ReferenceFieldName { get; init; } = string.Empty;
+    public int LookupCount { get; init; }
+    public int SummaryCount { get; init; }
+}
+
+public sealed class ImportPreviewFormItem
+{
+    public string LogicalRef { get; init; } = string.Empty;
+    public string Name { get; init; } = string.Empty;
+    public string TableRef { get; init; } = string.Empty;
+    public int SectionCount { get; init; }
+    public int RuleCount { get; init; }
+}
+
+public sealed class ImportPreviewRoleItem
+{
+    public string LogicalRef { get; init; } = string.Empty;
+    public string Name { get; init; } = string.Empty;
+    public int TablePermissionCount { get; init; }
+}
+
 public sealed class ImportPreviewResult
 {
     public bool IsValid { get; init; }
     public string AppName { get; init; } = string.Empty;
     public List<ImportPreviewTableItem> Tables { get; init; } = [];
+    public List<ImportPreviewRelationshipItem> Relationships { get; init; } = [];
+    public List<ImportPreviewFormItem> Forms { get; init; } = [];
+    public List<ImportPreviewRoleItem> Roles { get; init; } = [];
     public List<PblIssueDto> Errors { get; init; } = [];
     public List<PblIssueDto> Warnings { get; init; } = [];
 }

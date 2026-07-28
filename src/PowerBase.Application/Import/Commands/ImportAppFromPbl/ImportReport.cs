@@ -27,6 +27,10 @@ public sealed class ImportReport
     public int TablesCreated { get; init; }
     public int FieldsCreated { get; init; }
     public int ReportsCreated { get; init; }
+    public int RelationshipsCreated { get; init; }
+    public int FormsCreated { get; init; }
+    public int FormRulesCreated { get; init; }
+    public int RolesCreated { get; init; }
     public List<ImportSkippedItem> Skipped { get; init; } = [];
     public List<FormulaTranslationReportItem> FormulaTranslations { get; init; } = [];
 }

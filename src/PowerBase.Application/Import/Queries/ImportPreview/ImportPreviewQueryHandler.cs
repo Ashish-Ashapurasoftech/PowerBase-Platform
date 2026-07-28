@@ -1,5 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Import.Pbl;
+using PowerBase.Application.Import.Qbl;
+using YamlDotNet.Core;
 
 namespace PowerBase.Application.Import.Queries.ImportPreview;
 
@@ -15,9 +17,10 @@ public class ImportPreviewQueryHandler
     public Task<ImportPreviewResult> HandleAsync(ImportPreviewQuery query, CancellationToken ct = default)
     {
         PblDocument document;
+        List<PblIssue> conversionIssues;
         try
         {
-            document = PblSerializer.Deserialize(query.PblJson);
+            (document, conversionIssues) = ImportDocumentParser.Parse(query.PblJson);
         }
         catch (JsonException ex)
         {
@@ -27,8 +30,17 @@ public class ImportPreviewQueryHandler
                 Errors = [new PblIssueDto { Code = "INVALID_JSON", Message = $"Could not parse PBL document: {ex.Message}" }],
             });
         }
+        catch (YamlException ex)
+        {
+            return Task.FromResult(new ImportPreviewResult
+            {
+                IsValid = false,
+                Errors = [new PblIssueDto { Code = "INVALID_YAML", Message = $"Could not parse QBL document: {ex.Message}" }],
+            });
+        }
 
         var validation = _validator.Validate(document);
+        var isValid = validation.IsValid && conversionIssues.All(i => i.Severity != PblIssueSeverity.Error);
 
         var tables = (document.Tables ?? []).Select(t => new ImportPreviewTableItem
         {
@@ -46,13 +58,42 @@ public class ImportPreviewQueryHandler
             Reports = (t.Reports ?? []).Select(r => r.Name).ToList(),
         }).ToList();
 
+        var relationships = (document.Relationships ?? []).Select(r => new ImportPreviewRelationshipItem
+        {
+            LogicalRef = r.LogicalRef,
+            ParentTableRef = r.ParentTableRef,
+            ChildTableRef = r.ChildTableRef,
+            ReferenceFieldName = r.ReferenceFieldName,
+            LookupCount = r.Lookups.Count,
+            SummaryCount = r.Summaries.Count,
+        }).ToList();
+
+        var forms = (document.Forms ?? []).Select(f => new ImportPreviewFormItem
+        {
+            LogicalRef = f.LogicalRef,
+            Name = f.Name,
+            TableRef = f.TableRef,
+            SectionCount = f.Sections.Count,
+            RuleCount = f.Rules.Count,
+        }).ToList();
+
+        var roles = (document.Roles ?? []).Select(r => new ImportPreviewRoleItem
+        {
+            LogicalRef = r.LogicalRef,
+            Name = r.Name,
+            TablePermissionCount = r.TablePermissions.Count,
+        }).ToList();
+
         return Task.FromResult(new ImportPreviewResult
         {
-            IsValid = validation.IsValid,
+            IsValid = isValid,
             AppName = document.App?.Name ?? string.Empty,
             Tables = tables,
-            Errors = validation.Errors.Select(ToDto).ToList(),
-            Warnings = validation.Warnings.Select(ToDto).ToList(),
+            Relationships = relationships,
+            Forms = forms,
+            Roles = roles,
+            Errors = validation.Errors.Concat(conversionIssues.Where(i => i.Severity == PblIssueSeverity.Error)).Select(ToDto).ToList(),
+            Warnings = validation.Warnings.Concat(conversionIssues.Where(i => i.Severity == PblIssueSeverity.Warning)).Select(ToDto).ToList(),
         });
     }
 

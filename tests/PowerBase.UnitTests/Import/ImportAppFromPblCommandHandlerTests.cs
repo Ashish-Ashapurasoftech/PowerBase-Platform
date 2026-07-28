@@ -2,12 +2,21 @@ using System.Text.Json;
 using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Apps.Commands.CreateApp;
+using PowerBase.Application.Apps.Commands.CreateAppRole;
+using PowerBase.Application.Apps.Commands.UpdateTablePermissions;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Commands.BulkCreateFields;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Application.Formulas;
+using PowerBase.Application.Forms.Commands.CreateForm;
+using PowerBase.Application.Forms.Commands.CreateFormRule;
+using PowerBase.Application.Forms.Commands.SaveFormLayout;
+using PowerBase.Application.Forms.Commands.SaveFormRule;
+using PowerBase.Application.Forms.Queries.GetFormLayout;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.FormulaTranslation;
 using PowerBase.Application.Import.Pbl;
+using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Domain.Entities;
@@ -39,6 +48,23 @@ public class ImportAppFromPblCommandHandlerTests
     // --- CreateReportCommandHandler's own dependency not shared with the above ---
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
 
+    // --- CreateRelationshipCommandHandler's own dependency not shared with the above ---
+    // (no existing test in this file exercises a PblDocument with Relationships, so this stays
+    // a bare substitute — relationship-orchestration correctness is covered by integration
+    // tests instead, per the "don't grow the fake-repo unit harness indefinitely" note.)
+    private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
+
+    // --- Form Rules handlers' own dependencies not shared with the above ---
+    // (no existing test in this file exercises a PblDocument with form Rules either, same
+    // reasoning as relationships above.)
+    private readonly IFormRuleRepository _formRuleRepo = Substitute.For<IFormRuleRepository>();
+    private readonly IFormulaExpressionValidator _formulaExpressionValidator = Substitute.For<IFormulaExpressionValidator>();
+
+    // --- Roles handlers' own dependency not shared with the above ---
+    // (no existing test in this file exercises a PblDocument with Roles either, same reasoning
+    // as relationships/form rules above.)
+    private readonly IAppRolePermissionRepository _appRolePermissionRepo = Substitute.For<IAppRolePermissionRepository>();
+
     private readonly PblValidator _validator = new();
 
     // Fake in-memory persistence so pass 2 (formula fields + reports) sees what pass 1 actually
@@ -63,9 +89,23 @@ public class ImportAppFromPblCommandHandlerTests
         var createReportHandler = new CreateReportCommandHandler(
             _tableRepo, _fieldRepo, _reportRepo, _appUserRepo, _appRoleRepo, _queryContext, _auditRepo);
 
+        var createRelationshipHandler = new CreateRelationshipCommandHandler(
+            _tableRepo, _fieldRepo, _fieldTypeRepo, _relRepo, _schemaEngine, _formRepo, _queryContext, _auditRepo, _appRepo);
+
+        var createFormHandler = new CreateFormCommandHandler(_tableRepo, _formRepo, _queryContext, _auditRepo);
+        var saveFormLayoutHandler = new SaveFormLayoutCommandHandler(_formRepo, _fieldRepo, _queryContext, _auditRepo);
+        var getFormLayoutHandler = new GetFormLayoutQueryHandler(_formRepo);
+        var createFormRuleHandler = new CreateFormRuleCommandHandler(_formRepo, _formRuleRepo, _queryContext, _auditRepo);
+        var saveFormRuleHandler = new SaveFormRuleCommandHandler(_formRuleRepo, _queryContext, _auditRepo, _formRepo, _fieldRepo, _formulaExpressionValidator);
+
+        var createAppRoleHandler = new CreateAppRoleCommandHandler(_appRepo, _appRoleRepo, _queryContext, _auditRepo, _appRolePermissionRepo);
+        var updateTablePermissionsHandler = new UpdateTablePermissionsCommandHandler(_appRoleRepo, _appRolePermissionRepo, _tableRepo, _auditRepo);
+
         return new ImportAppFromPblCommandHandler(
             _validator, createAppHandler, _appRepo, _tableRepo, _fieldRepo, bulkCreateHandler,
-            formulaTranslator, createReportHandler);
+            formulaTranslator, createReportHandler, createRelationshipHandler, createFormHandler, saveFormLayoutHandler,
+            getFormLayoutHandler, createFormRuleHandler, saveFormRuleHandler,
+            createAppRoleHandler, updateTablePermissionsHandler);
     }
 
     public ImportAppFromPblCommandHandlerTests()

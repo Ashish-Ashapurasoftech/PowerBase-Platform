@@ -14,6 +14,9 @@ public sealed class PblDocument
     public string Version { get; set; } = "1.0";
     public PblApp App { get; set; } = new();
     public List<PblTable> Tables { get; set; } = [];
+    public List<PblRelationship> Relationships { get; set; } = [];
+    public List<PblForm> Forms { get; set; } = [];
+    public List<PblRole> Roles { get; set; } = [];
 }
 
 public sealed class PblApp
@@ -83,6 +86,9 @@ public sealed class PblReport
     /// <summary>Logical ref, e.g. "$Report_Clients_ByBalance".</summary>
     public string LogicalRef { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+
+    /// <summary>One of CreateReportCommandHandler's AllowedReportTypes: Table, Summary, GridEdit.</summary>
+    public string ReportType { get; set; } = "Table";
 
     /// <summary>Field Names (matching a <see cref="PblField.Name"/> in the same table) to
     /// show as columns, in order.</summary>

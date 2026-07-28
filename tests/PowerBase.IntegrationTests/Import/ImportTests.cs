@@ -158,13 +158,125 @@ public class ImportTests : IntegrationTestBase
         reports.Should().Contain(r => r.Name == "By Total");
     }
 
+    // Extracted from a real 55,844-line QBL v0.12 export (structure confirmed, not invented):
+    // Reference.Relationship/Lookup.Relationship point at the Child relationship node's own
+    // key; the Child node's Parent ref gives the parent table; Summary.ReferenceField points at
+    // the Reference field's own ref (not the relationship ref).
+    private const string QblWithRelationship = """
+    Version: '0.12'
+    Resources:
+      $App_Test:
+        Type: QB::Application
+        Properties:
+          Name: Departments App
+        Tables:
+          $Table_Departments:
+            Type: QB::Table
+            Properties:
+              Name: Departments
+            Fields:
+              $Field_Dept_Name:
+                Type: QB::Field::Text
+                Properties:
+                  Label: Department Name
+              $Field_Employee_Count:
+                Type: QB::Field::Summary
+                Properties:
+                  Label: Employee Count
+                  Summary:
+                    ReferenceField: !Ref
+                      Table: $Table_Employees
+                      Field: $Field_Related_Department
+                    Function: Count
+          $Table_Employees:
+            Type: QB::Table
+            Properties:
+              Name: Employees
+            Fields:
+              $Field_Employee_Name:
+                Type: QB::Field::Text
+                Properties:
+                  Label: Employee Name
+              $Field_Related_Department:
+                Type: QB::Field::Reference
+                Properties:
+                  Label: Related Department
+                  Reference:
+                    Relationship: !Ref
+                      Relationship: $Relationship_to_Departments
+              $Field_Dept_Name_Lookup:
+                Type: QB::Field::Lookup
+                Properties:
+                  Label: Department Name
+                  Lookup:
+                    Relationship: !Ref
+                      Relationship: $Relationship_to_Departments
+                    TargetField: !Ref
+                      Table: $Table_Departments
+                      Field: $Field_Dept_Name
+            Relationships:
+              $Relationship_to_Departments:
+                Type: QB::Relationship::Child
+                Properties:
+                  Parent: !Ref
+                    Table: $Table_Departments
+                    Relationship: $Relationship_to_Departments_1
+    """;
+
+    [Fact]
+    public async Task Preview_QblWithRelationship_DetectsRelationshipAndFlagsNothing()
+    {
+        var (token, _) = await SignupAsync();
+
+        var response = await PostFileAsync("/apps/import/preview", QblWithRelationship, token: token, fileName: "sample.qbl");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var preview = await ReadData<PreviewDto>(response);
+        preview.IsValid.Should().BeTrue();
+        preview.AppName.Should().Be("Departments App");
+        preview.Relationships.Should().ContainSingle();
+        preview.Relationships[0].ReferenceFieldName.Should().Be("Related Department");
+        preview.Relationships[0].LookupCount.Should().Be(1);
+        preview.Relationships[0].SummaryCount.Should().Be(1);
+        preview.Errors.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Import_QblWithRelationship_CreatesReferenceLookupAndSummaryFields()
+    {
+        var (token, _) = await SignupAsync();
+
+        var response = await PostFileAsync("/apps/import", QblWithRelationship, token: token, fileName: "sample.qbl");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+        var report = await ReadData<ImportReportDto>(response);
+        report.RelationshipsCreated.Should().Be(1);
+        report.Skipped.Should().BeEmpty();
+
+        var relationshipsResponse = await GetAsync($"/apps/{report.AppPublicId}/relationships", token);
+        relationshipsResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var tablesResponse = await GetAsync($"/apps/{report.AppPublicId}/tables", token);
+        var tables = await ReadListData<MinimalTableDto>(tablesResponse);
+        var employees = tables.Should().ContainSingle(t => t.Name == "Employees").Subject;
+        var departments = tables.Should().ContainSingle(t => t.Name == "Departments").Subject;
+
+        var employeeFields = await ReadListData<MinimalFieldDto>(await GetAsync($"/tables/{employees.PublicId}/fields", token));
+        employeeFields.Should().Contain(f => f.Name == "Related Department" && f.TypeCode == "Reference");
+        employeeFields.Should().Contain(f => f.Name == "Department Name" && f.TypeCode == "Lookup");
+
+        var departmentFields = await ReadListData<MinimalFieldDto>(await GetAsync($"/tables/{departments.PublicId}/fields", token));
+        departmentFields.Should().Contain(f => f.Name == "Employee Count" && f.TypeCode == "Summary");
+    }
+
     private record PblIssueDto(string Code, string Message, string? ElementRef);
     private record PreviewFieldDto(string LogicalRef, string Name, string TypeCode, bool IsSupported);
     private record PreviewTableDto(string LogicalRef, string Name, List<PreviewFieldDto> Fields, List<string> Reports);
-    private record PreviewDto(bool IsValid, string AppName, List<PreviewTableDto> Tables, List<PblIssueDto> Errors, List<PblIssueDto> Warnings);
+    private record PreviewRelationshipDto(string LogicalRef, string ParentTableRef, string ChildTableRef, string ReferenceFieldName, int LookupCount, int SummaryCount);
+    private record PreviewDto(bool IsValid, string AppName, List<PreviewTableDto> Tables, List<PreviewRelationshipDto> Relationships, List<PblIssueDto> Errors, List<PblIssueDto> Warnings);
     private record SkippedDto(string LogicalRef, string Name, string Reason);
     private record FormulaTranslationDto(string LogicalRef, string Name, string Status, List<string> Diagnostics);
-    private record ImportReportDto(Guid AppPublicId, string AppName, int TablesCreated, int FieldsCreated, int ReportsCreated,
+    private record ImportReportDto(Guid AppPublicId, string AppName, int TablesCreated, int FieldsCreated, int ReportsCreated, int RelationshipsCreated,
         List<SkippedDto> Skipped, List<FormulaTranslationDto> FormulaTranslations);
     private record MinimalTableDto(Guid PublicId, string Name);
     private record MinimalFieldDto(string Name, string TypeCode);
