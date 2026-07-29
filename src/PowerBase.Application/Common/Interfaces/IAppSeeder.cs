@@ -17,5 +17,13 @@ public interface IAppSeeder
     /// set, but no Id) and seeds it with the standard defaults. Returns the same instance with
     /// Id, PublicId, and PhysicalTableName populated.
     /// </summary>
-    Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, CancellationToken ct = default);
+    /// <param name="seedDefaultViews">
+    /// When false, the default "List All"/"List Changes" reports and "Main Form" are not created.
+    /// Import passes false for a table whose source file defines its own forms/reports: seeding
+    /// them too would leave the table with two "Main Form"s and two "List All"s, and — because
+    /// the seeded copies are the ones marked IsDefault — the empty seeded form would be what
+    /// users actually open. System fields and role permissions are always seeded regardless,
+    /// since those are structural rather than something an import supplies.
+    /// </param>
+    Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, bool seedDefaultViews = true, CancellationToken ct = default);
 }

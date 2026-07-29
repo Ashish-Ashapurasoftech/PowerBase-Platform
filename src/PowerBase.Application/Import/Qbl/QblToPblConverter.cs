@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using PowerBase.Application.Import.Pbl;
 
 namespace PowerBase.Application.Import.Qbl;
@@ -98,6 +99,10 @@ public static class QblToPblConverter
             fieldNameByRefPerTable[tableRef] = fieldNameByRef;
             relFieldsPerTable[tableRef] = relFields;
         }
+
+        // Runs once Pass A has seen every table, since a formula on the first table can name the
+        // last one.
+        RewriteQuickbaseTableIdRefs(tables, issues);
 
         // Pass B.
         var relationships = new List<PblRelationship>();
@@ -220,6 +225,95 @@ public static class QblToPblConverter
         var document = new PblDocument { App = pblApp, Tables = tables, Relationships = relationships, Forms = forms, Roles = roles };
         return new QblConversionResult { Document = document, Issues = issues };
     }
+
+    /// <summary>Quickbase writes another table's id as the pseudo-field <c>[_DBID_TABLE_NAME]</c>
+    /// (the table's name upper-cased, non-alphanumerics collapsed to underscores). PowerBase
+    /// spells the same thing <c>Dbid("Table Name")</c> — a real function that resolves a table id
+    /// by name at evaluation time — so this is a direct rename rather than an approximation.
+    /// These appear throughout record-URL formulas, which is what makes them worth translating.
+    ///
+    /// A ref naming a table that isn't in this import (real exports carry plenty, left over from
+    /// other apps or deleted tables) is left untouched and flagged: there's nothing to point it at,
+    /// and inventing a target would be worse than saying so.</summary>
+    private static void RewriteQuickbaseTableIdRefs(List<PblTable> tables, List<PblIssue> issues)
+    {
+        var tableNameBySlug = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var t in tables)
+            tableNameBySlug[QuickbaseTableSlug(t.Name)] = t.Name;
+
+        foreach (var table in tables)
+        {
+            foreach (var field in table.Fields)
+            {
+                if (!string.Equals(field.TypeCode, "Formula", StringComparison.OrdinalIgnoreCase) ||
+                    string.IsNullOrWhiteSpace(field.FormulaExpression))
+                    continue;
+
+                var unresolved = new List<string>();
+                field.FormulaExpression = ReplaceOutsideStringLiterals(field.FormulaExpression, QuickbaseTableIdRef, m =>
+                {
+                    var slug = m.Groups["slug"].Value;
+                    if (tableNameBySlug.TryGetValue(slug, out var tableName))
+                        return $"Dbid(\"{tableName}\")";
+
+                    unresolved.Add(slug);
+                    return m.Value;
+                });
+
+                foreach (var slug in unresolved.Distinct())
+                {
+                    issues.Add(Warning(
+                        "QBL_FORMULA_UNKNOWN_TABLE_REF",
+                        $"Formula field '{field.Name}' references Quickbase table '{slug}', which is not part of this import; left as-is for manual review.",
+                        field.LogicalRef));
+                }
+            }
+        }
+    }
+
+    private static readonly Regex QuickbaseTableIdRef = new(@"\[_DBID_(?<slug>[A-Za-z0-9_]+)\]", RegexOptions.Compiled);
+
+    /// <summary>Applies <paramref name="replace"/> only to the parts of <paramref name="source"/>
+    /// outside double-quoted strings. Real formulas embed <c>[_DBID_X]</c> inside URL string
+    /// literals as part of Quickbase's own <c>&lt;!~db~…~db~&gt;</c> markup, where it is text rather
+    /// than a reference — substituting there would splice quotes into the middle of a string and
+    /// corrupt the formula rather than translate it.</summary>
+    private static string ReplaceOutsideStringLiterals(string source, Regex pattern, MatchEvaluator replace)
+    {
+        var result = new System.Text.StringBuilder(source.Length);
+        var segmentStart = 0;
+        var i = 0;
+
+        while (i < source.Length)
+        {
+            if (source[i] != '"')
+            {
+                i++;
+                continue;
+            }
+
+            // Code since the last string ends here — rewrite it, then copy the string verbatim.
+            result.Append(pattern.Replace(source[segmentStart..i], replace));
+
+            var stringStart = i;
+            i++; // opening quote
+            while (i < source.Length)
+            {
+                if (source[i] == '\\' && i + 1 < source.Length) { i += 2; continue; } // escape
+                if (source[i] == '"') { i++; break; }
+                i++;
+            }
+
+            result.Append(source[stringStart..i]);
+            segmentStart = i;
+        }
+
+        result.Append(pattern.Replace(source[segmentStart..], replace));
+        return result.ToString();
+    }
+
+    private static string QuickbaseTableSlug(string tableName) =>
+        new(tableName.ToUpperInvariant().Select(c => char.IsLetterOrDigit(c) ? c : '_').ToArray());
 
     // ── Roles (Pass D) ───────────────────────────────────────────────────────
 
@@ -660,9 +754,13 @@ public static class QblToPblConverter
     }
 
     /// <summary>QBL's <c>Columns</c> property is either an explicit list of field <c>!Ref</c>s,
-    /// or the literal string <c>"Default"</c> meaning "show every field in the table's own
-    /// order" — Quickbase's real definition of a default report, not a guess, so replicating it
-    /// with the table's full field list is a faithful translation, not an approximation.</summary>
+    /// or the literal string <c>"Default"</c> meaning "show every field in the table's own order".
+    /// PowerBase expresses that same idea as a report with *no* columns listed — that's exactly
+    /// how its own seeded "List All" is defined, and the runtime expands an empty column list to
+    /// every reportable field. Leaving it empty is therefore both the more faithful mapping and a
+    /// sturdier one: enumerating every field instead would make the table's main view depend on
+    /// all of them importing successfully, so one formula that failed to translate would take
+    /// "List All" down with it.</summary>
     private static List<string> ResolveReportColumns(
         QblResourceNode reportNode,
         Dictionary<string, string> fieldNameByRef,
@@ -694,9 +792,7 @@ public static class QblToPblConverter
             return columns;
         }
 
-        if (raw is string s && string.Equals(s, "Default", StringComparison.OrdinalIgnoreCase))
-            columns.AddRange(fieldNameByRef.Values);
-
+        // "Default" → leave columns empty; see the summary above.
         return columns;
     }
 

@@ -58,22 +58,37 @@ public class FormulaTranslator
         var compiled = _engine.Compile(expression, schema, expectedType);
 
         if (compiled.HasErrors)
+        {
+            // Before giving up, see whether the only thing wrong is a place where Quickbase's
+            // dialect is looser than PowerBase's, and retry the rewritten form. The rewrite is
+            // what gets persisted, so the stored formula stays valid under the same rules the
+            // authoring UI applies.
+            var rewritten = QuickbaseDialectRewriter.TryRewrite(expression, compiled.Diagnostics);
+            if (rewritten is not null)
+            {
+                var recompiled = _engine.Compile(rewritten, schema, expectedType);
+                if (!recompiled.HasErrors)
+                    return Success(FormulaTranslationStatus.Adjusted, recompiled.ResultType.ToString(), rewritten);
+
+                // The rewrite didn't get there — report against the original so the diagnostics
+                // point at what the author actually wrote.
+            }
+
             return new FormulaTranslationResult
             {
                 Status = FormulaTranslationStatus.NeedsManualReview,
                 Diagnostics = compiled.Diagnostics.Select(d => d.Message).ToList(),
             };
+        }
 
-        var settings = new FormulaSettings
-        {
-            ResultType = compiled.ResultType.ToString(),
-            Expression = expression,
-        };
-
-        return new FormulaTranslationResult
-        {
-            Status = FormulaTranslationStatus.Clean,
-            SettingsJson = JsonSerializer.Serialize(settings, JsonOptions),
-        };
+        return Success(FormulaTranslationStatus.Clean, compiled.ResultType.ToString(), expression);
     }
+
+    private static FormulaTranslationResult Success(FormulaTranslationStatus status, string resultType, string expression) =>
+        new()
+        {
+            Status = status,
+            SettingsJson = JsonSerializer.Serialize(
+                new FormulaSettings { ResultType = resultType, Expression = expression }, JsonOptions),
+        };
 }

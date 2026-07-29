@@ -104,6 +104,25 @@ translation is mostly: re-point `[Field]` references to mapped PowerBase fields 
 matching, then validate through the existing `Binder`/`TypeChecker`. Quickbase functions with no
 PowerBase equivalent are flagged for manual review rather than translated.
 
+Where the two dialects differ, the gap is closed in one of two places — the engine when
+PowerBase was simply missing something, the importer when PowerBase's stricter behaviour is
+deliberate and shouldn't change for hand-authored formulas:
+
+| Quickbase form | Handled in | Notes |
+|---|---|---|
+| `var <type> <name> = …;` declarations, `$name` refs, `//` comments | Engine | Added as a language feature (`LetExpr`); `//` was already skipped by the lexer. Most non-trivial exported formulas are written this way. |
+| `If(cond, value)` — else branch omitted | Engine | Yields blank when false. The type checker already treated the missing branch as `Null`; only the arity check forbade it. |
+| `UserToName(user)` | Engine | Added alongside `UserToEmail`/`UserToID`. Returns empty unless the host supplied a name — as with `UserToEmail`, a user value read from a record is only an identifier. |
+| `[_DBID_TABLE_NAME]` | Converter | Rewritten to `Dbid("Table Name")`, PowerBase's existing "another table's id" function. Applied **outside string literals only** — real formulas embed the ref inside URL strings as part of Quickbase's `<!~db~…~db~>` markup, where it is text. A ref naming a table absent from the import is left alone and flagged. |
+| `&` with a non-text operand | Translator | Quickbase coerces; PowerBase deliberately does not (there are engine tests asserting `[Text] & 1` is an error). The importer wraps the flagged operands in `ToText()` and **persists the rewrite**, so the stored formula stays valid under the same rules the authoring UI applies. Reported as `Adjusted`. |
+| Text parameter given a non-text argument (`URLEncode([Record ID#])`) | Translator | Same `ToText()` wrap, applied only to the argument position the checker named. |
+
+Still unsupported, flagged for manual review: Quickbase's numeric field-id syntax (`[1226]`),
+`NotLeft`/`NotRight` with a text delimiter (PowerBase's take a count), and formulas whose URLs
+target Quickbase's own HTTP API (`?a=API_GenAddRecordForm`, `api.quickbase.com/v1/…`). The last
+group now compiles — `URLRoot()`/`Dbid()`/`Rurl()` all exist — but the query string it builds is
+Quickbase-shaped, so the link needs rewriting by hand even though the field imports.
+
 ## Import modes
 
 | Mode | Availability |

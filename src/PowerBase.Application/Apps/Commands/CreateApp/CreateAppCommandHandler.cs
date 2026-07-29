@@ -201,7 +201,7 @@ public class CreateAppCommandHandler
             CreatedBy = userId,
         };
 
-        table = await _appSeeder.CreateTableWithDefaultsAsync(table, userId, ct);
+        table = await _appSeeder.CreateTableWithDefaultsAsync(table, userId, spec.SeedDefaultViews, ct);
 
         // Process Custom Fields
         if (spec.Fields != null && spec.Fields.Any())

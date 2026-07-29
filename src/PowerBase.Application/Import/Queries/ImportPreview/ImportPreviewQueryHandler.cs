@@ -54,6 +54,7 @@ public class ImportPreviewQueryHandler
                 Name = f.Name,
                 TypeCode = f.TypeCode,
                 IsSupported = PblValidator.IsCreatableFieldType(f.TypeCode),
+                IsPendingValidation = string.Equals(f.TypeCode, PblValidator.FormulaTypeCode, StringComparison.OrdinalIgnoreCase),
             }).ToList(),
             Reports = (t.Reports ?? []).Select(r => r.Name).ToList(),
         }).ToList();

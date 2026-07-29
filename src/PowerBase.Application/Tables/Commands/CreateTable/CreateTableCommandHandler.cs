@@ -66,7 +66,7 @@ public class CreateTableCommandHandler
             CreatedBy = _queryContext.UserId,
         };
 
-        table = await _appSeeder.CreateTableWithDefaultsAsync(table, _queryContext.UserId, ct);
+        table = await _appSeeder.CreateTableWithDefaultsAsync(table, _queryContext.UserId, ct: ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.AppTable, table.PublicId.ToString(), $"Table added: {table.Name}", appId: app.Id, ct: ct);

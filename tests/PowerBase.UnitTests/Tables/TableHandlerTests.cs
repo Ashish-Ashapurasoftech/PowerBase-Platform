@@ -34,7 +34,7 @@ public class TableHandlerTests
     {
         _queryContext.TenantId.Returns(1L);
         _queryContext.UserId.Returns(1L);
-        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 var t = ci.Arg<AppTable>();
@@ -59,7 +59,7 @@ public class TableHandlerTests
 
         result.Name.Should().Be("Contacts");
         result.PhysicalTableName.Should().Be(PhysicalNaming.TableName(20L));
-        await _appSeeder.Received(1).CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<CancellationToken>());
+        await _appSeeder.Received(1).CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

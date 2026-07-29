@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Apps.Commands.CreateApp;
 using PowerBase.Application.Apps.Commands.CreateAppRole;
+using PowerBase.Application.Apps.Commands.DeleteApp;
 using PowerBase.Application.Apps.Commands.UpdateTablePermissions;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Commands.BulkCreateFields;
@@ -55,9 +56,13 @@ public class ImportAppFromPblCommandHandler
 {
     private readonly PblValidator _validator;
     private readonly CreateAppCommandHandler _createAppHandler;
+    private readonly DeleteAppCommandHandler _deleteAppHandler;
     private readonly IAppRepository _appRepo;
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
+    private readonly IFormRepository _formRepo;
+    private readonly IReportRepository _reportRepo;
+    private readonly IAppRoleRepository _appRoleRepo;
     private readonly BulkCreateFieldsCommandHandler _bulkCreateHandler;
     private readonly FormulaTranslator _formulaTranslator;
     private readonly CreateReportCommandHandler _createReportHandler;
@@ -73,9 +78,13 @@ public class ImportAppFromPblCommandHandler
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
         CreateAppCommandHandler createAppHandler,
+        DeleteAppCommandHandler deleteAppHandler,
         IAppRepository appRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
+        IFormRepository formRepo,
+        IReportRepository reportRepo,
+        IAppRoleRepository appRoleRepo,
         BulkCreateFieldsCommandHandler bulkCreateHandler,
         FormulaTranslator formulaTranslator,
         CreateReportCommandHandler createReportHandler,
@@ -90,9 +99,13 @@ public class ImportAppFromPblCommandHandler
     {
         _validator = validator;
         _createAppHandler = createAppHandler;
+        _deleteAppHandler = deleteAppHandler;
         _appRepo = appRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
+        _formRepo = formRepo;
+        _reportRepo = reportRepo;
+        _appRoleRepo = appRoleRepo;
         _bulkCreateHandler = bulkCreateHandler;
         _formulaTranslator = formulaTranslator;
         _createReportHandler = createReportHandler;
@@ -177,6 +190,14 @@ public class ImportAppFromPblCommandHandler
                 fieldSpecs.Add(new AppFieldSpec(field.Name, field.TypeCode, field.Settings));
             }
 
+            // Only let the seeder add its stock "Main Form"/"List All"/"List Changes" when this
+            // document doesn't bring its own — real exports overwhelmingly do (every table in a
+            // real Quickbase export carries both a "Main Form" and its own "List All"), and
+            // seeding alongside them leaves two of each with the *empty* seeded copy marked
+            // default, so that's the one users would open.
+            var suppliesOwnViews = (table.Reports ?? []).Count > 0
+                || (document.Forms ?? []).Any(f => f.TableRef == table.LogicalRef);
+
             tableSpecs.Add(new TableSpec(
                 table.Name,
                 table.SingularLabel,
@@ -184,7 +205,8 @@ public class ImportAppFromPblCommandHandler
                 table.Icon,
                 table.Description,
                 Config: null,
-                Fields: fieldSpecs));
+                Fields: fieldSpecs,
+                SeedDefaultViews: !suppliesOwnViews));
         }
 
         var createCommand = new CreateAppCommand(
@@ -210,93 +232,151 @@ public class ImportAppFromPblCommandHandler
         var hasFormulasReportsRelationshipsFormsOrRoles = relationships.Count > 0 || forms.Count > 0 || roles.Count > 0 || (document.Tables ?? []).Any(t =>
             (t.Fields ?? []).Any(IsFormulaField) || (t.Reports ?? []).Count > 0);
 
-        if (hasFormulasReportsRelationshipsFormsOrRoles)
+        // Everything past this point builds onto the app just created. A single transaction around
+        // it isn't viable — these handlers each open their own connection, and holding one open
+        // across ~46 CREATE TABLEs and hundreds of ADD COLUMNs would keep schema locks on a shared
+        // tenant database for the whole run. Because CreateNewApp only ever builds a brand-new app,
+        // deleting it on failure gives the same all-or-nothing result the caller cares about
+        // without blocking every other user of that tenant.
+        try
         {
-            var appId = await _appRepo.GetIdByPublicIdAsync(createResult.PublicId, ct);
-            var createdTables = await _tableRepo.ListByAppAsync(appId, ct);
-            var tableByName = createdTables.ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
-            var tableNameByRef = (document.Tables ?? []).ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
-
-            if (roles.Count > 0)
-                rolesCreated = await CreateRolesAsync(roles, tableNameByRef, tableByName, createResult.PublicId, skipped, ct);
-
-            if (relationships.Count > 0)
-                relationshipsCreated = await CreateRelationshipsAsync(relationships, tableNameByRef, tableByName, createResult.PublicId, skipped, ct);
-
-            // Formula fields must exist before forms and reports are built: a form element or
-            // report column referencing a formula field can only resolve once that field has a
-            // real Fid. Running this after CreateFormsAsync silently dropped every such element
-            // (confirmed against a real export — 20 elements referencing successfully-created
-            // formula fields went missing), so this pass stays ahead of both.
-            fieldsCreated += await CreateFormulaFieldsAsync(document, tableByName, formulaTranslations, skipped, ct);
-
-            if (forms.Count > 0)
+            if (hasFormulasReportsRelationshipsFormsOrRoles)
             {
-                var createdFormLayouts = await CreateFormsAsync(forms, tableNameByRef, tableByName, skipped, ct);
-                formsCreated = createdFormLayouts.Count;
+                var appId = await _appRepo.GetIdByPublicIdAsync(createResult.PublicId, ct);
+                var createdTables = await _tableRepo.ListByAppAsync(appId, ct);
+                var tableByName = createdTables.ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+                var tableNameByRef = (document.Tables ?? []).ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
 
-                if (forms.Any(f => f.Rules.Count > 0))
-                    formRulesCreated = await CreateFormRulesAsync(forms, createdFormLayouts, tableNameByRef, tableByName, skipped, ct);
-            }
+                if (roles.Count > 0)
+                    rolesCreated = await CreateRolesAsync(roles, tableNameByRef, tableByName, createResult.PublicId, skipped, ct);
 
-            foreach (var table in document.Tables ?? [])
-            {
-                if (!tableByName.TryGetValue(table.Name, out var createdTable))
-                    continue; // defensive: every PBL table was just created by CreateAppCommandHandler
+                if (relationships.Count > 0)
+                    relationshipsCreated = await CreateRelationshipsAsync(relationships, tableNameByRef, tableByName, createResult.PublicId, skipped, ct);
 
-                var pblReports = table.Reports ?? [];
-                if (pblReports.Count == 0)
-                    continue;
+                // Formula fields must exist before forms and reports are built: a form element or
+                // report column referencing a formula field can only resolve once that field has a
+                // real Fid. Running this after CreateFormsAsync silently dropped every such element
+                // (confirmed against a real export — 20 elements referencing successfully-created
+                // formula fields went missing), so this pass stays ahead of both.
+                fieldsCreated += await CreateFormulaFieldsAsync(document, tableByName, formulaTranslations, skipped, ct);
 
-                var allFields = await _fieldRepo.ListByTableAsync(createdTable.Id, ct);
-                var fidByName = allFields
-                    .Where(f => f.Fid.HasValue)
-                    .ToDictionary(f => f.Name, f => (long)f.Fid!.Value, StringComparer.OrdinalIgnoreCase);
-
-                foreach (var report in pblReports)
+                if (forms.Count > 0)
                 {
-                    var unresolved = report.Columns.Where(c => !fidByName.ContainsKey(c))
-                        .Concat(report.SortFields.Select(s => s.FieldName).Where(n => !fidByName.ContainsKey(n)))
-                        .ToList();
+                    var createdFormLayouts = await CreateFormsAsync(forms, tableNameByRef, tableByName, skipped, ct);
+                    formsCreated = createdFormLayouts.Count;
 
-                    if (unresolved.Count > 0)
-                    {
-                        skipped.Add(new ImportSkippedItem
-                        {
-                            LogicalRef = report.LogicalRef,
-                            Name = report.Name,
-                            Reason = $"Report references field(s) that were not created: {string.Join(", ", unresolved.Distinct())}.",
-                        });
+                    if (forms.Any(f => f.Rules.Count > 0))
+                        formRulesCreated = await CreateFormRulesAsync(forms, createdFormLayouts, tableNameByRef, tableByName, skipped, ct);
+                }
+
+                foreach (var table in document.Tables ?? [])
+                {
+                    if (!tableByName.TryGetValue(table.Name, out var createdTable))
+                        continue; // defensive: every PBL table was just created by CreateAppCommandHandler
+
+                    var pblReports = table.Reports ?? [];
+                    if (pblReports.Count == 0)
                         continue;
+
+                    var allFields = await _fieldRepo.ListByTableAsync(createdTable.Id, ct);
+                    var fidByName = allFields
+                        .Where(f => f.Fid.HasValue)
+                        .ToDictionary(f => f.Name, f => (long)f.Fid!.Value, StringComparer.OrdinalIgnoreCase);
+
+                    var tableHasDefaultReport = false;
+
+                    foreach (var report in pblReports)
+                    {
+                        // A column pointing at a field that didn't make it (a formula that failed
+                        // to translate, an unsupported type) costs that column, not the whole
+                        // report. Dropping the report outright would be badly disproportionate:
+                        // "List All" means "every field in the table", so a single failed formula
+                        // anywhere would take the table's main view down with it — and with the
+                        // seeded default views suppressed for imported tables, that can leave a
+                        // table with no reports at all.
+                        var unresolved = report.Columns.Where(c => !fidByName.ContainsKey(c))
+                            .Concat(report.SortFields.Select(s => s.FieldName).Where(n => !fidByName.ContainsKey(n)))
+                            .Distinct()
+                            .ToList();
+
+                        var columns = report.Columns.Where(fidByName.ContainsKey).Select(c => fidByName[c]).ToList();
+                        var sortFields = report.SortFields
+                            .Where(s => fidByName.ContainsKey(s.FieldName))
+                            .Select(s => new SortSpec { FieldId = fidByName[s.FieldName], Desc = s.Desc })
+                            .ToList();
+
+                        // Nothing left to show — now the report really is meaningless.
+                        if (columns.Count == 0 && report.Columns.Count > 0)
+                        {
+                            skipped.Add(new ImportSkippedItem
+                            {
+                                LogicalRef = report.LogicalRef,
+                                Name = report.Name,
+                                Reason = $"Report references no field that was created: {string.Join(", ", unresolved)}.",
+                            });
+                            continue;
+                        }
+
+                        if (unresolved.Count > 0)
+                        {
+                            skipped.Add(new ImportSkippedItem
+                            {
+                                LogicalRef = report.LogicalRef,
+                                Name = report.Name,
+                                Reason = $"Report imported without column(s) whose field was not created: {string.Join(", ", unresolved)}.",
+                            });
+                        }
+
+                        var createdReport = await _createReportHandler.HandleAsync(new CreateReportCommand(
+                            createdTable.PublicId,
+                            report.Name,
+                            Description: null,
+                            Visibility: "Shared",
+                            ReportType: report.ReportType,
+                            Columns: columns,
+                            SortFields: sortFields,
+                            FilterTree: null,
+                            GroupByFieldId: null,
+                            GroupByMode: "EqualValues",
+                            HideTotals: false,
+                            GroupDefaultCollapsed: false,
+                            GroupByDescending: false,
+                            Aggregations: [],
+                            DynamicFilterType: "Default",
+                            CustomDynamicFilterFields: [],
+                            CustomDynamicFilterItems: null,
+                            AllowQuickSearch: true,
+                            VisibleToRoleIds: null), ct);
+
+                        // Same reasoning as forms: reports are created IsDefault=false and the seeded
+                        // default was suppressed, so the first one that imports for a table becomes it.
+                        if (!tableHasDefaultReport)
+                        {
+                            await _reportRepo.SetDefaultAsync(createdTable.PublicId, createdReport.Id, ct);
+                            tableHasDefaultReport = true;
+                        }
+
+                        reportsCreated++;
                     }
-
-                    var columns = report.Columns.Select(c => fidByName[c]).ToList();
-                    var sortFields = report.SortFields.Select(s => new SortSpec { FieldId = fidByName[s.FieldName], Desc = s.Desc }).ToList();
-
-                    await _createReportHandler.HandleAsync(new CreateReportCommand(
-                        createdTable.PublicId,
-                        report.Name,
-                        Description: null,
-                        Visibility: "Shared",
-                        ReportType: report.ReportType,
-                        Columns: columns,
-                        SortFields: sortFields,
-                        FilterTree: null,
-                        GroupByFieldId: null,
-                        GroupByMode: "EqualValues",
-                        HideTotals: false,
-                        GroupDefaultCollapsed: false,
-                        GroupByDescending: false,
-                        Aggregations: [],
-                        DynamicFilterType: "Default",
-                        CustomDynamicFilterFields: [],
-                        CustomDynamicFilterItems: null,
-                        AllowQuickSearch: true,
-                        VisibleToRoleIds: null), ct);
-
-                    reportsCreated++;
                 }
             }
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                await _deleteAppHandler.HandleAsync(new DeleteAppCommand(createResult.PublicId), CancellationToken.None);
+            }
+            catch (Exception cleanupEx)
+            {
+                // Surface both: the caller needs to know the import failed *and* that a
+                // half-built app is still sitting there needing manual removal.
+                throw new AggregateException(
+                    $"Import failed and the partially-created app '{createResult.Name}' could not be removed — it must be deleted manually.",
+                    ex, cleanupEx);
+            }
+
+            throw;
         }
 
         return new ImportReport
@@ -471,6 +551,7 @@ public class ImportAppFromPblCommandHandler
         CancellationToken ct)
     {
         var result = new Dictionary<string, CreatedFormLayout>(StringComparer.Ordinal);
+        var defaultedTableRefs = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var form in forms)
         {
@@ -535,6 +616,12 @@ public class ImportAppFromPblCommandHandler
 
             var createdForm = await _createFormHandler.HandleAsync(new CreateFormCommand(table.PublicId, form.Name), ct);
             await _saveFormLayoutHandler.HandleAsync(new SaveFormLayoutCommand(createdForm.Id, sectionLayouts), ct);
+
+            // Forms are created IsDefault=false, and the seeder's default form was suppressed for
+            // any table supplying its own — so without this the table would have no default form
+            // at all. First imported form for a table wins, matching document order.
+            if (defaultedTableRefs.Add(form.TableRef))
+                await _formRepo.SetDefaultAsync(table.PublicId, createdForm.Id, ct);
 
             result[form.LogicalRef] = new CreatedFormLayout(createdForm.Id, sectionGuidByRef, blockGuidByRef, elementGuidByRef);
         }
@@ -668,9 +755,20 @@ public class ImportAppFromPblCommandHandler
     {
         var created = 0;
 
+        // Roles named Administrator/Participant/Viewer already exist — CreateAppCommandHandler
+        // seeds them for every new app — and real exports routinely carry roles by those same
+        // names. Adopting the existing role and writing the imported permissions onto it is the
+        // faithful outcome: skipping instead would silently leave PowerBase's default permissions
+        // in place under a name the source file defines differently, which is a permissions
+        // change nobody asked for and nothing surfaces.
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var existingRoles = await _appRoleRepo.ListDetailsByAppIdAsync(appId, ct);
+        var existingRoleIdByName = existingRoles.ToDictionary(r => r.Name, r => r.PublicId, StringComparer.OrdinalIgnoreCase);
+
         foreach (var role in roles)
         {
             Guid rolePublicId;
+            var adoptedExisting = false;
             try
             {
                 var createdRole = await _createAppRoleHandler.HandleAsync(new CreateAppRoleCommand(appPublicId, role.Name, role.IsDefault), ct);
@@ -678,11 +776,18 @@ public class ImportAppFromPblCommandHandler
             }
             catch (DuplicateException)
             {
-                skipped.Add(new ImportSkippedItem { LogicalRef = role.LogicalRef, Name = role.Name, Reason = $"A role named '{role.Name}' already exists (e.g. a default PowerBase role); table permissions for this role were not imported." });
-                continue;
+                if (!existingRoleIdByName.TryGetValue(role.Name, out rolePublicId))
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = role.LogicalRef, Name = role.Name, Reason = $"A role named '{role.Name}' already exists but could not be resolved; table permissions for this role were not imported." });
+                    continue;
+                }
+                adoptedExisting = true;
             }
 
-            created++;
+            if (adoptedExisting)
+                skipped.Add(new ImportSkippedItem { LogicalRef = role.LogicalRef, Name = role.Name, Reason = $"A role named '{role.Name}' already existed on the new app; its permissions were replaced with the imported ones rather than creating a second role." });
+            else
+                created++;
 
             if (role.TablePermissions.Count == 0)
                 continue;

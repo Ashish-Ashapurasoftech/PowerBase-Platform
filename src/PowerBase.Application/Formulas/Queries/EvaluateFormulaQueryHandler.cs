@@ -72,7 +72,7 @@ public sealed class EvaluateFormulaQueryHandler
         {
             UtcNow = DateTime.UtcNow,
             CurrentUser = _queryContext.UserId > 0
-                ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
+                ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail, _queryContext.UserName)
                 : null,
             AppId = appPublicId.ToString(),
             TableId = table.PublicId.ToString(),

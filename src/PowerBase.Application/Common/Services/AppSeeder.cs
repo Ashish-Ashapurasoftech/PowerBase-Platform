@@ -34,7 +34,7 @@ public class AppSeeder : IAppSeeder
         _permRepo = permRepo;
     }
 
-    public async Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, CancellationToken ct = default)
+    public async Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, bool seedDefaultViews = true, CancellationToken ct = default)
     {
         var (id, publicId) = await _tableRepo.CreateAsync(table, ct);
         table.Id = id;
@@ -80,6 +80,15 @@ public class AppSeeder : IAppSeeder
             };
             await _fieldRepo.CreateAsync(f, ct);
             seededFids[name] = fid;
+        }
+
+        // Default reports and Main Form are skipped when the caller is supplying its own (import) —
+        // see IAppSeeder.CreateTableWithDefaultsAsync. Everything above and below this block is
+        // structural and always seeded.
+        if (!seedDefaultViews)
+        {
+            await _permRepo.SeedDefaultsForTableAsync(table.Id, table.AppId, ct);
+            return table;
         }
 
         // Seed default reports — sort/filter use FIDs, not internal Ids

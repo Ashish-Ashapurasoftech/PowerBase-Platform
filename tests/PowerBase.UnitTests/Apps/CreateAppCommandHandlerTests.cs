@@ -28,7 +28,7 @@ public class CreateAppCommandHandlerTests
         _queryContext.UserId.Returns(1L);
         _userRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
             .Returns(new User { Id = 1, PublicId = Guid.NewGuid(), Name = "Test User", Email = "test@example.com" });
-        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 var t = ci.Arg<AppTable>();

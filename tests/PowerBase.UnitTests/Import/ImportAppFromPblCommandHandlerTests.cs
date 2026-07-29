@@ -2,6 +2,7 @@ using System.Text.Json;
 using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Apps.Commands.CreateApp;
+using PowerBase.Application.Apps.Commands.DeleteApp;
 using PowerBase.Application.Apps.Commands.CreateAppRole;
 using PowerBase.Application.Apps.Commands.UpdateTablePermissions;
 using PowerBase.Application.Common.Interfaces;
@@ -101,8 +102,11 @@ public class ImportAppFromPblCommandHandlerTests
         var createAppRoleHandler = new CreateAppRoleCommandHandler(_appRepo, _appRoleRepo, _queryContext, _auditRepo, _appRolePermissionRepo);
         var updateTablePermissionsHandler = new UpdateTablePermissionsCommandHandler(_appRoleRepo, _appRolePermissionRepo, _tableRepo, _auditRepo);
 
+        var deleteAppHandler = new DeleteAppCommandHandler(_appRepo, _auditRepo);
+
         return new ImportAppFromPblCommandHandler(
-            _validator, createAppHandler, _appRepo, _tableRepo, _fieldRepo, bulkCreateHandler,
+            _validator, createAppHandler, deleteAppHandler, _appRepo, _tableRepo, _fieldRepo,
+            _formRepo, _reportRepo, _appRoleRepo, bulkCreateHandler,
             formulaTranslator, createReportHandler, createRelationshipHandler, createFormHandler, saveFormLayoutHandler,
             getFormLayoutHandler, createFormRuleHandler, saveFormRuleHandler,
             createAppRoleHandler, updateTablePermissionsHandler);
@@ -125,7 +129,7 @@ public class ImportAppFromPblCommandHandlerTests
         _tableRepo.NameExistsInAppAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(false);
 
-        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 var t = ci.Arg<AppTable>();

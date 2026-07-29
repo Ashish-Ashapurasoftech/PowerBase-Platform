@@ -7,7 +7,11 @@ public record TableSpec(
     string? Icon = null,
     string? Description = null,
     string? Config = null,
-    IReadOnlyList<AppFieldSpec>? Fields = null
+    IReadOnlyList<AppFieldSpec>? Fields = null,
+    /// <summary>False when the caller will create this table's own forms/reports afterwards, so
+    /// the seeded "Main Form"/"List All"/"List Changes" would only be duplicates. Defaults to
+    /// true — normal app creation is unaffected. See <c>IAppSeeder</c>.</summary>
+    bool SeedDefaultViews = true
 );
 
 public record AppFieldSpec(

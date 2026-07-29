@@ -141,6 +141,93 @@ public class QblToPblConverterTests
     }
 
     [Fact]
+    public void Convert_FormulaWithQuickbaseTableIdRef_RewritesToDbidCall()
+    {
+        // [_DBID_FILE_LOGS] is Quickbase's way of naming another table's id; PowerBase spells the
+        // same thing Dbid("File Logs"). Common in record-URL formulas, so worth translating.
+        const string yaml = """
+        Version: '0.12'
+        Resources:
+          $App_Test:
+            Type: QB::Application
+            Properties:
+              Name: Test App
+            Tables:
+              $Table_Clients:
+                Type: QB::Table
+                Properties:
+                  Name: Clients
+                Fields:
+                  $Field_Link:
+                    Type: QB::Field::URL::Formula
+                    Properties:
+                      Label: Add Log
+                      Formula: URLRoot() & "db/" & [_DBID_FILE_LOGS]
+              $Table_File_Logs:
+                Type: QB::Table
+                Properties:
+                  Name: File Logs
+                Fields: {}
+        """;
+
+        var result = Convert(yaml);
+
+        var field = result.Document.Tables.Single(t => t.Name == "Clients").Fields.Single();
+        field.FormulaExpression.Should().Be("""URLRoot() & "db/" & Dbid("File Logs")""");
+        result.Issues.Should().NotContain(i => i.Code == "QBL_FORMULA_UNKNOWN_TABLE_REF");
+    }
+
+    [Fact]
+    public void Convert_FormulaWithTableIdRefInsideStringLiteral_LeavesItUntouched()
+    {
+        // Real formulas embed [_DBID_X] inside URL strings as part of Quickbase's own
+        // <!~db~...~db~> markup, where it's literal text. Substituting Dbid("X") there would
+        // splice quotes into the middle of the string and break the formula outright.
+        const string yaml = """
+        Version: '0.12'
+        Resources:
+          $App_Test:
+            Type: QB::Application
+            Properties:
+              Name: Test App
+            Tables:
+              $Table_Projects:
+                Type: QB::Table
+                Properties:
+                  Name: Projects
+                Fields:
+                  $Field_Link:
+                    Type: QB::Field::RichText::Formula
+                    Properties:
+                      Label: Report Link
+                      Formula: '"/table/<!~db~[_DBID_PROJECTS]~db~>/action/q" & [_DBID_PROJECTS]'
+        """;
+
+        var result = Convert(yaml);
+
+        var expr = result.Document.Tables[0].Fields.Single().FormulaExpression!;
+        expr.Should().Contain("<!~db~[_DBID_PROJECTS]~db~>");   // inside the string: untouched
+        expr.Should().EndWith("""& Dbid("Projects")""");        // outside the string: translated
+    }
+
+    [Fact]
+    public void Convert_FormulaWithTableIdRefOutsideImport_LeavesItAndFlags()
+    {
+        // Real exports reference tables from other apps or ones since deleted. There is nothing
+        // to point those at, so they stay put and get reported rather than invented.
+        var result = Convert(TableWithFields("""
+              $Field_Link:
+                Type: QB::Field::URL::Formula
+                Properties:
+                  Label: Add Thing
+                  Formula: URLRoot() & "db/" & [_DBID_SOME_OTHER_APP]
+            """));
+
+        result.Document.Tables[0].Fields.Single().FormulaExpression.Should().Contain("[_DBID_SOME_OTHER_APP]");
+        result.Issues.Should().ContainSingle(i => i.Code == "QBL_FORMULA_UNKNOWN_TABLE_REF");
+    }
+
+    [Fact]
     public void Convert_FormulaField_MapsResultTypeAndExpression()
     {
         var result = Convert(TableWithFields("""
@@ -345,7 +432,7 @@ public class QblToPblConverterTests
     }
 
     [Fact]
-    public void Convert_ReportWithDefaultColumns_ExpandsToAllTableFields()
+    public void Convert_ReportWithDefaultColumns_LeavesColumnsEmptyMeaningAllFields()
     {
         const string yaml = """
         Version: '0.12'
@@ -374,7 +461,11 @@ public class QblToPblConverterTests
 
         var result = Convert(yaml);
 
-        result.Document.Tables[0].Reports[0].Columns.Should().Contain("Company Name");
+        // QBL "Default" and a PowerBase report with no columns mean the same thing — every
+        // reportable field — and PowerBase's own seeded "List All" is defined exactly this way.
+        // Enumerating the fields instead would tie the table's main view to every one of them
+        // importing successfully.
+        result.Document.Tables[0].Reports[0].Columns.Should().BeEmpty();
     }
 
     [Theory]

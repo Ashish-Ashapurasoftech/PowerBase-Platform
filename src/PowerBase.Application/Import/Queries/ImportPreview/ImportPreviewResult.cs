@@ -16,6 +16,12 @@ public sealed class ImportPreviewFieldItem
     /// <summary>False when this field's type isn't creatable by this import phase; the field
     /// will be skipped (and reported) rather than imported.</summary>
     public bool IsSupported { get; init; }
+
+    /// <summary>True for formula fields, whose expression can only be compiled once the table's
+    /// fields actually exist and have Fids — which happens during import, not preview. Preview
+    /// can confirm the type is importable but not that the formula will translate, so these are
+    /// counted separately rather than promised outright.</summary>
+    public bool IsPendingValidation { get; init; }
 }
 
 public sealed class ImportPreviewTableItem

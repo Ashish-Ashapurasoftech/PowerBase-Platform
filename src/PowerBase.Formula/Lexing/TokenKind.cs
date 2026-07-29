@@ -23,6 +23,10 @@ public enum TokenKind
     LParen,
     RParen,
     Comma,
+    Semicolon,
+
+    /// <summary>A reference to a declared variable, e.g. <c>$total</c>. Text is the name without the '$'.</summary>
+    VariableRef,
 
     // Keywords
     And,
@@ -30,6 +34,7 @@ public enum TokenKind
     Not,
     True,
     False,
+    Var,
 
     EndOfFile,
 }
