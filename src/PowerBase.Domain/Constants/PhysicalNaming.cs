@@ -15,8 +15,9 @@ public static class PhysicalNaming
     /// Field types computed at read time — they have no physical storage column.
     /// Formula values come from the formula engine; Lookup/Summary values come from the
     /// relationship projector (cross-table). Reference is NOT computed — it is a physical
-    /// BIGINT foreign-key column.
+    /// BIGINT foreign-key column. ActionButton is an interactive action type — its own
+    /// value is never stored; clicking it writes to other fields via a dedicated endpoint.
     /// </summary>
     public static bool IsComputedTypeCode(string typeCode) =>
-        typeCode is "Formula" or "Lookup" or "Summary" or "ReportLink";
+        typeCode is "Formula" or "Lookup" or "Summary" or "ReportLink" or "ActionButton";
 }

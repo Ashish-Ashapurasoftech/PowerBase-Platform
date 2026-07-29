@@ -2,8 +2,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
 using PowerBase.API.Models;
+using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Exceptions;
-using System.IO;
 
 namespace PowerBase.API.Controllers;
 
@@ -12,11 +12,11 @@ namespace PowerBase.API.Controllers;
 [RequireAuth]
 public class FilesController : ControllerBase
 {
-    private readonly IConfiguration _configuration;
+    private readonly IFileStorageService _storage;
 
-    public FilesController(IConfiguration configuration)
+    public FilesController(IFileStorageService storage)
     {
-        _configuration = configuration;
+        _storage = storage;
     }
 
     /// <summary>Upload a file for the app context.</summary>
@@ -32,38 +32,15 @@ public class FilesController : ControllerBase
             throw new BadRequestException("FILE_UPLOAD_ERROR", "No file was uploaded.");
         }
 
-        var localPath = _configuration.GetValue<string>("Storage:LocalPath") ?? "C:\\PowerbaseUploads";
-        var baseUrl = _configuration.GetValue<string>("Storage:BaseUrl") ?? "http://localhost:5000/files";
-
-        // Ensure directory exists
-        if (!Directory.Exists(localPath))
-        {
-            Directory.CreateDirectory(localPath);
-        }
-
-        // Generate a unique file name
-        var fileExtension = Path.GetExtension(file.FileName);
-        var uniqueFileName = $"{Guid.NewGuid()}{fileExtension}";
-        var physicalPath = Path.Combine(localPath, uniqueFileName);
-
-        // Save to disk
-        using (var stream = new FileStream(physicalPath, FileMode.Create))
-        {
-            await file.CopyToAsync(stream, ct);
-        }
-
-        // Clean trailing slash of base URL
-        baseUrl = baseUrl.TrimEnd('/');
-
-        // Build file URL/path mapping (e.g. /files/filename.ext)
-        var relativePath = $"/files/{uniqueFileName}";
+        await using var stream = file.OpenReadStream();
+        var stored = await _storage.SaveAsync(stream, file.FileName, file.ContentType, ct);
 
         var response = new FileUploadResponse
         {
-            Name = file.FileName,
-            Path = relativePath,
-            Size = file.Length,
-            Type = file.ContentType
+            Name = stored.Name,
+            Path = stored.Path,
+            Size = stored.Size,
+            Type = stored.ContentType ?? string.Empty,
         };
 
         return Ok(new ApiResponse<FileUploadResponse>(response));

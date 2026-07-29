@@ -107,7 +107,7 @@ public class RunReportQueryHandler
             }
         }
 
-        if (report.ReportType == "Summary")
+        if (report.ReportType is "Summary" or "Chart")
             return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, ct);
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields, query.RuntimeFilters, query.QuickSearch, ct);
@@ -349,9 +349,20 @@ public class RunReportQueryHandler
             .Where(a => visibleFieldIds.Contains(a.FieldId))
             .ToList();
 
+        // Chart-only: an optional second grouping dimension ("Series / Group by") that splits each category
+        // into multiple datasets. Ignored for plain Summary reports (definition.Chart is always null there).
+        AppField? seriesField = null;
+        if (definition.Chart?.SeriesFieldId is { } seriesFieldId
+            && fieldMap.TryGetValue(seriesFieldId, out var resolvedSeriesField)
+            && visibleFieldIds.Contains(seriesFieldId))
+        {
+            seriesField = resolvedSeriesField;
+        }
+
         var rows = await _recordRepo.SummarizeAsync(
             table, groupByField, visibleAggregations, allFields, definition.GroupByMode,
-            filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy,
+            seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
 
         // Build alias→fieldId map. Identify columns displayed as percent-of-total and compute their totals.
         var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -377,6 +388,8 @@ public class RunReportQueryHandler
             var fields = new Dictionary<string, object?>();
             fields[(groupByField.Fid ?? groupByField.Id).ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
+            if (seriesField is not null)
+                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = row.TryGetValue("SeriesValue", out var sv) ? sv : null;
             foreach (var (alias, fieldId) in aggAliasToFieldId)
             {
                 if (!row.TryGetValue(alias, out var val)) continue;
@@ -388,12 +401,18 @@ public class RunReportQueryHandler
             return new RecordResult { Id = Guid.Empty, CreatedOn = DateTime.UtcNow, Fields = fields };
         }).ToList();
 
-        // Synthetic columns: group-by field + Count + one per visible aggregation
+        // Synthetic columns: group-by field + Count + (Chart-only) series field + one per visible aggregation.
+        // FieldId must match the keys used in `fields` above (Fid when present, else Id) or the frontend can't
+        // look up the values by column.
         var columns = new List<ReportColumnInfo>
         {
-            new() { FieldId = groupByField.Id, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
+            new() { FieldId = groupByField.Fid ?? groupByField.Id, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
             new() { FieldId = 0, Name = "Count", TypeCode = "Number" },
         };
+        if (seriesField is not null)
+        {
+            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
+        }
         foreach (var agg in visibleAggregations)
         {
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
@@ -402,7 +421,7 @@ public class RunReportQueryHandler
                 var label = agg.DisplayAs == "PercentOfColumnTotal"
                     ? $"{agg.Function} of {fieldName} (%)"
                     : $"{agg.Function} of {fieldName}";
-                columns.Add(new ReportColumnInfo { FieldId = aggField.Id, Name = label, TypeCode = "Number" });
+                columns.Add(new ReportColumnInfo { FieldId = aggField.Fid ?? aggField.Id, Name = label, TypeCode = "Number" });
             }
         }
 

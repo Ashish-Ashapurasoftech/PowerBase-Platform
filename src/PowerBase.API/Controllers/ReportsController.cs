@@ -102,7 +102,8 @@ public class ReportsController : ControllerBase
             request.CustomDynamicFilterFields,
             request.CustomDynamicFilterItems?.Select(i => new CustomDynamicFilterItem { FieldId = i.FieldId, SubField = i.SubField }).ToList(),
             request.AllowQuickSearch,
-            request.VisibleToRoleIds ?? []);
+            request.VisibleToRoleIds ?? [],
+            MapChartConfig(request.Chart));
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
@@ -198,7 +199,8 @@ public class ReportsController : ControllerBase
             request.CustomDynamicFilterFields,
             request.CustomDynamicFilterItems?.Select(i => new CustomDynamicFilterItem { FieldId = i.FieldId, SubField = i.SubField }).ToList(),
             request.AllowQuickSearch,
-            request.VisibleToRoleIds ?? []);
+            request.VisibleToRoleIds ?? [],
+            MapChartConfig(request.Chart));
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
     }
@@ -405,6 +407,7 @@ public class ReportsController : ControllerBase
                 SubField = i.SubField
             }).ToList() ?? [],
             AllowQuickSearch = r.Definition.AllowQuickSearch,
+            Chart = MapChartConfigDto(r.Definition.Chart),
         },
         IsDefault = r.IsDefault,
         DisplayOrder = r.DisplayOrder,
@@ -468,6 +471,68 @@ public class ReportsController : ControllerBase
                 },
                 Group = MapFilterGroupDto(n.Group),
             }).ToList(),
+        };
+    }
+
+    // ── Chart config mapping helpers ──────────────────────────────────────────
+
+    private static ChartConfigCommand? MapChartConfig(ChartConfigRequest? req)
+    {
+        if (req is null) return null;
+        return new ChartConfigCommand(
+            req.ChartType,
+            req.SeriesFieldId,
+            req.SeriesMode,
+            req.AxisLabelX,
+            req.AxisLabelY,
+            req.YMin,
+            req.YMax,
+            req.LogScale,
+            req.SortBy,
+            req.SortDirection,
+            req.GoalValue,
+            req.GoalLabel,
+            req.DataLabelsVisible,
+            req.HideMissingCategories,
+            req.DrilldownReportId,
+            req.SecondaryAxisAggregationFieldIds,
+            req.AxisLabelY2,
+            req.YMin2,
+            req.YMax2,
+            req.LogScale2,
+            req.GaugeFieldId,
+            req.GaugeLowMaxPercent,
+            req.GaugeMediumMaxPercent);
+    }
+
+    private static ChartConfigDto? MapChartConfigDto(ChartConfig? chart)
+    {
+        if (chart is null) return null;
+        return new ChartConfigDto
+        {
+            ChartType = chart.ChartType,
+            SeriesFieldId = chart.SeriesFieldId,
+            SeriesMode = chart.SeriesMode,
+            AxisLabelX = chart.AxisLabelX,
+            AxisLabelY = chart.AxisLabelY,
+            YMin = chart.YMin,
+            YMax = chart.YMax,
+            LogScale = chart.LogScale,
+            SortBy = chart.SortBy,
+            SortDirection = chart.SortDirection,
+            GoalValue = chart.GoalValue,
+            GoalLabel = chart.GoalLabel,
+            DataLabelsVisible = chart.DataLabelsVisible,
+            HideMissingCategories = chart.HideMissingCategories,
+            DrilldownReportId = chart.DrilldownReportId,
+            SecondaryAxisAggregationFieldIds = chart.SecondaryAxisAggregationFieldIds,
+            AxisLabelY2 = chart.AxisLabelY2,
+            YMin2 = chart.YMin2,
+            YMax2 = chart.YMax2,
+            LogScale2 = chart.LogScale2,
+            GaugeFieldId = chart.GaugeFieldId,
+            GaugeLowMaxPercent = chart.GaugeLowMaxPercent,
+            GaugeMediumMaxPercent = chart.GaugeMediumMaxPercent,
         };
     }
 }

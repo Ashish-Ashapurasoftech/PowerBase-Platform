@@ -39,6 +39,8 @@ public class ExceptionHandlingMiddleware
             UnauthorizedActionException e => (StatusCodes.Status403Forbidden, e.ErrorCode, e.Message, (object?)null),
             Domain.Exceptions.ValidationException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)e.Errors),
             BadRequestException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)null),
+            LinkExpiredException e => (StatusCodes.Status410Gone, e.ErrorCode, e.Message, (object?)null),
+            ActionGateException e => (422, e.ErrorCode, e.Message, (object?)null),
             InternalServerException e => (StatusCodes.Status500InternalServerError, e.ErrorCode, e.Message, (object?)null),
             _ => (StatusCodes.Status500InternalServerError, "INTERNAL_ERROR", "An unexpected error occurred.", (object?)null)
         };

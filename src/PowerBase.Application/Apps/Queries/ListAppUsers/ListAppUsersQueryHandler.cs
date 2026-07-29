@@ -11,6 +11,7 @@ public record AppUserResult(
     Guid RolePublicId,
     string RoleName,
     string Status,
+    bool ShowInUserPickers,
     DateTime AddedOn,
     bool IsOwner);
 
@@ -38,6 +39,7 @@ public class ListAppUsersQueryHandler
             u.RolePublicId,
             u.RoleName,
             u.Status,
+            u.ShowInUserPickers,
             u.CreatedOn,
             u.IsOwner)).ToList();
     }

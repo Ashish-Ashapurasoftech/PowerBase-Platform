@@ -167,12 +167,12 @@ public class FormsController : ControllerBase
     }
 
     /// <summary>Set a form as the default form for the table.</summary>
-    [HttpPost("forms/{formId:guid}/set-default")]
+    [HttpPost("forms/{publicId:guid}/set-default")]
     [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
-    public async Task<IActionResult> SetDefaultForm(Guid formId, [FromQuery] Guid tableId, CancellationToken ct)
+    public async Task<IActionResult> SetDefaultForm(Guid publicId, [FromQuery] Guid tableId, CancellationToken ct)
     {
-        await _setDefaultFormHandler.HandleAsync(new SetDefaultFormCommand(tableId, formId), ct);
+        await _setDefaultFormHandler.HandleAsync(new SetDefaultFormCommand(tableId, publicId), ct);
         return NoContent();
     }
 

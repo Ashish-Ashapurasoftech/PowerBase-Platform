@@ -410,6 +410,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         string groupByMode = "EqualValues",
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
+        AppField? seriesField = null,
+        string seriesMode = "EqualValues",
         CancellationToken ct = default)
     {
         var groupCol = groupByField.IsSystem && !string.IsNullOrEmpty(groupByField.PhysicalColumnName)
@@ -417,6 +419,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             : PhysicalNaming.ColumnName(groupByField.Fid!.Value);
         var groupExpr = BuildGroupByExpr(groupCol, groupByMode);
         var fieldMap = allFields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+
+        string? seriesExpr = null;
+        if (seriesField is not null)
+        {
+            var seriesCol = seriesField.IsSystem && !string.IsNullOrEmpty(seriesField.PhysicalColumnName)
+                ? seriesField.PhysicalColumnName!
+                : PhysicalNaming.ColumnName(seriesField.Fid!.Value);
+            seriesExpr = BuildGroupByExpr(seriesCol, seriesMode);
+        }
 
         var aggClauses = new List<string> { "COUNT(*) AS [Count]" };
         foreach (var agg in aggregations)
@@ -439,12 +450,17 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var ownerWhere = BuildOwnerWhere(restrictToCreatedBy, parameters);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
 
+        var selectList = seriesExpr is null
+            ? $"{groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}"
+            : $"{groupExpr} AS GroupValue, {seriesExpr} AS SeriesValue, {string.Join(", ", aggClauses)}";
+        var groupByList = seriesExpr is null ? groupExpr : $"{groupExpr}, {seriesExpr}";
+
         var sql = $"""
-            SELECT {groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}
+            SELECT {selectList}
             FROM {PhysicalNaming.FullTableName(table.Id)}
             WHERE IsDeleted = 0{ownerWhere}{filterWhere}
-            GROUP BY {groupExpr}
-            ORDER BY {groupExpr}
+            GROUP BY {groupByList}
+            ORDER BY {groupByList}
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);

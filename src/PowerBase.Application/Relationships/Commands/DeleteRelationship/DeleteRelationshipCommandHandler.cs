@@ -48,7 +48,19 @@ public class DeleteRelationshipCommandHandler
 
         // Soft-delete the participating fields.
         if (refField is not null)
-            await _fieldRepo.DeleteAsync(refField.PublicId, child.Id, ct);
+        {
+            if (rel.ReferenceFieldIsExisting)
+            {
+                // The reference field existed before this relationship was created.
+                // Revert it back to a plain Number field (undo the type conversion).
+                await _fieldRepo.RevertToNumberFieldAsync(refField.Id, ct);
+            }
+            else
+            {
+                // The reference field was auto-created for this relationship — delete it.
+                await _fieldRepo.DeleteAsync(refField.PublicId, child.Id, ct);
+            }
+        }
 
         foreach (var f in childFields.Where(f => f.TypeCode == "Lookup"
             && FormulaTypeMap.ParseLookupSettings(f.Settings)?.RelationshipId == rel.Id))

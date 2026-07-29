@@ -8,7 +8,7 @@ namespace PowerBase.Application.Relationships;
 /// <summary>Validates that submitted Reference field values point at existing parent records.</summary>
 public static class ReferenceWriteValidator
 {
-    public static async Task ValidateAsync(
+    public static async Task<Dictionary<long, object?>> ValidateAsync(
         IReadOnlyList<AppField> fields,
         IReadOnlyDictionary<long, object?> values,
         IAppTableRepository tableRepo,
@@ -16,6 +16,8 @@ public static class ReferenceWriteValidator
         IRecordRepository recordRepo,
         CancellationToken ct)
     {
+        var overrides = new Dictionary<long, object?>();
+
         foreach (var field in fields.Where(f => f.TypeCode == "Reference" && f.Fid.HasValue))
         {
             if (!values.TryGetValue(field.Fid!.Value, out var raw) || raw is null) continue;
@@ -45,12 +47,20 @@ public static class ReferenceWriteValidator
                     throw new ValidationException(new Dictionary<string, string[]> { [field.Name] = ["Invalid reference value."] });
                 var col = KeyFieldResolver.ColumnName(keyField);
                 var matches = await recordRepo.GetIdsByColumnValuesAsync(parent, col, [typedValue], ct);
+                
                 exists = matches.Count > 0;
+                if (exists)
+                {
+                    // Swap the custom key string for the physical BIGINT Record ID# so it can be saved.
+                    overrides[field.Fid!.Value] = matches.Values.First();
+                }
             }
 
             if (!exists)
                 throw new ValidationException(
                     new Dictionary<string, string[]> { [field.Name] = [$"The referenced {parent.Name} record does not exist."] });
         }
+        
+        return overrides;
     }
 }

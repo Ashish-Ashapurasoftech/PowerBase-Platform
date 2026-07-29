@@ -225,6 +225,30 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 new { id, fieldTypeId, settings, isRequired, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
+    public async Task RevertToNumberFieldAsync(long fieldId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        
+        var numberTypeId = await connection.QuerySingleAsync<long>(
+            new CommandDefinition(
+                "SELECT Id FROM core.FieldType WHERE Code = 'Number' AND IsActive = 1",
+                cancellationToken: ct));
+
+        await connection.ExecuteAsync(
+            new CommandDefinition(
+                """
+                UPDATE meta.AppField
+                SET FieldTypeId = @numberTypeId,
+                    Settings    = NULL,
+                    ModifiedOn  = SYSUTCDATETIME(),
+                    ModifiedBy  = @modifiedBy
+                WHERE Id = @fieldId
+                """,
+                new { fieldId, numberTypeId, modifiedBy = QueryContext.UserId },
+                cancellationToken: ct));
+    }
+
+
     public async Task<AppField?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);

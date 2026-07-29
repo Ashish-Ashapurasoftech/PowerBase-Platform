@@ -26,6 +26,9 @@ public class ReportDefinition
     public List<CustomDynamicFilterItem> CustomDynamicFilterItems { get; set; } = [];
     public bool AllowQuickSearch { get; set; } = true;
 
+    // Chart-only
+    public ChartConfig? Chart { get; set; }
+
     // Legacy compat — kept so old JSON deserializes without data loss
     public long? SortFieldId { get; set; }
     public bool SortDesc { get; set; }
@@ -98,4 +101,57 @@ public class CustomDynamicFilterItem
     public long FieldId { get; set; }
     /// <summary>Optional JSON sub-field for Address types (e.g. "city", "country", "zip").</summary>
     public string? SubField { get; set; }
+}
+
+// ── Chart config ─────────────────────────────────────────────────────────────
+
+/// <summary>
+/// Chart-report-only config. X-axis/category is GroupByFieldId/GroupByMode, and Y-values are
+/// Aggregations (both shared with Summary reports) — this class only holds what's unique to charts.
+/// </summary>
+public class ChartConfig
+{
+    /// <summary>Bar, StackedBar, HorizontalBar, HorizontalStackedBar, Line, LineBarCombo, Pie, Donut, Gauge, Waterfall, Radial</summary>
+    public string ChartType { get; set; } = "Bar";
+
+    /// <summary>Optional second grouping dimension ("Series / Group by") — splits each category into multiple datasets.</summary>
+    public long? SeriesFieldId { get; set; }
+    /// <summary>EqualValues (default), FirstWord, FirstLetter — same semantics as GroupByMode.</summary>
+    public string SeriesMode { get; set; } = "EqualValues";
+
+    public string? AxisLabelX { get; set; }
+    public string? AxisLabelY { get; set; }
+    public decimal? YMin { get; set; }
+    public decimal? YMax { get; set; }
+    public bool LogScale { get; set; }
+
+    /// <summary>Labels or Values</summary>
+    public string SortBy { get; set; } = "Labels";
+    /// <summary>Asc or Desc</summary>
+    public string SortDirection { get; set; } = "Asc";
+
+    public decimal? GoalValue { get; set; }
+    public string? GoalLabel { get; set; }
+
+    public bool DataLabelsVisible { get; set; }
+    public bool HideMissingCategories { get; set; }
+
+    /// <summary>Report opened when a chart segment is clicked, filtered by the clicked category value. Null = use the table's default report.</summary>
+    public Guid? DrilldownReportId { get; set; }
+
+    // ── Line / LineBarCombo dual y-axis ──
+    /// <summary>Which of the Aggregations field IDs render on the secondary axis (Line) / as bars (LineBarCombo). Everything else renders on the primary axis / as lines.</summary>
+    public List<long> SecondaryAxisAggregationFieldIds { get; set; } = [];
+    public string? AxisLabelY2 { get; set; }
+    public decimal? YMin2 { get; set; }
+    public decimal? YMax2 { get; set; }
+    public bool LogScale2 { get; set; }
+
+    // ── Gauge ──
+    /// <summary>The field the gauge measures. The wizard also uses this as GroupByFieldId under the hood (Gauge has no category axis).</summary>
+    public long? GaugeFieldId { get; set; }
+    /// <summary>Upper bound (%) of the "Low" color band.</summary>
+    public decimal GaugeLowMaxPercent { get; set; } = 30;
+    /// <summary>Upper bound (%) of the "Medium" color band; above this is "High".</summary>
+    public decimal GaugeMediumMaxPercent { get; set; } = 70;
 }

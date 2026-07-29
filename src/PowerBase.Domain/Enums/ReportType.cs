@@ -4,5 +4,6 @@ public enum ReportType
 {
     Table,
     Summary,
-    GridEdit
+    GridEdit,
+    Chart
 }

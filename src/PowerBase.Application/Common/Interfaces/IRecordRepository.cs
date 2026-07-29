@@ -89,7 +89,9 @@ public interface IRecordRepository
     /// <summary>Returns true if any non-deleted rows have a non-null, non-empty value in the field's column.</summary>
     Task<bool> HasAnyDataAsync(AppTable table, AppField field, CancellationToken ct = default);
 
-    /// <summary>Run a GROUP BY aggregation query for Summary reports.</summary>
+    /// <summary>Run a GROUP BY aggregation query for Summary (and Chart) reports. When <paramref name="seriesField"/>
+    /// is supplied (Chart reports only), groups by both <paramref name="groupByField"/> and it, and each result
+    /// row additionally carries a "SeriesValue" key.</summary>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table,
         AppField groupByField,
@@ -98,6 +100,8 @@ public interface IRecordRepository
         string groupByMode = "EqualValues",
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
+        AppField? seriesField = null,
+        string seriesMode = "EqualValues",
         CancellationToken ct = default);
 
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(

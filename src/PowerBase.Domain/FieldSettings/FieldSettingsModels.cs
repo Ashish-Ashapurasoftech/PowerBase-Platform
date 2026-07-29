@@ -125,6 +125,17 @@ public sealed class FormulaSettings
 
     /// <summary>The Quickbase-style formula expression text.</summary>
     public string? Expression { get; set; }
+
+    /// <summary>
+    /// When true (ResultType = Text only), the formula's computed value is a button
+    /// descriptor rather than plain text: either a bare Fid ("42") or a JSON object
+    /// ("{"fid":42,"label":"...","color":"...","enabled":false}") naming an ActionButton
+    /// field on this table whose full configured behavior the rendered button inherits,
+    /// with any present JSON keys overriding that button's own settings. This is how a
+    /// formula can pick WHICH button to show, and how (color/enabled/label), with full
+    /// conditional logic (Field-Type spec Rule 3).
+    /// </summary>
+    public bool? ReturnsButton { get; set; }
 }
 
 public static class FormulaResultTypes
@@ -237,4 +248,148 @@ public static class SummaryFunctions
     public const string Max = "Max";
 
     public static readonly string[] All = [Count, Exists, Sum, Avg, Min, Max];
+}
+
+// ── Action Button field settings ────────────────────────────────────────────
+
+/// <summary>
+/// A recurring "value from data / field / formula" slot used throughout Action Button
+/// settings (label, color, filename, prompt default, add-data values, redirect, gates).
+/// Exactly one of <see cref="Data"/>/<see cref="FieldFid"/>/<see cref="Formula"/> is
+/// meaningful, selected by <see cref="Kind"/>.
+/// </summary>
+public sealed class ValueSource
+{
+    /// <summary>One of <see cref="ValueSourceKinds"/>.</summary>
+    public string? Kind { get; set; }
+    /// <summary>Static value (Kind = "data"). Also used as a static color/URL/password.</summary>
+    public string? Data { get; set; }
+    /// <summary>Fid of another field on the same table to read the value from (Kind = "field").</summary>
+    public int? FieldFid { get; set; }
+    /// <summary>Formula expression text, evaluated against the current record (Kind = "formula").</summary>
+    public string? Formula { get; set; }
+}
+
+public static class ValueSourceKinds
+{
+    public const string Data = "data";
+    public const string Field = "field";
+    public const string Formula = "formula";
+    public static readonly string[] All = [Data, Field, Formula];
+}
+
+/// <summary>One "set this field to this value" instruction, used by Add Data to Capture
+/// and (in its entirety) by the Data Button variant.</summary>
+public sealed class AddDataItem
+{
+    /// <summary>The Fid of the field being written.</summary>
+    public int? TargetFid { get; set; }
+    public ValueSource? Value { get; set; }
+}
+
+/// <summary>Server-side-enforced expiration window for a button link.</summary>
+public sealed class LinkExpirationSettings
+{
+    /// <summary>Static timestamp or formula (e.g. Now()) marking the start of the window.</summary>
+    public ValueSource? Start { get; set; }
+    /// <summary>Minutes after Start during which the button remains valid.</summary>
+    public int? Minutes { get; set; }
+}
+
+/// <summary>Captures device geolocation into a field, optionally restricted to a state.</summary>
+public sealed class LocationCaptureSettings
+{
+    public int? TargetFid { get; set; }
+    public string? RestrictToState { get; set; }
+}
+
+public sealed class PopupSizeSettings
+{
+    public int? Width { get; set; }
+    public int? Height { get; set; }
+}
+
+/// <summary>
+/// Configuration for an Action Button field (Signature | File | Prompt | Data variant,
+/// selected by <see cref="Variant"/>). Computed / non-stored — the button's own value is
+/// never persisted; clicking it writes to other fields via the InvokeButtonAction endpoint.
+/// </summary>
+public sealed class ActionButtonSettings
+{
+    /// <summary>One of <see cref="ActionButtonVariants"/>.</summary>
+    public string? Variant { get; set; }
+
+    public ValueSource? ButtonLabel { get; set; }
+    /// <summary>Static color (hex/name) or a formula, per <see cref="ValueSource"/>.</summary>
+    public ValueSource? ButtonColor { get; set; }
+
+    /// <summary>Where the captured signature / file / prompt value is stored (Signature/File/Prompt).</summary>
+    public int? CaptureFid { get; set; }
+    /// <summary>Stored file name (Signature/File). Blank → random (signature) / original (file).</summary>
+    public ValueSource? FileName { get; set; }
+    /// <summary>Optional field to record the server time of the click.</summary>
+    public int? TimestampFid { get; set; }
+
+    /// <summary>One of <see cref="PromptTypes"/> (Prompt only).</summary>
+    public string? PromptType { get; set; }
+    /// <summary>Source multichoice field Fid when PromptType = FromField.</summary>
+    public int? PromptSourceFid { get; set; }
+    /// <summary>Hand-built options list when PromptType = EnterData.</summary>
+    public string[]? PromptOptions { get; set; }
+    /// <summary>Pre-filled prompt value (Prompt only).</summary>
+    public ValueSource? DefaultValue { get; set; }
+
+    /// <summary>Fields to set on click, beyond the Capture field. The entire configuration
+    /// for a Data Button (no capture UI).</summary>
+    public AddDataItem[]? AddData { get; set; }
+
+    /// <summary>Static URL or formula. Blank → in-place refresh (no navigation).</summary>
+    public ValueSource? Redirect { get; set; }
+    /// <summary>One of <see cref="RedirectModes"/> — how a resolved Redirect URL is opened.
+    /// Only meaningful when Redirect is set; null/absent defaults to SameWindow. Distinct
+    /// from capture popups (Signature/File/Prompt), which always render in a dialog
+    /// regardless of this setting.</summary>
+    public string? RedirectMode { get; set; }
+
+    // ── Advanced (light) ──────────────────────────────────────────────────────
+    public LinkExpirationSettings? LinkExpiration { get; set; }
+    /// <summary>Boolean field Fid that must evaluate true at click time for the action to proceed.</summary>
+    public int? BoolGateFid { get; set; }
+    public LocationCaptureSettings? LocationCapture { get; set; }
+    /// <summary>Field to save the caller's server-observed IP address into.</summary>
+    public int? IpCaptureFid { get; set; }
+    /// <summary>Expected password — static, formula, or read from another field.</summary>
+    public ValueSource? PasswordGate { get; set; }
+    public PopupSizeSettings? PopupSize { get; set; }
+}
+
+public static class ActionButtonVariants
+{
+    public const string Signature = "Signature";
+    public const string File = "File";
+    public const string Prompt = "Prompt";
+    public const string Data = "Data";
+    public static readonly string[] All = [Signature, File, Prompt, Data];
+}
+
+public static class PromptTypes
+{
+    public const string FromField = "FromField";
+    public const string EnterData = "EnterData";
+    public const string FreeText = "FreeText";
+    public static readonly string[] All = [FromField, EnterData, FreeText];
+}
+
+/// <summary>
+/// Navigation & Save-State Behavior for URL-type actions (Field-Type spec, July-2
+/// addendum). Action Button captures (Signature/File/Prompt) always render in a popup
+/// regardless of this setting — these modes apply only to a resolved Redirect URL.
+/// </summary>
+public static class RedirectModes
+{
+    /// <summary>Opens in a separate window/tab; the current page never navigates away. No unsaved-changes risk.</summary>
+    public const string NewWindow = "NewWindow";
+    /// <summary>Navigates the current window. Real unsaved-changes risk — the client must warn/block.</summary>
+    public const string SameWindow = "SameWindow";
+    public static readonly string[] All = [NewWindow, SameWindow];
 }

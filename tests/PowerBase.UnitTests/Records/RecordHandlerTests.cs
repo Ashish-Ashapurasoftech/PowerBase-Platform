@@ -2,6 +2,7 @@ using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Records;
 using PowerBase.Application.Records.Commands.CreateRecord;
 using PowerBase.Application.Records.Commands.DeleteRecord;
 using PowerBase.Application.Records.Commands.UpdateRecord;
@@ -113,7 +114,8 @@ public class RecordHandlerTests
         var recordId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
-        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _enforcer, _auditRepo);
+        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo);
+        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService);
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, recordId,
             new Dictionary<long, object?> { [1L] = "Updated" }));
@@ -127,7 +129,8 @@ public class RecordHandlerTests
     public async Task UpdateRecord_EmptyFieldValues_SkipsUpdate()
     {
         var table = MakeTable();
-        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _enforcer, _auditRepo);
+        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo);
+        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService);
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, Guid.NewGuid(),
             new Dictionary<long, object?>()));

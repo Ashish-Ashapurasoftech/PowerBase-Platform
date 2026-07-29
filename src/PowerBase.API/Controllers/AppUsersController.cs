@@ -6,6 +6,7 @@ using PowerBase.Application.Apps.Commands.AddAppUser;
 using PowerBase.Application.Apps.Commands.ChangeAppUserRole;
 using PowerBase.Application.Apps.Commands.InviteAppUser;
 using PowerBase.Application.Apps.Commands.RemoveAppUser;
+using PowerBase.Application.Apps.Commands.UpdateUserPickerVisibility;
 using PowerBase.Application.Apps.Queries.ListAppUsers;
 
 namespace PowerBase.API.Controllers;
@@ -19,6 +20,7 @@ public class AppUsersController : ControllerBase
     private readonly AddAppUserCommandHandler _addHandler;
     private readonly InviteAppUserCommandHandler _inviteHandler;
     private readonly ChangeAppUserRoleCommandHandler _changeRoleHandler;
+    private readonly UpdateUserPickerVisibilityCommandHandler _updatePickerVisibilityHandler;
     private readonly RemoveAppUserCommandHandler _removeHandler;
     private readonly string _frontendBaseUrl;
 
@@ -27,6 +29,7 @@ public class AppUsersController : ControllerBase
         AddAppUserCommandHandler addHandler,
         InviteAppUserCommandHandler inviteHandler,
         ChangeAppUserRoleCommandHandler changeRoleHandler,
+        UpdateUserPickerVisibilityCommandHandler updatePickerVisibilityHandler,
         RemoveAppUserCommandHandler removeHandler,
         IConfiguration config)
     {
@@ -34,6 +37,7 @@ public class AppUsersController : ControllerBase
         _addHandler = addHandler;
         _inviteHandler = inviteHandler;
         _changeRoleHandler = changeRoleHandler;
+        _updatePickerVisibilityHandler = updatePickerVisibilityHandler;
         _removeHandler = removeHandler;
         _frontendBaseUrl = config["Frontend:BaseUrl"] ?? "http://localhost:4200";
     }
@@ -53,6 +57,7 @@ public class AppUsersController : ControllerBase
             RolePublicId = u.RolePublicId,
             RoleName = u.RoleName,
             Status = u.Status,
+            ShowInUserPickers = u.ShowInUserPickers,
             AddedOn = u.AddedOn.ToString("o"),
             IsOwner = u.IsOwner,
         }).ToList();
@@ -140,6 +145,21 @@ public class AppUsersController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Toggle 'Show in User Pickers' for an app user.</summary>
+    [HttpPatch("{userPublicId:guid}/user-picker-visibility")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateUserPickerVisibility(
+        [FromRoute] Guid appId,
+        [FromRoute] Guid userPublicId,
+        [FromBody] UpdateUserPickerVisibilityRequest request,
+        CancellationToken ct)
+    {
+        await _updatePickerVisibilityHandler.HandleAsync(
+            new UpdateUserPickerVisibilityCommand(appId, userPublicId, request.ShowInUserPickers), ct);
+        return NoContent();
+    }
+
     /// <summary>Remove a user from this app.</summary>
     [HttpDelete("{userPublicId:guid}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
@@ -152,3 +172,4 @@ public class AppUsersController : ControllerBase
 }
 
 public record InviteAppUserRequest(string Email, Guid? RolePublicId);
+public record UpdateUserPickerVisibilityRequest(bool ShowInUserPickers);
