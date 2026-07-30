@@ -294,10 +294,13 @@ public class ReportsController : ControllerBase
         [FromQuery] int pageSize = 20,
         [FromQuery] List<string>? dynamicFilters = null,
         [FromQuery] string? quickSearch = null,
+        [FromQuery] List<long>? searchFieldIds = null,
+        [FromQuery] bool exactMatch = false,
         CancellationToken ct = default)
     {
         var runtimeFilters = ParseDynamicFilters(dynamicFilters);
-        var result = await _runHandler.HandleAsync(new RunReportQuery(publicId, page, pageSize, runtimeFilters, quickSearch), ct);
+        var result = await _runHandler.HandleAsync(
+            new RunReportQuery(publicId, page, pageSize, runtimeFilters, quickSearch, searchFieldIds, exactMatch), ct);
         var response = new ReportRunResponse
         {
             Columns = result.Columns.Select(c => new ReportColumnDto
@@ -412,6 +415,8 @@ public class ReportsController : ControllerBase
         IsDefault = r.IsDefault,
         DisplayOrder = r.DisplayOrder,
         ViewEditFormId = r.ViewEditFormId,
+        TableId = r.TableId,
+        TableName = r.TableName,
         CreatedOn = r.CreatedOn,
         VisibleToRoleIds = r.VisibleToRoleIds,
     };

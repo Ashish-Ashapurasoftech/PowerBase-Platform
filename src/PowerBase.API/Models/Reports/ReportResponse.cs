@@ -11,6 +11,8 @@ public class ReportResponse
     public bool IsDefault { get; init; }
     public int DisplayOrder { get; init; }
     public Guid? ViewEditFormId { get; init; }
+    public Guid TableId { get; init; }
+    public string TableName { get; init; } = string.Empty;
     public DateTime CreatedOn { get; init; }
     public List<Guid> VisibleToRoleIds { get; init; } = [];
 }
