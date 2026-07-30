@@ -1,5 +1,6 @@
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.UserTokens.Common;
 using PowerBase.Application.UserTokens.Queries.GetAdminUserTokens;
 using PowerBase.Application.UserTokens.Queries.GetMyUserTokens;
 using PowerBase.Application.UserTokens.Queries.GetSingleTokenDetail;
@@ -25,26 +26,23 @@ public class UserTokenQueryHandlerTests
     {
         // Arrange
         var publicId = Guid.NewGuid();
-        var tokens = new List<UserToken>
+        var adminTokens = new List<AdminUserTokenDto>
         {
-            new UserToken
+            new AdminUserTokenDto
             {
-                Id = 1,
                 PublicId = publicId,
-                TenantId = 500,
-                UserId = 1001,
                 TokenName = "Admin Token",
-                TokenPrefix = "ctg812345678yhbn...",
+                TokenPrefix = "ctg8************yhbn",
                 AccessAllApps = true,
-                IsActive = true
+                IsActive = true,
+                UserId = 1001,
+                OwnerName = "Test User",
+                OwnerEmail = "test@example.com"
             }
         };
 
         _userTokenRepository.GetAdminTokensPagedAsync(500, null, null, 1, 20, Arg.Any<CancellationToken>())
-            .Returns((tokens, 1));
-
-        var user = new User { Id = 1001, Name = "Test User", Email = "test@example.com" };
-        _userRepository.GetByIdAsync(1001, Arg.Any<CancellationToken>()).Returns(user);
+            .Returns(((IEnumerable<AdminUserTokenDto>)adminTokens, 1));
 
         var handler = new GetAdminUserTokensQueryHandler(_userTokenRepository, _userRepository, _queryContext);
         var query = new GetAdminUserTokensQuery { Page = 1, PageSize = 20 };

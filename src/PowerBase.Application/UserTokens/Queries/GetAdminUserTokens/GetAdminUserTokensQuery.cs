@@ -46,55 +46,12 @@ public class GetAdminUserTokensQueryHandler
             cancellationToken
         );
 
-        var resultList = new List<AdminUserTokenDto>();
-
-        foreach (var token in tokens)
-        {
-            var (allowedApps, allowedAppNames) = token.AccessAllApps 
-                ? (Enumerable.Empty<Guid>(), Enumerable.Empty<string>())
-                : await _userTokenRepository.GetAllowedAppDetailsAsync(token.Id, token.TenantId, cancellationToken);
-
-            var owner = await _userRepository.GetByIdAsync(token.UserId, cancellationToken);
-
-            // Display format: ctg8************yhbn (first 4 and last 4 chars)
-            var tokenMasked = MaskTokenPrefix(token.TokenPrefix);
-
-            resultList.Add(new AdminUserTokenDto
-            {
-                PublicId = token.PublicId,
-                TokenName = token.TokenName,
-                Description = token.Description,
-                TokenPrefix = token.TokenPrefix,
-                IsActive = token.IsActive,
-                AccessAllApps = token.AccessAllApps,
-                CreatedAt = token.CreatedAt,
-                LastUsedAt = token.LastUsedAt,
-                AllowedAppPublicIds = allowedApps,
-                AllowedAppNames = allowedAppNames,
-                UserId = token.UserId,
-                OwnerName = owner?.Name ?? string.Empty,
-                OwnerEmail = owner?.Email ?? string.Empty
-            });
-        }
-
         return new GetAdminUserTokensResult
         {
-            Items = resultList,
+            Items = tokens,
             TotalCount = totalCount,
             Page = query.Page,
             PageSize = query.PageSize
         };
-    }
-
-    private static string MaskTokenPrefix(string prefix)
-    {
-        var cleanPrefix = prefix.Replace("...", "");
-        if (cleanPrefix.Length >= 8)
-        {
-            var first4 = cleanPrefix.Substring(0, 4);
-            var last4 = cleanPrefix.Substring(cleanPrefix.Length - 4, 4);
-            return $"{first4}************{last4}";
-        }
-        return $"{prefix}************";
     }
 }

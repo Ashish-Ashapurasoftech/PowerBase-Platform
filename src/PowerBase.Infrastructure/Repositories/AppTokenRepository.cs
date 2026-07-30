@@ -29,6 +29,27 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
         INNER JOIN meta.App a ON a.Id = t.AppId
         WHERE t.PublicId = @publicId AND t.TenantId = @tenantId AND a.PublicId = @appPublicId AND t.IsDeleted = 0;";
 
+    private const string UpdateStatusSql = @"
+        UPDATE t
+        SET t.IsActive = @isActive
+        FROM meta.AppToken t
+        INNER JOIN meta.App a ON a.Id = t.AppId
+        WHERE t.PublicId = @publicId AND t.TenantId = @tenantId AND a.PublicId = @appPublicId AND t.IsDeleted = 0;";
+
+    private const string DeleteSql = @"
+        UPDATE t
+        SET t.IsDeleted = 1
+        FROM meta.AppToken t
+        INNER JOIN meta.App a ON a.Id = t.AppId
+        WHERE t.PublicId = @publicId AND t.TenantId = @tenantId AND a.PublicId = @appPublicId AND t.IsDeleted = 0;";
+
+    private const string RotateSecretSql = @"
+        UPDATE meta.AppToken
+        SET TokenHash = @newTokenHash,
+            TokenPrefix = @newTokenPrefix,
+            CreatedAt = SYSUTCDATETIME()
+        WHERE Id = @id AND IsDeleted = 0;";
+
     public async Task<AppToken> CreateAsync(AppToken appToken, CancellationToken ct)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -97,15 +118,8 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
 
-        const string sql = @"
-            UPDATE t
-            SET t.IsActive = @isActive
-            FROM meta.AppToken t
-            INNER JOIN meta.App a ON a.Id = t.AppId
-            WHERE t.PublicId = @publicId AND t.TenantId = @tenantId AND a.PublicId = @appPublicId AND t.IsDeleted = 0;";
-
         var rows = await connection.ExecuteAsync(
-            new CommandDefinition(sql, new { publicId, tenantId, appPublicId, isActive }, cancellationToken: ct));
+            new CommandDefinition(UpdateStatusSql, new { publicId, tenantId, appPublicId, isActive }, cancellationToken: ct));
 
         return rows > 0;
     }
@@ -114,15 +128,8 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
 
-        const string sql = @"
-            UPDATE t
-            SET t.IsDeleted = 1
-            FROM meta.AppToken t
-            INNER JOIN meta.App a ON a.Id = t.AppId
-            WHERE t.PublicId = @publicId AND t.TenantId = @tenantId AND a.PublicId = @appPublicId AND t.IsDeleted = 0;";
-
         var rows = await connection.ExecuteAsync(
-            new CommandDefinition(sql, new { publicId, tenantId, appPublicId }, cancellationToken: ct));
+            new CommandDefinition(DeleteSql, new { publicId, tenantId, appPublicId }, cancellationToken: ct));
 
         return rows > 0;
     }
@@ -131,15 +138,8 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
 
-        const string sql = @"
-            UPDATE meta.AppToken
-            SET TokenHash = @newTokenHash,
-                TokenPrefix = @newTokenPrefix,
-                CreatedAt = SYSUTCDATETIME()
-            WHERE Id = @id AND IsDeleted = 0;";
-
         var rows = await connection.ExecuteAsync(
-            new CommandDefinition(sql, new { id, newTokenHash, newTokenPrefix }, cancellationToken: ct));
+            new CommandDefinition(RotateSecretSql, new { id, newTokenHash, newTokenPrefix }, cancellationToken: ct));
 
         return rows > 0;
     }

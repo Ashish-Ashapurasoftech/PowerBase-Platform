@@ -32,7 +32,7 @@ public class UserTokensController : ControllerBase
 
     /// <summary>Create a User Token (Self-service, permission-gated)</summary>
     [HttpPost]
-    //[RequirePermission("token:create")]
+    [RequirePermission("token:create")]
     public async Task<IActionResult> CreateToken([FromBody] CreateUserTokenRequest request, CancellationToken ct)
     {
         var command = new CreateUserTokenCommand

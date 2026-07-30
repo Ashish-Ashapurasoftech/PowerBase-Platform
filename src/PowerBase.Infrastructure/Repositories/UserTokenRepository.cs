@@ -1,6 +1,7 @@
 using System.Data;
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.UserTokens.Common;
 using PowerBase.Domain.Entities;
 using PowerBase.Infrastructure.Persistence;
 
@@ -119,6 +120,26 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
     private const string GetAppDetailsByIdSql = @"
         SELECT PublicId, Name FROM meta.App WHERE Id = @appId AND IsDeleted = 0;";
 
+    private const string GetAdminTokensCountSql = @"
+        SELECT COUNT(1) 
+        FROM core.UserToken ut";
+
+    private const string GetAdminTokensItemsSql = @"
+        SELECT ut.Id, ut.PublicId, ut.TenantId, ut.UserId, ut.TokenName, ut.Description, ut.TokenHash, ut.TokenPrefix, ut.IsActive, ut.AccessAllApps, ut.CreatedAt, ut.LastUsedAt, ut.IsDeleted, ut.RowVersion,
+               u.Name AS OwnerName, u.Email AS OwnerEmail
+        FROM core.UserToken ut
+        LEFT JOIN core.[User] u ON u.Id = ut.UserId";
+
+    private const string GetAllowedAppIdsBatchSql = @"
+        SELECT UserTokenId, AppId 
+        FROM core.UserTokenAppRestriction 
+        WHERE UserTokenId IN @restrictedIds";
+
+    private const string GetAppDetailsByIdsSql = @"
+        SELECT Id, PublicId, Name 
+        FROM meta.App 
+        WHERE Id IN @distinctAppIds AND IsDeleted = 0";
+
     public async Task<(IEnumerable<Guid> PublicIds, IEnumerable<string> Names)> GetAllowedAppDetailsAsync(long userTokenId, long? targetTenantId = null, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
@@ -174,7 +195,7 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
         );
     }
 
-    public async Task<(IEnumerable<UserToken> Items, int TotalCount)> GetAdminTokensPagedAsync(
+    public async Task<(IEnumerable<AdminUserTokenDto> Items, int TotalCount)> GetAdminTokensPagedAsync(
         long tenantId, 
         string? search, 
         bool? isActive, 
@@ -208,18 +229,113 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
             parameters.Add("isActive", isActive.Value);
         }
 
-        var countSql = $"SELECT COUNT(1) FROM core.UserToken ut {whereClause};";
-        var itemsSql = $@"
-            SELECT ut.Id, ut.PublicId, ut.TenantId, ut.UserId, ut.TokenName, ut.Description, ut.TokenHash, ut.TokenPrefix, ut.IsActive, ut.AccessAllApps, ut.CreatedAt, ut.LastUsedAt, ut.IsDeleted, ut.RowVersion
-            FROM core.UserToken ut
+        var countSql = $"{GetAdminTokensCountSql} {whereClause};";
+        var itemsSql = $@"{GetAdminTokensItemsSql}
             {whereClause}
             ORDER BY ut.CreatedAt DESC
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;";
 
         var totalCount = await connection.ExecuteScalarAsync<int>(new CommandDefinition(countSql, parameters, cancellationToken: ct));
-        var items = await connection.QueryAsync<UserToken>(new CommandDefinition(itemsSql, parameters, cancellationToken: ct));
+        var dbRows = (await connection.QueryAsync<AdminUserTokenDbRow>(new CommandDefinition(itemsSql, parameters, cancellationToken: ct))).ToList();
 
-        return (items, totalCount);
+        if (dbRows.Count == 0)
+        {
+            return (Enumerable.Empty<AdminUserTokenDto>(), totalCount);
+        }
+
+        // Mask function helper (matching original logic)
+        string MaskTokenPrefix(string prefix)
+        {
+            var cleanPrefix = prefix.Replace("...", "");
+            if (cleanPrefix.Length >= 8)
+            {
+                var first4 = cleanPrefix.Substring(0, 4);
+                var last4 = cleanPrefix.Substring(cleanPrefix.Length - 4, 4);
+                return $"{first4}************{last4}";
+            }
+            return $"{prefix}************";
+        }
+
+        // Batch fetch allowed apps for restricted tokens
+        var restrictedRows = dbRows.Where(r => !r.AccessAllApps).ToList();
+        var allowedAppsMap = new Dictionary<long, (IEnumerable<Guid> PublicIds, IEnumerable<string> Names)>();
+
+        if (restrictedRows.Count > 0)
+        {
+            var restrictedIds = restrictedRows.Select(r => r.Id).Distinct().ToList();
+            
+            var restrictions = (await connection.QueryAsync<(long UserTokenId, long AppId)>(
+                new CommandDefinition(GetAllowedAppIdsBatchSql, new { restrictedIds }, cancellationToken: ct)
+            )).ToList();
+
+            if (restrictions.Count > 0)
+            {
+                var tenantIdToUse = tenantId > 0 ? tenantId : QueryContext.TenantId;
+                if (tenantIdToUse > 0)
+                {
+                    var distinctAppIds = restrictions.Select(r => r.AppId).Distinct().ToList();
+                    var connStr = await _tenantConnectionResolver.ResolveAsync(tenantIdToUse, ct);
+                    await using var tenantConn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+
+                    var appDetails = (await tenantConn.QueryAsync<(long Id, Guid PublicId, string Name)>(
+                        new CommandDefinition(GetAppDetailsByIdsSql, new { distinctAppIds }, cancellationToken: ct)
+                    )).ToDictionary(a => a.Id, a => (a.PublicId, a.Name));
+
+                    var groupedRestrictions = restrictions.GroupBy(r => r.UserTokenId);
+
+                    foreach (var rowId in restrictedIds)
+                    {
+                        var userTokenRestrictions = groupedRestrictions.FirstOrDefault(g => g.Key == rowId);
+                        if (userTokenRestrictions != null)
+                        {
+                            var publicIds = new List<Guid>();
+                            var names = new List<string>();
+                            foreach (var r in userTokenRestrictions)
+                            {
+                                if (appDetails.TryGetValue(r.AppId, out var appInfo))
+                                {
+                                    publicIds.Add(appInfo.PublicId);
+                                    if (!string.IsNullOrWhiteSpace(appInfo.Name))
+                                    {
+                                        names.Add(appInfo.Name);
+                                    }
+                                }
+                            }
+                            allowedAppsMap[rowId] = (publicIds, names);
+                        }
+                    }
+                }
+            }
+        }
+
+        var dtoList = new List<AdminUserTokenDto>();
+        foreach (var row in dbRows)
+        {
+            var (allowedApps, allowedAppNames) = row.AccessAllApps 
+                ? (Enumerable.Empty<Guid>(), Enumerable.Empty<string>())
+                : allowedAppsMap.TryGetValue(row.Id, out var appDetails) 
+                    ? appDetails 
+                    : (Enumerable.Empty<Guid>(), Enumerable.Empty<string>());
+
+            dtoList.Add(new AdminUserTokenDto
+            {
+                PublicId = row.PublicId,
+                TokenName = row.TokenName,
+                Description = row.Description,
+                TokenPrefix = MaskTokenPrefix(row.TokenPrefix),
+                IsActive = row.IsActive,
+                AccessAllApps = row.AccessAllApps,
+                CreatedAt = row.CreatedAt,
+                LastUsedAt = row.LastUsedAt,
+                AllowedAppPublicIds = allowedApps,
+                AllowedAppNames = allowedAppNames,
+                UserId = row.UserId,
+                OwnerName = row.OwnerName ?? string.Empty,
+                OwnerEmail = row.OwnerEmail ?? string.Empty
+            });
+        }
+
+        return (dtoList, totalCount);
     }
 
     private const string GetExistingPublicIdsSql = @"
@@ -290,6 +406,22 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
     {
         public Guid PublicId { get; set; }
         public string Name { get; set; } = string.Empty;
+    }
+
+    private class AdminUserTokenDbRow
+    {
+        public long Id { get; set; }
+        public Guid PublicId { get; set; }
+        public long UserId { get; set; }
+        public string TokenName { get; set; } = string.Empty;
+        public string? Description { get; set; }
+        public string TokenPrefix { get; set; } = string.Empty;
+        public bool IsActive { get; set; }
+        public bool AccessAllApps { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime? LastUsedAt { get; set; }
+        public string OwnerName { get; set; } = string.Empty;
+        public string OwnerEmail { get; set; } = string.Empty;
     }
 }
 
