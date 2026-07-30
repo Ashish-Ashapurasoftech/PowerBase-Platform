@@ -20,7 +20,7 @@ public class ParentDeleteGuardTests
         var rels = new List<Relationship> { new() { ChildTableId = 77, ReferenceFid = 10 } };
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Invoice Item" });
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Count", null,
-                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<object, object?> { [1L] = 2 });
 
         var act = () => ParentDeleteGuard.EnsureNotReferencedAsync(parent, rels, new[] { 1L }, _tableRepo, _fieldRepo, _recordRepo, default);
@@ -35,7 +35,7 @@ public class ParentDeleteGuardTests
         var rels = new List<Relationship> { new() { ChildTableId = 77, ReferenceFid = 10 } };
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Invoice Item" });
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Count", null,
-                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<CancellationToken>())
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<object, object?>());
 
         var act = () => ParentDeleteGuard.EnsureNotReferencedAsync(parent, rels, new[] { 1L }, _tableRepo, _fieldRepo, _recordRepo, default);

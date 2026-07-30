@@ -62,6 +62,19 @@ public class PblValidator
     public static bool IsCreatableFieldType(string typeCode) =>
         SupportedFieldTypeCodes.Contains(typeCode) || string.Equals(typeCode, FormulaTypeCode, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Every table gets these fields auto-seeded by <c>IAppSeeder</c> (see
+    /// <c>AppSeeder.cs</c>'s <c>systemFieldDefs</c>) regardless of what's declared in this PBL
+    /// document's own Fields list — a report column, form element, or form rule condition can
+    /// validly reference one of these even though it's never a standalone PblField entry.</summary>
+    private static readonly string[] ImplicitSystemFieldNames =
+    [
+        "Record ID#",
+        "Date Created",
+        "Date Modified",
+        "Record Owner",
+        "Last Modified By",
+    ];
+
     public PblValidationResult Validate(PblDocument document)
     {
         var issues = new List<PblIssue>();
@@ -72,7 +85,13 @@ public class PblValidator
             return new PblValidationResult { Issues = issues };
         }
 
-        var seenRefs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Ordinal, not OrdinalIgnoreCase: a LogicalRef is an internal identifier, not a
+        // human-facing name, and QBL-derived refs are literal YAML resource keys — Quickbase's
+        // own auto-naming can legitimately produce two distinct keys differing only in case
+        // (confirmed real: "$Field_Other_Reason_for_release_of" and
+        // "$Field_Other_reason_for_release_of" are two different fields — a Checkbox and its
+        // companion Text field). Case-insensitive comparison collided them as duplicates.
+        var seenRefs = new HashSet<string>(StringComparer.Ordinal);
 
         ValidateRef(document.App.LogicalRef, "App", issues, seenRefs);
         if (string.IsNullOrWhiteSpace(document.App.Name))
@@ -103,7 +122,10 @@ public class PblValidator
             else if (!seenTableNames.Add(table.Name))
                 issues.Add(Error("DUPLICATE_TABLE_NAME", $"Table name '{table.Name}' is used more than once.", table.LogicalRef));
 
-            fieldNamesByTableRef[table.LogicalRef] = ValidateFields(table, issues, seenRefs);
+            var tableFieldNames = ValidateFields(table, issues, seenRefs);
+            foreach (var systemFieldName in ImplicitSystemFieldNames)
+                tableFieldNames.Add(systemFieldName);
+            fieldNamesByTableRef[table.LogicalRef] = tableFieldNames;
         }
 
         // A relationship's Lookup/Summary can reference a field created by a *different*

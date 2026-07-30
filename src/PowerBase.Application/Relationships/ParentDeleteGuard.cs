@@ -40,7 +40,7 @@ public static class ParentDeleteGuard
         {
             var childTable = await tableRepo.GetByIdAsync(rel.ChildTableId, ct);
             var counts = await recordRepo.AggregateByReferenceAsync(
-                childTable, rel.ReferenceFid, SummaryFunctions.Count, targetFid: null, parentKeyValues, filterTree: null, ct);
+                childTable, rel.ReferenceFid, SummaryFunctions.Count, targetFid: null, parentKeyValues, filterTree: null, ct: ct);
             long total = counts.Values.Sum(v => v is null ? 0L : Convert.ToInt64(v));
             if (total > 0)
                 throw new ConflictException(
