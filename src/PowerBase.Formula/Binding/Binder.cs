@@ -35,7 +35,12 @@ public static class Binder
             case FunctionCallExpr c:
                 foreach (var arg in c.Args) Walk(arg, schema, diagnostics, fids);
                 break;
-            // LiteralExpr, ErrorExpr: nothing to bind.
+            case LetExpr l:
+                foreach (var decl in l.Declarations) Walk(decl.Value, schema, diagnostics, fids);
+                Walk(l.Body, schema, diagnostics, fids);
+                break;
+            // LiteralExpr, VariableRefExpr, ErrorExpr: nothing to bind — a variable resolves
+            // against the formula's own declarations in the type checker, not the field schema.
         }
     }
 

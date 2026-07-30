@@ -213,7 +213,7 @@ public sealed class FormulaProjector : IFormulaProjector
     {
         UtcNow = DateTime.UtcNow,
         CurrentUser = _queryContext.UserId > 0
-            ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
+            ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail, _queryContext.UserName)
             : null,
         // AppID()/Dbid() surface route-usable identifiers (publicIds), so URL-formula fields can
         // build links like /app/{AppId}/tables/{Dbid()}/records/new. Blocking here matches the
