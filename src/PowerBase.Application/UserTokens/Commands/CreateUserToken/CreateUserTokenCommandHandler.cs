@@ -23,7 +23,7 @@ public class CreateUserTokenCommandHandler
         
         using var sha256 = SHA256.Create();
         var tokenHash = Convert.ToHexString(sha256.ComputeHash(Encoding.UTF8.GetBytes(rawSecret))).ToLowerInvariant();
-        var tokenPrefix = rawSecret.Substring(0, 10) + "...";
+        var tokenPrefix = rawSecret.Substring(0, 16);
 
         var userToken = new UserToken
         {
@@ -42,7 +42,7 @@ public class CreateUserTokenCommandHandler
         var createdToken = await _userTokenRepository.CreateAsync(userToken, command.AllowedAppPublicIds, cancellationToken);
         var allowedAppPublicIds = command.AccessAllApps 
             ? Enumerable.Empty<Guid>() 
-            : await _userTokenRepository.GetAllowedAppPublicIdsAsync(createdToken.Id, cancellationToken);
+            : await _userTokenRepository.GetAllowedAppPublicIdsAsync(createdToken.Id, createdToken.TenantId, cancellationToken);
 
         return new UserTokenCreatedDto
         {

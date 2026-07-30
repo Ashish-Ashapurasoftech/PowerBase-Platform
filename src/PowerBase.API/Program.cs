@@ -223,6 +223,7 @@ builder.Services.AddScoped<IFormRuleRepository, FormRuleRepository>();
 builder.Services.AddScoped<IRelationshipRepository, RelationshipRepository>();
 builder.Services.AddScoped<IAdminRepository, AdminRepository>();
 builder.Services.AddScoped<IUserTokenRepository, UserTokenRepository>();
+builder.Services.AddScoped<IAppTokenRepository, AppTokenRepository>();
 
 // Handlers
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.CreateUserToken.CreateUserTokenCommandHandler>();
@@ -233,6 +234,12 @@ builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.UpdateUserT
 
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.RevokeUserToken.RevokeUserTokenCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.RotateUserToken.RotateUserTokenCommandHandler>();
+
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Commands.CreateAppToken.CreateAppTokenCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Queries.GetAppTokens.GetAppTokensQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Commands.UpdateAppTokenStatus.UpdateAppTokenStatusCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Commands.RotateAppToken.RotateAppTokenCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Commands.DeleteAppToken.DeleteAppTokenCommandHandler>();
 
 builder.Services.AddScoped<SignupCommandHandler>();
 builder.Services.AddScoped<ForgotPasswordCommandHandler>();

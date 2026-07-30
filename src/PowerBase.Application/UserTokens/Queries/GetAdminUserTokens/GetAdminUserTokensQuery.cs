@@ -50,9 +50,9 @@ public class GetAdminUserTokensQueryHandler
 
         foreach (var token in tokens)
         {
-            var allowedApps = token.AccessAllApps 
-                ? Enumerable.Empty<Guid>() 
-                : await _userTokenRepository.GetAllowedAppPublicIdsAsync(token.Id, cancellationToken);
+            var (allowedApps, allowedAppNames) = token.AccessAllApps 
+                ? (Enumerable.Empty<Guid>(), Enumerable.Empty<string>())
+                : await _userTokenRepository.GetAllowedAppDetailsAsync(token.Id, token.TenantId, cancellationToken);
 
             var owner = await _userRepository.GetByIdAsync(token.UserId, cancellationToken);
 
@@ -64,12 +64,13 @@ public class GetAdminUserTokensQueryHandler
                 PublicId = token.PublicId,
                 TokenName = token.TokenName,
                 Description = token.Description,
-                TokenPrefix = tokenMasked,
+                TokenPrefix = token.TokenPrefix,
                 IsActive = token.IsActive,
                 AccessAllApps = token.AccessAllApps,
                 CreatedAt = token.CreatedAt,
                 LastUsedAt = token.LastUsedAt,
                 AllowedAppPublicIds = allowedApps,
+                AllowedAppNames = allowedAppNames,
                 UserId = token.UserId,
                 OwnerName = owner?.Name ?? string.Empty,
                 OwnerEmail = owner?.Email ?? string.Empty

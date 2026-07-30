@@ -9,14 +9,17 @@ namespace PowerBase.Infrastructure.Repositories;
 public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 {
     private readonly ITenantConnectionFactory _tenantConnectionFactory;
+    private readonly ITenantConnectionResolver _tenantConnectionResolver;
 
     public UserTokenRepository(
         IControlConnectionFactory connectionFactory, 
         ITenantConnectionFactory tenantConnectionFactory,
+        ITenantConnectionResolver tenantConnectionResolver,
         IQueryContext queryContext)
         : base(connectionFactory, queryContext)
     {
         _tenantConnectionFactory = tenantConnectionFactory;
+        _tenantConnectionResolver = tenantConnectionResolver;
     }
 
     private const string InsertTokenSql = @"
@@ -99,37 +102,67 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
         }
     }
 
+    private const string GetByPublicIdAdminSql = @"
+        SELECT Id, PublicId, TenantId, UserId, TokenName, Description, TokenHash, TokenPrefix, IsActive, AccessAllApps, CreatedAt, LastUsedAt, IsDeleted, RowVersion
+        FROM core.UserToken
+        WHERE PublicId = @publicId AND IsDeleted = 0;";
+
     public async Task<UserToken?> GetByPublicIdAsync(Guid publicId, long tenantId, CancellationToken ct)
     {
         await using var connection = ConnectionFactory.Create();
+        var sql = tenantId > 0 ? GetByPublicIdSql : GetByPublicIdAdminSql;
         return await connection.QuerySingleOrDefaultAsync<UserToken>(
-            new CommandDefinition(GetByPublicIdSql, new { publicId, tenantId }, cancellationToken: ct)
+            new CommandDefinition(sql, new { publicId, tenantId }, cancellationToken: ct)
         );
     }
 
-    public async Task<IEnumerable<Guid>> GetAllowedAppPublicIdsAsync(long userTokenId, CancellationToken ct)
+    private const string GetAppDetailsByIdSql = @"
+        SELECT PublicId, Name FROM meta.App WHERE Id = @appId AND IsDeleted = 0;";
+
+    public async Task<(IEnumerable<Guid> PublicIds, IEnumerable<string> Names)> GetAllowedAppDetailsAsync(long userTokenId, long? targetTenantId = null, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
         var appIds = await connection.QueryAsync<long>(
             new CommandDefinition(GetAllowedAppIdsSql, new { userTokenId }, cancellationToken: ct)
         );
 
-        if (!appIds.Any()) return Enumerable.Empty<Guid>();
+        if (!appIds.Any()) return (Enumerable.Empty<Guid>(), Enumerable.Empty<string>());
 
-        await using var tenantConn = await _tenantConnectionFactory.CreateAsync(ct);
+        var tenantIdToUse = (targetTenantId.HasValue && targetTenantId.Value > 0) 
+            ? targetTenantId.Value 
+            : QueryContext.TenantId;
+
+        if (tenantIdToUse == 0)
+        {
+            return (Enumerable.Empty<Guid>(), Enumerable.Empty<string>());
+        }
+
+        var connStr = await _tenantConnectionResolver.ResolveAsync(tenantIdToUse, ct);
+        await using var tenantConn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
         var publicIds = new List<Guid>();
+        var names = new List<string>();
 
         foreach (var appId in appIds)
         {
-            var publicId = await tenantConn.QuerySingleOrDefaultAsync<Guid?>(
-                new CommandDefinition(GetAppPublicIdByIdSql, new { appId }, cancellationToken: ct)
+            var appDetail = await tenantConn.QuerySingleOrDefaultAsync<AppDetailDto>(
+                new CommandDefinition(GetAppDetailsByIdSql, new { appId }, cancellationToken: ct)
             );
-            if (publicId.HasValue)
+            if (appDetail != null)
             {
-                publicIds.Add(publicId.Value);
+                publicIds.Add(appDetail.PublicId);
+                if (!string.IsNullOrWhiteSpace(appDetail.Name))
+                {
+                    names.Add(appDetail.Name);
+                }
             }
         }
 
+        return (publicIds, names);
+    }
+
+    public async Task<IEnumerable<Guid>> GetAllowedAppPublicIdsAsync(long userTokenId, long? targetTenantId = null, CancellationToken ct = default)
+    {
+        var (publicIds, _) = await GetAllowedAppDetailsAsync(userTokenId, targetTenantId, ct);
         return publicIds;
     }
 
@@ -151,9 +184,15 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
     {
         await using var connection = ConnectionFactory.Create();
 
-        var whereClause = "WHERE ut.TenantId = @tenantId AND ut.IsDeleted = 0";
+        var whereClause = tenantId > 0 
+            ? "WHERE ut.TenantId = @tenantId AND ut.IsDeleted = 0" 
+            : "WHERE ut.IsDeleted = 0";
+
         var parameters = new DynamicParameters();
-        parameters.Add("tenantId", tenantId);
+        if (tenantId > 0)
+        {
+            parameters.Add("tenantId", tenantId);
+        }
         parameters.Add("offset", (page - 1) * pageSize);
         parameters.Add("pageSize", pageSize);
 
@@ -188,20 +227,32 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
         FROM core.UserToken
         WHERE PublicId IN @publicIds AND TenantId = @tenantId AND IsDeleted = 0;";
 
+    private const string GetExistingPublicIdsAdminSql = @"
+        SELECT PublicId
+        FROM core.UserToken
+        WHERE PublicId IN @publicIds AND IsDeleted = 0;";
+
     public async Task<IEnumerable<Guid>> GetExistingPublicIdsAsync(IEnumerable<Guid> publicIds, long tenantId, CancellationToken ct)
     {
         if (publicIds == null || !publicIds.Any()) return Enumerable.Empty<Guid>();
         await using var connection = ConnectionFactory.Create();
+        var sql = tenantId > 0 ? GetExistingPublicIdsSql : GetExistingPublicIdsAdminSql;
         return await connection.QueryAsync<Guid>(
-            new CommandDefinition(GetExistingPublicIdsSql, new { publicIds, tenantId }, cancellationToken: ct)
+            new CommandDefinition(sql, new { publicIds, tenantId }, cancellationToken: ct)
         );  
     }
+
+    private const string UpdateStatusAdminSql = @"
+        UPDATE core.UserToken
+        SET IsActive = @isActive
+        WHERE PublicId IN @publicIds AND IsDeleted = 0;";
 
     public async Task<bool> UpdateStatusAsync(IEnumerable<Guid> publicIds, long tenantId, bool isActive, CancellationToken ct)
     {
         await using var connection = ConnectionFactory.Create();
+        var sql = tenantId > 0 ? UpdateStatusSql : UpdateStatusAdminSql;
         var rowsAffected = await connection.ExecuteAsync(
-            new CommandDefinition(UpdateStatusSql, new { publicIds, tenantId, isActive }, cancellationToken: ct)
+            new CommandDefinition(sql, new { publicIds, tenantId, isActive }, cancellationToken: ct)
         );
         return rowsAffected > 0;
     }
@@ -211,11 +262,17 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
         SET TokenHash = @newTokenHash, TokenPrefix = @newTokenPrefix
         WHERE Id = @id AND IsDeleted = 0;";
 
+    private const string RevokeAdminSql = @"
+        UPDATE core.UserToken
+        SET IsDeleted = 1
+        WHERE PublicId = @publicId AND IsDeleted = 0;";
+
     public async Task<bool> RevokeAsync(Guid publicId, long tenantId, CancellationToken ct)
     {
         await using var connection = ConnectionFactory.Create();
+        var sql = tenantId > 0 ? RevokeSql : RevokeAdminSql;
         var rowsAffected = await connection.ExecuteAsync(
-            new CommandDefinition(RevokeSql, new { publicId, tenantId }, cancellationToken: ct)
+            new CommandDefinition(sql, new { publicId, tenantId }, cancellationToken: ct)
         );
         return rowsAffected > 0;
     }
@@ -227,6 +284,12 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
             new CommandDefinition(RotateSecretSql, new { id, newTokenHash, newTokenPrefix }, cancellationToken: ct)
         );
         return rowsAffected > 0;
+    }
+
+    private class AppDetailDto
+    {
+        public Guid PublicId { get; set; }
+        public string Name { get; set; } = string.Empty;
     }
 }
 

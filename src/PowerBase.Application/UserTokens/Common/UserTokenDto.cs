@@ -11,6 +11,7 @@ public class UserTokenDto
     public DateTime CreatedAt { get; set; }
     public DateTime? LastUsedAt { get; set; }
     public IEnumerable<Guid> AllowedAppPublicIds { get; set; } = Enumerable.Empty<Guid>();
+    public IEnumerable<string> AllowedAppNames { get; set; } = Enumerable.Empty<string>();
 }
 
 public class AdminUserTokenDto : UserTokenDto

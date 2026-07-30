@@ -34,9 +34,9 @@ public class GetSingleTokenDetailQueryHandler
         var token = await _userTokenRepository.GetByPublicIdAsync(query.TokenId, _queryContext.TenantId, cancellationToken);
         if (token == null) return null;
 
-        var allowedApps = token.AccessAllApps
-            ? Enumerable.Empty<Guid>()
-            : await _userTokenRepository.GetAllowedAppPublicIdsAsync(token.Id, cancellationToken);
+        var allowedApps = token.AccessAllApps 
+            ? Enumerable.Empty<Guid>() 
+            : await _userTokenRepository.GetAllowedAppPublicIdsAsync(token.Id, token.TenantId, cancellationToken);
 
         var owner = await _userRepository.GetByIdAsync(token.UserId, cancellationToken);
 

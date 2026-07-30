@@ -39,7 +39,7 @@ public class RotateUserTokenCommandHandler
 
         var allowedAppPublicIds = existingToken.AccessAllApps 
             ? Enumerable.Empty<Guid>() 
-            : await _userTokenRepository.GetAllowedAppPublicIdsAsync(existingToken.Id, cancellationToken);
+            : await _userTokenRepository.GetAllowedAppPublicIdsAsync(existingToken.Id, existingToken.TenantId, cancellationToken);
 
         return new UserTokenCreatedDto
         {

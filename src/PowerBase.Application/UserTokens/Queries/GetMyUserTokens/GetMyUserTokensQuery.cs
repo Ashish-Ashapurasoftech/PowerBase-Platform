@@ -27,7 +27,7 @@ public class GetMyUserTokensQueryHandler
         {
             var allowedApps = token.AccessAllApps 
                 ? Enumerable.Empty<Guid>() 
-                : await _userTokenRepository.GetAllowedAppPublicIdsAsync(token.Id, cancellationToken);
+                : await _userTokenRepository.GetAllowedAppPublicIdsAsync(token.Id, token.TenantId, cancellationToken);
 
             resultList.Add(new UserTokenDto
             {
