@@ -104,6 +104,7 @@ public class CreateAppCommandHandler
                 PermissionCodes.RecordsCreate, PermissionCodes.RecordsRead, PermissionCodes.RecordsUpdate, PermissionCodes.RecordsDelete,
                 PermissionCodes.ReportsCreate, PermissionCodes.ReportsRead, PermissionCodes.ReportsUpdate, PermissionCodes.ReportsDelete, PermissionCodes.ReportsRun,
                 PermissionCodes.FormsCreate, PermissionCodes.FormsRead, PermissionCodes.FormsUpdate, PermissionCodes.FormsDelete, PermissionCodes.FormsRulesManage,
+                PermissionCodes.PagesCreate, PermissionCodes.PagesRead, PermissionCodes.PagesUpdate, PermissionCodes.PagesDelete, PermissionCodes.PagesPublish, PermissionCodes.PagesCode,
                 PermissionCodes.UsersInvite, PermissionCodes.UsersManage, PermissionCodes.RolesManage,
                 PermissionCodes.AuditLogsRead,PermissionCodes.AuditLogsReadOfStream,
             }, _uow.Transaction, ct);
@@ -122,7 +123,8 @@ public class CreateAppCommandHandler
                 PermissionCodes.FieldsCreate, PermissionCodes.FieldsRead,
                 PermissionCodes.RecordsCreate, PermissionCodes.RecordsRead,
                 PermissionCodes.ReportsCreate, PermissionCodes.ReportsRead, PermissionCodes.ReportsRun,
-                PermissionCodes.FormsRead
+                PermissionCodes.FormsRead,
+                PermissionCodes.PagesRead,
             }, _uow.Transaction, ct);
 
             var (viewerRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
@@ -138,7 +140,8 @@ public class CreateAppCommandHandler
                 PermissionCodes.TablesRead, PermissionCodes.FieldsRead,
                 PermissionCodes.RecordsRead,
                 PermissionCodes.ReportsRead, PermissionCodes.ReportsRun,
-                PermissionCodes.FormsRead
+                PermissionCodes.FormsRead,
+                PermissionCodes.PagesRead,
             }, _uow.Transaction, ct);
 
             await _appRepo.SetDefaultRoleAsync(appId, viewerRoleId, _uow.Transaction, ct);

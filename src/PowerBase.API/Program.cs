@@ -203,6 +203,19 @@ builder.Services.AddScoped<PowerBase.Application.Records.Commands.InvokeButtonAc
     PowerBase.Application.Records.Commands.InvokeButtonAction.ActionButtonValueResolver>();
 builder.Services.AddScoped<PowerBase.Application.Records.Commands.InvokeButtonAction.InvokeButtonActionCommandHandler>();
 
+// Pages (shared layer — Phase 1)
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.CreatePage.CreatePageCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.UpdatePage.UpdatePageCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.DeletePages.DeletePagesCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.DuplicatePage.DuplicatePageCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.PublishPage.PublishPageCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.RestorePageVersion.RestorePageVersionCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListPages.ListPagesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.GetPage.GetPageQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListPageVersions.ListPageVersionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.RenderPage.RenderPageQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.SetDefaultHome.SetDefaultHomeCommandHandler>();
+
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
 builder.Services.AddScoped<IAppVariableRepository, AppVariableRepository>();
@@ -224,6 +237,7 @@ builder.Services.AddScoped<IFormRepository, FormRepository>();
 builder.Services.AddScoped<IFormRuleRepository, FormRuleRepository>();
 builder.Services.AddScoped<IRelationshipRepository, RelationshipRepository>();
 builder.Services.AddScoped<IAdminRepository, AdminRepository>();
+builder.Services.AddScoped<IPageRepository, PageRepository>();
 
 // Handlers
 builder.Services.AddScoped<SignupCommandHandler>();

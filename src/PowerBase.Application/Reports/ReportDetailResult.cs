@@ -11,6 +11,10 @@ public class ReportDetailResult
     public bool IsDefault { get; init; }
     public int DisplayOrder { get; init; }
     public Guid? ViewEditFormId { get; init; }
+    /// <summary>Owning table, so callers listing an app's reports can group them by table
+    /// without a follow-up request per table.</summary>
+    public Guid TableId { get; init; }
+    public string TableName { get; init; } = string.Empty;
     public DateTime CreatedOn { get; init; }
     public List<Guid> VisibleToRoleIds { get; init; } = [];
 }
