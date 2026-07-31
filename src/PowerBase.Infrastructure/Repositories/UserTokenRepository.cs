@@ -270,29 +270,38 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
 
             if (restrictions.Count > 0)
             {
-                var tenantIdToUse = tenantId > 0 ? tenantId : QueryContext.TenantId;
-                if (tenantIdToUse > 0)
+                var tokenTenantMap = dbRows.ToDictionary(r => r.Id, r => r.TenantId);
+
+                var restrictionsWithTenant = restrictions
+                    .Select(r => new { r.UserTokenId, r.AppId, TenantId = tokenTenantMap.TryGetValue(r.UserTokenId, out var tId) ? tId : 0 })
+                    .Where(x => x.TenantId > 0)
+                    .GroupBy(x => x.TenantId);
+
+                foreach (var tenantGroup in restrictionsWithTenant)
                 {
-                    var distinctAppIds = restrictions.Select(r => r.AppId).Distinct().ToList();
-                    var connStr = await _tenantConnectionResolver.ResolveAsync(tenantIdToUse, ct);
-                    await using var tenantConn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+                    var currentTenantId = tenantGroup.Key;
+                    var distinctAppIds = tenantGroup.Select(x => x.AppId).Distinct().ToList();
 
-                    var appDetails = (await tenantConn.QueryAsync<(long Id, Guid PublicId, string Name)>(
-                        new CommandDefinition(GetAppDetailsByIdsSql, new { distinctAppIds }, cancellationToken: ct)
-                    )).ToDictionary(a => a.Id, a => (a.PublicId, a.Name));
-
-                    var groupedRestrictions = restrictions.GroupBy(r => r.UserTokenId);
-
-                    foreach (var rowId in restrictedIds)
+                    try
                     {
-                        var userTokenRestrictions = groupedRestrictions.FirstOrDefault(g => g.Key == rowId);
-                        if (userTokenRestrictions != null)
+                        var connStr = await _tenantConnectionResolver.ResolveAsync(currentTenantId, ct);
+                        await using var tenantConn = new Microsoft.Data.SqlClient.SqlConnection(connStr);
+
+                        var appDetails = (await tenantConn.QueryAsync<(long Id, Guid PublicId, string Name)>(
+                            new CommandDefinition(GetAppDetailsByIdsSql, new { distinctAppIds }, cancellationToken: ct)
+                        )).ToDictionary(a => a.Id, a => (a.PublicId, a.Name));
+
+                        var groupedByToken = tenantGroup.GroupBy(x => x.UserTokenId);
+
+                        foreach (var tokenGroup in groupedByToken)
                         {
+                            var userTokenId = tokenGroup.Key;
                             var publicIds = new List<Guid>();
                             var names = new List<string>();
-                            foreach (var r in userTokenRestrictions)
+
+                            foreach (var item in tokenGroup)
                             {
-                                if (appDetails.TryGetValue(r.AppId, out var appInfo))
+                                if (appDetails.TryGetValue(item.AppId, out var appInfo))
                                 {
                                     publicIds.Add(appInfo.PublicId);
                                     if (!string.IsNullOrWhiteSpace(appInfo.Name))
@@ -301,8 +310,12 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
                                     }
                                 }
                             }
-                            allowedAppsMap[rowId] = (publicIds, names);
+                            allowedAppsMap[userTokenId] = (publicIds, names);
                         }
+                    }
+                    catch
+                    {
+                        // Ignore individual tenant failure to allow other tenants to process successfully
                     }
                 }
             }
@@ -438,6 +451,7 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
     {
         public long Id { get; set; }
         public Guid PublicId { get; set; }
+        public long TenantId { get; set; }
         public long UserId { get; set; }
         public string TokenName { get; set; } = string.Empty;
         public string? Description { get; set; }
