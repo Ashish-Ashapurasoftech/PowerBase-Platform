@@ -402,6 +402,32 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
         return rowsAffected > 0;
     }
 
+    private const string GetByHashSql = @"
+        SELECT Id, PublicId, TenantId, UserId, TokenName, Description, TokenHash, TokenPrefix, IsActive, AccessAllApps, CreatedAt, LastUsedAt, IsDeleted, RowVersion
+        FROM core.UserToken
+        WHERE TokenHash = @hash AND IsActive = 1 AND IsDeleted = 0;";
+
+    private const string UpdateLastUsedAtSql = @"
+        UPDATE core.UserToken
+        SET LastUsedAt = SYSUTCDATETIME()
+        WHERE Id = @id;";
+
+    public async Task<UserToken?> GetByHashAsync(string hash, CancellationToken ct)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<UserToken>(
+            new CommandDefinition(GetByHashSql, new { hash }, cancellationToken: ct)
+        );
+    }
+
+    public async Task UpdateLastUsedAtAsync(long id, CancellationToken ct)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateLastUsedAtSql, new { id }, cancellationToken: ct)
+        );
+    }
+
     private class AppDetailDto
     {
         public Guid PublicId { get; set; }

@@ -69,7 +69,7 @@ public class UserTokenQueryHandlerTests
             TenantId = 500,
             UserId = 1001,
             TokenName = "Single Token",
-            TokenPrefix = "pb_ut_1234...",
+            TokenPrefix = "pb_ut_1234567890",
             AccessAllApps = true,
             IsActive = true
         };
@@ -87,6 +87,7 @@ public class UserTokenQueryHandlerTests
         Assert.NotNull(result);
         Assert.Equal("Single Token", result!.TokenName);
         Assert.Equal(publicId, result.PublicId);
+        Assert.Equal("pb_u************7890", result.TokenPrefix);
     }
 
     [Fact]

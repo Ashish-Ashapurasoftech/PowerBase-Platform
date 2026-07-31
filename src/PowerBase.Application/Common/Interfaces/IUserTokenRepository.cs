@@ -15,4 +15,6 @@ public interface IUserTokenRepository
     Task<bool> UpdateStatusAsync(IEnumerable<Guid> publicIds, long tenantId, bool isActive, CancellationToken ct);
     Task<bool> RevokeAsync(Guid publicId, long tenantId, CancellationToken ct);
     Task<bool> RotateSecretAsync(long id, string newTokenHash, string newTokenPrefix, CancellationToken ct);
+    Task<UserToken?> GetByHashAsync(string hash, CancellationToken ct);
+    Task UpdateLastUsedAtAsync(long id, CancellationToken ct);
 }

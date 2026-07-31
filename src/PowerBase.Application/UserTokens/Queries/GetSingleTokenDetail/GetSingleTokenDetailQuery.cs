@@ -40,8 +40,10 @@ public class GetSingleTokenDetailQueryHandler
 
         var owner = await _userRepository.GetByIdAsync(token.UserId, cancellationToken);
 
-        var first4 = token.TokenPrefix.Length >= 4 ? token.TokenPrefix.Substring(0, 4) : token.TokenPrefix;
-        var maskedToken = $"{first4}************";
+        var cleanPrefix = token.TokenPrefix.Replace("...", "");
+        var maskedToken = cleanPrefix.Length >= 8
+            ? $"{cleanPrefix.Substring(0, 4)}************{cleanPrefix.Substring(cleanPrefix.Length - 4, 4)}"
+            : $"{token.TokenPrefix}************";
 
         return new AdminUserTokenDto
         {
