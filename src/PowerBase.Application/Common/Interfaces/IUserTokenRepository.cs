@@ -17,4 +17,5 @@ public interface IUserTokenRepository
     Task<bool> RotateSecretAsync(long id, string newTokenHash, string newTokenPrefix, CancellationToken ct);
     Task<UserToken?> GetByHashAsync(string hash, CancellationToken ct);
     Task UpdateLastUsedAtAsync(long id, CancellationToken ct);
+    Task<bool> UpdateDetailsAsync(long id, string tokenName, string? description, bool accessAllApps, IEnumerable<Guid>? allowedAppPublicIds, CancellationToken ct);
 }

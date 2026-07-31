@@ -231,6 +231,7 @@ builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetMyUserTok
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetAdminUserTokens.GetAdminUserTokensQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetSingleTokenDetail.GetSingleTokenDetailQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.UpdateUserTokenStatus.UpdateUserTokenStatusCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.UpdateUserToken.UpdateUserTokenCommandHandler>();
 
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.RevokeUserToken.RevokeUserTokenCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.RotateUserToken.RotateUserTokenCommandHandler>();

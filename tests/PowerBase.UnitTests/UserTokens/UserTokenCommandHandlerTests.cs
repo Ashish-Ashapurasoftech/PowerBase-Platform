@@ -2,6 +2,7 @@ using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.UserTokens.Commands.RevokeUserToken;
 using PowerBase.Application.UserTokens.Commands.RotateUserToken;
+using PowerBase.Application.UserTokens.Commands.UpdateUserToken;
 using PowerBase.Application.UserTokens.Commands.UpdateUserTokenStatus;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -135,6 +136,81 @@ public class UserTokenCommandHandlerTests
         // Assert
         Assert.True(result);
         await _userTokenRepository.Received(1).RevokeAsync(publicId, 500, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task UpdateToken_ValidToken_UpdatesSuccessfully()
+    {
+        // Arrange
+        var publicId = Guid.NewGuid();
+        var existingToken = new UserToken
+        {
+            Id = 123,
+            PublicId = publicId,
+            TenantId = 500,
+            UserId = 1001,
+            TokenName = "Old Token Name",
+            Description = "Old Description",
+            IsActive = true,
+            AccessAllApps = true
+        };
+
+        var allowedAppPublicIds = new List<Guid> { Guid.NewGuid() };
+
+        _userTokenRepository.GetByPublicIdAsync(publicId, 500, Arg.Any<CancellationToken>())
+            .Returns(existingToken);
+
+        _userTokenRepository.UpdateDetailsAsync(
+            123,
+            "New Token Name",
+            "New Description",
+            false,
+            allowedAppPublicIds,
+            Arg.Any<CancellationToken>()
+        ).Returns(true);
+
+        var handler = new UpdateUserTokenCommandHandler(_userTokenRepository, _queryContext);
+        var command = new UpdateUserTokenCommand
+        {
+            PublicId = publicId,
+            TokenName = "New Token Name",
+            Description = "New Description",
+            AccessAllApps = false,
+            AllowedAppPublicIds = allowedAppPublicIds
+        };
+
+        // Act
+        var result = await handler.HandleAsync(command, CancellationToken.None);
+
+        // Assert
+        Assert.True(result);
+        await _userTokenRepository.Received(1).UpdateDetailsAsync(
+            123,
+            "New Token Name",
+            "New Description",
+            false,
+            allowedAppPublicIds,
+            Arg.Any<CancellationToken>()
+        );
+    }
+
+    [Fact]
+    public async Task UpdateToken_NonExistingToken_ThrowsNotFoundException()
+    {
+        // Arrange
+        var publicId = Guid.NewGuid();
+        _userTokenRepository.GetByPublicIdAsync(publicId, 500, Arg.Any<CancellationToken>())
+            .Returns((UserToken?)null);
+
+        var handler = new UpdateUserTokenCommandHandler(_userTokenRepository, _queryContext);
+        var command = new UpdateUserTokenCommand
+        {
+            PublicId = publicId,
+            TokenName = "New Token Name"
+        };
+
+        // Act & Assert
+        await Assert.ThrowsAsync<NotFoundException>(() => handler.HandleAsync(command, CancellationToken.None));
     }
 }
 

@@ -23,7 +23,6 @@ public class CreateUserTokenCommandHandler
         
         using var sha256 = SHA256.Create();
         var tokenHash = Convert.ToHexString(sha256.ComputeHash(Encoding.UTF8.GetBytes(rawSecret))).ToLowerInvariant();
-        var tokenPrefix = rawSecret.Substring(0, 16);
 
         var userToken = new UserToken
         {
@@ -33,7 +32,7 @@ public class CreateUserTokenCommandHandler
             TokenName = command.TokenName,
             Description = command.Description,
             TokenHash = tokenHash,
-            TokenPrefix = tokenPrefix,
+            TokenPrefix = rawSecret,
             IsActive = true,
             AccessAllApps = command.AccessAllApps,
             CreatedAt = DateTime.UtcNow

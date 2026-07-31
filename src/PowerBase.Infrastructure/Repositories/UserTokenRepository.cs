@@ -441,6 +441,68 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
         );
     }
 
+    private const string UpdateDetailsSql = @"
+        UPDATE core.UserToken
+        SET TokenName = @tokenName,
+            Description = @description,
+            AccessAllApps = @accessAllApps
+        WHERE Id = @id;";
+
+    private const string DeleteAppRestrictionsSql = @"
+        DELETE FROM core.UserTokenAppRestriction WHERE UserTokenId = @userTokenId;";
+
+    public async Task<bool> UpdateDetailsAsync(long id, string tokenName, string? description, bool accessAllApps, IEnumerable<Guid>? allowedAppPublicIds, CancellationToken ct)
+    {
+        await using var connection = ConnectionFactory.Create();
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+
+        try
+        {
+            var rowsAffected = await connection.ExecuteAsync(
+                new CommandDefinition(UpdateDetailsSql, new { id, tokenName, description, accessAllApps }, transaction: transaction, cancellationToken: ct)
+            );
+
+            if (rowsAffected == 0)
+            {
+                transaction.Rollback();
+                return false;
+            }
+
+            // Always clear existing restrictions
+            await connection.ExecuteAsync(
+                new CommandDefinition(DeleteAppRestrictionsSql, new { userTokenId = id }, transaction: transaction, cancellationToken: ct)
+            );
+
+            if (!accessAllApps && allowedAppPublicIds != null && allowedAppPublicIds.Any())
+            {
+                await using var tenantConn = await _tenantConnectionFactory.CreateAsync(ct);
+                
+                foreach (var appPublicId in allowedAppPublicIds)
+                {
+                    var appId = await tenantConn.QuerySingleOrDefaultAsync<long?>(
+                        new CommandDefinition(GetAppIdByPublicIdSql, new { appPublicId }, cancellationToken: ct)
+                    );
+
+                    if (appId.HasValue)
+                    {
+                        await connection.ExecuteAsync(
+                            new CommandDefinition(InsertAppRestrictionSql, new { userTokenId = id, appId = appId.Value }, transaction: transaction, cancellationToken: ct)
+                        );
+                    }
+                }
+            }
+
+            transaction.Commit();
+            return true;
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
+        }
+    }
+
     private class AppDetailDto
     {
         public Guid PublicId { get; set; }

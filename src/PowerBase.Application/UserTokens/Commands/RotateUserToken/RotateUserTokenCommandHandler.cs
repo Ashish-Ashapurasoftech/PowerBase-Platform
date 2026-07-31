@@ -29,9 +29,8 @@ public class RotateUserTokenCommandHandler
         
         using var sha256 = SHA256.Create();
         var tokenHash = Convert.ToHexString(sha256.ComputeHash(Encoding.UTF8.GetBytes(rawSecret))).ToLowerInvariant();
-        var tokenPrefix = rawSecret.Substring(0, 10) + "...";
 
-        var rotated = await _userTokenRepository.RotateSecretAsync(existingToken.Id, tokenHash, tokenPrefix, cancellationToken);
+        var rotated = await _userTokenRepository.RotateSecretAsync(existingToken.Id, tokenHash, rawSecret, cancellationToken);
         if (!rotated)
         {
             throw new Exception("Failed to rotate user token.");
@@ -46,7 +45,7 @@ public class RotateUserTokenCommandHandler
             PublicId = existingToken.PublicId,
             TokenName = existingToken.TokenName,
             Description = existingToken.Description,
-            TokenPrefix = tokenPrefix,
+            TokenPrefix = rawSecret,
             IsActive = existingToken.IsActive,
             AccessAllApps = existingToken.AccessAllApps,
             CreatedAt = existingToken.CreatedAt,

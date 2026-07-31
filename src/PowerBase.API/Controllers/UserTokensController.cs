@@ -4,6 +4,7 @@ using PowerBase.API.Models.UserTokens;
 using PowerBase.Application.UserTokens.Commands.CreateUserToken;
 using PowerBase.Application.UserTokens.Commands.RevokeUserToken;
 using PowerBase.Application.UserTokens.Commands.RotateUserToken;
+using PowerBase.Application.UserTokens.Commands.UpdateUserToken;
 using PowerBase.Application.UserTokens.Queries.GetMyUserTokens;
 
 namespace PowerBase.API.Controllers;
@@ -17,17 +18,20 @@ public class UserTokensController : ControllerBase
     private readonly GetMyUserTokensQueryHandler _getMyTokensHandler;
     private readonly RevokeUserTokenCommandHandler _revokeHandler;
     private readonly RotateUserTokenCommandHandler _rotateHandler;
+    private readonly UpdateUserTokenCommandHandler _updateHandler;
 
     public UserTokensController(
         CreateUserTokenCommandHandler createHandler,
         GetMyUserTokensQueryHandler getMyTokensHandler,
         RevokeUserTokenCommandHandler revokeHandler,
-        RotateUserTokenCommandHandler rotateHandler)
+        RotateUserTokenCommandHandler rotateHandler,
+        UpdateUserTokenCommandHandler updateHandler)
     {
         _createHandler = createHandler;
         _getMyTokensHandler = getMyTokensHandler;
         _revokeHandler = revokeHandler;
         _rotateHandler = rotateHandler;
+        _updateHandler = updateHandler;
     }
 
     /// <summary>Create a User Token (Self-service, permission-gated)</summary>
@@ -69,6 +73,22 @@ public class UserTokensController : ControllerBase
     {
         var command = new RevokeUserTokenCommand(publicId);
         var result = await _revokeHandler.HandleAsync(command, ct);
+        return Ok(new { data = result });
+    }
+
+    [HttpPut("{publicId:guid}")]
+    public async Task<IActionResult> UpdateToken([FromRoute] Guid publicId, [FromBody] UpdateUserTokenRequest request, CancellationToken ct)
+    {
+        var command = new UpdateUserTokenCommand
+        {
+            PublicId = publicId,
+            TokenName = request.TokenName,
+            Description = request.Description,
+            AccessAllApps = request.AccessAllApps,
+            AllowedAppPublicIds = request.AllowedAppPublicIds
+        };
+
+        var result = await _updateHandler.HandleAsync(command, ct);
         return Ok(new { data = result });
     }
 }
