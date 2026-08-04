@@ -1,4 +1,9 @@
 using PowerBase.API.Middleware;
+using PowerBase.Application.Groups.Commands.CreateGroup;
+using PowerBase.Application.Groups.Commands.DeleteGroup;
+using PowerBase.Application.Groups.Commands.UpdateGroup;
+using PowerBase.Application.Groups.Queries.GetGroup;
+using PowerBase.Application.Groups.Queries.ListGroups;
 using PowerBase.Application.Apps.Commands.AddAppUser;
 using PowerBase.Application.Apps.Commands.ChangeAppUserRole;
 using PowerBase.Application.Apps.Commands.CreateApp;
@@ -224,6 +229,7 @@ builder.Services.AddScoped<IRelationshipRepository, RelationshipRepository>();
 builder.Services.AddScoped<IAdminRepository, AdminRepository>();
 builder.Services.AddScoped<IUserTokenRepository, UserTokenRepository>();
 builder.Services.AddScoped<IAppTokenRepository, AppTokenRepository>();
+builder.Services.AddScoped<IGroupRepository, GroupRepository>();
 
 // Handlers
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.CreateUserToken.CreateUserTokenCommandHandler>();
@@ -356,6 +362,13 @@ builder.Services.AddScoped<PowerBase.Application.Forms.Queries.GetRoleFormOverri
 builder.Services.AddScoped<PowerBase.Application.Forms.Queries.ResolveForm.ResolveFormQueryHandler>();
 builder.Services.AddScoped<ListFormRulesQueryHandler>();
 builder.Services.AddScoped<GetFormRuleQueryHandler>();
+
+// Groups
+builder.Services.AddScoped<CreateGroupCommandHandler>();
+builder.Services.AddScoped<UpdateGroupCommandHandler>();
+builder.Services.AddScoped<DeleteGroupCommandHandler>();
+builder.Services.AddScoped<ListGroupsQueryHandler>();
+builder.Services.AddScoped<GetGroupQueryHandler>();
 
 var app = builder.Build();
 
