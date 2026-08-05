@@ -4,6 +4,11 @@ using PowerBase.Application.Groups.Commands.DeleteGroup;
 using PowerBase.Application.Groups.Commands.UpdateGroup;
 using PowerBase.Application.Groups.Queries.GetGroup;
 using PowerBase.Application.Groups.Queries.ListGroups;
+using PowerBase.Application.Groups.Commands.AddGroupMembers;
+using PowerBase.Application.Groups.Commands.RemoveGroupMember;
+using PowerBase.Application.Groups.Queries.ListGroupMembers;
+using PowerBase.Application.Groups.Commands.AssignGroupRole;
+using PowerBase.Application.Groups.Queries.GetUserEffectivePermissions;
 using PowerBase.Application.Apps.Commands.AddAppUser;
 using PowerBase.Application.Apps.Commands.ChangeAppUserRole;
 using PowerBase.Application.Apps.Commands.CreateApp;
@@ -369,6 +374,13 @@ builder.Services.AddScoped<UpdateGroupCommandHandler>();
 builder.Services.AddScoped<DeleteGroupCommandHandler>();
 builder.Services.AddScoped<ListGroupsQueryHandler>();
 builder.Services.AddScoped<GetGroupQueryHandler>();
+builder.Services.AddScoped<AddGroupMembersCommandHandler>();
+builder.Services.AddScoped<RemoveGroupMemberCommandHandler>();
+builder.Services.AddScoped<ListGroupMembersQueryHandler>();
+builder.Services.AddScoped<AssignGroupRoleCommandHandler>();
+builder.Services.AddScoped<GetUserEffectivePermissionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Groups.Commands.ShareGroupWithApp.ShareGroupWithAppCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Groups.Commands.UnshareGroupFromApp.UnshareGroupFromAppCommandHandler>();
 
 var app = builder.Build();
 

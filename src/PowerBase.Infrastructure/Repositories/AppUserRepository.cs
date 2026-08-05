@@ -93,6 +93,35 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         JOIN meta.AppRolePermission arp ON arp.AppRoleId = ar.Id
         JOIN meta.Permission p ON p.Id = arp.PermissionId
         WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
+        
+        UNION
+        
+        SELECT p.Code
+        FROM meta.GroupMember gm
+        JOIN meta.[Group] g ON g.Id = gm.GroupId
+        JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+        JOIN meta.AppRole ar ON ar.Id = ga.AppRoleId
+        JOIN meta.AppRolePermission arp ON arp.AppRoleId = ar.Id
+        JOIN meta.Permission p ON p.Id = arp.PermissionId
+        WHERE ga.AppId = @appId 
+          AND gm.UserId = @userId
+          AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+        """;
+
+    private const string GetUserAppRoleIdsSql = """
+        SELECT au.AppRoleId
+        FROM meta.AppUser au
+        WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
+
+        UNION
+
+        SELECT ga.AppRoleId
+        FROM meta.GroupMember gm
+        JOIN meta.[Group] g ON g.Id = gm.GroupId
+        JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+        WHERE ga.AppId = @appId 
+          AND gm.UserId = @userId
+          AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
         """;
 
     private const string RemoveSql = """
@@ -185,5 +214,143 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(RemoveSql, new { appId, userId }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<long>> GetUserAppRoleIdsAsync(long appId, long userId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var result = await connection.QueryAsync<long>(
+            new CommandDefinition(GetUserAppRoleIdsSql, new { appId, userId }, cancellationToken: ct));
+        return result.ToList();
+    }
+
+    public async Task<PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.UserEffectivePermissionsDto> GetUserEffectivePermissionsAsync(Guid userPublicId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+
+        const string GetAppUsersSql = @"
+            SELECT au.Id AS AppUserId, au.AppId, a.PublicId AS AppPublicId, a.Name AS AppName, 
+                   au.UserName, au.UserEmail, au.UserPublicId,
+                   au.AppRoleId AS DirectRoleId, ar.PublicId AS DirectRolePublicId, ar.Name AS DirectRoleName
+              FROM meta.AppUser au
+              INNER JOIN meta.App a ON a.Id = au.AppId
+              LEFT JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+              WHERE au.UserPublicId = @userPublicId AND au.IsDeleted = 0 AND a.IsDeleted = 0
+              
+            UNION
+            
+            SELECT NULL AS AppUserId, a.Id AS AppId, a.PublicId AS AppPublicId, a.Name AS AppName,
+                   (SELECT TOP 1 UserName FROM meta.AppUser WHERE UserPublicId = @userPublicId AND IsDeleted = 0) AS UserName,
+                   (SELECT TOP 1 UserEmail FROM meta.AppUser WHERE UserPublicId = @userPublicId AND IsDeleted = 0) AS UserEmail,
+                   @userPublicId AS UserPublicId,
+                   NULL AS DirectRoleId, NULL AS DirectRolePublicId, NULL AS DirectRoleName
+              FROM meta.GroupMember gm
+              INNER JOIN meta.[Group] g ON g.Id = gm.GroupId
+              INNER JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+              INNER JOIN meta.App a ON a.Id = ga.AppId
+              CROSS APPLY (
+                  SELECT TOP 1 au.UserId 
+                  FROM meta.AppUser au 
+                  WHERE au.UserPublicId = @userPublicId AND au.IsDeleted = 0
+              ) u
+              WHERE gm.UserId = u.UserId
+                AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0 AND a.IsDeleted = 0
+                AND NOT EXISTS (
+                    SELECT 1 FROM meta.AppUser au2 
+                    WHERE au2.AppId = a.Id AND au2.UserPublicId = @userPublicId AND au2.IsDeleted = 0
+                );";
+
+        var appUsers = (await conn.QueryAsync<dynamic>(GetAppUsersSql, new { userPublicId })).ToList();
+        if (appUsers.Count == 0)
+        {
+            return new PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.UserEffectivePermissionsDto
+            {
+                UserPublicId = userPublicId,
+                Apps = new()
+            };
+        }
+
+        var userName = appUsers[0].UserName;
+        var userEmail = appUsers[0].UserEmail;
+
+        const string GetInheritedRolesSql = @"
+            SELECT gm.UserId, ga.AppId, g.PublicId AS GroupPublicId, g.Name AS GroupName, 
+                   ar.PublicId AS AppRolePublicId, ar.Name AS AppRoleName
+              FROM meta.GroupMember gm
+              INNER JOIN meta.[Group] g ON g.Id = gm.GroupId
+              INNER JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+              INNER JOIN meta.AppRole ar ON ar.Id = ga.AppRoleId
+              CROSS APPLY (
+                  SELECT TOP 1 au.UserId 
+                  FROM meta.AppUser au 
+                  WHERE au.UserPublicId = @userPublicId AND au.IsDeleted = 0
+              ) u
+              WHERE gm.UserId = u.UserId 
+                AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0;";
+
+        var inheritedRoles = (await conn.QueryAsync<dynamic>(GetInheritedRolesSql, new { userPublicId })).ToList();
+
+        var resultApps = new List<PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.AppPermissionDetailDto>();
+        foreach (var au in appUsers)
+        {
+            var appId = (long)au.AppId;
+
+            var appInherited = inheritedRoles
+                .Where(r => (long)r.AppId == appId)
+                .Select(r => new PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.InheritedRoleDto
+                {
+                    GroupPublicId = r.GroupPublicId,
+                    GroupName = r.GroupName,
+                    AppRolePublicId = r.AppRolePublicId,
+                    AppRoleName = r.AppRoleName
+                }).ToList();
+
+            const string GetPermissionsSql = @"
+                SELECT p.Code
+                FROM meta.AppUser au
+                JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+                JOIN meta.AppRolePermission arp ON arp.AppRoleId = ar.Id
+                JOIN meta.Permission p ON p.Id = arp.PermissionId
+                WHERE au.AppId = @appId AND au.UserPublicId = @userPublicId AND au.IsDeleted = 0
+                
+                UNION
+                
+                SELECT p.Code
+                FROM meta.GroupMember gm
+                JOIN meta.[Group] g ON g.Id = gm.GroupId
+                JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+                JOIN meta.AppRole ar ON ar.Id = ga.AppRoleId
+                JOIN meta.AppRolePermission arp ON arp.AppRoleId = ar.Id
+                JOIN meta.Permission p ON p.Id = arp.PermissionId
+                CROSS APPLY (
+                    SELECT TOP 1 au.UserId 
+                    FROM meta.AppUser au 
+                    WHERE au.UserPublicId = @userPublicId AND au.IsDeleted = 0
+                ) u
+                WHERE ga.AppId = @appId 
+                  AND gm.UserId = u.UserId 
+                  AND gm.IsDeleted = 0 
+                  AND g.IsDeleted = 0 
+                  AND ga.IsDeleted = 0;";
+
+            var permissions = (await conn.QueryAsync<string>(GetPermissionsSql, new { appId, userPublicId })).ToList();
+
+            resultApps.Add(new PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.AppPermissionDetailDto
+            {
+                AppPublicId = au.AppPublicId,
+                AppName = au.AppName,
+                DirectRoleName = au.DirectRoleName,
+                InheritedRoles = appInherited,
+                ConsolidatedPermissions = permissions
+            });
+        }
+
+        return new PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.UserEffectivePermissionsDto
+        {
+            UserPublicId = userPublicId,
+            UserName = userName,
+            UserEmail = userEmail,
+            Apps = resultApps
+        };
     }
 }
