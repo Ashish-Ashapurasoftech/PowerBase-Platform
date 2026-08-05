@@ -3,6 +3,7 @@ using PowerBase.API.Attributes;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Apps;
+using PowerBase.Application.Apps.Commands.BulkDeleteApps;
 using PowerBase.Application.Apps.Commands.CreateApp;
 using PowerBase.Application.Apps.Commands.DeleteApp;
 using PowerBase.Application.Apps.Commands.UpdateApp;
@@ -25,6 +26,7 @@ public class AppsController : ControllerBase
     private readonly CreateAppCommandHandler _createHandler;
     private readonly UpdateAppCommandHandler _updateHandler;
     private readonly DeleteAppCommandHandler _deleteHandler;
+    private readonly BulkDeleteAppsCommandHandler _bulkDeleteHandler;
     private readonly GetAppQueryHandler _getHandler;
     private readonly ListAppsQueryHandler _listHandler;
     private readonly PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler _getPermissionsHandler;
@@ -38,6 +40,7 @@ public class AppsController : ControllerBase
         CreateAppCommandHandler createHandler,
         UpdateAppCommandHandler updateHandler,
         DeleteAppCommandHandler deleteHandler,
+        BulkDeleteAppsCommandHandler bulkDeleteHandler,
         GetAppQueryHandler getHandler,
         ListAppsQueryHandler listHandler,
         PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler getPermissionsHandler,
@@ -50,6 +53,7 @@ public class AppsController : ControllerBase
         _createHandler = createHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
+        _bulkDeleteHandler = bulkDeleteHandler;
         _getHandler = getHandler;
         _listHandler = listHandler;
         _getPermissionsHandler = getPermissionsHandler;
@@ -138,17 +142,31 @@ public class AppsController : ControllerBase
         return Ok(new ApiListResponse<AppResponse>(paginated, filtered.Count, page, pageSize));
     }
 
-    /// <summary>Export all apps for the current tenant to CSV.</summary>
+    private static readonly string[] ExportColumns =
+        ["PublicId", "Name", "Description", "Color", "Icon", "Status", "CreatedOn", "OwnerName"];
+
+    private async Task<IReadOnlyList<PowerBase.Domain.Entities.App>> GetExportItemsAsync(string? name, CancellationToken ct)
+    {
+        var allItems = await _appRepo.ListAllByUserAsync(_queryContext.UserId, ct);
+        if (string.IsNullOrWhiteSpace(name))
+            return allItems;
+
+        return allItems
+            .Where(a => a.Name.Contains(name.Trim(), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    /// <summary>Export apps for the current tenant to CSV. Filters by name when <paramref name="name"/> is supplied.</summary>
     [HttpGet("export")]
     [RequirePermission(PermissionCodes.AppsRead)]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> Export(CancellationToken ct = default)
+    public async Task<IActionResult> Export([FromQuery] string? name = null, CancellationToken ct = default)
     {
-        var allItems = await _appRepo.ListAllByUserAsync(_queryContext.UserId, ct);
+        var allItems = await GetExportItemsAsync(name, ct);
 
         var csvBuilder = new System.Text.StringBuilder();
-        csvBuilder.AppendLine("PublicId,Name,Description,Color,Icon,Status,CreatedOn");
+        csvBuilder.AppendLine(string.Join(",", ExportColumns));
 
         foreach (var app in allItems)
         {
@@ -159,12 +177,53 @@ public class AppsController : ControllerBase
                 EscapeCsvField(app.Color),
                 EscapeCsvField(app.Icon),
                 EscapeCsvField(app.Status),
-                EscapeCsvField(app.CreatedOn.ToString("o"))
+                EscapeCsvField(app.CreatedOn.ToString("MM-dd-yyyy")),
+                EscapeCsvField(app.OwnerName)
             ));
         }
 
         var bytes = System.Text.Encoding.UTF8.GetBytes(csvBuilder.ToString());
         return File(bytes, "text/csv", "apps.csv");
+    }
+
+    /// <summary>Export apps for the current tenant to Excel (.xlsx). Filters by name when <paramref name="name"/> is supplied.</summary>
+    [HttpGet("export/xlsx")]
+    [RequirePermission(PermissionCodes.AppsRead)]
+    [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> ExportXlsx([FromQuery] string? name = null, CancellationToken ct = default)
+    {
+        var allItems = await GetExportItemsAsync(name, ct);
+
+        using var wb = new ClosedXML.Excel.XLWorkbook();
+        var ws = wb.Worksheets.Add("Apps");
+
+        for (var ci = 0; ci < ExportColumns.Length; ci++)
+        {
+            var cell = ws.Cell(1, ci + 1);
+            cell.Value = ExportColumns[ci];
+            cell.Style.Font.Bold = true;
+        }
+
+        var row = 2;
+        foreach (var app in allItems)
+        {
+            ws.Cell(row, 1).Value = app.PublicId.ToString();
+            ws.Cell(row, 2).Value = app.Name;
+            ws.Cell(row, 3).Value = app.Description ?? string.Empty;
+            ws.Cell(row, 4).Value = app.Color ?? string.Empty;
+            ws.Cell(row, 5).Value = app.Icon ?? string.Empty;
+            ws.Cell(row, 6).Value = app.Status;
+            ws.Cell(row, 7).Value = app.CreatedOn.ToString("MM-dd-yyyy");
+            ws.Cell(row, 8).Value = app.OwnerName ?? string.Empty;
+            row++;
+        }
+
+        ws.Columns().AdjustToContents();
+
+        using var ms = new MemoryStream();
+        wb.SaveAs(ms);
+        return File(ms.ToArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "apps.xlsx");
     }
 
     private static string EscapeCsvField(string? field)
@@ -244,6 +303,19 @@ public class AppsController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Soft-delete multiple apps by their public IDs.</summary>
+    [HttpDelete("bulk")]
+    [RequirePermission(PermissionCodes.AppsDelete)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> BulkDelete([FromBody] BulkDeleteAppsRequest request, CancellationToken ct)
+    {
+        await _bulkDeleteHandler.HandleAsync(new BulkDeleteAppsCommand(request.PublicIds), ct);
+        return NoContent();
+    }
+
     /// <summary>Get the roles and reports visibility matrix for this app.</summary>
     [HttpGet("{publicId:guid}/roles-reports-matrix")]
     [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppPublicId)]
@@ -276,6 +348,7 @@ public class AppsController : ControllerBase
         Color = result.Color,
         Status = result.Status,
         CreatedOn = result.CreatedOn,
+        OwnerName = result.OwnerName
     };
 
     private static AppResponse MapToAppResponse(PowerBase.Domain.Entities.App app)
@@ -299,6 +372,7 @@ public class AppsController : ControllerBase
             SecurityOptions = security,
             Status = app.Status,
             CreatedOn = app.CreatedOn,
+            OwnerName = app.OwnerName
         };
     }
 

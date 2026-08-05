@@ -42,7 +42,7 @@ public class TablesController : ControllerBase
     [HttpPost("apps/{appId:guid}/tables")]
 
     [RequireAppPermission(PermissionCodes.TablesCreate, AppAccessResolver.ByAppId)]
-    [ProducesResponseType(typeof(ApiResponse<TableResponse>), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ApiResponse<TableSummaryResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -51,21 +51,31 @@ public class TablesController : ControllerBase
     {
         var command = new CreateTableCommand(appId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon);
         var result = await _createHandler.HandleAsync(command, ct);
-        return StatusCode(StatusCodes.Status201Created, new ApiResponse<TableResponse>(MapToResponse(result)));
+        return StatusCode(StatusCodes.Status201Created, new ApiResponse<TableSummaryResponse>(MapToSummaryResponse(result)));
     }
 
-    /// <summary>List all tables for an app.</summary>
+    /// <summary>List tables for an app. Supports paging, search (by name or singular label), and sorting.
+    /// Omit <paramref name="isShowInBar"/> for the full listing (e.g. a "manage tables" page); pass it
+    /// (true/false) to return only tables matching that flag (e.g. the sidebar navigation).</summary>
     [HttpGet("apps/{appId:guid}/tables")]
 
     [RequireAppPermission(PermissionCodes.TablesRead, AppAccessResolver.ByAppId)]
-    [ProducesResponseType(typeof(ApiListResponse<TableResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiListResponse<TableListItemResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> List(Guid appId, CancellationToken ct)
+    public async Task<IActionResult> List(
+        Guid appId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? search = null,
+        [FromQuery] string sortBy = "name",
+        [FromQuery] bool sortDesc = false,
+        [FromQuery] bool? isShowInBar = null,
+        CancellationToken ct = default)
     {
-        var tables = await _listHandler.HandleAsync(new ListTablesQuery(appId), ct);
-        var items = tables.Select(MapToResponse).ToList();
-        return Ok(new ApiListResponse<TableResponse>(items, items.Count, 1, items.Count));
+        var result = await _listHandler.HandleAsync(new ListTablesQuery(appId, page, pageSize, search, sortBy, sortDesc, isShowInBar), ct);
+        var items = result.Items.Select(MapToListItemResponse).ToList();
+        return Ok(new ApiListResponse<TableListItemResponse>(items, result.Total, result.Page, result.PageSize));
     }
 
     /// <summary>Get a single table by its public ID, including its fields.</summary>
@@ -85,16 +95,17 @@ public class TablesController : ControllerBase
     [HttpPatch("tables/{publicId:guid}")]
 
     [RequireAppPermission(PermissionCodes.TablesUpdate, AppAccessResolver.ByTablePublicId)]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ApiResponse<TableSummaryResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateTableRequest request, CancellationToken ct)
     {
-        await _updateHandler.HandleAsync(new UpdateTableCommand(
+        var result = await _updateHandler.HandleAsync(new UpdateTableCommand(
             publicId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon,
-            request.DefaultRecordPickerField1Id, request.DefaultRecordPickerField2Id, request.DefaultRecordPickerField3Id), ct);
-        return NoContent();
+            request.DefaultRecordPickerField1Id, request.DefaultRecordPickerField2Id, request.DefaultRecordPickerField3Id,
+            request.IsShowInBar), ct);
+        return Ok(new ApiResponse<TableSummaryResponse>(MapToSummaryResponse(result)));
     }
 
     /// <summary>Soft-delete a table by its public ID (does not drop the physical table).</summary>
@@ -120,6 +131,7 @@ public class TablesController : ControllerBase
         Icon = r.Icon,
         PhysicalTableName = r.PhysicalTableName,
         RecordCount = r.RecordCount,
+        IsShowInBar = r.IsShowInBar,
         CreatedOn = r.CreatedOn,
         Fields = [],
     };
@@ -138,6 +150,7 @@ public class TablesController : ControllerBase
         DefaultRecordPickerField3Id = t.DefaultRecordPickerField3Id,
         KeyFieldFid = ResolveKeyFieldFid(t.KeyFieldId, t.Fields),
         RecordCount = t.RecordCount,
+        IsShowInBar = t.IsShowInBar,
         CreatedOn = t.CreatedOn,
         Fields = t.Fields.Select(MapFieldToResponse).ToList(),
     };
@@ -156,8 +169,41 @@ public class TablesController : ControllerBase
         DefaultRecordPickerField3Id = r.Table.DefaultRecordPickerField3Id,
         KeyFieldFid = ResolveKeyFieldFid(r.Table.KeyFieldId, r.Fields),
         RecordCount = r.Table.RecordCount,
+        IsShowInBar = r.Table.IsShowInBar,
         CreatedOn = r.Table.CreatedOn,
         Fields = r.Fields.Select(MapFieldToResponse).ToList(),
+    };
+
+    private static TableSummaryResponse MapToSummaryResponse(CreateTableResult r) => new()
+    {
+        PublicId = r.PublicId,
+        Name = r.Name,
+        SingularLabel = r.SingularLabel,
+        Icon = r.Icon,
+        IsShowInBar = r.IsShowInBar,
+        CreatedOn = r.CreatedOn,
+    };
+
+    private static TableSummaryResponse MapToSummaryResponse(PowerBase.Application.Tables.Commands.UpdateTable.UpdateTableResult r) => new()
+    {
+        PublicId = r.PublicId,
+        Name = r.Name,
+        SingularLabel = r.SingularLabel,
+        Icon = r.Icon,
+        IsShowInBar = r.IsShowInBar,
+        CreatedOn = r.CreatedOn,
+    };
+
+    private static TableListItemResponse MapToListItemResponse(AppTableListItemDto t) => new()
+    {
+        PublicId = t.PublicId,
+        Name = t.Name,
+        SingularLabel = t.SingularLabel,
+        Icon = t.Icon,
+        RecordCount = t.RecordCount,
+        FieldCount = t.FieldCount,
+        IsShowInBar = t.IsShowInBar,
+        CreatedOn = t.CreatedOn,
     };
 
     private static int? ResolveKeyFieldFid(long? keyFieldId, IReadOnlyList<AppField> fields) =>

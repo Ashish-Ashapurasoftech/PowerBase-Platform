@@ -124,13 +124,19 @@ public class TableHandlerTests
     public async Task ListTables_ReturnsTablesForApp()
     {
         var app = MakeApp();
-        var tables = new List<AppTable> { MakeTable(), MakeTable(21) };
+        var items = new List<PowerBase.Application.Common.Models.AppTableListItemDto>
+        {
+            new() { PublicId = Guid.NewGuid(), Name = "Contacts" },
+            new() { PublicId = Guid.NewGuid(), Name = "Companies" },
+        };
         _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
-        _tableRepo.ListByAppAsync(app.Id).Returns(tables);
+        _tableRepo.ListByAppPagedAsync(app.Id, 1, 20, null, "name", false, null, Arg.Any<CancellationToken>()).Returns(items);
+        _tableRepo.CountByAppAsync(app.Id, null, null, Arg.Any<CancellationToken>()).Returns(2);
         var sut = new ListTablesQueryHandler(_appRepo, _tableRepo);
 
         var result = await sut.HandleAsync(new ListTablesQuery(app.PublicId));
 
-        result.Should().HaveCount(2);
+        result.Items.Should().HaveCount(2);
+        result.Total.Should().Be(2);
     }
 }

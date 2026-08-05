@@ -4,6 +4,16 @@ using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Tables.Commands.UpdateTable;
 
+public class UpdateTableResult
+{
+    public Guid PublicId { get; init; }
+    public string Name { get; init; } = string.Empty;
+    public string? SingularLabel { get; init; }
+    public string? Icon { get; init; }
+    public bool IsShowInBar { get; init; }
+    public DateTime CreatedOn { get; init; }
+}
+
 public class UpdateTableCommandHandler
 {
     private readonly IAppTableRepository _tableRepo;
@@ -17,7 +27,7 @@ public class UpdateTableCommandHandler
         _auditRepo = auditRepo;
     }
 
-    public async Task HandleAsync(UpdateTableCommand command, CancellationToken ct = default)
+    public async Task<UpdateTableResult> HandleAsync(UpdateTableCommand command, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(command.Name))
             throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name is required."] });
@@ -45,14 +55,17 @@ public class UpdateTableCommandHandler
             changes.Add("Default Record Picker Field 2");
         if (table.DefaultRecordPickerField3Id != command.DefaultRecordPickerField3Id)
             changes.Add("Default Record Picker Field 3");
+        if (command.IsShowInBar.HasValue && table.IsShowInBar != command.IsShowInBar.Value)
+            changes.Add($"Show In Bar to '{command.IsShowInBar.Value}'");
 
         var affected = await _tableRepo.UpdateAsync(
             command.TablePublicId, command.Name,
             command.SingularLabel, command.PluralLabel,
-            command.Description, command.Icon, 
+            command.Description, command.Icon,
             command.DefaultRecordPickerField1Id,
             command.DefaultRecordPickerField2Id,
             command.DefaultRecordPickerField3Id,
+            command.IsShowInBar,
             ct);
 
         if (affected > 0 && changes.Count > 0)
@@ -61,5 +74,15 @@ public class UpdateTableCommandHandler
             await _auditRepo.LogActivityAsync(
                 AuditActions.Updated, AuditEntityTypes.AppTable, command.TablePublicId.ToString(), logMessage, appId: table.AppId, ct: ct);
         }
+
+        return new UpdateTableResult
+        {
+            PublicId = table.PublicId,
+            Name = command.Name,
+            SingularLabel = command.SingularLabel,
+            Icon = command.Icon,
+            IsShowInBar = command.IsShowInBar ?? table.IsShowInBar,
+            CreatedOn = table.CreatedOn,
+        };
     }
 }
