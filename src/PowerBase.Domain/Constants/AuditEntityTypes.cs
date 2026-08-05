@@ -13,4 +13,5 @@ public static class AuditEntityTypes
     public const string AppUser  = "AppUser";
     public const string Form     = "Form";
     public const string FormRule = "FormRule";
+    public const string Page     = "Page";
 }

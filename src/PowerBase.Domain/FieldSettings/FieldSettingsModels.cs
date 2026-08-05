@@ -183,6 +183,10 @@ public sealed class LookupSettings
     /// <summary>The source field's TypeCode, captured at creation so the value can be rendered/typed
     /// without a cross-table lookup (e.g. for formula type-mapping).</summary>
     public string? SourceTypeCode { get; set; }
+    /// <summary>When the source field is a composite Address field, the JSON sub-key to pull out
+    /// of its value (one of <see cref="AddressSubFields.All"/>) instead of the whole address —
+    /// e.g. just the city. Null for an ordinary (non-Address, or whole-Address) lookup.</summary>
+    public string? SourceSubField { get; set; }
 }
 
 /// <summary>
@@ -202,8 +206,28 @@ public sealed class SummarySettings
     public int? TargetFid { get; set; }
     /// <summary>The target field's TypeCode (for Min/Max result typing/rendering); null for Count.</summary>
     public string? TargetTypeCode { get; set; }
+    /// <summary>When the target field is a composite Address field, the JSON sub-key to aggregate
+    /// (one of <see cref="AddressSubFields.All"/>) instead of the whole address. Only meaningful
+    /// with Count/Exists/Min/Max — Sum/Avg over an address sub-value (always text) makes no sense
+    /// and is rejected at creation time.</summary>
+    public string? TargetSubField { get; set; }
     /// <summary>Optional child-record filter (serialized FilterGroup JSON) applied before aggregating.</summary>
     public string? FilterTree { get; set; }
+}
+
+/// <summary>The JSON keys an Address field's composite value is stored under (confirmed real
+/// shape, matching both the Angular <c>AddressValue</c> interface and the existing report-filter
+/// <c>SubField</c> mechanism in <c>ReportDefinition.cs</c>/<c>RecordRepository</c>).</summary>
+public static class AddressSubFields
+{
+    public const string Street1 = "street1";
+    public const string Street2 = "street2";
+    public const string City = "city";
+    public const string State = "state";
+    public const string Zip = "zip";
+    public const string Country = "country";
+
+    public static readonly string[] All = [Street1, Street2, City, State, Zip, Country];
 }
 
 /// <summary>

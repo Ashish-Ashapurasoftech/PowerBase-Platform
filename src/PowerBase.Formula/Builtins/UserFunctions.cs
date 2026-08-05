@@ -19,6 +19,8 @@ internal static class UserFunctions
             (a, _) => a[0].IsNull ? FormulaValue.Null(FormulaType.User) : FormulaValue.User(new UserRef(a[0].AsText()))));
         r.Add(Fn.Exact("UserToEmail", FormulaType.Text, new[] { P.User },
             (a, _) => FormulaValue.Text(a[0].IsNull ? string.Empty : a[0].AsUser().Email ?? string.Empty)));
+        r.Add(Fn.Exact("UserToName", FormulaType.Text, new[] { P.User },
+            (a, _) => FormulaValue.Text(a[0].IsNull ? string.Empty : a[0].AsUser().Name ?? string.Empty)));
         r.Add(Fn.Exact("UserToID", FormulaType.Text, new[] { P.User },
             (a, _) => FormulaValue.Text(a[0].IsNull ? string.Empty : a[0].AsUser().UserId)));
         r.Add(Fn.Exact("UserID", FormulaType.Text, new[] { P.User },

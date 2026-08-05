@@ -155,7 +155,7 @@ public class ReportHandlerTests
         var reports = new List<Report> { MakeReport(table.Id), MakeReport(table.Id) };
         _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
         _reportRepo.ListByAppAsync(app.Id).Returns(reports);
-        var sut = new ListReportsQueryHandler(_reportRepo, _appRepo);
+        var sut = new ListReportsQueryHandler(_reportRepo, _appRepo, _tableRepo);
 
         var result = await sut.HandleAsync(new ListReportsQuery(app.PublicId));
 
@@ -234,5 +234,66 @@ public class ReportHandlerTests
 
         result.Columns.Should().ContainSingle(c => c.FieldId == 1L);
         result.Columns.Should().NotContain(c => c.FieldId == 2L);
+    }
+
+    [Fact]
+    public async Task RunReport_QuickSearchFieldIds_RestrictsSearchToThoseFields()
+    {
+        var table = MakeTable();
+        var field1 = new AppField { Id = 1, Name = "Field1", TypeCode = "Text", IsReportable = true, IsSearchable = true };
+        var field2 = new AppField { Id = 2, Name = "Field2", TypeCode = "Text", IsReportable = true, IsSearchable = true };
+        var report = MakeReport(table.Id, []);
+        _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
+        _tableRepo.GetByIdAsync(table.Id).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field1, field2 });
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>>());
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>()).Returns(0);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult(new TableAccessContext
+            {
+                Unrestricted = true,
+                VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
+                EditableFieldIds = new HashSet<long>(),
+            }));
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+
+        await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20, QuickSearch: "abc", QuickSearchFieldIds: [1]));
+
+        await _recordRepo.Received(1).ListAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Is<FilterGroup?>(f => f != null && f.Nodes.Count == 1 && f.Nodes[0].Condition!.FieldId == 1),
+            Arg.Any<IReadOnlyList<SortSpec>?>());
+    }
+
+    [Fact]
+    public async Task RunReport_QuickSearchExact_UsesEqOperator()
+    {
+        var table = MakeTable();
+        var field1 = new AppField { Id = 1, Name = "Field1", TypeCode = "Text", IsReportable = true, IsSearchable = true };
+        var report = MakeReport(table.Id, []);
+        _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
+        _tableRepo.GetByIdAsync(table.Id).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field1 });
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>>());
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>()).Returns(0);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult(new TableAccessContext
+            {
+                Unrestricted = true,
+                VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
+                EditableFieldIds = new HashSet<long>(),
+            }));
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+
+        await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20, QuickSearch: "abc", QuickSearchExact: true));
+
+        await _recordRepo.Received(1).ListAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Is<FilterGroup?>(f => f != null && f.Nodes[0].Condition!.Operator == "eq"),
+            Arg.Any<IReadOnlyList<SortSpec>?>());
     }
 }

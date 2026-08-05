@@ -10,6 +10,7 @@ public class AppAccessService : IAppAccessService
     private readonly IReportRepository _reportRepo;
     private readonly IFormRepository _formRepo;
     private readonly IFormRuleRepository _formRuleRepo;
+    private readonly IPageRepository _pageRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IQueryContext _queryContext;
 
@@ -19,6 +20,7 @@ public class AppAccessService : IAppAccessService
         IReportRepository reportRepo,
         IFormRepository formRepo,
         IFormRuleRepository formRuleRepo,
+        IPageRepository pageRepo,
         IAppUserRepository appUserRepo,
         IQueryContext queryContext)
     {
@@ -27,6 +29,7 @@ public class AppAccessService : IAppAccessService
         _reportRepo = reportRepo;
         _formRepo = formRepo;
         _formRuleRepo = formRuleRepo;
+        _pageRepo = pageRepo;
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
     }
@@ -61,6 +64,12 @@ public class AppAccessService : IAppAccessService
         await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
     }
 
+    public async Task RequirePermissionByPagePublicIdAsync(Guid pagePublicId, string permissionCode, CancellationToken ct = default)
+    {
+        var appId = await _pageRepo.GetAppIdByPublicIdAsync(pagePublicId, ct);
+        await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
+    }
+
     public async Task RequirePermissionByAppIdAsync(long appId, string permissionCode, CancellationToken ct = default)
     {
         var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
@@ -92,6 +101,13 @@ public class AppAccessService : IAppAccessService
     {
         if (_queryContext.IsSuperAdmin) return;
         var appId = await _reportRepo.GetAppIdByPublicIdAsync(reportPublicId, ct);
+        await RequireMembershipByAppIdAsync(appId, ct);
+    }
+
+    public async Task RequireMembershipByPagePublicIdAsync(Guid pagePublicId, CancellationToken ct = default)
+    {
+        if (_queryContext.IsSuperAdmin) return;
+        var appId = await _pageRepo.GetAppIdByPublicIdAsync(pagePublicId, ct);
         await RequireMembershipByAppIdAsync(appId, ct);
     }
 

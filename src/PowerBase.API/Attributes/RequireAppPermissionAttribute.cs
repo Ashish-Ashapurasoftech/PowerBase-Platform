@@ -5,7 +5,7 @@ using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.API.Attributes;
 
-public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId }
+public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId, ByPagePublicId }
 
 /// <summary>
 /// Requires the caller to be an app member (any role). Does NOT require a specific permission code.
@@ -50,6 +50,10 @@ internal class AppMemberFilter : IAsyncActionFilter
                 case AppAccessResolver.ByReportPublicId:
                     var reportId = Guid.Parse(route["publicId"]!.ToString()!);
                     await _accessService.RequireMembershipByReportPublicIdAsync(reportId, context.HttpContext.RequestAborted);
+                    break;
+                case AppAccessResolver.ByPagePublicId:
+                    var pageId = Guid.Parse(route["publicId"]!.ToString()!);
+                    await _accessService.RequireMembershipByPagePublicIdAsync(pageId, context.HttpContext.RequestAborted);
                     break;
                 default:
                     throw new InvalidOperationException($"RequireAppMember does not support resolver {_resolver}");
@@ -143,6 +147,11 @@ internal class AppPermissionFilter : IAsyncActionFilter
                 case AppAccessResolver.ByFormRulePublicId:
                     var rulePubId = Guid.Parse(route["ruleId"]!.ToString()!);
                     await _accessService.RequirePermissionByFormRulePublicIdAsync(rulePubId, _permissionCode, context.HttpContext.RequestAborted);
+                    break;
+
+                case AppAccessResolver.ByPagePublicId:
+                    var pagePubId = Guid.Parse(route["publicId"]!.ToString()!);
+                    await _accessService.RequirePermissionByPagePublicIdAsync(pagePubId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
             }
         }

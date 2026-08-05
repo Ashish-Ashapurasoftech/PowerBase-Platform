@@ -15,17 +15,12 @@ public class CreateAppCommandHandlerTests
     private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
-    private readonly ISchemaEngineService _schemaEngine = Substitute.For<ISchemaEngineService>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
-    private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
-    private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
-    private readonly IFieldTypeRepository _fieldTypeRepo = Substitute.For<IFieldTypeRepository>();
-    private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
-    private readonly IAppRolePermissionRepository _permRepo = Substitute.For<IAppRolePermissionRepository>();
-    private readonly PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler _bulkCreateHandler = Substitute.For<PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler>(Substitute.For<PowerBase.Application.Common.Interfaces.IAppTableRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAppFieldRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFieldTypeRepository>(), Substitute.For<PowerBase.Application.Fields.Commands.CreateField.CreateFieldCommandHandler>(Substitute.For<PowerBase.Application.Common.Interfaces.IAppTableRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAppFieldRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFieldTypeRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.ISchemaEngineService>(), Substitute.For<PowerBase.Application.Common.Interfaces.IQueryContext>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAuditRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFormRepository>(), new PowerBase.Application.Fields.Settings.FieldSettingsValidatorRegistry(System.Array.Empty<PowerBase.Application.Fields.Settings.IFieldSettingsValidator>())));
+    private readonly IAppSeeder _appSeeder = Substitute.For<IAppSeeder>();
+    private readonly PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler _bulkCreateHandler = Substitute.For<PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler>(Substitute.For<PowerBase.Application.Common.Interfaces.IAppTableRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAppFieldRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFieldTypeRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.ISchemaEngineService>(), Substitute.For<PowerBase.Application.Common.Interfaces.IQueryContext>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAuditRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFormRepository>(), new PowerBase.Application.Fields.Settings.FieldSettingsValidatorRegistry(System.Array.Empty<PowerBase.Application.Fields.Settings.IFieldSettingsValidator>()));
 
-    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _schemaEngine, _auditRepo, _fieldRepo, _reportRepo, _fieldTypeRepo, _formRepo, _userRepo, _permRepo, _bulkCreateHandler);
+    private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _auditRepo, _userRepo, _appSeeder, _bulkCreateHandler);
 
     public CreateAppCommandHandlerTests()
     {
@@ -33,6 +28,15 @@ public class CreateAppCommandHandlerTests
         _queryContext.UserId.Returns(1L);
         _userRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
             .Returns(new User { Id = 1, PublicId = Guid.NewGuid(), Name = "Test User", Email = "test@example.com" });
+        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                var t = ci.Arg<AppTable>();
+                t.Id = 1;
+                t.PublicId = Guid.NewGuid();
+                t.PhysicalTableName = "t_1";
+                return t;
+            });
     }
 
     private void SetupHappyPath(Guid publicId, long appId = 10)
@@ -44,8 +48,6 @@ public class CreateAppCommandHandlerTests
             .Returns((1L, Guid.NewGuid()));
         _tableRepo.NameExistsInAppAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(false);
-        _tableRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<CancellationToken>())
-            .Returns((1L, Guid.NewGuid()));
     }
 
     [Fact]

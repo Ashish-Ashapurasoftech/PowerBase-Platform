@@ -12,6 +12,7 @@ public class User
     public int? SystemRoleId { get; set; }
     public string? SystemRoleCode { get; set; }
     public bool IsActive { get; set; }
+    public string? Preferences { get; set; }
     public bool IsDeleted { get; set; }
     public DateTime? LastLoginOn { get; set; }
     public DateTime CreatedOn { get; set; }

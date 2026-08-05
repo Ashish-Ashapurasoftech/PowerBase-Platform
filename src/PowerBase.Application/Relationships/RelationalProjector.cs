@@ -115,7 +115,8 @@ public sealed class RelationalProjector : IRelationalProjector
                         var srcCol = parentFieldsByFid.TryGetValue(settings.SourceFid!.Value, out var srcField)
                             ? (srcField.PhysicalColumnName ?? PhysicalNaming.ColumnName(settings.SourceFid.Value))
                             : PhysicalNaming.ColumnName(settings.SourceFid.Value);
-                        if (prow.TryGetValue(srcCol, out var v)) value = v;
+                        if (prow.TryGetValue(srcCol, out var v))
+                            value = string.IsNullOrWhiteSpace(settings.SourceSubField) ? v : ExtractJsonSubField(v, settings.SourceSubField);
                     }
                     maps[i][field.Fid!.Value] = value;
                 }
@@ -173,7 +174,7 @@ public sealed class RelationalProjector : IRelationalProjector
 
             var childTable = await _tableRepo.GetByIdAsync(childId, ct);
             var filter = ParseFilter(s.FilterTree);
-            var agg = await _recordRepo.AggregateByReferenceAsync(childTable, refFid, s.Function!, s.TargetFid, parentKeyValues, filter, ct);
+            var agg = await _recordRepo.AggregateByReferenceAsync(childTable, refFid, s.Function!, s.TargetFid, parentKeyValues, filter, s.TargetSubField, ct);
 
             var isCount = string.Equals(s.Function, SummaryFunctions.Count, StringComparison.OrdinalIgnoreCase);
             var isExists = string.Equals(s.Function, SummaryFunctions.Exists, StringComparison.OrdinalIgnoreCase);
@@ -183,6 +184,26 @@ public sealed class RelationalProjector : IRelationalProjector
                 if (aggKeys[i] is object key && agg.TryGetValue(key, out var v)) maps[i][field.Fid!.Value] = v;
                 else maps[i][field.Fid!.Value] = isCount ? 0 : isExists ? false : null;
             }
+        }
+    }
+
+    /// <summary>Pulls one JSON property out of a composite Address field's raw stored value
+    /// (e.g. just the city). Returns null on any parse failure rather than throwing — malformed
+    /// or legacy data shouldn't take down the whole record read.</summary>
+    private static object? ExtractJsonSubField(object? rawValue, string subField)
+    {
+        if (rawValue is not string json || string.IsNullOrWhiteSpace(json))
+            return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty(subField, out var prop) && prop.ValueKind != JsonValueKind.Null
+                ? prop.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 

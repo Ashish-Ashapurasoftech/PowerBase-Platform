@@ -34,9 +34,14 @@ using PowerBase.Application.Auth.Commands.ForgotPassword;
 using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.RefreshToken;
 using PowerBase.Application.Auth.Commands.Signup;
+using PowerBase.Application.Auth.Commands.UpdateMyPreferences;
 using PowerBase.Application.Auth.Queries.GetMe;
+using PowerBase.Application.Auth.Queries.GetMyPreferences;
 using PowerBase.Application.Auth.Queries.Login;
+using PowerBase.Application.Apps.Queries.GetAppBranding;
+using PowerBase.Application.Apps.Commands.UpdateAppBranding;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Services;
 using PowerBase.Application.Tenants.Commands.CreateTenant;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Commands.DeleteField;
@@ -178,6 +183,7 @@ builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService, PowerBase.Application.Records.RecordWriteService>();
+builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 
 // Field Settings Validators
 builder.Services.AddScoped<IFieldSettingsValidator, TextSettingsValidator>();
@@ -211,6 +217,19 @@ builder.Services.AddScoped<PowerBase.Application.Records.Commands.InvokeButtonAc
     PowerBase.Application.Records.Commands.InvokeButtonAction.ActionButtonValueResolver>();
 builder.Services.AddScoped<PowerBase.Application.Records.Commands.InvokeButtonAction.InvokeButtonActionCommandHandler>();
 
+// Pages (shared layer — Phase 1)
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.CreatePage.CreatePageCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.UpdatePage.UpdatePageCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.DeletePages.DeletePagesCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.DuplicatePage.DuplicatePageCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.PublishPage.PublishPageCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.RestorePageVersion.RestorePageVersionCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListPages.ListPagesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.GetPage.GetPageQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListPageVersions.ListPageVersionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.RenderPage.RenderPageQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Commands.SetDefaultHome.SetDefaultHomeCommandHandler>();
+
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
 builder.Services.AddScoped<IAppVariableRepository, AppVariableRepository>();
@@ -232,6 +251,7 @@ builder.Services.AddScoped<IFormRepository, FormRepository>();
 builder.Services.AddScoped<IFormRuleRepository, FormRuleRepository>();
 builder.Services.AddScoped<IRelationshipRepository, RelationshipRepository>();
 builder.Services.AddScoped<IAdminRepository, AdminRepository>();
+builder.Services.AddScoped<IPageRepository, PageRepository>();
 builder.Services.AddScoped<IUserTokenRepository, UserTokenRepository>();
 builder.Services.AddScoped<IAppTokenRepository, AppTokenRepository>();
 builder.Services.AddScoped<IGroupRepository, GroupRepository>();
@@ -259,10 +279,16 @@ builder.Services.AddScoped<ResetPasswordCommandHandler>();
 builder.Services.AddScoped<AcceptInviteCommandHandler>();
 builder.Services.AddScoped<LoginQueryHandler>();
 builder.Services.AddScoped<GetMeQueryHandler>();
+builder.Services.AddScoped<GetMyPreferencesQueryHandler>();
+builder.Services.AddScoped<UpdateMyPreferencesCommandHandler>();
 builder.Services.AddScoped<SelectTenantCommandHandler>();
 builder.Services.AddScoped<RefreshTokenCommandHandler>();
 builder.Services.AddScoped<CreateTenantCommandHandler>();
 builder.Services.AddScoped<CreateAppCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Pbl.PblValidator>();
+builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.FormulaTranslator>();
+builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Commands.ImportAppFromPbl.ImportAppFromPblCommandHandler>();
 builder.Services.AddScoped<UpdateAppCommandHandler>();
 builder.Services.AddScoped<ListAppUsersQueryHandler>();
 builder.Services.AddScoped<AddAppUserCommandHandler>();
@@ -289,6 +315,8 @@ builder.Services.AddScoped<ListAppVariablesQueryHandler>();
 builder.Services.AddScoped<CreateAppVariableCommandHandler>();
 builder.Services.AddScoped<UpdateAppVariableCommandHandler>();
 builder.Services.AddScoped<DeleteAppVariableCommandHandler>();
+builder.Services.AddScoped<GetAppBrandingQueryHandler>();
+builder.Services.AddScoped<UpdateAppBrandingCommandHandler>();
 builder.Services.AddScoped<CreateTableCommandHandler>();
 builder.Services.AddScoped<UpdateTableCommandHandler>();
 builder.Services.AddScoped<DeleteTableCommandHandler>();

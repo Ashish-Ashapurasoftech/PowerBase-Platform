@@ -6,11 +6,15 @@ using PowerBase.Application.Auth.Commands.AcceptInvite;
 using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.RefreshToken;
 using PowerBase.Application.Auth.Commands.Signup;
+using PowerBase.Application.Auth.Commands.UpdateMyPreferences;
 using PowerBase.Application.Auth.Queries.GetMe;
+using PowerBase.Application.Auth.Queries.GetMyPreferences;
 using PowerBase.Application.Auth.Queries.Login;
 using PowerBase.Application.Auth.Commands.ResetPassword;
 using PowerBase.Application.Auth.Commands.ForgotPassword;
 using PowerBase.Application.Common.Interfaces;
+using System.Text.Json;
+using PowerBase.Domain.ValueObjects;
 
 namespace PowerBase.API.Controllers;
 
@@ -26,6 +30,8 @@ public class AuthController : ControllerBase
     private readonly ForgotPasswordCommandHandler _forgotPasswordHandler;
     private readonly ResetPasswordCommandHandler _resetPasswordHandler;
     private readonly RefreshTokenCommandHandler _refreshTokenHandler;
+    private readonly GetMyPreferencesQueryHandler _getMyPreferencesHandler;
+    private readonly UpdateMyPreferencesCommandHandler _updateMyPreferencesHandler;
 
     public AuthController(
         SignupCommandHandler signupHandler,
@@ -35,7 +41,9 @@ public class AuthController : ControllerBase
         AcceptInviteCommandHandler acceptInviteHandler,
         ForgotPasswordCommandHandler forgotPasswordHandler,
         ResetPasswordCommandHandler resetPasswordHandler,
-        RefreshTokenCommandHandler refreshTokenHandler)
+        RefreshTokenCommandHandler refreshTokenHandler,
+        GetMyPreferencesQueryHandler getMyPreferencesHandler,
+        UpdateMyPreferencesCommandHandler updateMyPreferencesHandler)
     {
         _signupHandler = signupHandler;
         _loginHandler = loginHandler;
@@ -45,6 +53,38 @@ public class AuthController : ControllerBase
         _forgotPasswordHandler = forgotPasswordHandler;
         _resetPasswordHandler = resetPasswordHandler;
         _refreshTokenHandler = refreshTokenHandler;
+        _getMyPreferencesHandler = getMyPreferencesHandler;
+        _updateMyPreferencesHandler = updateMyPreferencesHandler;
+    }
+
+    private static readonly JsonSerializerOptions PreferencesJsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    /// <summary>Get the current user's personal appearance/grid preferences — overrides
+    /// that apply only to this account, on top of the active app's Branding defaults.</summary>
+    [HttpGet("me/preferences")]
+    [RequireAuth]
+    [ProducesResponseType(typeof(ApiResponse<UserPreferencesSettings>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> GetMyPreferences(CancellationToken ct)
+    {
+        var user = await _getMyPreferencesHandler.HandleAsync(new GetMyPreferencesQuery(), ct);
+        var preferences = string.IsNullOrEmpty(user.Preferences)
+            ? new UserPreferencesSettings()
+            : JsonSerializer.Deserialize<UserPreferencesSettings>(user.Preferences, PreferencesJsonOptions) ?? new UserPreferencesSettings();
+        return Ok(new ApiResponse<UserPreferencesSettings>(preferences));
+    }
+
+    /// <summary>Replace the current user's personal appearance/grid preferences. Any field
+    /// left null falls back to inheriting the active app's Branding default.</summary>
+    [HttpPut("me/preferences")]
+    [RequireAuth]
+    [ProducesResponseType(typeof(ApiResponse<UserPreferencesSettings>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> UpdateMyPreferences([FromBody] UserPreferencesSettings request, CancellationToken ct)
+    {
+        await _updateMyPreferencesHandler.HandleAsync(new UpdateMyPreferencesCommand(request), ct);
+        return await GetMyPreferences(ct);
     }
 
     /// <summary>Register a new user account. Returns an identity token (no tenant context yet).</summary>

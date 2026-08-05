@@ -47,6 +47,7 @@ public sealed class Lexer
         if (c == '"') return LexString(start);
         if (c == '[') return LexFieldRef(start);
         if (char.IsLetter(c) || c == '_') return LexIdentifier(start);
+        if (c == '$') return LexVariableRef(start);
         return LexOperator(start);
     }
 
@@ -153,9 +154,28 @@ public sealed class Lexer
             "not" => TokenKind.Not,
             "true" => TokenKind.True,
             "false" => TokenKind.False,
+            "var" => TokenKind.Var,
             _ => TokenKind.Identifier,
         };
         return new Token(kind, text, span);
+    }
+
+    /// <summary>A '$' introduces a reference to a declared variable. The name is lexed without the
+    /// sigil so it matches the identifier the declaration bound.</summary>
+    private Token LexVariableRef(int start)
+    {
+        _pos++; // '$'
+        var nameStart = _pos;
+        while (!AtEnd && (char.IsLetterOrDigit(Current) || Current == '_')) _pos++;
+
+        var span = TextSpan.FromBounds(start, _pos);
+        if (_pos == nameStart)
+        {
+            _diags.Add(new FormulaDiagnostic(FormulaErrorCode.UnexpectedCharacter, "Expected a variable name after '$'.", span));
+            return new Token(TokenKind.VariableRef, string.Empty, span);
+        }
+
+        return new Token(TokenKind.VariableRef, _src[nameStart.._pos], span);
     }
 
     private Token LexOperator(int start)
@@ -171,6 +191,7 @@ public sealed class Lexer
             case '&': return Single(TokenKind.Amp, start);
             case '(': return Single(TokenKind.LParen, start);
             case ')': return Single(TokenKind.RParen, start);
+            case ';': return Single(TokenKind.Semicolon, start);
             case ',': return Single(TokenKind.Comma, start);
             case '=': return Single(TokenKind.Equal, start);
             case '<':

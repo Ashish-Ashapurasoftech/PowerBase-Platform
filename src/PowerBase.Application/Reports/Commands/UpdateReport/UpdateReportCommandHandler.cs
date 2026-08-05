@@ -16,7 +16,8 @@ public class UpdateReportCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
 
-    private static readonly HashSet<string> AllowedOperators = ["eq", "ne", "contains", "startsWith", "gt", "gte", "lt", "lte"];
+    private static readonly HashSet<string> AllowedOperators =
+        ["eq", "ne", "contains", "notContains", "startsWith", "notStartsWith", "gt", "gte", "lt", "lte", "in", "notIn", "isEmpty", "isNotEmpty", "date_eq"];
     private static readonly HashSet<string> AllowedFunctions = ["Count", "Sum", "Avg", "Min", "Max"];
     private static readonly HashSet<string> AllowedVisibilities = ["Personal", "Shared", "MyRole", "SpecificRoles", "RoleScoped"];
 

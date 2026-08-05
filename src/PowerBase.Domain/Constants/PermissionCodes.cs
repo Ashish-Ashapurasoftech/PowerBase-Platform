@@ -41,6 +41,15 @@ public static class PermissionCodes
     public const string FormsDelete      = "forms:delete";
     public const string FormsRulesManage = "forms:rules:manage";
 
+    public const string PagesCreate  = "pages:create";
+    public const string PagesRead    = "pages:read";
+    public const string PagesUpdate  = "pages:update";
+    public const string PagesDelete  = "pages:delete";
+    public const string PagesPublish = "pages:publish";
+    /// <summary>Code Page Builder capability — additionally required (on top of PagesCreate/
+    /// PagesUpdate) to create or edit a page whose PageType is "Code".</summary>
+    public const string PagesCode    = "pages:code";
+
     public const string TokenCreate      = "token:create";
 
     /// <summary>
@@ -55,6 +64,7 @@ public static class PermissionCodes
         FieldsRead,
         ReportsRead, ReportsRun,
         FormsRead,
+        PagesRead,
         TokenCreate,
     };
 }
