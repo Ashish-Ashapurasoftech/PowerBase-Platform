@@ -9,7 +9,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class UserRepository : ControlRepositoryBase, IUserRepository
 {
-    private const string SelectColumns = "u.Id, u.PublicId, u.Email, u.EmailNormalized, u.HashedPassword, u.Name, u.SystemRoleId, sr.Code AS SystemRoleCode, u.IsEmailVerified, u.IsActive, u.IsDeleted, u.LastLoginOn, u.CreatedOn, u.CreatedBy, u.ModifiedOn, u.ModifiedBy, u.DeletedOn, u.DeletedBy, u.RowVersion";
+    private const string SelectColumns = "u.Id, u.PublicId, u.Email, u.EmailNormalized, u.HashedPassword, u.Name, u.SystemRoleId, sr.Code AS SystemRoleCode, u.IsEmailVerified, u.IsActive, u.Preferences, u.IsDeleted, u.LastLoginOn, u.CreatedOn, u.CreatedBy, u.ModifiedOn, u.ModifiedBy, u.DeletedOn, u.DeletedBy, u.RowVersion";
 
     private const string GetByEmailSql = $"""
         SELECT {SelectColumns}
@@ -50,6 +50,12 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
     private const string UpdatePasswordSql = """
         UPDATE core.[User]
         SET HashedPassword = @hashedPassword, ModifiedOn = SYSUTCDATETIME()
+        WHERE Id = @userId AND IsDeleted = 0
+        """;
+
+    private const string UpdatePreferencesSql = """
+        UPDATE core.[User]
+        SET Preferences = @preferences, ModifiedOn = SYSUTCDATETIME()
         WHERE Id = @userId AND IsDeleted = 0
         """;
 
@@ -125,6 +131,13 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePasswordSql, new { userId, hashedPassword }, cancellationToken: ct));
+    }
+
+    public async Task UpdatePreferencesAsync(long userId, string? preferences, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdatePreferencesSql, new { userId, preferences }, cancellationToken: ct));
     }
 
 }

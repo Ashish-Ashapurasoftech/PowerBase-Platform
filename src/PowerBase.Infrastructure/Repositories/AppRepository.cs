@@ -12,7 +12,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class AppRepository : TenantRepositoryBase, IAppRepository
 {
-    private const string SelectColumns = "Id, PublicId, OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
+    private const string SelectColumns = "Id, PublicId, OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, Branding, LayoutSettings, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
 
     private const string GetByPublicIdSql = $"""
         SELECT {SelectColumns}
@@ -114,6 +114,16 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             SecurityOptions = @securityOptions,
             ModifiedOn  = SYSUTCDATETIME(),
             ModifiedBy  = @modifiedBy
+        WHERE PublicId  = @publicId
+          AND IsDeleted = 0
+        """;
+
+    private const string UpdateBrandingSql = """
+        UPDATE meta.App
+        SET Branding       = @branding,
+            LayoutSettings = @layoutSettings,
+            ModifiedOn     = SYSUTCDATETIME(),
+            ModifiedBy     = @modifiedBy
         WHERE PublicId  = @publicId
           AND IsDeleted = 0
         """;
@@ -258,6 +268,17 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             new CommandDefinition(UpdateSql, new
             {
                 publicId, name, description, icon, color, formatting, securityOptions,
+                modifiedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
+    }
+
+    public async Task<int> UpdateBrandingAsync(Guid publicId, string? branding, string? layoutSettings, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteAsync(
+            new CommandDefinition(UpdateBrandingSql, new
+            {
+                publicId, branding, layoutSettings,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

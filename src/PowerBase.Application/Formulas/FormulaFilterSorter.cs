@@ -1,3 +1,4 @@
+using System.Text.Json;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -136,19 +137,37 @@ public static class FormulaFilterSorter
 
         return c.Operator switch
         {
-            "isEmpty"    => val is null || val.ToString() == string.Empty,
-            "isNotEmpty" => val is not null && val.ToString() != string.Empty,
-            "eq"         => CompareValues(val, c.Value) == 0,
-            "ne"         => CompareValues(val, c.Value) != 0,
-            "gt"         => CompareValues(val, c.Value) > 0,
-            "gte"        => CompareValues(val, c.Value) >= 0,
-            "lt"         => CompareValues(val, c.Value) < 0,
-            "lte"        => CompareValues(val, c.Value) <= 0,
-            "contains"   => val?.ToString()?.Contains(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
-            "startsWith" => val?.ToString()?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
-            "date_eq"    => val is DateTime dt && DateTime.TryParse(c.Value, out var dv) && dt.Date == dv.Date,
-            _            => true,
+            "isEmpty"       => val is null || val.ToString() == string.Empty,
+            "isNotEmpty"    => val is not null && val.ToString() != string.Empty,
+            "eq"            => CompareValues(val, c.Value) == 0,
+            "ne"            => CompareValues(val, c.Value) != 0,
+            "gt"            => CompareValues(val, c.Value) > 0,
+            "gte"           => CompareValues(val, c.Value) >= 0,
+            "lt"            => CompareValues(val, c.Value) < 0,
+            "lte"           => CompareValues(val, c.Value) <= 0,
+            "contains"      => val?.ToString()?.Contains(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
+            "notContains"   => val?.ToString()?.Contains(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
+            "startsWith"    => val?.ToString()?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
+            "notStartsWith" => val?.ToString()?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
+            "date_eq"       => val is DateTime dt && DateTime.TryParse(c.Value, out var dv) && dt.Date == dv.Date,
+            "in"            => ParseValueList(c.Value).Any(v => CompareValues(val, v) == 0),
+            "notIn"         => !ParseValueList(c.Value).Any(v => CompareValues(val, v) == 0),
+            _               => true,
         };
+    }
+
+    /// <summary>Mirrors RecordRepository.ParseValueList — the "in"/"notIn" wire format is a JSON
+    /// string array in FilterCondition.Value, falling back to a comma split.</summary>
+    private static List<string> ParseValueList(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return [];
+        try
+        {
+            var arr = JsonSerializer.Deserialize<List<string>>(raw);
+            if (arr != null) return arr.Where(v => !string.IsNullOrEmpty(v)).ToList();
+        }
+        catch (JsonException) { /* not JSON — fall through to comma split */ }
+        return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     }
 
     private static int CompareValues(object? a, string? b)

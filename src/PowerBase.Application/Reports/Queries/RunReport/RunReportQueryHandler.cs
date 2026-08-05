@@ -85,30 +85,49 @@ public class RunReportQueryHandler
             };
         }
 
-        // Resolve sort fields — support legacy SortFieldId/SortDesc
-        IReadOnlyList<SortSpec> sortFields = definition.SortFields.Count > 0
-            ? definition.SortFields
-            : (definition.SortFieldId.HasValue
-                ? [new SortSpec { FieldId = definition.SortFieldId.Value, Desc = definition.SortDesc }]
-                : []);
+        // Resolve sort fields — support legacy SortFieldId/SortDesc. A runtime sort (ad-hoc,
+        // not persisted — the reference design's header-click sort) replaces the saved sort
+        // outright rather than combining with it, matching single-column sort UX.
+        IReadOnlyList<SortSpec> sortFields = query.RuntimeSortFieldId.HasValue
+            ? [new SortSpec { FieldId = query.RuntimeSortFieldId.Value, Desc = query.RuntimeSortDesc }]
+            : (definition.SortFields.Count > 0
+                ? definition.SortFields
+                : (definition.SortFieldId.HasValue
+                    ? [new SortSpec { FieldId = definition.SortFieldId.Value, Desc = definition.SortDesc }]
+                    : []));
+
+        // Runtime grouping (ad-hoc, not persisted — the per-column kebab menu) overrides the
+        // saved GroupByFieldId; ClearGrouping explicitly drops it even if the report has one saved.
+        var effectiveGroupByFieldId = query.ClearGrouping ? null : (query.RuntimeGroupByFieldId ?? definition.GroupByFieldId);
+        var effectiveGroupByDesc = query.RuntimeGroupByFieldId.HasValue ? query.RuntimeGroupByDesc : definition.GroupByDescending;
 
         // For grouped Table reports: prepend group field as primary sort key so records
         // of the same group are contiguous — the frontend groups the flat result visually.
-        if (report.ReportType != "Summary" && definition.GroupByFieldId.HasValue)
+        if (report.ReportType != "Summary" && effectiveGroupByFieldId.HasValue)
         {
-            var gfId = definition.GroupByFieldId.Value;
+            var gfId = effectiveGroupByFieldId.Value;
             var list = sortFields.ToList();
             if (list.Count == 0 || list[0].FieldId != gfId)
             {
                 var without = list.Where(s => s.FieldId != gfId).ToList();
-                sortFields = new[] { new SortSpec { FieldId = gfId, Desc = definition.GroupByDescending } }
+                sortFields = new[] { new SortSpec { FieldId = gfId, Desc = effectiveGroupByDesc } }
                     .Concat(without)
                     .ToArray();
             }
         }
 
+        // Runtime filter tree (Advanced builder / per-column filters), AND'd on top of the
+        // saved tree — role ViewFilter and dynamic/quick-search filters are merged in further
+        // down (RunTableAsync) / below (RunSummaryAsync).
+        if (query.RuntimeFilterTree is { Nodes.Count: > 0 })
+        {
+            filterTree = filterTree == null
+                ? query.RuntimeFilterTree
+                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = query.RuntimeFilterTree }] };
+        }
+
         if (report.ReportType is "Summary" or "Chart")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, query.RuntimeFilters, ct);
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, query.RuntimeFilters, filterTree, ct);
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
             query.RuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, ct);
@@ -345,6 +364,7 @@ public class RunReportQueryHandler
         int page, int pageSize,
         string? quickSearch,
         IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters,
+        FilterGroup? savedAndRuntimeFilterTree,
         CancellationToken ct)
     {
         if (!definition.GroupByFieldId.HasValue)
@@ -380,7 +400,18 @@ public class RunReportQueryHandler
             seriesField = resolvedSeriesField;
         }
 
-        var summaryFilterTree = MergeRuntimeFilters(access.ViewFilter, allFields, runtimeFilters);
+        // Previously Summary/Chart reports ignored their own saved FilterTree entirely (only
+        // role ViewFilter + dynamic/quick-search filters applied) — now AND everything together:
+        // saved tree + ad-hoc runtime tree (already merged into savedAndRuntimeFilterTree by the
+        // caller) + role ViewFilter + dynamic filters.
+        var baseFilterTree = access.ViewFilter;
+        if (savedAndRuntimeFilterTree is { Nodes.Count: > 0 })
+        {
+            baseFilterTree = baseFilterTree == null
+                ? savedAndRuntimeFilterTree
+                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = baseFilterTree }, new FilterNode { Group = savedAndRuntimeFilterTree }] };
+        }
+        var summaryFilterTree = MergeRuntimeFilters(baseFilterTree, allFields, runtimeFilters);
 
         var rows = await _recordRepo.SummarizeAsync(
             table, groupByField, visibleAggregations, allFields, definition.GroupByMode,

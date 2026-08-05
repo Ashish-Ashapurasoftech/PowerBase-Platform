@@ -12,4 +12,5 @@ public interface IUserRepository
     Task<long> CreateAsync(User user, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task ActivateAsync(long userId, string name, string hashedPassword, CancellationToken ct = default);
     Task UpdatePasswordAsync(long userId, string hashedPassword, CancellationToken ct = default);
+    Task UpdatePreferencesAsync(long userId, string? preferences, CancellationToken ct = default);
 }

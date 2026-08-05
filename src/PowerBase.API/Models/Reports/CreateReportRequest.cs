@@ -85,6 +85,8 @@ public class FilterConditionRequest
     public long FieldId { get; set; }
     public string Operator { get; set; } = "eq";
     public string? Value { get; set; }
+    /// <summary>Optional JSON sub-field for complex types (e.g. Address street/city, DateRange start/end).</summary>
+    public string? SubField { get; set; }
 }
 
 // ── Sort request model ────────────────────────────────────────────────────────

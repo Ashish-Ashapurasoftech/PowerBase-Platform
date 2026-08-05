@@ -72,6 +72,7 @@ public class FilterConditionDto
     public long FieldId { get; init; }
     public string Operator { get; init; } = "eq";
     public string? Value { get; init; }
+    public string? SubField { get; init; }
 }
 
 // ── Sort DTOs ─────────────────────────────────────────────────────────────────

@@ -20,7 +20,8 @@ public class CreateReportCommandHandler
     private readonly CreateReportCommandValidator _validator;
 
     private static readonly HashSet<string> AllowedReportTypes = ["Table", "Summary", "GridEdit", "Chart"];
-    private static readonly HashSet<string> AllowedOperators = ["eq", "ne", "contains", "startsWith", "gt", "gte", "lt", "lte"];
+    private static readonly HashSet<string> AllowedOperators =
+        ["eq", "ne", "contains", "notContains", "startsWith", "notStartsWith", "gt", "gte", "lt", "lte", "in", "notIn", "isEmpty", "isNotEmpty", "date_eq"];
     private static readonly HashSet<string> AllowedFunctions = ["Count", "Sum", "Avg", "Min", "Max"];
 
     public CreateReportCommandHandler(
@@ -64,20 +65,23 @@ public class CreateReportCommandHandler
             tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         }
 
+        // Report columns/filters carry per-table field IDs (AppField.Fid), matching what the client
+        // sends and how RunReport/ExportReport resolve them — not the global AppField.Id.
+        var validFieldIds = tableFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
+
         if (command.Columns.Count > 0)
         {
-            // Report columns carry per-table field IDs (AppField.Fid), matching what the client sends
-            // and how RunReport/ExportReport resolve them — not the global AppField.Id.
-            var validIds = tableFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
-            var invalid = command.Columns.Where(id => !validIds.Contains(id)).ToList();
+            var invalid = command.Columns.Where(id => !validFieldIds.Contains(id)).ToList();
             if (invalid.Count > 0)
                 throw new ValidationException(
                     new Dictionary<string, string[]> { ["columns"] = [$"Unknown field IDs: {string.Join(", ", invalid)}"] });
         }
 
-        // Validate filter tree operators (two-level walk)
+        // Validate filter tree operators + field IDs (recursive walk — an unknown fieldId would
+        // otherwise reach RecordRepository as a reference to a nonexistent f_{fid} column and
+        // fail as a raw SQL error at run time instead of a clean 400 here).
         if (command.FilterTree is not null)
-            ValidateFilterGroup(command.FilterTree, AllowedOperators);
+            ValidateFilterGroup(command.FilterTree, AllowedOperators, validFieldIds);
 
         // Validate aggregations
         foreach (var agg in command.Aggregations)
@@ -194,16 +198,22 @@ public class CreateReportCommandHandler
         };
     }
 
-    private static void ValidateFilterGroup(FilterGroup group, HashSet<string> allowedOperators)
+    private static void ValidateFilterGroup(FilterGroup group, HashSet<string> allowedOperators, HashSet<long> validFieldIds)
     {
         foreach (var node in group.Nodes)
         {
-            if (node.Condition is { } cond && !allowedOperators.Contains(cond.Operator))
-                throw new ValidationException(new Dictionary<string, string[]>
-                    { ["filterTree"] = [$"Invalid operator '{cond.Operator}'. Allowed: {string.Join(", ", allowedOperators)}"] });
+            if (node.Condition is { } cond)
+            {
+                if (!allowedOperators.Contains(cond.Operator))
+                    throw new ValidationException(new Dictionary<string, string[]>
+                        { ["filterTree"] = [$"Invalid operator '{cond.Operator}'. Allowed: {string.Join(", ", allowedOperators)}"] });
+                if (!validFieldIds.Contains(cond.FieldId))
+                    throw new ValidationException(new Dictionary<string, string[]>
+                        { ["filterTree"] = [$"Unknown field ID in filter: {cond.FieldId}"] });
+            }
 
             if (node.Group is { } sub)
-                ValidateFilterGroup(sub, allowedOperators);
+                ValidateFilterGroup(sub, allowedOperators, validFieldIds);
         }
     }
 }
