@@ -301,28 +301,60 @@ public class ReportsController : ControllerBase
         var runtimeFilters = ParseDynamicFilters(dynamicFilters);
         var result = await _runHandler.HandleAsync(
             new RunReportQuery(publicId, page, pageSize, runtimeFilters, quickSearch, searchFieldIds, exactMatch), ct);
-        var response = new ReportRunResponse
-        {
-            Columns = result.Columns.Select(c => new ReportColumnDto
-            {
-                FieldId = c.FieldId,
-                Name = c.Name,
-                TypeCode = c.TypeCode,
-            }).ToList(),
-            Rows = result.Items.Select(r => new RecordResponse
-            {
-                Id = r.Id,
-                CreatedOn = r.CreatedOn,
-                ModifiedOn = r.ModifiedOn,
-                CreatedBy = r.CreatedBy,
-                Fields = r.Fields,
-            }).ToList(),
-            TotalCount = result.TotalCount,
-            Page = result.Page,
-            PageSize = result.PageSize,
-        };
-        return Ok(new ApiResponse<ReportRunResponse>(response));
+        return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
     }
+
+    /// <summary>
+    /// Execute a report with ad-hoc (not persisted) filtering/sorting/grouping — the Advanced
+    /// filter builder, per-column filters, header-click sort, and the per-column grouping menu
+    /// all go through this instead of GET run, since a nested FilterTree can be arbitrarily deep
+    /// and would risk hitting URL length limits as a query string.
+    /// </summary>
+    [HttpPost("reports/{publicId:guid}/run")]
+    [RequireAppMember(AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(typeof(ApiResponse<ReportRunResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> RunPost(Guid publicId, [FromBody] RunReportRequest request, CancellationToken ct = default)
+    {
+        var runtimeFilters = ParseDynamicFilters(request.DynamicFilters);
+        var result = await _runHandler.HandleAsync(new RunReportQuery(
+            publicId,
+            request.Page,
+            request.PageSize,
+            runtimeFilters,
+            request.QuickSearch,
+            request.SearchFieldIds,
+            request.ExactMatch,
+            MapFilterGroup(request.FilterTree),
+            request.SortFieldId,
+            request.SortDesc,
+            request.GroupByFieldId,
+            request.GroupByDesc,
+            request.ClearGrouping), ct);
+        return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
+    }
+
+    private static ReportRunResponse ToRunResponse(PagedReportRunResult result) => new()
+    {
+        Columns = result.Columns.Select(c => new ReportColumnDto
+        {
+            FieldId = c.FieldId,
+            Name = c.Name,
+            TypeCode = c.TypeCode,
+        }).ToList(),
+        Rows = result.Items.Select(r => new RecordResponse
+        {
+            Id = r.Id,
+            CreatedOn = r.CreatedOn,
+            ModifiedOn = r.ModifiedOn,
+            CreatedBy = r.CreatedBy,
+            Fields = r.Fields,
+        }).ToList(),
+        TotalCount = result.TotalCount,
+        Page = result.Page,
+        PageSize = result.PageSize,
+    };
 
     /// <summary>Export report results as CSV.</summary>
     [HttpGet("reports/{publicId:guid}/export/csv")]
@@ -454,6 +486,7 @@ public class ReportsController : ControllerBase
                     FieldId = n.Condition.FieldId,
                     Operator = n.Condition.Operator,
                     Value = n.Condition.Value,
+                    SubField = n.Condition.SubField,
                 },
                 Group = MapFilterGroup(n.Group),
             }).ToList(),
@@ -473,6 +506,7 @@ public class ReportsController : ControllerBase
                     FieldId = n.Condition.FieldId,
                     Operator = n.Condition.Operator,
                     Value = n.Condition.Value,
+                    SubField = n.Condition.SubField,
                 },
                 Group = MapFilterGroupDto(n.Group),
             }).ToList(),

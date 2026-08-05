@@ -448,7 +448,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         var parameters = new DynamicParameters();
         var ownerWhere = BuildOwnerWhere(restrictToCreatedBy, parameters);
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
+        // fieldMap guards against computed/Formula-type conditions reaching SQL as a reference
+        // to a nonexistent f_{fid} column — see BuildConditionClause's IsComputedTypeCode check.
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldMap);
 
         var selectList = seriesExpr is null
             ? $"{groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}"
@@ -596,19 +598,54 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         
         switch (cond.Operator)
         {
-            case "eq":         p.Add(pname, cond.Value);        return $"{colExpr} = @{pname}";
-            case "ne":         p.Add(pname, cond.Value);        return $"{colExpr} <> @{pname}";
-            case "gt":         p.Add(pname, cond.Value);        return $"{colExpr} > @{pname}";
-            case "gte":        p.Add(pname, cond.Value);        return $"{colExpr} >= @{pname}";
-            case "lt":         p.Add(pname, cond.Value);        return $"{colExpr} < @{pname}";
-            case "lte":        p.Add(pname, cond.Value);        return $"{colExpr} <= @{pname}";
-            case "date_eq":    p.Add(pname, cond.Value);        return $"CAST({colExpr} AS DATE) = @{pname}";
-            case "contains":   p.Add(pname, $"%{cond.Value}%"); return $"{colExpr} LIKE @{pname}";
-            case "startsWith": p.Add(pname, $"{cond.Value}%");  return $"{colExpr} LIKE @{pname}";
+            case "eq":             p.Add(pname, cond.Value);        return $"{colExpr} = @{pname}";
+            case "ne":             p.Add(pname, cond.Value);        return $"{colExpr} <> @{pname}";
+            case "gt":              p.Add(pname, cond.Value);        return $"{colExpr} > @{pname}";
+            case "gte":            p.Add(pname, cond.Value);        return $"{colExpr} >= @{pname}";
+            case "lt":              p.Add(pname, cond.Value);        return $"{colExpr} < @{pname}";
+            case "lte":            p.Add(pname, cond.Value);        return $"{colExpr} <= @{pname}";
+            case "date_eq":        p.Add(pname, cond.Value);        return $"CAST({colExpr} AS DATE) = @{pname}";
+            case "contains":       p.Add(pname, $"%{cond.Value}%"); return $"{colExpr} LIKE @{pname}";
+            case "notContains":    p.Add(pname, $"%{cond.Value}%"); return $"{colExpr} NOT LIKE @{pname}";
+            case "startsWith":     p.Add(pname, $"{cond.Value}%");  return $"{colExpr} LIKE @{pname}";
+            case "notStartsWith":  p.Add(pname, $"{cond.Value}%");  return $"{colExpr} NOT LIKE @{pname}";
             case "isEmpty":    i--; return $"({colExpr} IS NULL OR {colExpr} = '')";
             case "isNotEmpty": i--; return $"({colExpr} IS NOT NULL AND {colExpr} <> '')";
+            case "in":
+            case "notIn":
+            {
+                var values = ParseValueList(cond.Value);
+                if (values.Count == 0) { i--; return null; }
+                var names = new List<string>(values.Count);
+                foreach (var v in values)
+                {
+                    var pn = $"fv{i++}";
+                    p.Add(pn, v);
+                    names.Add($"@{pn}");
+                }
+                var op = cond.Operator == "in" ? "IN" : "NOT IN";
+                return $"{colExpr} {op} ({string.Join(",", names)})";
+            }
             default: i--; return null;
         }
+    }
+
+    /// <summary>
+    /// Parses a filter condition's Value as a list for the "in"/"notIn" operators. The wire
+    /// format is a JSON string array (e.g. ["a","b"]) so FilterCondition.Value stays a single
+    /// string end to end, no model/schema change needed. Falls back to a comma split for any
+    /// caller that sends a plain delimited string instead of JSON.
+    /// </summary>
+    private static List<string> ParseValueList(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return [];
+        try
+        {
+            var arr = JsonSerializer.Deserialize<List<string>>(raw);
+            if (arr != null) return arr.Where(v => !string.IsNullOrEmpty(v)).ToList();
+        }
+        catch (JsonException) { /* not JSON — fall through to comma split */ }
+        return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     }
 
     public async Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
