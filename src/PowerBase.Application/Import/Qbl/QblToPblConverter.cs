@@ -66,11 +66,45 @@ public static class QblToPblConverter
         var tableNodeByRef = new Dictionary<string, QblResourceNode>(StringComparer.Ordinal);
         var fieldNameByRefPerTable = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
         var relFieldsPerTable = new Dictionary<string, RelationshipFieldCollector>(StringComparer.Ordinal);
+        // Tracks every field/lookup/summary Name already used per table (case-insensitive, same
+        // as PblValidator's own DUPLICATE_FIELD_NAME check) so a same-table collision can be
+        // caught and skipped here instead of hard-blocking the whole import downstream.
+        // Confirmed real data: two distinct fields on the same table can share a display Name
+        // (e.g. a Formula field and a Summary field both labeled "Latest Auth Units (OLP)") -
+        // Quickbase itself never enforces this, so treat it the same as the
+        // QBL_DUPLICATE_REPORT_NAME case below: first wins, later ones flagged and skipped.
+        var seenFieldNamesByTableRef = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var addressSubComponentOwnerByTableRef = new Dictionary<string, Dictionary<string, (string CompositeFieldRef, string SubFieldKey)>>(StringComparer.Ordinal);
 
         foreach (var (tableRef, tableNode) in appNode.ChildMap("Tables"))
         {
             var fieldNameByRef = new Dictionary<string, string>(StringComparer.Ordinal);
             var relFields = new RelationshipFieldCollector();
+            var seenFieldNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // Address composite fields explicitly link to their own sub-component shadow fields
+            // via Street1/Street2/City/State/PostalCode/Country !Ref properties (confirmed real
+            // shape) - build a reverse map (shadow field ref -> composite field ref + canonical
+            // PowerBase sub-field key) so a Lookup/Summary that targets one of these Quickbase-only
+            // shadow fields can be redirected to the composite Address field PowerBase actually
+            // creates, with a sub-field annotation, instead of permanently failing to resolve
+            // (confirmed real pattern: a Lookup pulling "just the city" from a parent's Address).
+            // Stored per-table (not consulted until Pass B) since a Lookup lives on the CHILD
+            // table but targets a field on the PARENT table - the owning table isn't known until
+            // every table has been walked.
+            var addressSubComponentOwner = new Dictionary<string, (string CompositeFieldRef, string SubFieldKey)>(StringComparer.Ordinal);
+            foreach (var (addrFieldRef, addrFieldNode) in tableNode.ChildMap("Fields"))
+            {
+                if (addrFieldNode.Type != "QB::Field::Address")
+                    continue;
+                foreach (var (qblPropName, subFieldKey) in QblFieldTypeMap.AddressSubComponentPropertyToKey)
+                {
+                    var subRef = addrFieldNode.PropertyRef(qblPropName)?["Field"];
+                    if (subRef is not null)
+                        addressSubComponentOwner[subRef] = (addrFieldRef, subFieldKey);
+                }
+            }
+            addressSubComponentOwnerByTableRef[tableRef] = addressSubComponentOwner;
 
             var table = new PblTable
             {
@@ -86,9 +120,28 @@ public static class QblToPblConverter
             {
                 CollectRelationshipField(fieldRef, fieldNode, relFields, issues);
 
+                // System fields (Record ID#, Date Created, etc.) never become a standalone
+                // PblField - PowerBase's own seeder already creates one per table - but real
+                // Quickbase data can have a relationship Summary/Lookup that targets one directly
+                // (confirmed: Function: Maximum over QB::Field::RecordID, a common "latest
+                // related record" pattern). Register the PowerBase-seeded field's Name here so
+                // that later resolution succeeds instead of leaving the Summary/Lookup - and
+                // everything chained off it - permanently unresolved.
+                if (QblFieldTypeMap.SystemFieldNames.TryGetValue(fieldNode.Type, out var systemFieldName))
+                {
+                    fieldNameByRef[fieldRef] = systemFieldName;
+                    continue;
+                }
+
                 var field = ConvertField(tableRef, fieldRef, fieldNode, issues);
                 if (field is null)
                     continue;
+
+                if (!seenFieldNames.Add(field.Name))
+                {
+                    issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Field '{field.Name}' is already used on table '{table.Name}'; only the first is imported.", fieldRef));
+                    continue;
+                }
 
                 table.Fields.Add(field);
                 fieldNameByRef[fieldRef] = field.Name;
@@ -98,6 +151,7 @@ public static class QblToPblConverter
             tableNodeByRef[tableRef] = tableNode;
             fieldNameByRefPerTable[tableRef] = fieldNameByRef;
             relFieldsPerTable[tableRef] = relFields;
+            seenFieldNamesByTableRef[tableRef] = seenFieldNames;
         }
 
         // Runs once Pass A has seen every table, since a formula on the first table can name the
@@ -131,7 +185,8 @@ public static class QblToPblConverter
         // relationship having already enriched the field-name maps, and relationship/table
         // iteration order isn't guaranteed to respect that dependency. Loop until a full pass
         // makes no further progress, then flag whatever's still unresolved.
-        ResolveRelationshipLookupsAndSummaries(relationships, relFieldsPerTable, fieldNameByRefPerTable, issues);
+        var tableNameByRef = tables.ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
+        ResolveRelationshipLookupsAndSummaries(relationships, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, tableNameByRef, addressSubComponentOwnerByTableRef, issues);
 
         // Relationship/Lookup/Summary refs are QBL keys scoped to their owning table's own
         // Fields/Relationships map, not globally unique — Quickbase auto-names them from the
@@ -397,6 +452,25 @@ public static class QblToPblConverter
     private sealed record LookupFieldInfo(string FieldRef, string Name, string? Label, string? TargetFieldRef);
     private sealed record SummaryFieldInfo(string FieldRef, string Name, string? Label, string Function, string? TargetFieldRef);
 
+    /// <summary>If the raw target ref is one of <paramref name="tableRef"/>'s Address shadow
+    /// sub-component fields (see the per-table maps built in <see cref="Convert"/>), redirects it
+    /// to the actual composite Address field's ref plus the canonical sub-field key - otherwise
+    /// passes the ref through unchanged with no sub-field. Consulted from Pass B (relationship
+    /// resolution), not Pass A's field-collection loop, because a Lookup/Summary lives on one
+    /// table but targets a field on a *different* table (parent for Lookup, child for Summary) -
+    /// that owning table's own field-level scan isn't visible until every table has been walked.</summary>
+    private static (string? TargetFieldRef, string? TargetSubField) ResolveAddressTarget(
+        string tableRef,
+        string? rawTargetFieldRef,
+        Dictionary<string, Dictionary<string, (string CompositeFieldRef, string SubFieldKey)>> addressSubComponentOwnerByTableRef)
+    {
+        if (rawTargetFieldRef is not null &&
+            addressSubComponentOwnerByTableRef.TryGetValue(tableRef, out var tableMap) &&
+            tableMap.TryGetValue(rawTargetFieldRef, out var owner))
+            return (owner.CompositeFieldRef, owner.SubFieldKey);
+        return (rawTargetFieldRef, null);
+    }
+
     private static void CollectRelationshipField(string fieldRef, QblResourceNode fieldNode, RelationshipFieldCollector collector, List<PblIssue> issues)
     {
         var label = ResolveScalar(fieldNode, "Label");
@@ -485,6 +559,7 @@ public static class QblToPblConverter
         "Average" => "Avg",
         "Maximum" => "Max",
         "Minimum" => "Min",
+        "AnyRelatedRecords" => "Exists",
         _ => null,
     };
 
@@ -542,6 +617,9 @@ public static class QblToPblConverter
         List<PblRelationship> relationships,
         Dictionary<string, RelationshipFieldCollector> relFieldsPerTable,
         Dictionary<string, Dictionary<string, string>> fieldNameByRefPerTable,
+        Dictionary<string, HashSet<string>> seenFieldNamesByTableRef,
+        Dictionary<string, string> tableNameByRef,
+        Dictionary<string, Dictionary<string, (string CompositeFieldRef, string SubFieldKey)>> addressSubComponentOwnerByTableRef,
         List<PblIssue> issues)
     {
         var pendingLookups = new List<(PblRelationship Rel, LookupFieldInfo Lookup)>();
@@ -583,10 +661,20 @@ public static class QblToPblConverter
             {
                 var (rel, lookup) = pendingLookups[i];
                 var parentFieldNames = fieldNameByRefPerTable.GetValueOrDefault(rel.ParentTableRef, []);
-                if (lookup.TargetFieldRef is null || !parentFieldNames.TryGetValue(lookup.TargetFieldRef, out var sourceFieldName))
+                var (lookupTargetFieldRef, lookupTargetSubField) = ResolveAddressTarget(rel.ParentTableRef, lookup.TargetFieldRef, addressSubComponentOwnerByTableRef);
+                if (lookupTargetFieldRef is null || !parentFieldNames.TryGetValue(lookupTargetFieldRef, out var sourceFieldName))
                     continue;
 
-                rel.Lookups.Add(new PblLookupField { LogicalRef = lookup.FieldRef, Name = lookup.Name, Label = lookup.Label, SourceFieldName = sourceFieldName });
+                var childSeenNames = seenFieldNamesByTableRef.GetValueOrDefault(rel.ChildTableRef);
+                if (childSeenNames is not null && !childSeenNames.Add(lookup.Name))
+                {
+                    issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Lookup field '{lookup.Name}' is already used on table '{tableNameByRef.GetValueOrDefault(rel.ChildTableRef, rel.ChildTableRef)}'; skipped.", lookup.FieldRef));
+                    pendingLookups.RemoveAt(i);
+                    progress = true;
+                    continue;
+                }
+
+                rel.Lookups.Add(new PblLookupField { LogicalRef = lookup.FieldRef, Name = lookup.Name, Label = lookup.Label, SourceFieldName = sourceFieldName, SourceSubField = lookupTargetSubField });
                 fieldNameByRefPerTable[rel.ChildTableRef][lookup.FieldRef] = lookup.Name;
                 pendingLookups.RemoveAt(i);
                 progress = true;
@@ -596,12 +684,30 @@ public static class QblToPblConverter
             {
                 var (rel, summary, _) = pendingSummaries[i];
                 var childFieldNames = fieldNameByRefPerTable.GetValueOrDefault(rel.ChildTableRef, []);
+                var (summaryTargetFieldRef, summaryTargetSubField) = ResolveAddressTarget(rel.ChildTableRef, summary.TargetFieldRef, addressSubComponentOwnerByTableRef);
+
+                if (summaryTargetSubField is not null && summary.Function is "Sum" or "Avg")
+                {
+                    issues.Add(Warning("QBL_UNSUPPORTED_SUMMARY_ADDRESS_SUBFIELD", $"Summary field '{summary.Name}' uses function '{summary.Function}' over an address sub-component, which PowerBase can't aggregate numerically; skipped.", summary.FieldRef));
+                    pendingSummaries.RemoveAt(i);
+                    progress = true;
+                    continue;
+                }
 
                 string? targetFieldName = null;
-                if (summary.TargetFieldRef is not null && !childFieldNames.TryGetValue(summary.TargetFieldRef, out targetFieldName))
+                if (summaryTargetFieldRef is not null && !childFieldNames.TryGetValue(summaryTargetFieldRef, out targetFieldName))
                     continue;
 
-                rel.Summaries.Add(new PblSummaryField { LogicalRef = summary.FieldRef, Name = summary.Name, Label = summary.Label, Function = summary.Function, TargetFieldName = targetFieldName });
+                var parentSeenNames = seenFieldNamesByTableRef.GetValueOrDefault(rel.ParentTableRef);
+                if (parentSeenNames is not null && !parentSeenNames.Add(summary.Name))
+                {
+                    issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Summary field '{summary.Name}' is already used on table '{tableNameByRef.GetValueOrDefault(rel.ParentTableRef, rel.ParentTableRef)}'; skipped.", summary.FieldRef));
+                    pendingSummaries.RemoveAt(i);
+                    progress = true;
+                    continue;
+                }
+
+                rel.Summaries.Add(new PblSummaryField { LogicalRef = summary.FieldRef, Name = summary.Name, Label = summary.Label, Function = summary.Function, TargetFieldName = targetFieldName, TargetSubField = summaryTargetSubField });
                 fieldNameByRefPerTable[rel.ParentTableRef][summary.FieldRef] = summary.Name;
                 pendingSummaries.RemoveAt(i);
                 progress = true;
@@ -842,16 +948,28 @@ public static class QblToPblConverter
 
         // QBL's Page tier has no PowerBase equivalent (PowerBase forms are Section→Block→Element,
         // confirmed no Page level) — flatten each Page's Sections into the form in document order.
+        // Confirmed real data: a single form can carry two distinct sections with the identical
+        // Title (e.g. two independently-added "Data Import details" sections) - Quickbase never
+        // enforces section-name uniqueness, but PowerBase's DUPLICATE_FORM_SECTION_NAME check
+        // does. Same class of issue as duplicate report/field names above - skip and flag rather
+        // than hard-blocking the whole import.
+        var seenSectionNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (_, pageNode) in formNode.ChildMap("Pages"))
         {
             foreach (var (sectionRef, sectionNode) in pageNode.ChildMap("Sections"))
             {
                 var section = ConvertFormSection(sectionRef, sectionNode, qualifiedFormRef, fieldNameByRef, qualifiedBlockRefByRaw, issues);
-                if (section is not null)
+                if (section is null)
+                    continue;
+
+                if (!seenSectionNames.Add(section.Name))
                 {
-                    form.Sections.Add(section);
-                    qualifiedSectionRefByRaw[sectionRef] = section.LogicalRef;
+                    issues.Add(Warning("QBL_DUPLICATE_FORM_SECTION_NAME", $"Section '{section.Name}' is already used on form '{form.Name}'; only the first is imported.", sectionRef));
+                    continue;
                 }
+
+                form.Sections.Add(section);
+                qualifiedSectionRefByRaw[sectionRef] = section.LogicalRef;
             }
         }
 
@@ -1215,14 +1333,16 @@ public static class QblToPblConverter
         };
     }
 
-    /// <summary>Confirmed real values: IsEqualTo, Includes. The rest of Quickbase's documented
-    /// comparison vocabulary is mapped defensively but unverified against a real sample.</summary>
+    /// <summary>Confirmed real values: IsEqualTo, IsNotEqualTo, Contains (a second real export
+    /// uses "Contains", not "Includes" - both accepted since neither sample contradicts the
+    /// other). The rest of Quickbase's documented comparison vocabulary is mapped defensively but
+    /// unverified against a real sample.</summary>
     private static string? MapComparisonOperator(string? qblComparison) => qblComparison switch
     {
         "IsEqualTo" => "eq",
         "IsNotEqualTo" => "ne",
-        "Includes" => "contains",
-        "DoesNotInclude" => "notContains",
+        "Includes" or "Contains" => "contains",
+        "DoesNotInclude" or "DoesNotContain" => "notContains",
         "StartsWith" => "startsWith",
         "EndsWith" => "endsWith",
         "IsEmpty" => "isEmpty",

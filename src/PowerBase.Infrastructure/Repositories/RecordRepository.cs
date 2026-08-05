@@ -162,20 +162,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     public async Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
-        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, CancellationToken ct = default)
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
+        CancellationToken ct = default)
     {
         var result = new Dictionary<object, object?>();
         if (parentKeyValues.Count == 0) return result;
 
         var refCol = PhysicalNaming.ColumnName(referenceFid);
+        // Address sub-field targeting: aggregate the JSON_VALUE-extracted sub-key instead of the
+        // raw column, same JSON_VALUE pattern already used for Address report filters below.
+        string TargetColExpr() => targetFid.HasValue
+            ? (string.IsNullOrWhiteSpace(targetSubField)
+                ? PhysicalNaming.ColumnName(targetFid.Value)
+                : $"JSON_VALUE({PhysicalNaming.ColumnName(targetFid.Value)}, '$.{System.Text.RegularExpressions.Regex.Replace(targetSubField, "[^a-zA-Z0-9_]", "")}')")
+            : "";
         var aggExpr = function switch
         {
             "Count" => "COUNT(*)",
             "Exists" => "CAST(CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS BIT)",
-            "Sum" when targetFid.HasValue => $"SUM(CAST({PhysicalNaming.ColumnName(targetFid.Value)} AS DECIMAL(18,4)))",
-            "Avg" when targetFid.HasValue => $"AVG(CAST({PhysicalNaming.ColumnName(targetFid.Value)} AS DECIMAL(18,4)))",
-            "Min" when targetFid.HasValue => $"MIN({PhysicalNaming.ColumnName(targetFid.Value)})",
-            "Max" when targetFid.HasValue => $"MAX({PhysicalNaming.ColumnName(targetFid.Value)})",
+            "Sum" when targetFid.HasValue => $"SUM(CAST({TargetColExpr()} AS DECIMAL(18,4)))",
+            "Avg" when targetFid.HasValue => $"AVG(CAST({TargetColExpr()} AS DECIMAL(18,4)))",
+            "Min" when targetFid.HasValue => $"MIN({TargetColExpr()})",
+            "Max" when targetFid.HasValue => $"MAX({TargetColExpr()})",
             _ => "COUNT(*)",
         };
 

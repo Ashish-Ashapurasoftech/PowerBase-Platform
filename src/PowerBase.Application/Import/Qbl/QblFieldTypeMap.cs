@@ -52,9 +52,11 @@ public static class QblFieldTypeMap
         ["QB::Field::URL::Formula"] = "Text",
         ["QB::Field::RichText::Formula"] = "Text",
         ["QB::Field::Email::Formula"] = "Text",
+        ["QB::Field::PhoneNumber::Formula"] = "Text",
         ["QB::Field::Checkbox::Formula"] = "Bool",
         ["QB::Field::Numeric::Formula"] = "Number",
         ["QB::Field::Currency::Formula"] = "Number",
+        ["QB::Field::Percent::Formula"] = "Number",
         ["QB::Field::Date::Formula"] = "Date",
         ["QB::Field::DateTime::Formula"] = "DateTime",
         ["QB::Field::Duration::Formula"] = "Duration",
@@ -70,6 +72,7 @@ public static class QblFieldTypeMap
     {
         "QB::Field::MultiselectText::Formula",
         "QB::Field::TextMultipleChoice::Formula",
+        "QB::Field::TimeOfDay::Formula",
     };
 
     /// <summary>Relationship-family field types — never created as a standalone <c>PblField</c>;
@@ -95,6 +98,23 @@ public static class QblFieldTypeMap
         "QB::Field::LastModifiedBy",
     };
 
+    /// <summary>QBL system field type → the Name PowerBase's own <c>IAppSeeder</c> gives the
+    /// equivalent auto-seeded field (see <c>AppSeeder.cs</c>'s <c>systemFieldDefs</c>). System
+    /// fields never become a standalone <c>PblField</c> (PowerBase already seeds one per table),
+    /// but a real, common Quickbase pattern is a relationship Summary/Lookup that targets the
+    /// built-in Record ID# field directly (e.g. <c>Function: Maximum</c> over
+    /// <c>QB::Field::RecordID</c>, used to compute "latest related record"). Without this name
+    /// registered, every such Summary/Lookup — and everything chained off it (reports, other
+    /// lookups, form elements) — would stay permanently unresolved.</summary>
+    public static readonly IReadOnlyDictionary<string, string> SystemFieldNames = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["QB::Field::RecordID"] = "Record ID#",
+        ["QB::Field::DateCreated"] = "Date Created",
+        ["QB::Field::DateModified"] = "Date Modified",
+        ["QB::Field::RecordOwner"] = "Record Owner",
+        ["QB::Field::LastModifiedBy"] = "Last Modified By",
+    };
+
     /// <summary>Address sub-component shadow fields. Quickbase exports each address
     /// sub-component (street/city/state/zip/country) as its own field alongside the composite
     /// <c>QB::Field::Address</c> field — importing them as separate scalar fields would create
@@ -108,6 +128,21 @@ public static class QblFieldTypeMap
         "QB::Field::AddressState",
         "QB::Field::AddressPostalCode",
         "QB::Field::AddressCountry",
+    };
+
+    /// <summary>QBL's composite Address field explicitly links to each of its own shadow
+    /// sub-component fields via a <c>!Ref</c> property (confirmed real shape: <c>Street1</c>,
+    /// <c>Street2</c>, <c>City</c>, <c>State</c>, <c>PostalCode</c>, <c>Country</c>) — this maps
+    /// that QBL property name to the canonical PowerBase
+    /// <see cref="PowerBase.Domain.FieldSettings.AddressSubFields"/> key.</summary>
+    public static readonly IReadOnlyDictionary<string, string> AddressSubComponentPropertyToKey = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["Street1"] = "street1",
+        ["Street2"] = "street2",
+        ["City"] = "city",
+        ["State"] = "state",
+        ["PostalCode"] = "zip",
+        ["Country"] = "country",
     };
 
     /// <summary>QBL types with no PowerBase equivalent. Always flagged, never silently dropped.

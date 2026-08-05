@@ -40,9 +40,13 @@ public interface IRecordRepository
     /// values (row Ids for the default Record ID# key, or the parent's key-field raw values for a Set-Key
     /// table — drives Summary projection and the parent-delete restrict check). Returns parentKeyValue →
     /// aggregate value.</summary>
+    /// <param name="targetSubField">When the target field is a composite Address field, the JSON
+    /// sub-key (see <see cref="PowerBase.Domain.FieldSettings.AddressSubFields"/>) to aggregate
+    /// instead of the whole value. Only meaningful with Count/Exists/Min/Max.</param>
     Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
-        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, CancellationToken ct = default);
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
+        CancellationToken ct = default);
 
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,

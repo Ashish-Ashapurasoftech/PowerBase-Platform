@@ -39,6 +39,11 @@ public sealed class PblLookupField
 
     /// <summary>A <see cref="PblField.Name"/> on the relationship's parent table.</summary>
     public string SourceFieldName { get; set; } = string.Empty;
+
+    /// <summary>When <see cref="SourceFieldName"/> is a composite Address field, the JSON
+    /// sub-key (see <see cref="PowerBase.Domain.FieldSettings.AddressSubFields"/>) to pull
+    /// instead of the whole value — e.g. a QBL export's own "just the city" shadow field.</summary>
+    public string? SourceSubField { get; set; }
 }
 
 /// <summary>A child-table aggregate rolled up onto the parent table.</summary>
@@ -53,4 +58,8 @@ public sealed class PblSummaryField
 
     /// <summary>A <see cref="PblField.Name"/> on the relationship's child table; null for Count/Exists.</summary>
     public string? TargetFieldName { get; set; }
+
+    /// <summary>When <see cref="TargetFieldName"/> is a composite Address field, the JSON
+    /// sub-key to aggregate instead of the whole value. Only meaningful with Count/Exists/Min/Max.</summary>
+    public string? TargetSubField { get; set; }
 }

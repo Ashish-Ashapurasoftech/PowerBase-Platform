@@ -494,7 +494,7 @@ public class ImportAppFromPblCommandHandler
                     skipped.Add(new ImportSkippedItem { LogicalRef = lookup.LogicalRef, Name = lookup.Name, Reason = $"Lookup source field '{lookup.SourceFieldName}' was not created on '{parentName}'." });
                     continue;
                 }
-                lookupSpecs.Add(new CreateLookupSpec(sourceFid, lookup.Name, lookup.Label));
+                lookupSpecs.Add(new CreateLookupSpec(sourceFid, lookup.Name, lookup.Label, lookup.SourceSubField));
             }
 
             var summarySpecs = new List<CreateSummarySpec>();
@@ -510,7 +510,7 @@ public class ImportAppFromPblCommandHandler
                     }
                     targetFid = fid;
                 }
-                summarySpecs.Add(new CreateSummarySpec(summary.Name, summary.Label, summary.Function, targetFid));
+                summarySpecs.Add(new CreateSummarySpec(summary.Name, summary.Label, summary.Function, targetFid, summary.TargetSubField));
             }
 
             await _createRelationshipHandler.HandleAsync(new CreateRelationshipCommand(
