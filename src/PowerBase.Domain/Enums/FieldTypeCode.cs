@@ -29,5 +29,6 @@ public enum FieldTypeCode
     Reference,
     Lookup,
     Summary,
-    ReportLink
+    ReportLink,
+    ActionButton
 }

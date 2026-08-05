@@ -121,6 +121,7 @@ public class CreateRelationshipCommandHandler
         {
             var src = parentFields.FirstOrDefault(f => f.Fid == spec.SourceFid)
                 ?? throw new NotFoundException("Field", spec.SourceFid);
+            ValidateSubField(spec.SourceSubField, src.TypeCode, "sourceSubField");
             var lookup = await CreateFieldAsync(child, lookupType, spec.Name.Trim(), spec.Label?.Trim(), false,
                 new LookupSettings
                 {
@@ -129,6 +130,7 @@ public class CreateRelationshipCommandHandler
                     SourceTableId = parent.Id,
                     SourceFid = spec.SourceFid,
                     SourceTypeCode = src.TypeCode,
+                    SourceSubField = spec.SourceSubField,
                 }, ct);
             firstLookup ??= lookup;
             createdFields.Add(new(lookup.PublicId, lookup.Fid!.Value, lookup.Name, "lookup"));
@@ -143,6 +145,12 @@ public class CreateRelationshipCommandHandler
         foreach (var spec in command.Summaries)
         {
             var target = spec.TargetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == spec.TargetFid) : null;
+            ValidateSubField(spec.TargetSubField, target?.TypeCode, "targetSubField");
+            if (spec.TargetSubField is not null && spec.Function is SummaryFunctions.Sum or SummaryFunctions.Avg)
+                throw new ValidationException(new Dictionary<string, string[]>
+                {
+                    ["targetSubField"] = [$"'{spec.Function}' can't aggregate an address sub-field (always text); use Count, Exists, Min, or Max."],
+                });
             var summary = await CreateFieldAsync(parent, summaryType, spec.Name.Trim(), spec.Label?.Trim(), false,
                 new SummarySettings
                 {
@@ -152,6 +160,7 @@ public class CreateRelationshipCommandHandler
                     Function = spec.Function,
                     TargetFid = spec.TargetFid,
                     TargetTypeCode = target?.TypeCode,
+                    TargetSubField = spec.TargetSubField,
                 }, ct);
             createdFields.Add(new(summary.PublicId, summary.Fid!.Value, summary.Name, "summary"));
             parentAddFids.Add(summary.Fid!.Value);
@@ -254,6 +263,27 @@ public class CreateRelationshipCommandHandler
         foreach (var form in forms.Where(f => f.AutoAddNewFields))
             foreach (var fid in fids)
                 await _formRepo.AppendFieldToLastSectionAsync(form.Id, fid, ct);
+    }
+
+    /// <summary>A sub-field only makes sense against a composite Address field, and only for one
+    /// of its real JSON keys — reject anything else eagerly with a clear message rather than
+    /// silently creating a Lookup/Summary that will always resolve to null.</summary>
+    private static void ValidateSubField(string? subField, string? fieldTypeCode, string paramName)
+    {
+        if (subField is null)
+            return;
+
+        if (fieldTypeCode != nameof(Domain.Enums.FieldTypeCode.Address))
+            throw new ValidationException(new Dictionary<string, string[]>
+            {
+                [paramName] = ["A sub-field can only target a composite Address field."],
+            });
+
+        if (!AddressSubFields.All.Contains(subField))
+            throw new ValidationException(new Dictionary<string, string[]>
+            {
+                [paramName] = [$"Must be one of: {string.Join(", ", AddressSubFields.All)}."],
+            });
     }
 
     private static string Serialize(object settings) => JsonSerializer.Serialize(settings, JsonOpts);

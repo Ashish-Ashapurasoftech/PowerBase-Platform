@@ -1,7 +1,9 @@
 using System.Globalization;
+using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
+using PowerBase.Domain.FieldSettings;
 using PowerBase.Formula;
 using PowerBase.Formula.Evaluation;
 using PowerBase.Formula.Types;
@@ -46,7 +48,8 @@ public sealed class FormulaProjector : IFormulaProjector
         AppTable? table = null)
     {
         var formulaFields = fields.Where(f => f.Fid.HasValue && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)).ToList();
-        if (formulaFields.Count == 0 || rows.Count == 0)
+        var hasButtonFormulas = fields.Any(f => f.Fid.HasValue && f.TypeCode == "ActionButton" && !string.IsNullOrWhiteSpace(f.Settings));
+        if ((formulaFields.Count == 0 && !hasButtonFormulas) || rows.Count == 0)
             return seed ?? rows.Select(_ => EmptyMap).ToList();
 
         var schema = new AppFieldSchema(fields);
@@ -120,7 +123,38 @@ public sealed class FormulaProjector : IFormulaProjector
         var crossTable = new CrossTableQueryContext(_tableRepo, _fieldRepo, _recordRepo, table);
         var fidToColMap = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value, f => f.PhysicalColumnName ?? string.Empty);
 
+        // ── Compile ActionButton formula label/color once, reuse per row ────────────
+        // Uses the same schema so formulas can reference any field on this table.
+        // Compiled once here; evaluated inside the row loop below.
+        var JsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var compiledButtonSlots = new List<(long Fid, CompiledFormula? Label, CompiledFormula? Color)>();
+        foreach (var f in fields.Where(f => f.Fid.HasValue && f.TypeCode == "ActionButton" && !string.IsNullOrWhiteSpace(f.Settings)))
+        {
+            ActionButtonSettings? bs = null;
+            try { bs = JsonSerializer.Deserialize<ActionButtonSettings>(f.Settings!, JsonOpts); } catch { }
+            if (bs is null) continue;
+
+            var labelFid = (long)f.Fid!.Value;
+            CompiledFormula? labelComp = null;
+            CompiledFormula? colorComp = null;
+
+            if (bs.ButtonLabel?.Kind == ValueSourceKinds.Formula && !string.IsNullOrWhiteSpace(bs.ButtonLabel.Formula))
+            {
+                var c = _engine.Compile(bs.ButtonLabel.Formula!, schema, FormulaType.Text);
+                if (!c.HasErrors) labelComp = c;
+            }
+            if (bs.ButtonColor?.Kind == ValueSourceKinds.Formula && !string.IsNullOrWhiteSpace(bs.ButtonColor.Formula))
+            {
+                var c = _engine.Compile(bs.ButtonColor.Formula!, schema, FormulaType.Text);
+                if (!c.HasErrors) colorComp = c;
+            }
+
+            if (labelComp is not null || colorComp is not null)
+                compiledButtonSlots.Add((labelFid, labelComp, colorComp));
+        }
+
         var output = new List<IReadOnlyDictionary<long, object?>>(rows.Count);
+
         for (var i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
@@ -143,6 +177,33 @@ public sealed class FormulaProjector : IFormulaProjector
                 }
                 map[fid] = value;
             }
+
+            // ── ActionButton formula label/color ─────────────────────────────────────
+            // Evaluate ButtonLabel.Formula and ButtonColor.Formula for each ActionButton
+            // field so the frontend can render the correct label and colour without knowing
+            // how to run the formula engine itself.  Results land in synthetic keys
+            // "{fid}__label" / "{fid}__color" which RecordResult.FromRow forwards through
+            // to the API response.  Failures fail-soft to null (identical behaviour to
+            // every other formula evaluation in this projector).
+            foreach (var (buttonFid, labelFormula, colorFormula) in compiledButtonSlots)
+            {
+                if (labelFormula is not null)
+                {
+                    object? lv = null;
+                    try { lv = FormulaRawValue.ToRaw(_engine.Evaluate(labelFormula, evalCtx, options)); }
+                    catch (FormulaEvaluationException) { lv = null; }
+                    map[buttonFid] = lv;                          // overwrite with computed value
+                    map[-(buttonFid * 2 + 1)] = lv;              // synthetic label slot
+                }
+                if (colorFormula is not null)
+                {
+                    object? cv = null;
+                    try { cv = FormulaRawValue.ToRaw(_engine.Evaluate(colorFormula, evalCtx, options)); }
+                    catch (FormulaEvaluationException) { cv = null; }
+                    map[-(buttonFid * 2 + 2)] = cv;              // synthetic color slot
+                }
+            }
+
             output.Add(map);
         }
         return output;
@@ -152,7 +213,7 @@ public sealed class FormulaProjector : IFormulaProjector
     {
         UtcNow = DateTime.UtcNow,
         CurrentUser = _queryContext.UserId > 0
-            ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
+            ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail, _queryContext.UserName)
             : null,
         // AppID()/Dbid() surface route-usable identifiers (publicIds), so URL-formula fields can
         // build links like /app/{AppId}/tables/{Dbid()}/records/new. Blocking here matches the

@@ -8,17 +8,20 @@ public class ListReportsQueryHandler
 {
     private readonly IReportRepository _reportRepo;
     private readonly IAppRepository _appRepo;
+    private readonly IAppTableRepository _tableRepo;
 
-    public ListReportsQueryHandler(IReportRepository reportRepo, IAppRepository appRepo)
+    public ListReportsQueryHandler(IReportRepository reportRepo, IAppRepository appRepo, IAppTableRepository tableRepo)
     {
         _reportRepo = reportRepo;
         _appRepo = appRepo;
+        _tableRepo = tableRepo;
     }
 
     public async Task<IReadOnlyList<ReportDetailResult>> HandleAsync(ListReportsQuery query, CancellationToken ct = default)
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
         var reports = await _reportRepo.ListByAppAsync(appId, ct);
+        var tables = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Id);
 
         var results = new List<ReportDetailResult>();
         foreach (var r in reports)
@@ -31,6 +34,8 @@ public class ListReportsQueryHandler
                 visibleToRoleIds = (await _reportRepo.GetReportRolePublicIdsAsync(r.Id, ct)).ToList();
             }
 
+            tables.TryGetValue(r.AppTableId, out var table);
+
             results.Add(new ReportDetailResult
             {
                 Id = r.PublicId,
@@ -42,6 +47,8 @@ public class ListReportsQueryHandler
                 IsDefault = r.IsDefault,
                 DisplayOrder = r.DisplayOrder,
                 ViewEditFormId = r.ViewEditFormPublicId,
+                TableId = table?.PublicId ?? Guid.Empty,
+                TableName = table?.Name ?? string.Empty,
                 CreatedOn = r.CreatedOn,
                 VisibleToRoleIds = visibleToRoleIds
             });

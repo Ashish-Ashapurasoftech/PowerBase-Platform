@@ -82,6 +82,27 @@ public class RecordResult
 
         var createdBy = row.TryGetValue("CreatedBy", out var cb) && cb is not null ? Convert.ToInt64(cb) : 0L;
 
+        // Forward synthetic ActionButton formula label/color keys.
+        // These are stored in computedValues with negative long keys:
+        //   -(fid*2+1) = resolved ButtonLabel for the ActionButton field with that fid
+        //   -(fid*2+2) = resolved ButtonColor for the ActionButton field with that fid
+        // The frontend reads these as "{fid}__label" / "{fid}__color" from the record's fields.
+        if (computedValues is not null)
+        {
+            foreach (var kv in computedValues)
+            {
+                if (kv.Key >= 0) continue; // positive keys are regular formula fields already handled
+                // Decode: negative key → (fid, slot)
+                // -(fid*2+1) ⟹ fid = (-key-1)/2, slot=label
+                // -(fid*2+2) ⟹ fid = (-key-2)/2, slot=color
+                var negKey = -kv.Key;
+                if ((negKey - 1) % 2 == 0)
+                    fieldData[$"{(negKey - 1) / 2}__label"] = kv.Value;
+                else if ((negKey - 2) % 2 == 0)
+                    fieldData[$"{(negKey - 2) / 2}__color"] = kv.Value;
+            }
+        }
+
         return new RecordResult
         {
             Id = (Guid)row["PublicId"]!,

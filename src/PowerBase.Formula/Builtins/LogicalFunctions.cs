@@ -9,7 +9,11 @@ internal static class LogicalFunctions
 {
     public static void Register(FunctionRegistry r)
     {
-        r.Add(Fn.Lazy("If", CheckIf, (t, _) => t[0]().AsBool() ? t[1]() : t[2]()));
+        // The else branch is optional: If(cond, value) yields blank when the condition is false.
+        // Quickbase's If behaves this way and CheckIf already types a missing third argument as
+        // Null, so only the arity check stood in the way.
+        r.Add(Fn.Lazy("If", CheckIf, (t, _) =>
+            t[0]().AsBool() ? t[1]() : (t.Count > 2 ? t[2]() : FormulaValue.Null(FormulaType.Null))));
 
         r.Add(Fn.Lazy("Case", CheckCase, EvalCase));
 
@@ -35,7 +39,7 @@ internal static class LogicalFunctions
 
     private static FormulaType CheckIf(IReadOnlyList<FormulaType> a, TextSpan span, List<FormulaDiagnostic> d)
     {
-        Fn.RequireArity("If", a.Count, 3, 3, span, d);
+        Fn.RequireArity("If", a.Count, 2, 3, span, d);
         if (a.Count >= 1) Fn.RequireParam("If", 0, P.Bool, a[0], span, d);
         var t1 = a.Count > 1 ? a[1] : FormulaType.Null;
         var t2 = a.Count > 2 ? a[2] : FormulaType.Null;

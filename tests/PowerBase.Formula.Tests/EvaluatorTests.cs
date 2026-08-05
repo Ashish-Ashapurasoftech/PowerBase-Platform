@@ -259,9 +259,19 @@ public class EvaluatorTests
     [Fact]
     public void User_functions_read_current_user()
     {
-        var opt = new EvaluationOptions { CurrentUser = new UserRef("u1", "a@b.com") };
+        var opt = new EvaluationOptions { CurrentUser = new UserRef("u1", "a@b.com", "Ada Lovelace") };
         FormulaEval.Const("UserToEmail(User())", opt).AsText().Should().Be("a@b.com");
         FormulaEval.Const("UserToID(User())", opt).AsText().Should().Be("u1");
+        FormulaEval.Const("UserToName(User())", opt).AsText().Should().Be("Ada Lovelace");
+    }
+
+    [Fact]
+    public void UserToName_is_empty_when_the_host_supplied_no_name()
+    {
+        // A user value read from a record is only an identifier, so there is no name to give
+        // back — same as UserToEmail already behaves in that case.
+        var opt = new EvaluationOptions { CurrentUser = new UserRef("u1") };
+        FormulaEval.Const("UserToName(User())", opt).AsText().Should().BeEmpty();
     }
 
     [Fact]

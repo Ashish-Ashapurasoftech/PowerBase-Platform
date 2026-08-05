@@ -153,33 +153,69 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
 
     private const string DeleteSectionsSql = "DELETE FROM meta.FormSection WHERE FormId = @formId";
 
+    // Saving a layout re-inserts every section/block/element, so rule action targets — which are
+    // FK'd to the rows about to be deleted — have to be released first and re-pointed afterwards.
+    // These three statements are that round-trip: capture what each action pointed at (by
+    // PublicId, the only identity that survives the delete), release, then re-point.
+    private const string SelectRuleActionTargetsSql = """
+        SELECT ra.Id            AS ActionId,
+               el.PublicId      AS ElementPublicId,
+               sec.PublicId     AS SectionPublicId,
+               blk.PublicId     AS BlockPublicId
+        FROM meta.FormRuleAction ra
+        JOIN meta.FormRule r ON r.Id = ra.FormRuleId
+        LEFT JOIN meta.FormElement      el  ON el.Id  = ra.TargetElementId
+        LEFT JOIN meta.FormSection      sec ON sec.Id = ra.TargetSectionId
+        LEFT JOIN meta.FormSectionBlock blk ON blk.Id = ra.TargetBlockId
+        WHERE r.FormId = @formId
+          AND (ra.TargetElementId IS NOT NULL OR ra.TargetSectionId IS NOT NULL OR ra.TargetBlockId IS NOT NULL)
+        """;
+
+    // TargetBlockId has no FK (added later than the other two), so the delete would leave it
+    // dangling at a dead id rather than erroring — clear it here alongside the FK'd columns so a
+    // target that can't be re-pointed ends up empty instead of silently aimed at another row.
     private const string NullRuleActionTargetsSql = """
         UPDATE ra
-        SET ra.TargetElementId = NULL, ra.TargetSectionId = NULL
+        SET ra.TargetElementId = NULL, ra.TargetSectionId = NULL, ra.TargetBlockId = NULL
         FROM meta.FormRuleAction ra
         JOIN meta.FormRule r ON r.Id = ra.FormRuleId
         WHERE r.FormId = @formId
         """;
 
+    private const string RestoreRuleActionTargetSql = """
+        UPDATE meta.FormRuleAction
+        SET TargetElementId = @targetElementId,
+            TargetSectionId = @targetSectionId,
+            TargetBlockId   = @targetBlockId
+        WHERE Id = @actionId
+        """;
+
+    // PublicId is honored when the caller supplies one and generated when they don't
+    // (ISNULL(@publicId, NEWID()) rather than relying on the column's NEWSEQUENTIALID() default,
+    // which SQL Server only permits as a column default, not inside an expression). Callers that
+    // need a saved element/section/block to keep a known identity — the importer, which matches
+    // these ids back to rule action targets in a later pass, and the form designer, which already
+    // sends the existing publicId for rows it is re-saving — depend on this round-tripping.
     private const string InsertSectionSql = """
-        INSERT INTO meta.FormSection (FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder)
+        INSERT INTO meta.FormSection (PublicId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder)
         OUTPUT INSERTED.Id
-        VALUES (@formId, @name, @columnCount, @columnWidths, @isCollapsed, @displayOrder)
+        VALUES (ISNULL(@publicId, NEWID()), @formId, @name, @columnCount, @columnWidths, @isCollapsed, @displayOrder)
         """;
 
     private const string InsertBlockSql = """
-        INSERT INTO meta.FormSectionBlock (FormSectionId, Heading, BackgroundColor, Width, DisplayOrder)
+        INSERT INTO meta.FormSectionBlock (PublicId, FormSectionId, Heading, BackgroundColor, Width, DisplayOrder)
         OUTPUT INSERTED.Id
-        VALUES (@formSectionId, @heading, @backgroundColor, @width, @displayOrder)
+        VALUES (ISNULL(@publicId, NEWID()), @formSectionId, @heading, @backgroundColor, @width, @displayOrder)
         """;
 
     private const string InsertElementSql = """
         INSERT INTO meta.FormElement
-            (FormSectionId, FormSectionBlockId, AppFieldId, ElementType, ElementContent,
+            (PublicId, FormSectionId, FormSectionBlockId, AppFieldId, ElementType, ElementContent,
              LabelMode, CustomLabel, ShowOnAdd, ShowOnEdit, ShowOnView,
              WidthMode, WidthValue, HelpTextOverride, IsReadOnly, IsRequired, DisplayAs, DisplayOrder)
+        OUTPUT INSERTED.Id
         VALUES
-            (@formSectionId, @formSectionBlockId, @appFieldId, @elementType, @elementContent,
+            (ISNULL(@publicId, NEWID()), @formSectionId, @formSectionBlockId, @appFieldId, @elementType, @elementContent,
              @labelMode, @customLabel, @showOnAdd, @showOnEdit, @showOnView,
              @widthMode, @widthValue, @helpTextOverride, @isReadOnly, @isRequired, @displayAs, @displayOrder)
         """;
@@ -308,14 +344,31 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         return sections;
     }
 
+    /// <summary>An unset <see cref="Guid"/> means "no PublicId supplied" — the entities carry a
+    /// non-nullable Guid, so <see cref="Guid.Empty"/> is how an absent value arrives here. Maps it
+    /// to SQL NULL so the insert falls back to generating one.</summary>
+    private static Guid? AsSuppliedPublicId(Guid publicId) => publicId == Guid.Empty ? null : publicId;
+
     public async Task SaveLayoutAsync(long formId, IReadOnlyList<FormSection> sections, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
 
+        // Remember what each rule action pointed at before the layout is torn down. PublicId is
+        // the only identity that survives — Ids are IDENTITY values and every row is re-inserted.
+        var priorTargets = (await conn.QueryAsync<RuleActionTargetRow>(
+            new CommandDefinition(SelectRuleActionTargetsSql, new { formId }, tx, cancellationToken: ct))).ToList();
+
         await conn.ExecuteAsync(new CommandDefinition(NullRuleActionTargetsSql, new { formId }, tx, cancellationToken: ct));
         await conn.ExecuteAsync(new CommandDefinition(DeleteSectionsSql, new { formId }, tx, cancellationToken: ct));
+
+        // PublicId → freshly-inserted Id, for re-pointing the targets captured above. Only rows
+        // whose PublicId the caller supplied can be matched; a brand-new row had no rule aimed at
+        // it in the first place, so nothing is lost by leaving it out.
+        var sectionIdByPublicId = new Dictionary<Guid, long>();
+        var blockIdByPublicId = new Dictionary<Guid, long>();
+        var elementIdByPublicId = new Dictionary<Guid, long>();
 
         for (var si = 0; si < sections.Count; si++)
         {
@@ -323,6 +376,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
             var sectionId = await conn.QuerySingleAsync<long>(
                 new CommandDefinition(InsertSectionSql, new
                 {
+                    publicId     = AsSuppliedPublicId(section.PublicId),
                     formId,
                     name         = section.Name,
                     columnCount  = section.Blocks.Count,
@@ -331,12 +385,16 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                     displayOrder = si + 1,
                 }, tx, cancellationToken: ct));
 
+            if (section.PublicId != Guid.Empty)
+                sectionIdByPublicId[section.PublicId] = sectionId;
+
             for (var bi = 0; bi < section.Blocks.Count; bi++)
             {
                 var block = section.Blocks[bi];
                 var blockId = await conn.QuerySingleAsync<long>(
                     new CommandDefinition(InsertBlockSql, new
                     {
+                        publicId        = AsSuppliedPublicId(block.PublicId),
                         formSectionId   = sectionId,
                         heading         = block.Heading,
                         backgroundColor = block.BackgroundColor,
@@ -344,11 +402,15 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                         displayOrder    = bi + 1,
                     }, tx, cancellationToken: ct));
 
+                if (block.PublicId != Guid.Empty)
+                    blockIdByPublicId[block.PublicId] = blockId;
+
                 for (var ei = 0; ei < block.Elements.Count; ei++)
                 {
                     var el = block.Elements[ei];
-                    await conn.ExecuteAsync(new CommandDefinition(InsertElementSql, new
+                    var elementId = await conn.QuerySingleAsync<long>(new CommandDefinition(InsertElementSql, new
                     {
+                        publicId           = AsSuppliedPublicId(el.PublicId),
                         formSectionId      = sectionId,
                         formSectionBlockId = blockId,
                         appFieldId         = el.AppFieldId,
@@ -367,12 +429,44 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                         displayAs          = el.DisplayAs,
                         displayOrder       = ei + 1,
                     }, tx, cancellationToken: ct));
+
+                    if (el.PublicId != Guid.Empty)
+                        elementIdByPublicId[el.PublicId] = elementId;
                 }
             }
         }
 
+        // Re-point the captured targets at the rows that replaced them. A target whose row is
+        // genuinely gone (the user deleted that element/section/column) resolves to nothing and
+        // stays null, which is the honest outcome — the rule now points at nothing because the
+        // thing it pointed at no longer exists.
+        foreach (var prior in priorTargets)
+        {
+            var elementId = Lookup(elementIdByPublicId, prior.ElementPublicId);
+            var sectionId = Lookup(sectionIdByPublicId, prior.SectionPublicId);
+            var blockId = Lookup(blockIdByPublicId, prior.BlockPublicId);
+
+            if (elementId is null && sectionId is null && blockId is null)
+                continue; // nothing to restore; the null already written above stands
+
+            await conn.ExecuteAsync(new CommandDefinition(RestoreRuleActionTargetSql, new
+            {
+                actionId        = prior.ActionId,
+                targetElementId = elementId,
+                targetSectionId = sectionId,
+                targetBlockId   = blockId,
+            }, tx, cancellationToken: ct));
+        }
+
         await tx.CommitAsync(ct);
+
+        static long? Lookup(Dictionary<Guid, long> map, Guid? publicId) =>
+            publicId is { } id && map.TryGetValue(id, out var newId) ? newId : null;
     }
+
+    /// <summary>What a single rule action pointed at before its form's layout was re-saved,
+    /// captured by PublicId so it can be re-pointed at the replacement rows.</summary>
+    private sealed record RuleActionTargetRow(long ActionId, Guid? ElementPublicId, Guid? SectionPublicId, Guid? BlockPublicId);
 
     public async Task AppendFieldToLastSectionAsync(long formId, int fieldFid, CancellationToken ct = default)
     {

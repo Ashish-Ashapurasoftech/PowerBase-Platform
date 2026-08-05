@@ -19,7 +19,7 @@ public class CreateReportCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly CreateReportCommandValidator _validator;
 
-    private static readonly HashSet<string> AllowedReportTypes = ["Table", "Summary", "GridEdit"];
+    private static readonly HashSet<string> AllowedReportTypes = ["Table", "Summary", "GridEdit", "Chart"];
     private static readonly HashSet<string> AllowedOperators = ["eq", "ne", "contains", "startsWith", "gt", "gte", "lt", "lte"];
     private static readonly HashSet<string> AllowedFunctions = ["Count", "Sum", "Avg", "Min", "Max"];
 
@@ -107,6 +107,32 @@ public class CreateReportCommandHandler
             CustomDynamicFilterFields = command.CustomDynamicFilterFields ?? [],
             CustomDynamicFilterItems = command.CustomDynamicFilterItems ?? [],
             AllowQuickSearch = command.AllowQuickSearch,
+            Chart = command.Chart is null ? null : new ChartConfig
+            {
+                ChartType = string.IsNullOrWhiteSpace(command.Chart.ChartType) ? "Bar" : command.Chart.ChartType,
+                SeriesFieldId = command.Chart.SeriesFieldId,
+                SeriesMode = string.IsNullOrWhiteSpace(command.Chart.SeriesMode) ? "EqualValues" : command.Chart.SeriesMode,
+                AxisLabelX = command.Chart.AxisLabelX,
+                AxisLabelY = command.Chart.AxisLabelY,
+                YMin = command.Chart.YMin,
+                YMax = command.Chart.YMax,
+                LogScale = command.Chart.LogScale,
+                SortBy = string.IsNullOrWhiteSpace(command.Chart.SortBy) ? "Labels" : command.Chart.SortBy,
+                SortDirection = string.IsNullOrWhiteSpace(command.Chart.SortDirection) ? "Asc" : command.Chart.SortDirection,
+                GoalValue = command.Chart.GoalValue,
+                GoalLabel = command.Chart.GoalLabel,
+                DataLabelsVisible = command.Chart.DataLabelsVisible,
+                HideMissingCategories = command.Chart.HideMissingCategories,
+                DrilldownReportId = command.Chart.DrilldownReportId,
+                SecondaryAxisAggregationFieldIds = command.Chart.SecondaryAxisAggregationFieldIds ?? [],
+                AxisLabelY2 = command.Chart.AxisLabelY2,
+                YMin2 = command.Chart.YMin2,
+                YMax2 = command.Chart.YMax2,
+                LogScale2 = command.Chart.LogScale2,
+                GaugeFieldId = command.Chart.GaugeFieldId,
+                GaugeLowMaxPercent = command.Chart.GaugeLowMaxPercent,
+                GaugeMediumMaxPercent = command.Chart.GaugeMediumMaxPercent,
+            },
         };
 
         var report = new Report

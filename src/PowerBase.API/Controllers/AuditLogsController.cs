@@ -44,7 +44,7 @@ public class AuditLogsController : ControllerBase
         [FromQuery] int pageSize = 50,
         CancellationToken ct = default)
     {
-        if (from.HasValue && to.HasValue && (to.Value - from.Value).TotalDays > 15)
+        if (from.HasValue && to.HasValue && (to.Value.Date - from.Value.Date).TotalDays > 15)
         {
             return BadRequest("Date range cannot exceed 15 days.");
         }
@@ -52,7 +52,7 @@ public class AuditLogsController : ControllerBase
         var query = new ListAuditLogsQuery(
             AppPublicId: appId,
             From: from,
-            To: to,
+            To: to?.Date.AddDays(1).AddTicks(-1),
             Email: email,
             EntityType: entityType,
             EntityId: entityId,
@@ -84,7 +84,7 @@ public class AuditLogsController : ControllerBase
         [FromQuery] string? action,
         CancellationToken ct = default)
     {
-        if (from.HasValue && to.HasValue && (to.Value - from.Value).TotalDays > 15)
+        if (from.HasValue && to.HasValue && (to.Value.Date - from.Value.Date).TotalDays > 15)
         {
             return BadRequest("Date range cannot exceed 15 days.");
         }
@@ -92,7 +92,7 @@ public class AuditLogsController : ControllerBase
         var query = new ExportAuditLogsCsvQuery(
             AppPublicId: appId,
             From: from,
-            To: to,
+            To: to?.Date.AddDays(1).AddTicks(-1),
             Email: email,
             EntityType: entityType,
             EntityId: entityId,

@@ -246,3 +246,107 @@ public sealed class FormulaSettingsValidator : FieldSettingsValidatorBase<Formul
         return errors;
     }
 }
+
+// ─── Action Button ────────────────────────────────────────────────────────────
+
+public sealed class ActionButtonSettingsValidator : FieldSettingsValidatorBase<ActionButtonSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["ActionButton"];
+
+    // Shape-only validation here (no table schema — target/capture Fid existence and
+    // formula expressions are checked against the table's fields in the create/update
+    // handler, mirroring how Formula's Expression is compiled there).
+    protected override IDictionary<string, string[]> ValidateTyped(ActionButtonSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (string.IsNullOrWhiteSpace(s.Variant))
+        {
+            AddError(errors, "Settings.Variant", "A button variant is required.");
+            return errors;
+        }
+        if (!ActionButtonVariants.All.Contains(s.Variant))
+        {
+            AddError(errors, "Settings.Variant",
+                $"Variant must be one of: {string.Join(", ", ActionButtonVariants.All)}.");
+            return errors;
+        }
+
+        ValidateValueSource(s.ButtonLabel, "Settings.ButtonLabel", errors);
+        ValidateValueSource(s.ButtonColor, "Settings.ButtonColor", errors);
+        ValidateValueSource(s.FileName, "Settings.FileName", errors);
+        ValidateValueSource(s.DefaultValue, "Settings.DefaultValue", errors);
+        ValidateValueSource(s.Redirect, "Settings.Redirect", errors);
+        if (s.RedirectMode is not null && !RedirectModes.All.Contains(s.RedirectMode))
+            AddError(errors, "Settings.RedirectMode",
+                $"RedirectMode must be one of: {string.Join(", ", RedirectModes.All)}.");
+        ValidateValueSource(s.PasswordGate, "Settings.PasswordGate", errors);
+        if (s.LinkExpiration?.Start is not null)
+            ValidateValueSource(s.LinkExpiration.Start, "Settings.LinkExpiration.Start", errors);
+
+        if (s.Variant is ActionButtonVariants.Signature or ActionButtonVariants.File or ActionButtonVariants.Prompt
+            && s.CaptureFid is null)
+            AddError(errors, "Settings.CaptureFid", "A capture field is required for this variant.");
+
+        if (s.Variant == ActionButtonVariants.Prompt)
+        {
+            if (string.IsNullOrWhiteSpace(s.PromptType))
+                AddError(errors, "Settings.PromptType", "A prompt type is required.");
+            else if (!PromptTypes.All.Contains(s.PromptType))
+                AddError(errors, "Settings.PromptType",
+                    $"PromptType must be one of: {string.Join(", ", PromptTypes.All)}.");
+            else if (s.PromptType == PromptTypes.FromField && s.PromptSourceFid is null)
+                AddError(errors, "Settings.PromptSourceFid",
+                    "A source field is required when PromptType is FromField.");
+            else if (s.PromptType == PromptTypes.EnterData && (s.PromptOptions is null || s.PromptOptions.Length == 0))
+                AddError(errors, "Settings.PromptOptions",
+                    "At least one option is required when PromptType is EnterData.");
+        }
+
+        if (s.AddData is { Length: > 0 })
+        {
+            for (var i = 0; i < s.AddData.Length; i++)
+            {
+                var item = s.AddData[i];
+                if (item.TargetFid is null)
+                    AddError(errors, $"Settings.AddData[{i}].TargetFid", "A target field is required.");
+                ValidateValueSource(item.Value, $"Settings.AddData[{i}].Value", errors);
+            }
+        }
+
+        if (s.Variant == ActionButtonVariants.Data && (s.AddData is null || s.AddData.Length == 0))
+            AddError(errors, "Settings.AddData", "A Data Button requires at least one field to write.");
+
+        if (s.LinkExpiration is { } exp && exp.Minutes is < 1)
+            AddError(errors, "Settings.LinkExpiration.Minutes", "Minutes must be at least 1.");
+
+        if (s.PopupSize is { } size && (size.Width is < 100 || size.Height is < 100))
+            AddError(errors, "Settings.PopupSize", "Popup width/height must be at least 100px.");
+
+        return errors;
+    }
+
+    private static void ValidateValueSource(ValueSource? vs, string field, IDictionary<string, string[]> errors)
+    {
+        if (vs is null) return;
+        if (string.IsNullOrWhiteSpace(vs.Kind))
+        {
+            AddError(errors, field, "A value source kind is required.");
+            return;
+        }
+        if (!ValueSourceKinds.All.Contains(vs.Kind))
+        {
+            AddError(errors, field, $"Kind must be one of: {string.Join(", ", ValueSourceKinds.All)}.");
+            return;
+        }
+        switch (vs.Kind)
+        {
+            case ValueSourceKinds.Field when vs.FieldFid is null:
+                AddError(errors, field, "FieldFid is required when Kind is 'field'.");
+                break;
+            case ValueSourceKinds.Formula when string.IsNullOrWhiteSpace(vs.Formula):
+                AddError(errors, field, "Formula is required when Kind is 'formula'.");
+                break;
+        }
+    }
+}

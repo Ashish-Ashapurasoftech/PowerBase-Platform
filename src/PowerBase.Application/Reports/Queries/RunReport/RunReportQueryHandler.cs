@@ -107,10 +107,11 @@ public class RunReportQueryHandler
             }
         }
 
-        if (report.ReportType == "Summary")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, ct);
+        if (report.ReportType is "Summary" or "Chart")
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, query.RuntimeFilters, ct);
 
-        return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields, query.RuntimeFilters, query.QuickSearch, ct);
+        return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
+            query.RuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, ct);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -123,6 +124,8 @@ public class RunReportQueryHandler
         IReadOnlyList<SortSpec> sortFields,
         IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters,
         string? quickSearch,
+        IReadOnlyList<long>? quickSearchFieldIds,
+        bool quickSearchExact,
         CancellationToken ct)
     {
         // Intersect report columns with fields the role can see (drop None-access fields)
@@ -157,87 +160,31 @@ public class RunReportQueryHandler
         }
 
         // Merge runtime filters (dynamic/quick-search) into the filter tree
-        if (runtimeFilters?.Count > 0)
-        {
-            var runtimeNodes = new List<FilterNode>();
-            
-            var fieldDict = allFields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
-            
-            // Group by (FieldId, SubField) to support:
-            //  - Same-field multi-select → OR'd together
-            //  - Different sub-fields of the same Address field → AND'd together
-            var groupedFilters = runtimeFilters.GroupBy(rf => (rf.FieldId, rf.SubField ?? string.Empty));
-            
-            foreach (var group in groupedFilters)
-            {
-                var field = fieldDict.GetValueOrDefault(group.Key.FieldId);
-                
-                // Use eq for SingleSelect/Boolean/User, contains for everything else
-                // For Address sub-fields (JSON path), use eq by default
-                var firstSubField = string.IsNullOrEmpty(group.Key.Item2) ? null : group.Key.Item2;
-                var operatorName = field?.TypeCode is "Date" or "DateTime"
-                    ? "date_eq"
-                    : field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address" ? "eq" : "contains";
+        filterTree = MergeRuntimeFilters(filterTree, allFields, runtimeFilters);
 
-                var values = group.Select(rf => rf.Value).ToList();
-
-                // Defensively filter out unparseable values for numeric/date fields to prevent SQL cast errors
-                if (field?.TypeCode is "Number" or "Currency" or "Percent")
-                {
-                    values = values.Where(v => double.TryParse(v, out _)).ToList();
-                }
-                else if (field?.TypeCode is "Date" or "DateTime")
-                {
-                    values = values.Where(v => DateTime.TryParse(v, out _)).ToList();
-                }
-
-                if (values.Count == 0) continue;
-
-                if (values.Count == 1)
-                {
-                    runtimeNodes.Add(new FilterNode
-                    {
-                        Condition = new FilterCondition { FieldId = group.Key.FieldId, Operator = operatorName, Value = values[0], SubField = firstSubField }
-                    });
-                }
-                else
-                {
-                    var orNodes = values.Select(v => new FilterNode
-                    {
-                        Condition = new FilterCondition { FieldId = group.Key.FieldId, Operator = operatorName, Value = v, SubField = firstSubField }
-                    }).ToList();
-                    
-                    runtimeNodes.Add(new FilterNode
-                    {
-                        Group = new FilterGroup { Logic = "or", Nodes = orNodes }
-                    });
-                }
-            }
-
-            filterTree = filterTree == null
-                ? new FilterGroup { Logic = "and", Nodes = runtimeNodes }
-                : new FilterGroup
-                {
-                    Logic = "and",
-                    Nodes = [new FilterNode { Group = filterTree }, .. runtimeNodes]
-                };
-        }
-
-        // Apply Quick Search across all searchable text fields (OR)
+        // Apply Quick Search across searchable text fields (OR) — restricted to
+        // quickSearchFieldIds when given (a caller-specified subset, e.g. a dashboard Search
+        // widget scoped to "Selected fields"), otherwise every IsSearchable text-ish field.
         if (!string.IsNullOrWhiteSpace(quickSearch))
         {
             var textFields = allFields.Where(f => f.IsSearchable && (f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")).ToList();
+            if (quickSearchFieldIds is { Count: > 0 })
+            {
+                var allowed = quickSearchFieldIds.ToHashSet();
+                textFields = textFields.Where(f => allowed.Contains(f.Fid.HasValue ? (long)f.Fid.Value : f.Id)).ToList();
+            }
             if (textFields.Count > 0)
             {
+                var searchOperator = quickSearchExact ? "eq" : "contains";
                 var qsNodes = textFields.Select(f => new FilterNode
                 {
-                    Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = "contains", Value = quickSearch }
+                    Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = searchOperator, Value = quickSearch }
                 }).ToList();
 
                 var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
-                
-                filterTree = filterTree == null 
-                    ? qsGroup 
+
+                filterTree = filterTree == null
+                    ? qsGroup
                     : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = qsGroup }] };
             }
         }
@@ -317,6 +264,79 @@ public class RunReportQueryHandler
         };
     }
 
+    internal static FilterGroup? MergeRuntimeFilters(
+        FilterGroup? filterTree,
+        IReadOnlyList<AppField> allFields,
+        IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters)
+    {
+        if (runtimeFilters is not { Count: > 0 }) return filterTree;
+
+        var runtimeNodes = new List<FilterNode>();
+
+        var fieldDict = allFields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+
+        // Group by (FieldId, SubField) to support:
+        //  - Same-field multi-select → OR'd together
+        //  - Different sub-fields of the same Address field → AND'd together
+        var groupedFilters = runtimeFilters.GroupBy(rf => (rf.FieldId, rf.SubField ?? string.Empty));
+
+        foreach (var group in groupedFilters)
+        {
+            var field = fieldDict.GetValueOrDefault(group.Key.FieldId);
+
+            // Use eq for SingleSelect/Boolean/User, contains for everything else
+            // For Address sub-fields (JSON path), use eq by default
+            var firstSubField = string.IsNullOrEmpty(group.Key.Item2) ? null : group.Key.Item2;
+            var operatorName = field?.TypeCode is "Date" or "DateTime"
+                ? "date_eq"
+                : field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address" ? "eq" : "contains";
+
+            var values = group.Select(rf => rf.Value).ToList();
+
+            // Defensively filter out unparseable values for numeric/date fields to prevent SQL cast errors
+            if (field?.TypeCode is "Number" or "Currency" or "Percent")
+            {
+                values = values.Where(v => double.TryParse(v, out _)).ToList();
+            }
+            else if (field?.TypeCode is "Date" or "DateTime")
+            {
+                values = values.Where(v => DateTime.TryParse(v, out _)).ToList();
+            }
+
+            if (values.Count == 0) continue;
+
+            if (values.Count == 1)
+            {
+                runtimeNodes.Add(new FilterNode
+                {
+                    Condition = new FilterCondition { FieldId = group.Key.FieldId, Operator = operatorName, Value = values[0], SubField = firstSubField }
+                });
+            }
+            else
+            {
+                var orNodes = values.Select(v => new FilterNode
+                {
+                    Condition = new FilterCondition { FieldId = group.Key.FieldId, Operator = operatorName, Value = v, SubField = firstSubField }
+                }).ToList();
+
+                runtimeNodes.Add(new FilterNode
+                {
+                    Group = new FilterGroup { Logic = "or", Nodes = orNodes }
+                });
+            }
+        }
+
+        if (runtimeNodes.Count == 0) return filterTree;
+
+        return filterTree == null
+            ? new FilterGroup { Logic = "and", Nodes = runtimeNodes }
+            : new FilterGroup
+            {
+                Logic = "and",
+                Nodes = [new FilterNode { Group = filterTree }, .. runtimeNodes]
+            };
+    }
+
     private async Task<PagedReportRunResult> RunSummaryAsync(
         AppTable table,
         IReadOnlyList<AppField> allFields,
@@ -324,6 +344,7 @@ public class RunReportQueryHandler
         ReportDefinition definition,
         int page, int pageSize,
         string? quickSearch,
+        IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters,
         CancellationToken ct)
     {
         if (!definition.GroupByFieldId.HasValue)
@@ -349,9 +370,22 @@ public class RunReportQueryHandler
             .Where(a => visibleFieldIds.Contains(a.FieldId))
             .ToList();
 
+        // Chart-only: an optional second grouping dimension ("Series / Group by") that splits each category
+        // into multiple datasets. Ignored for plain Summary reports (definition.Chart is always null there).
+        AppField? seriesField = null;
+        if (definition.Chart?.SeriesFieldId is { } seriesFieldId
+            && fieldMap.TryGetValue(seriesFieldId, out var resolvedSeriesField)
+            && visibleFieldIds.Contains(seriesFieldId))
+        {
+            seriesField = resolvedSeriesField;
+        }
+
+        var summaryFilterTree = MergeRuntimeFilters(access.ViewFilter, allFields, runtimeFilters);
+
         var rows = await _recordRepo.SummarizeAsync(
             table, groupByField, visibleAggregations, allFields, definition.GroupByMode,
-            filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
+            seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
 
         // Build alias→fieldId map. Identify columns displayed as percent-of-total and compute their totals.
         var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -377,6 +411,8 @@ public class RunReportQueryHandler
             var fields = new Dictionary<string, object?>();
             fields[(groupByField.Fid ?? groupByField.Id).ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
+            if (seriesField is not null)
+                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = row.TryGetValue("SeriesValue", out var sv) ? sv : null;
             foreach (var (alias, fieldId) in aggAliasToFieldId)
             {
                 if (!row.TryGetValue(alias, out var val)) continue;
@@ -388,12 +424,18 @@ public class RunReportQueryHandler
             return new RecordResult { Id = Guid.Empty, CreatedOn = DateTime.UtcNow, Fields = fields };
         }).ToList();
 
-        // Synthetic columns: group-by field + Count + one per visible aggregation
+        // Synthetic columns: group-by field + Count + (Chart-only) series field + one per visible aggregation.
+        // FieldId must match the keys used in `fields` above (Fid when present, else Id) or the frontend can't
+        // look up the values by column.
         var columns = new List<ReportColumnInfo>
         {
-            new() { FieldId = groupByField.Id, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
+            new() { FieldId = groupByField.Fid ?? groupByField.Id, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
             new() { FieldId = 0, Name = "Count", TypeCode = "Number" },
         };
+        if (seriesField is not null)
+        {
+            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
+        }
         foreach (var agg in visibleAggregations)
         {
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
@@ -402,7 +444,7 @@ public class RunReportQueryHandler
                 var label = agg.DisplayAs == "PercentOfColumnTotal"
                     ? $"{agg.Function} of {fieldName} (%)"
                     : $"{agg.Function} of {fieldName}";
-                columns.Add(new ReportColumnInfo { FieldId = aggField.Id, Name = label, TypeCode = "Number" });
+                columns.Add(new ReportColumnInfo { FieldId = aggField.Fid ?? aggField.Id, Name = label, TypeCode = "Number" });
             }
         }
 

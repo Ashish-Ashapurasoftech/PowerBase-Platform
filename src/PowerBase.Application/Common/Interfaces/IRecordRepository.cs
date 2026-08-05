@@ -40,9 +40,13 @@ public interface IRecordRepository
     /// values (row Ids for the default Record ID# key, or the parent's key-field raw values for a Set-Key
     /// table — drives Summary projection and the parent-delete restrict check). Returns parentKeyValue →
     /// aggregate value.</summary>
+    /// <param name="targetSubField">When the target field is a composite Address field, the JSON
+    /// sub-key (see <see cref="PowerBase.Domain.FieldSettings.AddressSubFields"/>) to aggregate
+    /// instead of the whole value. Only meaningful with Count/Exists/Min/Max.</param>
     Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
-        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, CancellationToken ct = default);
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
+        CancellationToken ct = default);
 
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
@@ -89,7 +93,9 @@ public interface IRecordRepository
     /// <summary>Returns true if any non-deleted rows have a non-null, non-empty value in the field's column.</summary>
     Task<bool> HasAnyDataAsync(AppTable table, AppField field, CancellationToken ct = default);
 
-    /// <summary>Run a GROUP BY aggregation query for Summary reports.</summary>
+    /// <summary>Run a GROUP BY aggregation query for Summary (and Chart) reports. When <paramref name="seriesField"/>
+    /// is supplied (Chart reports only), groups by both <paramref name="groupByField"/> and it, and each result
+    /// row additionally carries a "SeriesValue" key.</summary>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table,
         AppField groupByField,
@@ -98,6 +104,8 @@ public interface IRecordRepository
         string groupByMode = "EqualValues",
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
+        AppField? seriesField = null,
+        string seriesMode = "EqualValues",
         CancellationToken ct = default);
 
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(

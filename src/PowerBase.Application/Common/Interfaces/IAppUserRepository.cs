@@ -11,6 +11,7 @@ public record AppUserDetail(
     Guid RolePublicId,
     string RoleName,
     string Status,
+    bool ShowInUserPickers,
     DateTime CreatedOn,
     bool IsOwner);
 
@@ -20,6 +21,7 @@ public interface IAppUserRepository
     Task<AppUser?> GetByAppAndUserAsync(long appId, long userId, CancellationToken ct = default);
     Task CreateAsync(AppUser appUser, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task UpdateRoleAsync(long appId, long userId, long newRoleId, CancellationToken ct = default);
+    Task UpdateShowInUserPickersAsync(long appId, long userId, bool showInUserPickers, CancellationToken ct = default);
     Task RemoveAsync(long appId, long userId, CancellationToken ct = default);
     Task<string?> GetUserRoleNameAsync(long appId, long userId, CancellationToken ct = default);
     Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default);

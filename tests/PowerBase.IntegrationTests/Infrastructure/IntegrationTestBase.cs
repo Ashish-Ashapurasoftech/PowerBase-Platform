@@ -28,6 +28,19 @@ public abstract class IntegrationTestBase
     protected async Task<HttpResponseMessage> PutAsync(string url, object body, string? token = null) =>
         await SendAsync(HttpMethod.Put, url, Serialize(body), token);
 
+    protected async Task<HttpResponseMessage> PostFileAsync(string url, string fileContent, string fileName = "import.json", string? token = null)
+    {
+        var content = new MultipartFormDataContent();
+        var filePart = new ByteArrayContent(Encoding.UTF8.GetBytes(fileContent));
+        filePart.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        content.Add(filePart, "file", fileName);
+
+        var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+        if (token != null)
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return await Client.SendAsync(request);
+    }
+
     protected async Task<HttpResponseMessage> DeleteAsync(string url, string? token = null) =>
         await SendAsync(HttpMethod.Delete, url, null, token);
 

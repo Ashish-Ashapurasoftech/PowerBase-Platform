@@ -19,6 +19,32 @@ public record CreateReportCommand(
     List<long> CustomDynamicFilterFields,
     List<CustomDynamicFilterItem>? CustomDynamicFilterItems,
     bool AllowQuickSearch,
-    List<Guid>? VisibleToRoleIds);
+    List<Guid>? VisibleToRoleIds,
+    ChartConfigCommand? Chart = null);
 
 public record SummaryAggregationCommand(long FieldId, string Function, string DisplayAs = "Normal");
+
+public record ChartConfigCommand(
+    string ChartType,
+    long? SeriesFieldId,
+    string SeriesMode,
+    string? AxisLabelX,
+    string? AxisLabelY,
+    decimal? YMin,
+    decimal? YMax,
+    bool LogScale,
+    string SortBy,
+    string SortDirection,
+    decimal? GoalValue,
+    string? GoalLabel,
+    bool DataLabelsVisible,
+    bool HideMissingCategories,
+    Guid? DrilldownReportId,
+    List<long>? SecondaryAxisAggregationFieldIds = null,
+    string? AxisLabelY2 = null,
+    decimal? YMin2 = null,
+    decimal? YMax2 = null,
+    bool LogScale2 = false,
+    long? GaugeFieldId = null,
+    decimal GaugeLowMaxPercent = 30,
+    decimal GaugeMediumMaxPercent = 70);

@@ -26,12 +26,44 @@ public class CreateReportRequest
     public List<long> CustomDynamicFilterFields { get; set; } = [];
     public List<CustomDynamicFilterItemRequest> CustomDynamicFilterItems { get; set; } = [];
     public bool AllowQuickSearch { get; set; } = true;
+
+    // Chart-only
+    public ChartConfigRequest? Chart { get; set; }
 }
 
 public class CustomDynamicFilterItemRequest
 {
     public long FieldId { get; set; }
     public string? SubField { get; set; }
+}
+
+// ── Chart config request model ────────────────────────────────────────────────
+
+public class ChartConfigRequest
+{
+    public string ChartType { get; set; } = "Bar";
+    public long? SeriesFieldId { get; set; }
+    public string SeriesMode { get; set; } = "EqualValues";
+    public string? AxisLabelX { get; set; }
+    public string? AxisLabelY { get; set; }
+    public decimal? YMin { get; set; }
+    public decimal? YMax { get; set; }
+    public bool LogScale { get; set; }
+    public string SortBy { get; set; } = "Labels";
+    public string SortDirection { get; set; } = "Asc";
+    public decimal? GoalValue { get; set; }
+    public string? GoalLabel { get; set; }
+    public bool DataLabelsVisible { get; set; }
+    public bool HideMissingCategories { get; set; }
+    public Guid? DrilldownReportId { get; set; }
+    public List<long> SecondaryAxisAggregationFieldIds { get; set; } = [];
+    public string? AxisLabelY2 { get; set; }
+    public decimal? YMin2 { get; set; }
+    public decimal? YMax2 { get; set; }
+    public bool LogScale2 { get; set; }
+    public long? GaugeFieldId { get; set; }
+    public decimal GaugeLowMaxPercent { get; set; } = 30;
+    public decimal GaugeMediumMaxPercent { get; set; } = 70;
 }
 
 // ── Filter tree request models ────────────────────────────────────────────────

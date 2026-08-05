@@ -18,6 +18,10 @@ public sealed class TypeChecker
     private readonly IFunctionRegistry _functions;
     private readonly List<FormulaDiagnostic> _diags;
 
+    /// <summary>Types of the variables declared so far, by name. Scoping is flat and strictly
+    /// in order: a declaration can use the ones above it and nothing else.</summary>
+    private readonly Dictionary<string, FormulaType> _variables = new(StringComparer.OrdinalIgnoreCase);
+
     public TypeChecker(IFunctionRegistry functions, List<FormulaDiagnostic> diagnostics)
     {
         _functions = functions;
@@ -39,8 +43,42 @@ public sealed class TypeChecker
         UnaryExpr u => CheckUnary(u),
         BinaryExpr b => CheckBinary(b),
         FunctionCallExpr c => CheckCall(c),
+        LetExpr l => CheckLet(l),
+        VariableRefExpr v => CheckVariableRef(v),
         _ => FormulaType.Null,
     };
+
+    private FormulaType CheckLet(LetExpr l)
+    {
+        foreach (var decl in l.Declarations)
+        {
+            // Checked before it is in scope, so a declaration can't refer to itself.
+            var valueType = Check(decl.Value);
+
+            if (string.IsNullOrEmpty(decl.Name))
+                continue; // the parser already reported the missing name
+
+            if (!_variables.TryAdd(decl.Name, valueType))
+                _diags.Add(new FormulaDiagnostic(
+                    FormulaErrorCode.TypeMismatch,
+                    $"Variable '{decl.Name}' is declared more than once.",
+                    decl.Span));
+        }
+
+        return Check(l.Body);
+    }
+
+    private FormulaType CheckVariableRef(VariableRefExpr v)
+    {
+        if (_variables.TryGetValue(v.Name, out var type))
+            return type;
+
+        _diags.Add(new FormulaDiagnostic(
+            FormulaErrorCode.UnknownField,
+            $"Unknown variable ${v.Name}.",
+            v.Span));
+        return FormulaType.Null;
+    }
 
     // An operand that already failed (Null) shouldn't trigger a second, cascading error.
     private static bool IsError(FormulaType t) => t == FormulaType.Null;

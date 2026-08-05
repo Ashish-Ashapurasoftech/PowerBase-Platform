@@ -66,13 +66,49 @@ public sealed class Parser
             return new ErrorExpr(Current.Span);
         }
 
+        var start = Current.Span.Start;
+
+        // Any leading 'var' declarations belong to the expression that follows them.
+        var declarations = new List<VariableDeclaration>();
+        while (Check(TokenKind.Var))
+            declarations.Add(ParseVariableDeclaration());
+
         var expr = ParseOr();
         if (!Check(TokenKind.EndOfFile))
         {
             _diags.Add(new FormulaDiagnostic(FormulaErrorCode.UnexpectedToken, $"Unexpected '{Current.Text}'.", Current.Span));
         }
 
-        return expr;
+        return declarations.Count == 0
+            ? expr
+            : new LetExpr(declarations, expr, TextSpan.FromBounds(start, expr.Span.End));
+    }
+
+    /// <summary><c>var &lt;type&gt; &lt;name&gt; = &lt;expression&gt;;</c></summary>
+    private VariableDeclaration ParseVariableDeclaration()
+    {
+        var start = Current.Span.Start;
+        Advance(); // 'var'
+
+        // The declared type is a plain identifier (text/number/bool/date/…). Recorded but not
+        // enforced — see VariableDeclaration.
+        var declaredType = string.Empty;
+        if (Check(TokenKind.Identifier))
+            declaredType = Advance().Text;
+        else
+            _diags.Add(new FormulaDiagnostic(FormulaErrorCode.ExpectedToken, "Expected a type after 'var'.", Current.Span));
+
+        var name = string.Empty;
+        if (Check(TokenKind.Identifier))
+            name = Advance().Text;
+        else
+            _diags.Add(new FormulaDiagnostic(FormulaErrorCode.ExpectedToken, "Expected a variable name.", Current.Span));
+
+        Expect(TokenKind.Equal, "=");
+        var value = ParseOr();
+        Expect(TokenKind.Semicolon, ";");
+
+        return new VariableDeclaration(name, declaredType, value, TextSpan.FromBounds(start, value.Span.End));
     }
 
     private Expr ParseOr()
@@ -215,6 +251,9 @@ public sealed class Parser
                 return inner;
             case TokenKind.Identifier:
                 return ParseFunctionCall();
+            case TokenKind.VariableRef:
+                Advance();
+                return new VariableRefExpr(tok.Text, tok.Span);
             default:
                 _diags.Add(new FormulaDiagnostic(
                     FormulaErrorCode.UnexpectedToken,

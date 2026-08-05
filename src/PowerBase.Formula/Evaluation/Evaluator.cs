@@ -14,6 +14,10 @@ internal sealed class Evaluator
 {
     private readonly IFunctionRegistry _functions;
 
+    /// <summary>Values of the variables declared by the formula being evaluated. Populated as each
+    /// declaration is reached, so an initialiser sees only the ones before it.</summary>
+    private readonly Dictionary<string, FormulaValue> _variables = new(StringComparer.OrdinalIgnoreCase);
+
     public Evaluator(IFunctionRegistry functions) => _functions = functions;
 
     public FormulaValue Eval(Expr expr, IRecordContext ctx, EvaluationOptions opt) => expr switch
@@ -23,9 +27,26 @@ internal sealed class Evaluator
         UnaryExpr u => EvalUnary(u, ctx, opt),
         BinaryExpr b => EvalBinary(b, ctx, opt),
         FunctionCallExpr c => EvalCall(c, ctx, opt),
+        LetExpr l => EvalLet(l, ctx, opt),
+        VariableRefExpr v => EvalVariableRef(v),
         ErrorExpr => throw new FormulaEvaluationException("Cannot evaluate a formula that failed to compile."),
         _ => throw new FormulaEvaluationException($"Unsupported expression node {expr.GetType().Name}."),
     };
+
+    /// <summary>Each declaration is evaluated once, in order, then the body runs with all of them
+    /// in scope — so a variable used twice costs one evaluation, which is the point of naming it.</summary>
+    private FormulaValue EvalLet(LetExpr l, IRecordContext ctx, EvaluationOptions opt)
+    {
+        foreach (var decl in l.Declarations)
+            _variables[decl.Name] = Eval(decl.Value, ctx, opt);
+
+        return Eval(l.Body, ctx, opt);
+    }
+
+    private FormulaValue EvalVariableRef(VariableRefExpr v) =>
+        _variables.TryGetValue(v.Name, out var value)
+            ? value
+            : throw new FormulaEvaluationException($"Variable ${v.Name} was not assigned.");
 
     private FormulaValue EvalUnary(UnaryExpr u, IRecordContext ctx, EvaluationOptions opt)
     {

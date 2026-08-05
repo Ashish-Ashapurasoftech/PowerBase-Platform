@@ -20,4 +20,5 @@ public record UpdateReportCommand(
     List<long> CustomDynamicFilterFields,
     List<CustomDynamicFilterItem>? CustomDynamicFilterItems,
     bool AllowQuickSearch,
-    List<Guid>? VisibleToRoleIds);
+    List<Guid>? VisibleToRoleIds,
+    ChartConfigCommand? Chart = null);
