@@ -26,4 +26,6 @@ public interface IAppUserRepository
     Task<string?> GetUserRoleNameAsync(long appId, long userId, CancellationToken ct = default);
     Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default);
     Task<IReadOnlySet<string>> GetUserAppPermissionsAsync(long appId, long userId, CancellationToken ct = default);
+    Task<IReadOnlyList<long>> GetUserAppRoleIdsAsync(long appId, long userId, CancellationToken ct = default);
+    Task<PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.UserEffectivePermissionsDto> GetUserEffectivePermissionsAsync(Guid userPublicId, CancellationToken ct = default);
 }

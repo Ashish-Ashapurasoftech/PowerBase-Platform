@@ -25,6 +25,7 @@ public class UserPermissionRepository : ControlRepositoryBase, IUserPermissionRe
         await using var connection = ConnectionFactory.Create();
         var codes = await connection.QueryAsync<string>(
             new CommandDefinition(GetPermissionsSql, new { userId, tenantId }, cancellationToken: ct));
+
         return codes.ToHashSet();
     }
 }
