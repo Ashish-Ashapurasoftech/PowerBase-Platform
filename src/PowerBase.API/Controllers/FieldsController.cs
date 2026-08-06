@@ -8,6 +8,7 @@ using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Commands.DeleteField;
 using PowerBase.Application.Fields.Commands.UpdateField;
 using PowerBase.Application.Fields.Queries.ListFields;
+using PowerBase.Application.Fields.Queries.ListFieldTypes;
 using PowerBase.Application.Fields.Queries.GetFieldUsage;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -22,19 +23,22 @@ public class FieldsController : ControllerBase
     private readonly UpdateFieldCommandHandler _updateHandler;
     private readonly DeleteFieldCommandHandler _deleteHandler;
     private readonly ListFieldsQueryHandler _listHandler;
+    private readonly ListFieldTypesQueryHandler _listFieldTypesHandler;
 
     public FieldsController(
         CreateFieldCommandHandler createHandler,
         BulkCreateFieldsCommandHandler bulkCreateHandler,
         UpdateFieldCommandHandler updateHandler,
         DeleteFieldCommandHandler deleteHandler,
-        ListFieldsQueryHandler listHandler)
+        ListFieldsQueryHandler listHandler,
+        ListFieldTypesQueryHandler listFieldTypesHandler)
     {
         _createHandler = createHandler;
         _bulkCreateHandler = bulkCreateHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _listHandler = listHandler;
+        _listFieldTypesHandler = listFieldTypesHandler;
     }
 
     /// <summary>Add a field to a table (also runs ALTER TABLE on the physical data table).</summary>
@@ -82,6 +86,18 @@ public class FieldsController : ControllerBase
         var fields = await _listHandler.HandleAsync(new ListFieldsQuery(tableId), ct);
         var items = fields.Select(MapToResponse).ToList();
         return Ok(new ApiListResponse<FieldResponse>(items, items.Count, 1, items.Count));
+    }
+
+    /// <summary>List every supported field type configuration (reference data — not tenant- or table-scoped).</summary>
+    [HttpGet("/field-types")]
+    [RequireAuth]
+    [ProducesResponseType(typeof(ApiListResponse<FieldTypeResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> ListFieldTypes(CancellationToken ct)
+    {
+        var fieldTypes = await _listFieldTypesHandler.HandleAsync(new ListFieldTypesQuery(), ct);
+        var items = fieldTypes.Select(MapToResponse).ToList();
+        return Ok(new ApiListResponse<FieldTypeResponse>(items, items.Count, 1, items.Count));
     }
 
     /// <summary>Update a field's properties (name, label, required, searchable, reportable, etc.).</summary>
@@ -200,5 +216,14 @@ public class FieldsController : ControllerBase
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,
+    };
+
+    private static FieldTypeResponse MapToResponse(FieldType ft) => new()
+    {
+        Code = ft.Code,
+        DisplayName = ft.DisplayName,
+        Category = ft.Category,
+        SqlDataType = ft.SqlDataType,
+        Icon = ft.Icon,
     };
 }

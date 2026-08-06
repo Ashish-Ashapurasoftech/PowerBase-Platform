@@ -13,6 +13,12 @@ public class FieldTypeRepository : TenantRepositoryBase, IFieldTypeRepository
         WHERE Code = @code
         """;
 
+    private const string ListAllSql = """
+        SELECT Id, Code, DisplayName, Category, SqlDataType, Icon
+        FROM core.FieldType
+        ORDER BY Id
+        """;
+
     public FieldTypeRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
@@ -28,5 +34,12 @@ public class FieldTypeRepository : TenantRepositoryBase, IFieldTypeRepository
         const string sql = "SELECT Id FROM core.FieldType WHERE Code = @code";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, new { code }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<FieldType>> ListAllAsync(CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<FieldType>(new CommandDefinition(ListAllSql, cancellationToken: ct));
+        return rows.ToList();
     }
 }
