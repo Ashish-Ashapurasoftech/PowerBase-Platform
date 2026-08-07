@@ -10,6 +10,7 @@ public class CreateUserTokenCommandHandlerTests
 {
     private readonly IUserTokenRepository _userTokenRepository = Substitute.For<IUserTokenRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IAuditRepository _auditRepository = Substitute.For<IAuditRepository>();
     private readonly CreateUserTokenCommandHandler _handler;
 
     public CreateUserTokenCommandHandlerTests()
@@ -17,7 +18,7 @@ public class CreateUserTokenCommandHandlerTests
         _queryContext.UserId.Returns(1001);
         _queryContext.TenantId.Returns(500);
 
-        _handler = new CreateUserTokenCommandHandler(_userTokenRepository, _queryContext);
+        _handler = new CreateUserTokenCommandHandler(_userTokenRepository, _queryContext, _auditRepository);
     }
 
     [Fact]

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using PowerBase.Application.AppTokens.Common;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -12,15 +13,18 @@ public class CreateAppTokenCommandHandler
     private readonly IAppTokenRepository _appTokenRepository;
     private readonly IAppRepository _appRepository;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
     public CreateAppTokenCommandHandler(
         IAppTokenRepository appTokenRepository,
         IAppRepository appRepository,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAuditRepository auditRepo)
     {
         _appTokenRepository = appTokenRepository;
         _appRepository = appRepository;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task<AppTokenCreatedDto> HandleAsync(CreateAppTokenCommand command, CancellationToken cancellationToken = default)
@@ -52,6 +56,14 @@ public class CreateAppTokenCommandHandler
         };
 
         var createdToken = await _appTokenRepository.CreateAsync(appToken, cancellationToken);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Created,
+            AuditEntityTypes.AppToken,
+            createdToken.PublicId.ToString(),
+            $"App token created: {createdToken.TokenName}",
+            appId: appId,
+            ct: cancellationToken);
 
         return new AppTokenCreatedDto
         {

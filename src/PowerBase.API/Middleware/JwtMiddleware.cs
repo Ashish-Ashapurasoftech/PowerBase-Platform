@@ -18,7 +18,8 @@ public class JwtMiddleware
         IQueryContext queryContext, 
         IUserPermissionRepository permissionRepo,
         IUserTokenRepository userTokenRepository,
-        IUserRepository userRepository)
+        IUserRepository userRepository,
+        ITenantRepository tenantRepository)
     {
         var token = context.Request.Headers["Authorization"]
             .FirstOrDefault()?.Split(" ").Last();
@@ -47,6 +48,7 @@ public class JwtMiddleware
                         if (userToken.TenantId > 0)
                         {
                             ctx.Permissions = await permissionRepo.GetPermissionsAsync(user.Id, userToken.TenantId);
+                            ctx.TenantRole = await tenantRepository.GetUserRoleNameInTenantAsync(user.Id, userToken.TenantId, context.RequestAborted) ?? string.Empty;
                         }
 
                         // Fire and forget update last used at to prevent blocking request thread
@@ -54,7 +56,7 @@ public class JwtMiddleware
                     }
                 }
             }
-            else if (jwtService.ValidateToken(token, out var userId, out var tenantId, out _, out var userName, out var userEmail, out var systemRoleCode))
+            else if (jwtService.ValidateToken(token, out var userId, out var tenantId, out _, out var userName, out var userEmail, out var systemRoleCode, out var tenantRole))
             {
                 var ctx = (QueryContext)queryContext;
                 ctx.UserId      = userId;
@@ -63,6 +65,7 @@ public class JwtMiddleware
                 ctx.UserName    = userName;
                 ctx.UserEmail   = userEmail;
                 ctx.IpAddress   = context.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
+                ctx.TenantRole  = tenantRole;
                 if (tenantId > 0)
                     ctx.Permissions = await permissionRepo.GetPermissionsAsync(userId, tenantId);
             }

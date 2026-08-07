@@ -145,6 +145,17 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
         WHERE UserId = @userId AND TenantId = @tenantId AND IsDeleted = 0
         """;
 
+    private const string GetUserRoleNameInTenantSql = """
+        SELECT r.Name
+        FROM meta.TenantUser tu
+        JOIN meta.TenantRole r ON r.Id = tu.TenantRoleId
+        WHERE tu.UserId = @userId
+          AND tu.TenantId = @tenantId
+          AND tu.IsDeleted = 0
+          AND tu.IsActive = 1
+          AND r.IsDeleted = 0
+        """;
+
     private const string UpsertTenantUserSql = """
         MERGE meta.TenantUser AS target
         USING (VALUES (@tenantId, @userId)) AS source (TenantId, UserId)
@@ -483,6 +494,13 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
             serverRef,
             connectionSecretRef,
         }, cancellationToken: ct));
+    }
+
+    public async Task<string?> GetUserRoleNameInTenantAsync(long userId, long tenantId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<string>(
+            new CommandDefinition(GetUserRoleNameInTenantSql, new { userId, tenantId }, cancellationToken: ct));
     }
 
 }

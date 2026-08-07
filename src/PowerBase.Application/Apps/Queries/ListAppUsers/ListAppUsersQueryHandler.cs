@@ -13,7 +13,8 @@ public record AppUserResult(
     string Status,
     bool ShowInUserPickers,
     DateTime AddedOn,
-    bool IsOwner);
+    bool IsOwner,
+    bool IsFromGroup);
 
 public class ListAppUsersQueryHandler
 {
@@ -41,6 +42,7 @@ public class ListAppUsersQueryHandler
             u.Status,
             u.ShowInUserPickers,
             u.CreatedOn,
-            u.IsOwner)).ToList();
+            u.IsOwner,
+            u.IsFromGroup)).ToList();
     }
 }

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using PowerBase.Application.AppTokens.Common;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.AppTokens.Commands.RotateAppToken;
@@ -10,11 +11,16 @@ public class RotateAppTokenCommandHandler
 {
     private readonly IAppTokenRepository _appTokenRepository;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
-    public RotateAppTokenCommandHandler(IAppTokenRepository appTokenRepository, IQueryContext queryContext)
+    public RotateAppTokenCommandHandler(
+        IAppTokenRepository appTokenRepository,
+        IQueryContext queryContext,
+        IAuditRepository auditRepo)
     {
         _appTokenRepository = appTokenRepository;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task<AppTokenCreatedDto> HandleAsync(Guid appPublicId, Guid publicId, CancellationToken cancellationToken = default)
@@ -36,6 +42,14 @@ public class RotateAppTokenCommandHandler
         {
             throw new NotFoundException("AppToken", publicId);
         }
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Updated,
+            AuditEntityTypes.AppToken,
+            existingToken.PublicId.ToString(),
+            $"App token rotated: {existingToken.TokenName}",
+            appId: existingToken.AppId,
+            ct: cancellationToken);
 
         return new AppTokenCreatedDto
         {

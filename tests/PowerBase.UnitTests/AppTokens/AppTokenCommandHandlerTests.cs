@@ -16,6 +16,7 @@ public class AppTokenCommandHandlerTests
     private readonly IAppTokenRepository _appTokenRepository = Substitute.For<IAppTokenRepository>();
     private readonly IAppRepository _appRepository = Substitute.For<IAppRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IAuditRepository _auditRepository = Substitute.For<IAuditRepository>();
 
     private readonly CreateAppTokenCommandHandler _createHandler;
     private readonly UpdateAppTokenStatusCommandHandler _updateStatusHandler;
@@ -28,10 +29,10 @@ public class AppTokenCommandHandlerTests
         _queryContext.UserId.Returns(1001);
         _queryContext.TenantId.Returns(500);
 
-        _createHandler = new CreateAppTokenCommandHandler(_appTokenRepository, _appRepository, _queryContext);
-        _updateStatusHandler = new UpdateAppTokenStatusCommandHandler(_appTokenRepository, _queryContext);
-        _rotateHandler = new RotateAppTokenCommandHandler(_appTokenRepository, _queryContext);
-        _deleteHandler = new DeleteAppTokenCommandHandler(_appTokenRepository, _queryContext);
+        _createHandler = new CreateAppTokenCommandHandler(_appTokenRepository, _appRepository, _queryContext, _auditRepository);
+        _updateStatusHandler = new UpdateAppTokenStatusCommandHandler(_appTokenRepository, _queryContext, _auditRepository);
+        _rotateHandler = new RotateAppTokenCommandHandler(_appTokenRepository, _queryContext, _auditRepository);
+        _deleteHandler = new DeleteAppTokenCommandHandler(_appTokenRepository, _queryContext, _auditRepository);
         _getAppTokensHandler = new GetAppTokensQueryHandler(_appTokenRepository, _queryContext);
     }
 
@@ -93,6 +94,10 @@ public class AppTokenCommandHandlerTests
         // Arrange
         var appPublicId = Guid.NewGuid();
         var publicId = Guid.NewGuid();
+        var existingToken = new AppToken { PublicId = publicId, AppId = 45, TokenName = "Token" };
+
+        _appTokenRepository.GetByPublicIdAsync(publicId, 500, appPublicId, Arg.Any<CancellationToken>())
+            .Returns(existingToken);
 
         _appTokenRepository.UpdateStatusAsync(publicId, 500, appPublicId, false, Arg.Any<CancellationToken>())
             .Returns(true);
@@ -150,6 +155,10 @@ public class AppTokenCommandHandlerTests
         // Arrange
         var appPublicId = Guid.NewGuid();
         var publicId = Guid.NewGuid();
+        var existingToken = new AppToken { PublicId = publicId, AppId = 45, TokenName = "Token" };
+
+        _appTokenRepository.GetByPublicIdAsync(publicId, 500, appPublicId, Arg.Any<CancellationToken>())
+            .Returns(existingToken);
 
         _appTokenRepository.DeleteAsync(publicId, 500, appPublicId, Arg.Any<CancellationToken>())
             .Returns(true);

@@ -15,5 +15,7 @@ public class AppUser
     public long AddedBy { get; set; }
     public DateTime CreatedOn { get; set; }
     public DateTime? UpdatedOn { get; set; }
+    public bool IsFromGroup { get; set; } = false;
+    public long? GroupId { get; set; }
     public bool IsDeleted { get; set; }
 }

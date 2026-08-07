@@ -13,7 +13,8 @@ public record AppUserDetail(
     string Status,
     bool ShowInUserPickers,
     DateTime CreatedOn,
-    bool IsOwner);
+    bool IsOwner,
+    bool IsFromGroup);
 
 public interface IAppUserRepository
 {

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.UserTokens.Common;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.UserTokens.Commands.RotateUserToken;
@@ -10,11 +11,16 @@ public class RotateUserTokenCommandHandler
 {
     private readonly IUserTokenRepository _userTokenRepository;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
-    public RotateUserTokenCommandHandler(IUserTokenRepository userTokenRepository, IQueryContext queryContext)
+    public RotateUserTokenCommandHandler(
+        IUserTokenRepository userTokenRepository,
+        IQueryContext queryContext,
+        IAuditRepository auditRepo)
     {
         _userTokenRepository = userTokenRepository;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task<UserTokenCreatedDto> HandleAsync(RotateUserTokenCommand command, CancellationToken cancellationToken = default)
@@ -35,6 +41,13 @@ public class RotateUserTokenCommandHandler
         {
             throw new Exception("Failed to rotate user token.");
         }
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Updated,
+            AuditEntityTypes.UserToken,
+            existingToken.PublicId.ToString(),
+            $"User token rotated: {existingToken.TokenName}",
+            ct: cancellationToken);
 
         var allowedAppPublicIds = existingToken.AccessAllApps 
             ? Enumerable.Empty<Guid>() 

@@ -409,6 +409,7 @@ builder.Services.AddScoped<AssignGroupRoleCommandHandler>();
 builder.Services.AddScoped<GetUserEffectivePermissionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Groups.Commands.ShareGroupWithApp.ShareGroupWithAppCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Groups.Commands.UnshareGroupFromApp.UnshareGroupFromAppCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Groups.Queries.GetSharedApps.GetSharedAppsQueryHandler>();
 
 var app = builder.Build();
 

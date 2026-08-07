@@ -14,6 +14,7 @@ public class UserTokenCommandHandlerTests
 {
     private readonly IUserTokenRepository _userTokenRepository = Substitute.For<IUserTokenRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IAuditRepository _auditRepository = Substitute.For<IAuditRepository>();
     private readonly RotateUserTokenCommandHandler _rotateHandler;
     private readonly UpdateUserTokenStatusCommandHandler _updateStatusHandler;
 
@@ -22,7 +23,7 @@ public class UserTokenCommandHandlerTests
         _queryContext.UserId.Returns(1001);
         _queryContext.TenantId.Returns(500);
 
-        _rotateHandler = new RotateUserTokenCommandHandler(_userTokenRepository, _queryContext);
+        _rotateHandler = new RotateUserTokenCommandHandler(_userTokenRepository, _queryContext, _auditRepository);
         _updateStatusHandler = new UpdateUserTokenStatusCommandHandler(_userTokenRepository, _queryContext);
     }
 
@@ -125,7 +126,9 @@ public class UserTokenCommandHandlerTests
     {
         // Arrange
         var publicId = Guid.NewGuid();
-        var revokeHandler = new RevokeUserTokenCommandHandler(_userTokenRepository, _queryContext);
+        var existingToken = new UserToken { PublicId = publicId, UserId = 1001, TokenName = "Token" };
+        _userTokenRepository.GetByPublicIdAsync(publicId, 500, Arg.Any<CancellationToken>()).Returns(existingToken);
+        var revokeHandler = new RevokeUserTokenCommandHandler(_userTokenRepository, _queryContext, _auditRepository);
         _userTokenRepository.RevokeAsync(publicId, 500, Arg.Any<CancellationToken>()).Returns(true);
 
         var command = new RevokeUserTokenCommand(publicId);
@@ -169,7 +172,7 @@ public class UserTokenCommandHandlerTests
             Arg.Any<CancellationToken>()
         ).Returns(true);
 
-        var handler = new UpdateUserTokenCommandHandler(_userTokenRepository, _queryContext);
+        var handler = new UpdateUserTokenCommandHandler(_userTokenRepository, _queryContext, _auditRepository);
         var command = new UpdateUserTokenCommand
         {
             PublicId = publicId,
@@ -202,7 +205,7 @@ public class UserTokenCommandHandlerTests
         _userTokenRepository.GetByPublicIdAsync(publicId, 500, Arg.Any<CancellationToken>())
             .Returns((UserToken?)null);
 
-        var handler = new UpdateUserTokenCommandHandler(_userTokenRepository, _queryContext);
+        var handler = new UpdateUserTokenCommandHandler(_userTokenRepository, _queryContext, _auditRepository);
         var command = new UpdateUserTokenCommand
         {
             PublicId = publicId,

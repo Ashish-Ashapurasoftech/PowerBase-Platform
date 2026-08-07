@@ -19,7 +19,8 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             au.Status,
             ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
             au.CreatedOn,
-            CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner
+            CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
+            ISNULL(au.IsFromGroup, 0) AS IsFromGroup
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
         JOIN meta.App a ON a.Id = au.AppId
@@ -29,7 +30,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         """;
 
     private const string GetByAppAndUserSql = """
-        SELECT Id, PublicId, AppId, UserId, UserPublicId, AppRoleId, Status, ISNULL(ShowInUserPickers, 1) AS ShowInUserPickers, AddedBy, CreatedOn, UpdatedOn, IsDeleted
+        SELECT Id, PublicId, AppId, UserId, UserPublicId, AppRoleId, Status, ISNULL(ShowInUserPickers, 1) AS ShowInUserPickers, AddedBy, CreatedOn, UpdatedOn, IsDeleted, IsFromGroup, GroupId
         FROM meta.AppUser
         WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0 And Status = 'Active'
         """;
@@ -41,13 +42,15 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             SET Status = 'Active',
                 IsDeleted = 0,
                 AppRoleId = @appRoleId,
+                IsFromGroup = @isFromGroup,
+                GroupId = @groupId,
                 UpdatedOn = SYSUTCDATETIME()
             WHERE AppId = @appId AND UserId = @userId
         END
         ELSE
         BEGIN
-            INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn)
-            VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, 1, @addedBy, SYSUTCDATETIME())
+            INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
+            VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, 1, @addedBy, SYSUTCDATETIME(), @isFromGroup, @groupId)
         END
         """;
 
@@ -160,6 +163,8 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             appRoleId  = appUser.AppRoleId,
             status     = appUser.Status,
             addedBy    = QueryContext.UserId,
+            isFromGroup = appUser.IsFromGroup,
+            groupId    = appUser.GroupId
         };
 
         if (transaction is not null)

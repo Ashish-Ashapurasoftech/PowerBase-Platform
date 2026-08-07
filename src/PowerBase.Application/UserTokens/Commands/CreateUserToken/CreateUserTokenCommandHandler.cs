@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.UserTokens.Common;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.UserTokens.Commands.CreateUserToken;
@@ -10,11 +11,16 @@ public class CreateUserTokenCommandHandler
 {
     private readonly IUserTokenRepository _userTokenRepository;
     private readonly IQueryContext _queryContext;
+    private readonly IAuditRepository _auditRepo;
 
-    public CreateUserTokenCommandHandler(IUserTokenRepository userTokenRepository, IQueryContext queryContext)
+    public CreateUserTokenCommandHandler(
+        IUserTokenRepository userTokenRepository,
+        IQueryContext queryContext,
+        IAuditRepository auditRepo)
     {
         _userTokenRepository = userTokenRepository;
         _queryContext = queryContext;
+        _auditRepo = auditRepo;
     }
 
     public async Task<UserTokenCreatedDto> HandleAsync(CreateUserTokenCommand command, CancellationToken cancellationToken = default)
@@ -39,6 +45,14 @@ public class CreateUserTokenCommandHandler
         };
 
         var createdToken = await _userTokenRepository.CreateAsync(userToken, command.AllowedAppPublicIds, cancellationToken);
+
+        await _auditRepo.LogActivityAsync(
+            AuditActions.Created,
+            AuditEntityTypes.UserToken,
+            createdToken.PublicId.ToString(),
+            $"User token created: {createdToken.TokenName}",
+            ct: cancellationToken);
+
         var allowedAppPublicIds = command.AccessAllApps 
             ? Enumerable.Empty<Guid>() 
             : await _userTokenRepository.GetAllowedAppPublicIdsAsync(createdToken.Id, createdToken.TenantId, cancellationToken);

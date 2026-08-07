@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.UserTokens.Commands.UpdateUserTokenStatus;
@@ -8,7 +9,9 @@ public class UpdateUserTokenStatusCommandHandler
     private readonly IUserTokenRepository _userTokenRepository;
     private readonly IQueryContext _queryContext;
 
-    public UpdateUserTokenStatusCommandHandler(IUserTokenRepository userTokenRepository, IQueryContext queryContext)
+    public UpdateUserTokenStatusCommandHandler(
+        IUserTokenRepository userTokenRepository,
+        IQueryContext queryContext)
     {
         _userTokenRepository = userTokenRepository;
         _queryContext = queryContext;
