@@ -6,6 +6,8 @@ using PowerBase.Domain.Exceptions;
 namespace PowerBase.Application.Apps.Commands.CreateApp;
 
 using PowerBase.Application.Fields.Commands.BulkCreateFields;
+using PowerBase.Domain.ValueObjects;
+using System.Text.Json;
 
 public class CreateAppResult
 {
@@ -80,6 +82,8 @@ public class CreateAppCommandHandler
             Icon = command.Icon,
             Color = command.Color,
             Status = "Active",
+            Formatting = JsonSerializer.Serialize(new AppFormattingSettings()),
+            SecurityOptions = JsonSerializer.Serialize(new AppSecurityOptionsSettings()),
             CreatedOn = now,
             CreatedBy = _queryContext.UserId,
         };
@@ -211,7 +215,7 @@ public class CreateAppCommandHandler
         // Process Custom Fields
         if (spec.Fields != null && spec.Fields.Any())
         {
-            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name, Settings: f.Settings)).ToList();
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label, Settings: f.Settings, Name: f.Name)).ToList();
             await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
         }
     }

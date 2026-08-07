@@ -38,8 +38,8 @@ public class AddSummaryFieldCommandHandler
 
     public async Task<RelationshipDto> HandleAsync(AddSummaryFieldCommand command, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(command.Name))
-            throw new ValidationException(new Dictionary<string, string[]> { ["name"] = ["Summary field name is required."] });
+        if (string.IsNullOrWhiteSpace(command.Label))
+            throw new ValidationException(new Dictionary<string, string[]> { ["label"] = ["Summary field label is required."] });
         if (!SummaryFunctions.All.Contains(command.Function))
             throw new ValidationException(new Dictionary<string, string[]> { ["function"] = [$"Unknown summary function '{command.Function}'."] });
 
@@ -63,7 +63,7 @@ public class AddSummaryFieldCommandHandler
             : null;
 
         var summary = await _fieldFactory.CreateAsync(parent, nameof(Domain.Enums.FieldTypeCode.Summary),
-            command.Name.Trim(), command.Label?.Trim(), false,
+            command.Label.Trim(), false,
             new SummarySettings
             {
                 RelationshipId = rel.Id,

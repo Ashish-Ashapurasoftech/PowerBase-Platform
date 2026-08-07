@@ -11,12 +11,11 @@ public class CreateFieldCommandValidator : AbstractValidator<CreateFieldCommand>
 
     public CreateFieldCommandValidator()
     {
-        RuleFor(x => x.Name).NotEmpty().MaximumLength(200);
+        RuleFor(x => x.Label).NotEmpty().MaximumLength(200);
         RuleFor(x => x.TypeCode)
             .NotEmpty()
             .Must(c => ValidTypeCodes.Contains(c))
             .WithMessage($"TypeCode must be one of: {string.Join(", ", ValidTypeCodes)}");
-        RuleFor(x => x.Label).MaximumLength(200).When(x => x.Label is not null);
         RuleFor(x => x.Description).MaximumLength(500).When(x => x.Description is not null);
     }
 

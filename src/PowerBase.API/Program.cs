@@ -174,6 +174,7 @@ builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService, PowerBase.Application.Records.RecordWriteService>();
 builder.Services.AddScoped<IAppSeeder, AppSeeder>();
+builder.Services.AddScoped<IFieldNameResolver, PowerBase.Application.Common.Services.FieldNameResolver>();
 
 // Field Settings Validators
 builder.Services.AddScoped<IFieldSettingsValidator, TextSettingsValidator>();

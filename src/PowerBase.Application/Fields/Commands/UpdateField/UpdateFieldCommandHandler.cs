@@ -36,8 +36,8 @@ public class UpdateFieldCommandHandler
 
     public async Task HandleAsync(UpdateFieldCommand command, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(command.Name))
-            throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name is required."] });
+        if (string.IsNullOrWhiteSpace(command.Label))
+            throw new ValidationException(new Dictionary<string, string[]> { ["Label"] = ["Label is required."] });
 
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
@@ -47,6 +47,9 @@ public class UpdateFieldCommandHandler
         //   (c) enforce the required+None+default invariant.
         var existing = await _fieldRepo.GetByFidInTableAsync(table.Id, command.FieldFid, ct)
                        ?? throw new NotFoundException("Field", command.FieldFid);
+
+        if (await _fieldRepo.LabelExistsInTableAsync(table.Id, command.Label, excludeFieldId: existing.Id, ct: ct))
+            throw new DuplicateException("Field", "label", command.Label);
 
         // Validate per-type Settings JSON against the field's current type.
         var settingsErrors = _settingsRegistry.Validate(existing.TypeCode, command.Settings);
@@ -64,8 +67,8 @@ public class UpdateFieldCommandHandler
                 {
                     ["DefaultValue"] =
                     [
-                        $"'{command.Name}' is required but does not have a default value. Because some users are not " +
-                        $"allowed to modify '{command.Name}', those users will not be able to add new records. " +
+                        $"'{command.Label}' is required but does not have a default value. Because some users are not " +
+                        $"allowed to modify '{command.Label}', those users will not be able to add new records. " +
                         "Supply a default value or uncheck Required."
                     ],
                 });
@@ -80,14 +83,14 @@ public class UpdateFieldCommandHandler
             {
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
-                    ["IsUnique"] = [$"Cannot make '{command.Name}' unique — duplicate values already exist. Remove duplicates first."]
+                    ["IsUnique"] = [$"Cannot make '{command.Label}' unique — duplicate values already exist. Remove duplicates first."]
                 });
             }
         }
 
         var affected = await _fieldRepo.UpdateAsync(
             existing.PublicId, table.Id,
-            command.Name, command.Label, command.Description,
+            command.Label, command.Description,
             command.IsRequired, command.DefaultValue,
             command.IsSearchable, command.IsSortable,
             command.IsFilterable, command.IsReportable, command.IsAuditable,
@@ -114,6 +117,6 @@ public class UpdateFieldCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
-            $"Field modified: {command.Name} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+            $"Field modified: {command.Label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
     }
 }

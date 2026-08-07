@@ -35,7 +35,7 @@ public class GetParentOptionsQueryHandler
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
 
         var labelFields = ResolveLabelFields(parent, parentFields);
-        var headers = labelFields.Select(f => f.Name).ToList();
+        var headers = labelFields.Select(f => f.Label ?? f.Name).ToList();
         var options = await _recordRepo.SearchForReferenceAsync(parent, labelFields, search, take == 0 ? 50 : take, ct);
 
         // Default key: SearchForReferenceAsync already returns the row Id as text — nothing to do.

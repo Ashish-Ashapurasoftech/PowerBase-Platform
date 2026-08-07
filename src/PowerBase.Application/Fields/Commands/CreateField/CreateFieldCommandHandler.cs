@@ -32,6 +32,7 @@ public class CreateFieldCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly IFormRepository _formRepo;
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
+    private readonly IFieldNameResolver _fieldNameResolver;
 
     public CreateFieldCommandHandler(
         IAppTableRepository tableRepo,
@@ -41,7 +42,8 @@ public class CreateFieldCommandHandler
         IQueryContext queryContext,
         IAuditRepository auditRepo,
         IFormRepository formRepo,
-        FieldSettingsValidatorRegistry settingsRegistry)
+        FieldSettingsValidatorRegistry settingsRegistry,
+        IFieldNameResolver fieldNameResolver)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -51,6 +53,7 @@ public class CreateFieldCommandHandler
         _auditRepo = auditRepo;
         _formRepo = formRepo;
         _settingsRegistry = settingsRegistry;
+        _fieldNameResolver = fieldNameResolver;
     }
 
     public async Task<CreateFieldResult> HandleAsync(CreateFieldCommand command, CancellationToken ct = default)
@@ -68,8 +71,8 @@ public class CreateFieldCommandHandler
 
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
-        if (await _fieldRepo.NameExistsInTableAsync(table.Id, command.Name, ct))
-            throw new DuplicateException("Field", "name", command.Name);
+        if (await _fieldRepo.LabelExistsInTableAsync(table.Id, command.Label, ct: ct))
+            throw new DuplicateException("Field", "label", command.Label);
 
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(command.TypeCode, ct)
             ?? throw new NotFoundException("FieldType", command.TypeCode);
@@ -78,13 +81,14 @@ public class CreateFieldCommandHandler
         // changes. A brand-new field has no field-permission rows yet, so there is nothing to check here.
 
         var nextFid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
+        var generatedName = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, command.Label, isSystem: false, ct);
 
         var field = new AppField
         {
             AppTableId = table.Id,
             FieldTypeId = fieldType.Id,
             TypeCode = fieldType.Code,
-            Name = command.Name,
+            Name = generatedName,
             Label = command.Label,
             Description = command.Description,
             IsRequired = command.IsRequired,
@@ -92,7 +96,7 @@ public class CreateFieldCommandHandler
             Fid = nextFid,
             Settings = command.Settings,
             CreatedBy = _queryContext.UserId,
-            IsSearchable = true,
+            IsSearchable = false,
             IsSortable = true,
             IsFilterable = true,
             IsReportable = true,
@@ -121,7 +125,7 @@ public class CreateFieldCommandHandler
         }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), $"Field added: {command.Name} To TableName : {table.Name}", appId: table.AppId, ct: ct);
+            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), $"Field added: {command.Label} To TableName : {table.Name}", appId: table.AppId, ct: ct);
 
         return new CreateFieldResult
         {

@@ -85,7 +85,7 @@ public class AppsController : ControllerBase
                 t.Icon,
                 t.Description,
                 t.Config,
-                t.Fields?.Select(f => new AppFieldSpec(f.Name, f.TypeCode)).ToList())).ToList());
+                t.Fields?.Select(f => new AppFieldSpec(f.Label, f.TypeCode)).ToList())).ToList());
         var result = await _createHandler.HandleAsync(command, ct);
         var response = MapToAppResponse(result);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<AppResponse>(response));
@@ -354,11 +354,11 @@ public class AppsController : ControllerBase
     private static AppResponse MapToAppResponse(PowerBase.Domain.Entities.App app)
     {
         var formatting = string.IsNullOrEmpty(app.Formatting)
-            ? new AppFormattingSettings()
+            ? null
             : JsonSerializer.Deserialize<AppFormattingSettings>(app.Formatting, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppFormattingSettings();
 
         var security = string.IsNullOrEmpty(app.SecurityOptions)
-            ? new AppSecurityOptionsSettings()
+            ? null
             : JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
 
         return new AppResponse
@@ -379,11 +379,11 @@ public class AppsController : ControllerBase
     private static AppResponse MapToAppResponse(AppListItemDto app)
     {
         var formatting = string.IsNullOrEmpty(app.Formatting)
-            ? new AppFormattingSettings()
+            ? null
             : JsonSerializer.Deserialize<AppFormattingSettings>(app.Formatting, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppFormattingSettings();
 
         var security = string.IsNullOrEmpty(app.SecurityOptions)
-            ? new AppSecurityOptionsSettings()
+            ? null
             : JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
 
         return new AppResponse
