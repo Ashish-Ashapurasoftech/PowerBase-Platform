@@ -5,8 +5,8 @@ namespace PowerBase.Application.Common.Interfaces;
 public interface IJwtService
 {
     string GenerateIdentityToken(User user, out Guid jwtId, out DateTime expiresAt);
-    string GenerateToken(User user, long tenantId, out Guid jwtId, out DateTime expiresAt);
-    bool ValidateToken(string token, out long userId, out long tenantId, out Guid jwtId, out string userName, out string userEmail, out string systemRoleCode);
+    string GenerateToken(User user, long tenantId, string tenantRoleName, out Guid jwtId, out DateTime expiresAt);
+    bool ValidateToken(string token, out long userId, out long tenantId, out Guid jwtId, out string userName, out string userEmail, out string systemRoleCode, out string tenantRole);
     string GeneratePasswordResetToken(User user);
     bool ValidatePasswordResetToken(string token, out long userId, out string passwordHash);
 }

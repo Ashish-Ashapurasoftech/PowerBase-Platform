@@ -17,6 +17,7 @@ namespace PowerBase.API.Controllers;
 
 [ApiController]
 [Route("roles")]
+[RequireTenantAdmin]
 public class RolesController : ControllerBase
 {
     private readonly ListRolesQueryHandler _listHandler;

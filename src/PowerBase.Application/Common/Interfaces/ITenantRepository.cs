@@ -27,6 +27,7 @@ public interface ITenantRepository
     Task UpdateTenantUserRoleAsync(long tenantUserId, long tenantRoleId, CancellationToken ct = default);
     Task RemoveTenantUserAsync(long tenantUserId, CancellationToken ct = default);
     Task ActivateTenantUserAsync(long userId, long tenantId, CancellationToken ct = default);
+    Task<string?> GetUserRoleNameInTenantAsync(long userId, long tenantId, CancellationToken ct = default);
 
     // Role management
     Task<IReadOnlyList<TenantRole>> ListRolesAsync(CancellationToken ct = default);
