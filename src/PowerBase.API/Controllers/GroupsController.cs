@@ -14,6 +14,7 @@ using PowerBase.Application.Groups.Queries.GetGroup;
 using PowerBase.Application.Groups.Queries.ListGroupMembers;
 using PowerBase.Application.Groups.Queries.ListGroups;
 using PowerBase.Application.Groups.Queries.GetUserEffectivePermissions;
+using PowerBase.Application.Groups.Queries.GetSharedApps;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.API.Controllers;
@@ -35,6 +36,7 @@ public class GroupsController : ControllerBase
     private readonly GetUserEffectivePermissionsQueryHandler _effectivePermissionsHandler;
     private readonly ShareGroupWithAppCommandHandler _shareHandler;
     private readonly UnshareGroupFromAppCommandHandler _unshareHandler;
+    private readonly GetSharedAppsQueryHandler _getSharedAppsHandler;
 
     public GroupsController(
         CreateGroupCommandHandler createHandler,
@@ -48,7 +50,8 @@ public class GroupsController : ControllerBase
         AssignGroupRoleCommandHandler assignRoleHandler,
         GetUserEffectivePermissionsQueryHandler effectivePermissionsHandler,
         ShareGroupWithAppCommandHandler shareHandler,
-        UnshareGroupFromAppCommandHandler unshareHandler)
+        UnshareGroupFromAppCommandHandler unshareHandler,
+        GetSharedAppsQueryHandler getSharedAppsHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -62,6 +65,7 @@ public class GroupsController : ControllerBase
         _effectivePermissionsHandler = effectivePermissionsHandler;
         _shareHandler = shareHandler;
         _unshareHandler = unshareHandler;
+        _getSharedAppsHandler = getSharedAppsHandler;
     }
 
     /// <summary>Create a new group</summary>
@@ -219,7 +223,8 @@ public class GroupsController : ControllerBase
         var command = new ShareGroupWithAppCommand
         {
             GroupPublicId = publicId,
-            AppPublicIds = request.AppPublicIds
+            AppPublicIds = request.AppPublicIds,
+            AppRolePublicId = request.AppRolePublicId
         };
         var success = await _shareHandler.HandleAsync(command, ct);
         if (!success)
@@ -246,5 +251,15 @@ public class GroupsController : ControllerBase
             throw new NotFoundException("GroupShare", $"Group: {publicId}, App: {appPublicId}");
 
         return NoContent();
+    }
+
+    /// <summary>Get shared apps of a group.</summary>
+    [HttpGet("{publicId:guid}/apps")]
+    [RequirePermission(PermissionCodes.AppsRead)]
+    public async Task<IActionResult> GetSharedApps([FromRoute] Guid publicId, CancellationToken ct)
+    {
+        var query = new GetSharedAppsQuery { GroupPublicId = publicId };
+        var sharedAppIds = await _getSharedAppsHandler.HandleAsync(query, ct);
+        return Ok(new { data = sharedAppIds });
     }
 }

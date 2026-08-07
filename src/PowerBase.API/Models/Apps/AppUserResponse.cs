@@ -12,4 +12,5 @@ public class AppUserResponse
     public bool ShowInUserPickers { get; init; } = true;
     public string AddedOn { get; init; } = string.Empty;
     public bool IsOwner { get; init; }
+    public bool IsFromGroup { get; init; }
 }

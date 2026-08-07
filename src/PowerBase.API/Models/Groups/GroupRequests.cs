@@ -27,4 +27,5 @@ public class AssignGroupRoleRequest
 public class ShareGroupRequest
 {
     public IEnumerable<Guid> AppPublicIds { get; set; } = Enumerable.Empty<Guid>();
+    public Guid? AppRolePublicId { get; set; }
 }

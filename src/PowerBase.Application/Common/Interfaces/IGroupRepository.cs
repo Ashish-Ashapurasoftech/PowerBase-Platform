@@ -19,6 +19,7 @@ public interface IGroupRepository
     Task<(IEnumerable<GroupMemberDto> Items, int TotalCount)> ListMembersAsync(Guid groupPublicId, int page, int pageSize, CancellationToken ct = default);
 
     // Sharing
-    Task<bool> ShareWithAppsAsync(Guid groupPublicId, IEnumerable<Guid> appPublicIds, long createdBy, CancellationToken ct = default);
+    Task<bool> ShareWithAppsAsync(Guid groupPublicId, IEnumerable<Guid> appPublicIds, long createdBy, Guid? appRolePublicId = null, CancellationToken ct = default);
     Task<bool> UnshareFromAppAsync(Guid groupPublicId, Guid appPublicId, CancellationToken ct = default);
+    Task<IEnumerable<Guid>> GetSharedAppPublicIdsAsync(Guid groupPublicId, CancellationToken ct = default);
 }
