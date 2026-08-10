@@ -54,7 +54,7 @@ public class InviteUserCommandHandler
         }
         else if (await _tenantRepo.IsActiveMemberAsync(user!.Id, ct))
         {
-            throw new DuplicateException("TenantUser", "email", command.Email);
+            throw new DuplicateException("TenantUser", $"User with email '{command.Email}' is already a member of this tenant.");
         }
 
         // Pending users (IsActive=false) haven't accepted their invite yet — keep TenantUser inactive

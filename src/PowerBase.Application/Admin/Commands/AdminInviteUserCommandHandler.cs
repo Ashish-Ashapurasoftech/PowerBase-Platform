@@ -67,7 +67,7 @@ public class AdminInviteUserCommandHandler
             // Check if already an active member of this specific tenant
             var existing = await _adminRepo.ListTenantMembersAsync(command.TenantId, ct);
             if (existing.Any(m => m.Email.Equals(command.Email, StringComparison.OrdinalIgnoreCase) && m.IsActive))
-                throw new DuplicateException("TenantUser", "email", command.Email);
+                throw new DuplicateException("TenantUser", $"User with email '{command.Email}' is already a member of this tenant.");
         }
 
         // Pending/new users are assigned as inactive — they activate when they accept the invite link

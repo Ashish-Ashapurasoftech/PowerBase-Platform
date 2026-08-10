@@ -39,7 +39,7 @@ public class AdminInvitePlatformUserCommandHandler
 
         var existing = await _userRepo.GetByEmailAsync(command.Email, ct);
         if (existing is { IsActive: true })
-            throw new DuplicateException("User", "email", command.Email);
+            throw new DuplicateException("User", $"A user with email '{command.Email}' is already registered.");
 
         User user;
         if (existing is null)
