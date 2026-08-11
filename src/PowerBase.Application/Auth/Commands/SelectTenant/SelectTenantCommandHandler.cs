@@ -44,7 +44,10 @@ public class SelectTenantCommandHandler
         var tenant = await _tenantRepo.GetTenantForUserAsync(command.TenantPublicId, _queryContext.UserId, ct);
         var user = await _userRepo.GetByIdAsync(_queryContext.UserId, ct);
 
-        var token = _jwtService.GenerateToken(user, tenant.Id, out var jwtId, out var expiresAt);
+        var roleName = await _tenantRepo.GetUserRoleNameInTenantAsync(user.Id, tenant.Id, ct)
+            ?? throw new NotFoundException("TenantRole", $"User role in tenant {tenant.Id} not found.");
+
+        var token = _jwtService.GenerateToken(user, tenant.Id, roleName, out var jwtId, out var expiresAt);
         await _auditRepo.CreateSessionAsync(user.Id, tenant.Id, jwtId, _queryContext.IpAddress, expiresAt, ct: ct);
 
         return new SelectTenantResult

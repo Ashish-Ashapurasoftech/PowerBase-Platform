@@ -60,6 +60,7 @@ public class AppUsersController : ControllerBase
             ShowInUserPickers = u.ShowInUserPickers,
             AddedOn = u.AddedOn.ToString("o"),
             IsOwner = u.IsOwner,
+            IsFromGroup = u.IsFromGroup,
         }).ToList();
         return Ok(new ApiResponse<IReadOnlyList<AppUserResponse>>(response));
     }

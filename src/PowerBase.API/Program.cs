@@ -1,4 +1,14 @@
 using PowerBase.API.Middleware;
+using PowerBase.Application.Groups.Commands.CreateGroup;
+using PowerBase.Application.Groups.Commands.DeleteGroup;
+using PowerBase.Application.Groups.Commands.UpdateGroup;
+using PowerBase.Application.Groups.Queries.GetGroup;
+using PowerBase.Application.Groups.Queries.ListGroups;
+using PowerBase.Application.Groups.Commands.AddGroupMembers;
+using PowerBase.Application.Groups.Commands.RemoveGroupMember;
+using PowerBase.Application.Groups.Queries.ListGroupMembers;
+using PowerBase.Application.Groups.Commands.AssignGroupRole;
+using PowerBase.Application.Groups.Queries.GetUserEffectivePermissions;
 using PowerBase.Application.Apps.Commands.AddAppUser;
 using PowerBase.Application.Apps.Commands.ChangeAppUserRole;
 using PowerBase.Application.Apps.Commands.CreateApp;
@@ -242,8 +252,27 @@ builder.Services.AddScoped<IFormRuleRepository, FormRuleRepository>();
 builder.Services.AddScoped<IRelationshipRepository, RelationshipRepository>();
 builder.Services.AddScoped<IAdminRepository, AdminRepository>();
 builder.Services.AddScoped<IPageRepository, PageRepository>();
+builder.Services.AddScoped<IUserTokenRepository, UserTokenRepository>();
+builder.Services.AddScoped<IAppTokenRepository, AppTokenRepository>();
+builder.Services.AddScoped<IGroupRepository, GroupRepository>();
 
 // Handlers
+builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.CreateUserToken.CreateUserTokenCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetMyUserTokens.GetMyUserTokensQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetAdminUserTokens.GetAdminUserTokensQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetSingleTokenDetail.GetSingleTokenDetailQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.UpdateUserTokenStatus.UpdateUserTokenStatusCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.UpdateUserToken.UpdateUserTokenCommandHandler>();
+
+builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.RevokeUserToken.RevokeUserTokenCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.RotateUserToken.RotateUserTokenCommandHandler>();
+
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Commands.CreateAppToken.CreateAppTokenCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Queries.GetAppTokens.GetAppTokensQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Commands.UpdateAppTokenStatus.UpdateAppTokenStatusCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Commands.RotateAppToken.RotateAppTokenCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.AppTokens.Commands.DeleteAppToken.DeleteAppTokenCommandHandler>();
+
 builder.Services.AddScoped<SignupCommandHandler>();
 builder.Services.AddScoped<ForgotPasswordCommandHandler>();
 builder.Services.AddScoped<ResetPasswordCommandHandler>();
@@ -366,6 +395,21 @@ builder.Services.AddScoped<PowerBase.Application.Forms.Queries.GetRoleFormOverri
 builder.Services.AddScoped<PowerBase.Application.Forms.Queries.ResolveForm.ResolveFormQueryHandler>();
 builder.Services.AddScoped<ListFormRulesQueryHandler>();
 builder.Services.AddScoped<GetFormRuleQueryHandler>();
+
+// Groups
+builder.Services.AddScoped<CreateGroupCommandHandler>();
+builder.Services.AddScoped<UpdateGroupCommandHandler>();
+builder.Services.AddScoped<DeleteGroupCommandHandler>();
+builder.Services.AddScoped<ListGroupsQueryHandler>();
+builder.Services.AddScoped<GetGroupQueryHandler>();
+builder.Services.AddScoped<AddGroupMembersCommandHandler>();
+builder.Services.AddScoped<RemoveGroupMemberCommandHandler>();
+builder.Services.AddScoped<ListGroupMembersQueryHandler>();
+builder.Services.AddScoped<AssignGroupRoleCommandHandler>();
+builder.Services.AddScoped<GetUserEffectivePermissionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Groups.Commands.ShareGroupWithApp.ShareGroupWithAppCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Groups.Commands.UnshareGroupFromApp.UnshareGroupFromAppCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Groups.Queries.GetSharedApps.GetSharedAppsQueryHandler>();
 
 var app = builder.Build();
 

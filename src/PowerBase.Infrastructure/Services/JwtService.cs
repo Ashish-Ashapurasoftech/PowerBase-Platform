@@ -59,7 +59,7 @@ public class JwtService : IJwtService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    public string GenerateToken(User user, long tenantId, out Guid jwtId, out DateTime expiresAt)
+    public string GenerateToken(User user, long tenantId, string tenantRoleName, out Guid jwtId, out DateTime expiresAt)
     {
         jwtId = Guid.NewGuid();
         expiresAt = DateTime.UtcNow.AddMinutes(_expiresInMinutes);
@@ -73,6 +73,7 @@ public class JwtService : IJwtService
             new(JwtRegisteredClaimNames.Jti,   jwtId.ToString()),
             new(JwtRegisteredClaimNames.Name,  user.Name ?? string.Empty),
             new(JwtRegisteredClaimNames.Email, user.Email ?? string.Empty),
+            new("tenant_role",                  tenantRoleName)
         };
         if (!string.IsNullOrEmpty(user.SystemRoleCode))
             claimList.Add(new Claim("role", user.SystemRoleCode));
@@ -88,9 +89,9 @@ public class JwtService : IJwtService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    public bool ValidateToken(string token, out long userId, out long tenantId, out Guid jwtId, out string userName, out string userEmail, out string systemRoleCode)
+    public bool ValidateToken(string token, out long userId, out long tenantId, out Guid jwtId, out string userName, out string userEmail, out string systemRoleCode, out string tenantRole)
     {
-        userId = 0; tenantId = 0; jwtId = Guid.Empty; userName = string.Empty; userEmail = string.Empty; systemRoleCode = string.Empty;
+        userId = 0; tenantId = 0; jwtId = Guid.Empty; userName = string.Empty; userEmail = string.Empty; systemRoleCode = string.Empty; tenantRole = string.Empty;
         try
         {
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secretKey));
@@ -116,6 +117,7 @@ public class JwtService : IJwtService
             userName       = principal.FindFirst(JwtRegisteredClaimNames.Name)?.Value ?? string.Empty;
             userEmail      = principal.FindFirst(JwtRegisteredClaimNames.Email)?.Value ?? string.Empty;
             systemRoleCode = principal.FindFirst("role")?.Value ?? string.Empty;
+            tenantRole     = principal.FindFirst("tenant_role")?.Value ?? string.Empty;
             return true;
         }
         catch

@@ -35,22 +35,65 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
 
         var appUser = await _appUserRepo.GetByAppAndUserAsync(table.AppId, _queryContext.UserId, ct);
         if (appUser is null)
-            return Unrestricted(fields); // not an app member via AppUser → leave existing access checks in charge
+            return Unrestricted(fields); // not an app member via AppUser
 
-        var tablePerm = await _permRepo.GetTablePermissionAsync(appUser.AppRoleId, table.Id, ct)
-                        ?? AppRoleTablePermission.Default(appUser.AppRoleId, table.Id);
+        var roleIds = await _appUserRepo.GetUserAppRoleIdsAsync(table.AppId, _queryContext.UserId, ct);
+        if (roleIds.Count == 0)
+            roleIds = new[] { appUser.AppRoleId };
+
+        var permissions = new List<AppRoleTablePermission>();
+        foreach (var rId in roleIds)
+        {
+            var p = await _permRepo.GetTablePermissionAsync(rId, table.Id, ct)
+                    ?? AppRoleTablePermission.Default(rId, table.Id);
+            permissions.Add(p);
+        }
+
+        var canAdd = permissions.Any(p => p.CanAdd);
+        var canDelete = permissions.Any(p => p.CanDelete);
+
+        var viewScope = ResolveScope(permissions.Select(p => p.ViewScope));
+        var modifyScope = ResolveScope(permissions.Select(p => p.ModifyScope));
 
         // ── Field visibility ──
         var hidden = new HashSet<long>();
         var viewOnly = new HashSet<long>();
-        if (tablePerm.FieldAccessLevel == TableFieldAccessLevels.CustomAccess)
+
+        var fieldMaxAccess = new Dictionary<long, string>();
+        foreach (var f in fields)
         {
-            var accessMap = await _permRepo.GetFieldAccessMapAsync(appUser.AppRoleId, table.Id, ct);
-            foreach (var (fieldId, access) in accessMap)
+            fieldMaxAccess[f.Id] = FieldAccessLevels.None;
+        }
+
+        foreach (var rId in roleIds)
+        {
+            var perm = permissions.First(p => p.AppRoleId == rId);
+            if (perm.FieldAccessLevel == TableFieldAccessLevels.FullAccess)
             {
-                if (access == FieldAccessLevels.None) hidden.Add(fieldId);
-                else if (access == FieldAccessLevels.View) viewOnly.Add(fieldId);
+                foreach (var f in fields)
+                {
+                    fieldMaxAccess[f.Id] = FieldAccessLevels.Modify;
+                }
             }
+            else
+            {
+                var accessMap = await _permRepo.GetFieldAccessMapAsync(rId, table.Id, ct);
+                foreach (var f in fields)
+                {
+                    var level = accessMap.TryGetValue(f.Id, out var val) ? val : FieldAccessLevels.Modify;
+                    var currentMax = fieldMaxAccess.GetValueOrDefault(f.Id, FieldAccessLevels.None);
+                    fieldMaxAccess[f.Id] = GetHigherFieldAccess(currentMax, level);
+                }
+            }
+        }
+
+        foreach (var f in fields)
+        {
+            var maxAccess = fieldMaxAccess.GetValueOrDefault(f.Id, FieldAccessLevels.Modify);
+            if (maxAccess == FieldAccessLevels.None)
+                hidden.Add(f.Id);
+            else if (maxAccess == FieldAccessLevels.View)
+                viewOnly.Add(f.Id);
         }
 
         var visibleFields = fields.Where(f => !hidden.Contains(f.Id)).ToList();
@@ -60,25 +103,24 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             .ToHashSet();
 
         // ── Record filter (role-defined conditions) ──
-        var viewFilter = await BuildViewFilterAsync(appUser, table, fields, ct);
+        var viewFilter = await BuildCombinedViewFilterAsync(roleIds, appUser, table, fields, ct);
 
         return new TableAccessContext
         {
             Unrestricted = false,
-            ViewScope = tablePerm.ViewScope,
-            ModifyScope = tablePerm.ModifyScope,
-            CanAdd = tablePerm.CanAdd,
-            CanDelete = tablePerm.CanDelete,
+            ViewScope = viewScope,
+            ModifyScope = modifyScope,
+            CanAdd = canAdd,
+            CanDelete = canDelete,
             VisibleFields = visibleFields,
             EditableFieldIds = editableFieldIds,
             ViewFilter = viewFilter,
-            RestrictToCreatedBy = tablePerm.ViewScope == RecordScopes.OwnRecords ? _queryContext.UserId : null,
+            RestrictToCreatedBy = viewScope == RecordScopes.OwnRecords ? _queryContext.UserId : null,
         };
     }
 
     public async Task EnsureRecordOwnedAsync(AppTable table, Guid recordPublicId, CancellationToken ct = default)
     {
-        // Selecting with no custom fields still returns the CreatedBy system column.
         var row = await _recordRepo.GetByPublicIdAsync(table, Array.Empty<AppField>(), recordPublicId, ct);
         if (!row.TryGetValue("CreatedBy", out var createdBy) || Convert.ToInt64(createdBy) != _queryContext.UserId)
             throw new UnauthorizedActionException("You can only modify records you created.");
@@ -95,47 +137,70 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
         if (access.Unrestricted)
             return;
 
-        // Record-level visibility is never bypassed: a user who cannot see the record cannot
-        // act on it, regardless of what the button is configured to write.
         if (!access.CanView)
             throw new UnauthorizedActionException("You do not have permission to view this record.");
 
         if (access.ViewScope == RecordScopes.OwnRecords || access.ModifyScope == RecordScopes.OwnRecords)
             await EnsureRecordOwnedAsync(table, recordPublicId, ct);
-
-        // Deliberately no EditableFieldIds / ModifyScope==None check here — the button's
-        // configured target fields are writable by design (Rule 1 permission exception).
-        // The caller is responsible for ensuring the write set is exactly buttonTargetFids.
     }
 
-    private async Task<FilterGroup?> BuildViewFilterAsync(AppUser appUser, AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct)
+    private static string ResolveScope(IEnumerable<string> scopes)
     {
-        var stored = await _permRepo.GetRecordFilterAsync(appUser.AppRoleId, table.Id, ct);
-        if (stored is null || string.IsNullOrWhiteSpace(stored.FilterJson)) return null;
+        var scopeList = scopes.ToList();
+        if (scopeList.Contains(RecordScopes.AllRecords)) return RecordScopes.AllRecords;
+        if (scopeList.Contains(RecordScopes.OwnRecords)) return RecordScopes.OwnRecords;
+        return RecordScopes.None;
+    }
 
-        List<RoleRecordFilterCondition>? conditions;
-        try { conditions = JsonSerializer.Deserialize<List<RoleRecordFilterCondition>>(stored.FilterJson); }
-        catch { return null; }
-        if (conditions is null || conditions.Count == 0) return null;
+    private static string GetHigherFieldAccess(string a, string b)
+    {
+        if (a == FieldAccessLevels.Modify || b == FieldAccessLevels.Modify) return FieldAccessLevels.Modify;
+        if (a == FieldAccessLevels.View || b == FieldAccessLevels.View) return FieldAccessLevels.View;
+        return FieldAccessLevels.None;
+    }
 
-        var byPublicId = fields.ToDictionary(f => f.PublicId);
-        var nodes = new List<FilterNode>();
-        foreach (var c in conditions)
+    private async Task<FilterGroup?> BuildCombinedViewFilterAsync(
+        IReadOnlyList<long> roleIds, AppUser appUser, AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct)
+    {
+        var childGroups = new List<FilterGroup>();
+        foreach (var rId in roleIds)
         {
-            if (!byPublicId.TryGetValue(c.FieldPublicId, out var field)) continue;
-            var value = c.UseCurrentUser ? appUser.UserPublicId?.ToString() : c.Value;
-            var fieldId = field.Fid.HasValue ? (long)field.Fid.Value : field.Id;
-            nodes.Add(new FilterNode
+            var stored = await _permRepo.GetRecordFilterAsync(rId, table.Id, ct);
+            if (stored is null || string.IsNullOrWhiteSpace(stored.FilterJson)) continue;
+
+            List<RoleRecordFilterCondition>? conditions;
+            try { conditions = JsonSerializer.Deserialize<List<RoleRecordFilterCondition>>(stored.FilterJson); }
+            catch { continue; }
+            if (conditions is null || conditions.Count == 0) continue;
+
+            var byPublicId = fields.ToDictionary(f => f.PublicId);
+            var nodes = new List<FilterNode>();
+            foreach (var c in conditions)
             {
-                Condition = new FilterCondition { FieldId = fieldId, Operator = c.Operator, Value = value },
+                if (!byPublicId.TryGetValue(c.FieldPublicId, out var field)) continue;
+                var value = c.UseCurrentUser ? appUser.UserPublicId?.ToString() : c.Value;
+                var fieldId = field.Fid.HasValue ? (long)field.Fid.Value : field.Id;
+                nodes.Add(new FilterNode
+                {
+                    Condition = new FilterCondition { FieldId = fieldId, Operator = c.Operator, Value = value },
+                });
+            }
+            if (nodes.Count == 0) continue;
+
+            childGroups.Add(new FilterGroup
+            {
+                Logic = stored.Conjunction.Equals("OR", StringComparison.OrdinalIgnoreCase) ? "or" : "and",
+                Nodes = nodes,
             });
         }
-        if (nodes.Count == 0) return null;
+
+        if (childGroups.Count == 0) return null;
+        if (childGroups.Count == 1) return childGroups[0];
 
         return new FilterGroup
         {
-            Logic = stored.Conjunction.Equals("OR", StringComparison.OrdinalIgnoreCase) ? "or" : "and",
-            Nodes = nodes,
+            Logic = "or",
+            Nodes = childGroups.Select(cg => new FilterNode { Group = cg }).ToList()
         };
     }
 
