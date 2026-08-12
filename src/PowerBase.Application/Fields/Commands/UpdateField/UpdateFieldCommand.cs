@@ -2,7 +2,7 @@ namespace PowerBase.Application.Fields.Commands.UpdateField;
 
 public record UpdateFieldCommand(
     Guid TablePublicId,
-    int FieldFid,
+    Guid FieldPublicId,
     string Label,
     string? Description,
     bool IsRequired,

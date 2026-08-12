@@ -8,6 +8,7 @@ using PowerBase.Application.Fields.Commands.BulkCreateFields;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Commands.DeleteField;
 using PowerBase.Application.Fields.Commands.UpdateField;
+using PowerBase.Application.Fields.Queries.GetField;
 using PowerBase.Application.Fields.Queries.ListFields;
 using PowerBase.Application.Fields.Queries.ListFieldTypes;
 using PowerBase.Application.Fields.Queries.GetFieldUsage;
@@ -25,6 +26,7 @@ public class FieldsController : ControllerBase
     private readonly DeleteFieldCommandHandler _deleteHandler;
     private readonly ListFieldsQueryHandler _listHandler;
     private readonly ListFieldTypesQueryHandler _listFieldTypesHandler;
+    private readonly GetFieldQueryHandler _getHandler;
 
     public FieldsController(
         CreateFieldCommandHandler createHandler,
@@ -32,7 +34,8 @@ public class FieldsController : ControllerBase
         UpdateFieldCommandHandler updateHandler,
         DeleteFieldCommandHandler deleteHandler,
         ListFieldsQueryHandler listHandler,
-        ListFieldTypesQueryHandler listFieldTypesHandler)
+        ListFieldTypesQueryHandler listFieldTypesHandler,
+        GetFieldQueryHandler getHandler)
     {
         _createHandler = createHandler;
         _bulkCreateHandler = bulkCreateHandler;
@@ -40,6 +43,7 @@ public class FieldsController : ControllerBase
         _deleteHandler = deleteHandler;
         _listHandler = listHandler;
         _listFieldTypesHandler = listFieldTypesHandler;
+        _getHandler = getHandler;
     }
 
     /// <summary>Add a field to a table (also runs ALTER TABLE on the physical data table).</summary>
@@ -99,6 +103,18 @@ public class FieldsController : ControllerBase
         return Ok(new ApiListResponse<FieldListItemResponse>(items, result.Total, result.Page, result.PageSize));
     }
 
+    /// <summary>Get a single field's full details by its public ID.</summary>
+    [HttpGet("tables/{tableId:guid}/fields/{publicId:guid}")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<FieldDetailResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Get(Guid tableId, Guid publicId, CancellationToken ct)
+    {
+        var field = await _getHandler.HandleAsync(new GetFieldQuery(tableId, publicId), ct);
+        return Ok(new ApiResponse<FieldDetailResponse>(MapToDetailResponse(field)));
+    }
+
     /// <summary>List every supported field type configuration (reference data — not tenant- or table-scoped).</summary>
     [HttpGet("/field-types")]
     [RequireAuth]
@@ -113,16 +129,16 @@ public class FieldsController : ControllerBase
 
     /// <summary>Update a field's properties (label, required, searchable, reportable, etc.). Name is
     /// immutable after creation and cannot be changed here.</summary>
-    [HttpPatch("tables/{tableId:guid}/fields/{fieldId:int}")]
+    [HttpPatch("tables/{tableId:guid}/fields/{publicId:guid}")]
     [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Update(Guid tableId, int fieldId, [FromBody] UpdateFieldRequest request, CancellationToken ct)
+    public async Task<IActionResult> Update(Guid tableId, Guid publicId, [FromBody] UpdateFieldRequest request, CancellationToken ct)
     {
         await _updateHandler.HandleAsync(new UpdateFieldCommand(
-            tableId, fieldId,
+            tableId, publicId,
             request.Label, request.Description,
             request.IsRequired, request.DefaultValue,
             request.IsSearchable, request.IsSortable,
@@ -224,6 +240,28 @@ public class FieldsController : ControllerBase
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
         Fid = f.Fid,
+        CreatedOn = f.CreatedOn,
+    };
+
+    private static FieldDetailResponse MapToDetailResponse(AppField f) => new()
+    {
+        Id = f.Id,
+        PublicId = f.PublicId,
+        Name = f.Name,
+        Label = f.Label,
+        Description = f.Description,
+        TypeCode = f.TypeCode,
+        DefaultValue = f.DefaultValue,
+        IsRequired = f.IsRequired,
+        IsSearchable = f.IsSearchable,
+        IsSortable = f.IsSortable,
+        IsFilterable = f.IsFilterable,
+        IsReportable = f.IsReportable,
+        IsAuditable = f.IsAuditable,
+        IsUnique = f.IsUnique,
+        IsSystem = f.IsSystem,
+        Fid = f.Fid,
+        Settings = f.Settings,
         CreatedOn = f.CreatedOn,
     };
 

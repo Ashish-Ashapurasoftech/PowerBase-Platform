@@ -45,8 +45,13 @@ public class UpdateFieldCommandHandler
         //   (a) get its TypeCode for Settings validation,
         //   (b) detect the optional→required transition (for NULL backfill),
         //   (c) enforce the required+None+default invariant.
-        var existing = await _fieldRepo.GetByFidInTableAsync(table.Id, command.FieldFid, ct)
-                       ?? throw new NotFoundException("Field", command.FieldFid);
+        var existing = await _fieldRepo.GetByPublicIdAsync(command.FieldPublicId, ct)
+                       ?? throw new NotFoundException("Field", command.FieldPublicId);
+
+        // Defend against a caller supplying a field PublicId from a different table than the one
+        // named in the route (and thus than the one the permission check above just authorized).
+        if (existing.AppTableId != table.Id)
+            throw new NotFoundException("Field", command.FieldPublicId);
 
         if (await _fieldRepo.LabelExistsInTableAsync(table.Id, command.Label, excludeFieldId: existing.Id, ct: ct))
             throw new DuplicateException("Field", "label", command.Label);
@@ -97,7 +102,7 @@ public class UpdateFieldCommandHandler
             command.IsUnique, command.Settings, ct);
 
         if (affected == 0)
-            throw new NotFoundException("Field", command.FieldFid);
+            throw new NotFoundException("Field", command.FieldPublicId);
 
         // Unique index: create or drop after the metadata row is committed.
         if (command.IsUnique != existing.IsUnique)
