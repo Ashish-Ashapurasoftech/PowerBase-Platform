@@ -29,6 +29,87 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         ORDER BY au.UserName
         """;
 
+    private const string ListForUserPickerSql = """
+        SELECT
+            au.PublicId,
+            au.UserPublicId,
+            au.UserName,
+            au.UserEmail,
+            ar.PublicId AS RolePublicId,
+            ar.Name     AS RoleName,
+            au.Status,
+            ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
+            au.CreatedOn,
+            CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
+            ISNULL(au.IsFromGroup, 0) AS IsFromGroup
+        FROM meta.AppUser au
+        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        JOIN meta.App a ON a.Id = au.AppId
+        WHERE au.AppId    = @appId
+          AND au.IsDeleted = 0
+          AND au.Status    = 'Active'
+          AND ISNULL(au.ShowInUserPickers, 1) = 1
+        ORDER BY au.UserName
+        """;
+
+    private const string ListByAppPagedSqlTemplate = """
+        SELECT
+            au.PublicId,
+            au.UserPublicId,
+            au.UserName,
+            au.UserEmail,
+            ar.PublicId AS RolePublicId,
+            ar.Name     AS RoleName,
+            au.Status,
+            ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
+            au.CreatedOn,
+            CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
+            ISNULL(au.IsFromGroup, 0) AS IsFromGroup
+        FROM meta.AppUser au
+        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        JOIN meta.App a ON a.Id = au.AppId
+        WHERE au.AppId    = @appId
+          AND au.IsDeleted = 0
+          AND (@search IS NULL OR au.UserName LIKE @search OR au.UserEmail LIKE @search)
+          AND (@role IS NULL OR ar.Name = @role)
+        ORDER BY {0}
+        OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+        """;
+
+    private const string ListByAppFilteredSqlTemplate = """
+        SELECT
+            au.PublicId,
+            au.UserPublicId,
+            au.UserName,
+            au.UserEmail,
+            ar.PublicId AS RolePublicId,
+            ar.Name     AS RoleName,
+            au.Status,
+            ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
+            au.CreatedOn,
+            CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
+            ISNULL(au.IsFromGroup, 0) AS IsFromGroup
+        FROM meta.AppUser au
+        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        JOIN meta.App a ON a.Id = au.AppId
+        WHERE au.AppId    = @appId
+          AND au.IsDeleted = 0
+          AND (@search IS NULL OR au.UserName LIKE @search OR au.UserEmail LIKE @search)
+          AND (@role IS NULL OR ar.Name = @role)
+        ORDER BY {0}
+        """;
+
+    private const string CountByAppSql = """
+        SELECT COUNT(1)
+        FROM meta.AppUser au
+        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        JOIN meta.App a ON a.Id = au.AppId
+        WHERE au.AppId    = @appId
+          AND au.IsDeleted = 0
+          AND (@search IS NULL OR au.UserName LIKE @search OR au.UserEmail LIKE @search)
+          AND (@role IS NULL OR ar.Name = @role)
+        """;
+
     private const string GetByAppAndUserSql = """
         SELECT Id, PublicId, AppId, UserId, UserPublicId, AppRoleId, Status, ISNULL(ShowInUserPickers, 1) AS ShowInUserPickers, AddedBy, CreatedOn, UpdatedOn, IsDeleted, IsFromGroup, GroupId
         FROM meta.AppUser
@@ -142,6 +223,92 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         var results = await connection.QueryAsync<AppUserDetail>(
             new CommandDefinition(ListByAppIdSql, new { appId }, cancellationToken: ct));
         return results.AsList();
+    }
+
+    public async Task<IReadOnlyList<AppUserDetail>> ListForUserPickerAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var results = await connection.QueryAsync<AppUserDetail>(
+            new CommandDefinition(ListForUserPickerSql, new { appId }, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task<IReadOnlyList<AppUserDetail>> ListByAppPagedAsync(
+        long appId,
+        int page,
+        int pageSize,
+        string? search,
+        string? role,
+        string sortBy,
+        bool sortDesc,
+        CancellationToken ct = default)
+    {
+        var column = sortBy.ToLower() switch
+        {
+            "useremail" => "au.UserEmail",
+            "accessvia" => "au.IsFromGroup",
+            "rolename"  => "ar.Name",
+            "addedon"   => "au.CreatedOn",
+            _           => "au.UserName",
+        };
+        var sql = string.Format(ListByAppPagedSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}");
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<AppUserDetail>(
+            new CommandDefinition(sql, new
+            {
+                appId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                role = string.IsNullOrWhiteSpace(role) ? null : role,
+                offset = (page - 1) * pageSize,
+                pageSize
+            }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<IReadOnlyList<AppUserDetail>> ListByAppFilteredAsync(
+        long appId,
+        string? search,
+        string? role,
+        string sortBy,
+        bool sortDesc,
+        CancellationToken ct = default)
+    {
+        var column = sortBy.ToLower() switch
+        {
+            "useremail" => "au.UserEmail",
+            "accessvia" => "au.IsFromGroup",
+            "rolename"  => "ar.Name",
+            "addedon"   => "au.CreatedOn",
+            _           => "au.UserName",
+        };
+        var sql = string.Format(ListByAppFilteredSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}");
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<AppUserDetail>(
+            new CommandDefinition(sql, new
+            {
+                appId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                role = string.IsNullOrWhiteSpace(role) ? null : role
+            }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<int> CountByAppAsync(
+        long appId,
+        string? search,
+        string? role,
+        CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(CountByAppSql, new
+            {
+                appId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                role = string.IsNullOrWhiteSpace(role) ? null : role,
+            }, cancellationToken: ct));
     }
 
     public async Task<AppUser?> GetByAppAndUserAsync(long appId, long userId, CancellationToken ct = default)

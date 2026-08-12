@@ -291,6 +291,7 @@ builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.Im
 builder.Services.AddScoped<PowerBase.Application.Import.Commands.ImportAppFromPbl.ImportAppFromPblCommandHandler>();
 builder.Services.AddScoped<UpdateAppCommandHandler>();
 builder.Services.AddScoped<ListAppUsersQueryHandler>();
+builder.Services.AddScoped<ListAppUsersForPickerQueryHandler>();
 builder.Services.AddScoped<AddAppUserCommandHandler>();
 builder.Services.AddScoped<InviteAppUserCommandHandler>();
 builder.Services.AddScoped<ChangeAppUserRoleCommandHandler>();
