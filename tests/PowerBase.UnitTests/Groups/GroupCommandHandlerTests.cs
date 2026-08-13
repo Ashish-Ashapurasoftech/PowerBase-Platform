@@ -6,7 +6,6 @@ using System.Threading.Tasks;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Groups.Commands.AddGroupMembers;
-using PowerBase.Application.Groups.Commands.AssignGroupRole;
 using PowerBase.Application.Groups.Commands.CreateGroup;
 using PowerBase.Application.Groups.Commands.DeleteGroup;
 using PowerBase.Application.Groups.Commands.RemoveGroupMember;
@@ -40,22 +39,11 @@ public class GroupCommandHandlerTests
         var command = new CreateGroupCommand
         {
             Name = "Marketing Team",
-            Description = "Marketing department group",
-            AppRolePublicId = Guid.NewGuid()
-        };
-
-        var appRole = new AppRole
-        {
-            Id = 42,
-            PublicId = command.AppRolePublicId.Value,
-            Name = "Marketing Role"
+            Description = "Marketing department group"
         };
 
         _groupRepository.ExistsByNameAsync(command.Name, null, Arg.Any<CancellationToken>())
             .Returns(false);
-
-        _appRoleRepository.GetByPublicIdAsync(command.AppRolePublicId.Value, Arg.Any<CancellationToken>())
-            .Returns(appRole);
 
         _groupRepository.CreateAsync(Arg.Any<Group>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
@@ -65,7 +53,7 @@ public class GroupCommandHandlerTests
                 return g;
             });
 
-        var handler = new CreateGroupCommandHandler(_groupRepository, _queryContext, _appRoleRepository, _auditRepository);
+        var handler = new CreateGroupCommandHandler(_groupRepository, _queryContext, _auditRepository);
 
         // Act
         var result = await handler.HandleAsync(command, CancellationToken.None);
@@ -74,13 +62,10 @@ public class GroupCommandHandlerTests
         Assert.NotNull(result);
         Assert.Equal("Marketing Team", result.Name);
         Assert.Equal("Marketing department group", result.Description);
-        Assert.Equal(command.AppRolePublicId, result.AppRolePublicId);
-        Assert.Equal("Marketing Role", result.AppRoleName);
 
         await _groupRepository.Received(1).CreateAsync(Arg.Is<Group>(g => 
             g.Name == "Marketing Team" && 
             g.Description == "Marketing department group" && 
-            g.AppRoleId == 42 &&
             g.CreatedBy == 1001
         ), Arg.Any<CancellationToken>());
 
@@ -105,34 +90,10 @@ public class GroupCommandHandlerTests
         _groupRepository.ExistsByNameAsync(command.Name, null, Arg.Any<CancellationToken>())
             .Returns(true);
 
-        var handler = new CreateGroupCommandHandler(_groupRepository, _queryContext, _appRoleRepository, _auditRepository);
+        var handler = new CreateGroupCommandHandler(_groupRepository, _queryContext, _auditRepository);
 
         // Act & Assert
         await Assert.ThrowsAsync<DuplicateException>(() => handler.HandleAsync(command, CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task CreateGroup_AppRoleNotFound_ThrowsKeyNotFoundException()
-    {
-        // Arrange
-        var appRolePublicId = Guid.NewGuid();
-        var command = new CreateGroupCommand
-        {
-            Name = "Marketing Team",
-            AppRolePublicId = appRolePublicId
-        };
-
-        _groupRepository.ExistsByNameAsync(command.Name, null, Arg.Any<CancellationToken>())
-            .Returns(false);
-
-        _appRoleRepository.GetByPublicIdAsync(appRolePublicId, Arg.Any<CancellationToken>())
-            .Returns((AppRole?)null);
-
-        var handler = new CreateGroupCommandHandler(_groupRepository, _queryContext, _appRoleRepository, _auditRepository);
-
-        // Act & Assert
-        var ex = await Assert.ThrowsAsync<KeyNotFoundException>(() => handler.HandleAsync(command, CancellationToken.None));
-        Assert.Contains(appRolePublicId.ToString(), ex.Message);
     }
 
     [Fact]
@@ -146,24 +107,14 @@ public class GroupCommandHandlerTests
         {
             PublicId = groupPublicId,
             Name = "Old Name",
-            Description = "Old Desc",
-            AppRolePublicId = Guid.NewGuid(),
-            AppRoleName = "Old Role"
+            Description = "Old Desc"
         };
 
         var command = new UpdateGroupCommand
         {
             PublicId = groupPublicId,
             Name = "New Name",
-            Description = "New Desc",
-            AppRolePublicId = appRolePublicId
-        };
-
-        var appRole = new AppRole
-        {
-            Id = 88,
-            PublicId = appRolePublicId,
-            Name = "New Role"
+            Description = "New Desc"
         };
 
         _groupRepository.GetByPublicIdAsync(groupPublicId, Arg.Any<CancellationToken>())
@@ -172,20 +123,17 @@ public class GroupCommandHandlerTests
         _groupRepository.ExistsByNameAsync(command.Name, groupPublicId, Arg.Any<CancellationToken>())
             .Returns(false);
 
-        _appRoleRepository.GetByPublicIdAsync(appRolePublicId, Arg.Any<CancellationToken>())
-            .Returns(appRole);
-
-        _groupRepository.UpdateAsync(groupPublicId, command.Name, command.Description, 88, 1001, Arg.Any<CancellationToken>())
+        _groupRepository.UpdateAsync(groupPublicId, command.Name, command.Description, 1001, Arg.Any<CancellationToken>())
             .Returns(true);
 
-        var handler = new UpdateGroupCommandHandler(_groupRepository, _queryContext, _appRoleRepository, _auditRepository);
+        var handler = new UpdateGroupCommandHandler(_groupRepository, _queryContext, _auditRepository);
 
         // Act
         var result = await handler.HandleAsync(command, CancellationToken.None);
 
         // Assert
         Assert.True(result);
-        await _groupRepository.Received(1).UpdateAsync(groupPublicId, "New Name", "New Desc", 88, 1001, Arg.Any<CancellationToken>());
+        await _groupRepository.Received(1).UpdateAsync(groupPublicId, "New Name", "New Desc", 1001, Arg.Any<CancellationToken>());
         await _auditRepository.Received(1).LogActivityAsync(
             "Updated",
             "Group",
@@ -208,7 +156,7 @@ public class GroupCommandHandlerTests
         _groupRepository.GetByPublicIdAsync(groupPublicId, Arg.Any<CancellationToken>())
             .Returns((GroupDto?)null);
 
-        var handler = new UpdateGroupCommandHandler(_groupRepository, _queryContext, _appRoleRepository, _auditRepository);
+        var handler = new UpdateGroupCommandHandler(_groupRepository, _queryContext, _auditRepository);
 
         // Act & Assert
         await Assert.ThrowsAsync<KeyNotFoundException>(() => handler.HandleAsync(command, CancellationToken.None));
@@ -227,7 +175,7 @@ public class GroupCommandHandlerTests
         _groupRepository.ExistsByNameAsync(command.Name, groupPublicId, Arg.Any<CancellationToken>())
             .Returns(true);
 
-        var handler = new UpdateGroupCommandHandler(_groupRepository, _queryContext, _appRoleRepository, _auditRepository);
+        var handler = new UpdateGroupCommandHandler(_groupRepository, _queryContext, _auditRepository);
 
         // Act & Assert
         await Assert.ThrowsAsync<DuplicateException>(() => handler.HandleAsync(command, CancellationToken.None));
@@ -385,44 +333,7 @@ public class GroupCommandHandlerTests
         await Assert.ThrowsAsync<KeyNotFoundException>(() => handler.HandleAsync(command, CancellationToken.None));
     }
 
-    [Fact]
-    public async Task AssignGroupRole_ValidRole_AssignsRoleAndLogsAudit()
-    {
-        // Arrange
-        var groupPublicId = Guid.NewGuid();
-        var appRolePublicId = Guid.NewGuid();
-        var existingGroupDto = new GroupDto { PublicId = groupPublicId, Name = "Group", AppRolePublicId = Guid.NewGuid(), AppRoleName = "Old" };
-        var appRole = new AppRole { Id = 77, PublicId = appRolePublicId, Name = "New" };
 
-        _appRoleRepository.GetByPublicIdAsync(appRolePublicId, Arg.Any<CancellationToken>())
-            .Returns(appRole);
-
-        _groupRepository.GetByPublicIdAsync(groupPublicId, Arg.Any<CancellationToken>())
-            .Returns(existingGroupDto);
-
-        _groupRepository.UpdateAsync(groupPublicId, "Group", null, 77, 1001, Arg.Any<CancellationToken>())
-            .Returns(true);
-
-        var handler = new AssignGroupRoleCommandHandler(_groupRepository, _appRoleRepository, _queryContext, _auditRepository);
-        var command = new AssignGroupRoleCommand { GroupPublicId = groupPublicId, AppRolePublicId = appRolePublicId };
-
-        // Act
-        var result = await handler.HandleAsync(command, CancellationToken.None);
-
-        // Assert
-        Assert.True(result);
-        await _groupRepository.Received(1).UpdateAsync(groupPublicId, "Group", null, 77, 1001, Arg.Any<CancellationToken>());
-        await _auditRepository.Received(1).LogActivityAsync(
-            "RoleChanged",
-            "Group",
-            groupPublicId.ToString(),
-            "Group role changed: Group to role New",
-            null,
-            Arg.Any<string>(),
-            Arg.Any<string>(),
-            Arg.Any<CancellationToken>()
-        );
-    }
 
     [Fact]
     public async Task ShareGroup_ValidApp_SharesGroupAndLogsAudit()

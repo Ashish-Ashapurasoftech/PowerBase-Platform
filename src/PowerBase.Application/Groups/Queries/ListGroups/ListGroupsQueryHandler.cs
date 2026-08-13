@@ -12,8 +12,19 @@ public class ListGroupsQueryHandler
         _groupRepository = groupRepository;
     }
 
-    public async Task<(IEnumerable<GroupDto> Items, int TotalCount)> HandleAsync(ListGroupsQuery query, CancellationToken ct = default)
+    public async Task<ListGroupsResult> HandleAsync(ListGroupsQuery query, CancellationToken ct = default)
     {
-        return await _groupRepository.ListPagedAsync(query.Search, query.Page, query.PageSize, ct);
+        var page = query.Page < 1 ? 1 : query.Page;
+        var pageSize = query.PageSize is < 1 or > 100 ? 20 : query.PageSize;
+
+        var (items, total) = await _groupRepository.ListPagedAsync(query.Search, page, pageSize, ct);
+
+        return new ListGroupsResult
+        {
+            Items = items.ToList(),
+            Total = total,
+            Page = page,
+            PageSize = pageSize
+        };
     }
 }

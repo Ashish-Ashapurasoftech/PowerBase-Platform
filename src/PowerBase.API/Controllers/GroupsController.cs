@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
+using PowerBase.API.Models;
 using PowerBase.API.Models.Groups;
 using PowerBase.Domain.Constants;
+using System.ComponentModel.DataAnnotations;
+using PowerBase.Application.Groups.Common;
 using PowerBase.Application.Groups.Commands.AddGroupMembers;
-using PowerBase.Application.Groups.Commands.AssignGroupRole;
 using PowerBase.Application.Groups.Commands.CreateGroup;
 using PowerBase.Application.Groups.Commands.DeleteGroup;
 using PowerBase.Application.Groups.Commands.RemoveGroupMember;
@@ -32,7 +34,6 @@ public class GroupsController : ControllerBase
     private readonly AddGroupMembersCommandHandler _addMembersHandler;
     private readonly RemoveGroupMemberCommandHandler _removeMemberHandler;
     private readonly ListGroupMembersQueryHandler _listMembersHandler;
-    private readonly AssignGroupRoleCommandHandler _assignRoleHandler;
     private readonly GetUserEffectivePermissionsQueryHandler _effectivePermissionsHandler;
     private readonly ShareGroupWithAppCommandHandler _shareHandler;
     private readonly UnshareGroupFromAppCommandHandler _unshareHandler;
@@ -47,7 +48,6 @@ public class GroupsController : ControllerBase
         AddGroupMembersCommandHandler addMembersHandler,
         RemoveGroupMemberCommandHandler removeMemberHandler,
         ListGroupMembersQueryHandler listMembersHandler,
-        AssignGroupRoleCommandHandler assignRoleHandler,
         GetUserEffectivePermissionsQueryHandler effectivePermissionsHandler,
         ShareGroupWithAppCommandHandler shareHandler,
         UnshareGroupFromAppCommandHandler unshareHandler,
@@ -61,7 +61,6 @@ public class GroupsController : ControllerBase
         _addMembersHandler = addMembersHandler;
         _removeMemberHandler = removeMemberHandler;
         _listMembersHandler = listMembersHandler;
-        _assignRoleHandler = assignRoleHandler;
         _effectivePermissionsHandler = effectivePermissionsHandler;
         _shareHandler = shareHandler;
         _unshareHandler = unshareHandler;
@@ -76,8 +75,7 @@ public class GroupsController : ControllerBase
         var command = new CreateGroupCommand 
         { 
             Name = request.Name, 
-            Description = request.Description,
-            AppRolePublicId = request.AppRolePublicId
+            Description = request.Description
         };
         var result = await _createHandler.HandleAsync(command, ct);
         return Ok(new { data = result });
@@ -86,6 +84,7 @@ public class GroupsController : ControllerBase
     /// <summary>List all groups (paginated)</summary>
     [HttpGet]
     [RequirePermission(PermissionCodes.AppsRead)]
+    [ProducesResponseType(typeof(ApiListResponse<GroupDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ListGroups(
         [FromQuery] string? search,
         [FromQuery] int page = 1,
@@ -98,8 +97,8 @@ public class GroupsController : ControllerBase
             Page = page, 
             PageSize = pageSize 
         };
-        var (items, total) = await _listHandler.HandleAsync(query, ct);
-        return Ok(new { data = items, total });
+        var result = await _listHandler.HandleAsync(query, ct);
+        return Ok(new ApiListResponse<GroupDto>(result.Items, result.Total, result.Page, result.PageSize));
     }
 
     /// <summary>Get a single group</summary>
@@ -124,8 +123,7 @@ public class GroupsController : ControllerBase
         { 
             PublicId = publicId,
             Name = request.Name, 
-            Description = request.Description,
-            AppRolePublicId = request.AppRolePublicId
+            Description = request.Description
         };
         await _updateHandler.HandleAsync(command, ct);
         return Ok(new { data = true });
@@ -138,19 +136,6 @@ public class GroupsController : ControllerBase
     {
         var command = new DeleteGroupCommand { PublicId = publicId };
         await _deleteHandler.HandleAsync(command, ct);
-        return Ok(new { data = true });
-    }
-
-    /// <summary>Assign or change the role linked to a group</summary>
-    [HttpPut("{publicId:guid}/role")]
-    [RequirePermission(PermissionCodes.AppsCreate)]
-    public async Task<IActionResult> AssignGroupRole(
-        [FromRoute] Guid publicId, 
-        [FromBody] AssignGroupRoleRequest request, 
-        CancellationToken ct)
-    {
-        var command = new AssignGroupRoleCommand { GroupPublicId = publicId, AppRolePublicId = request.AppRolePublicId };
-        await _assignRoleHandler.HandleAsync(command, ct);
         return Ok(new { data = true });
     }
 
@@ -189,6 +174,7 @@ public class GroupsController : ControllerBase
     /// <summary>List members of a group (paginated)</summary>
     [HttpGet("{publicId:guid}/members")]
     [RequirePermission(PermissionCodes.AppsRead)]
+    [ProducesResponseType(typeof(ApiListResponse<GroupMemberDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ListMembers(
         [FromRoute] Guid publicId,
         [FromQuery] int page = 1,
@@ -196,8 +182,8 @@ public class GroupsController : ControllerBase
         CancellationToken ct = default)
     {
         var query = new ListGroupMembersQuery { GroupPublicId = publicId, Page = page, PageSize = pageSize };
-        var (items, total) = await _listMembersHandler.HandleAsync(query, ct);
-        return Ok(new { data = items, total });
+        var result = await _listMembersHandler.HandleAsync(query, ct);
+        return Ok(new ApiListResponse<GroupMemberDto>(result.Items, result.Total, result.Page, result.PageSize));
     }
 
     /// <summary>Get consolidated permissions and app access for a user</summary>
@@ -259,7 +245,7 @@ public class GroupsController : ControllerBase
     public async Task<IActionResult> GetSharedApps([FromRoute] Guid publicId, CancellationToken ct)
     {
         var query = new GetSharedAppsQuery { GroupPublicId = publicId };
-        var sharedAppIds = await _getSharedAppsHandler.HandleAsync(query, ct);
-        return Ok(new { data = sharedAppIds });
+        var sharedApps = await _getSharedAppsHandler.HandleAsync(query, ct);
+        return Ok(new { data = sharedApps });
     }
 }

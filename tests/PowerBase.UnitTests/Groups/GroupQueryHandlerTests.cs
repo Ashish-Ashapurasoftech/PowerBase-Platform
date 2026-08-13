@@ -82,7 +82,7 @@ public class GroupQueryHandlerTests
 
         // Assert
         Assert.NotNull(result.Items);
-        Assert.Equal(2, result.TotalCount);
+        Assert.Equal(2, result.Total);
         Assert.Contains(result.Items, g => g.Name == "Group A");
         Assert.Contains(result.Items, g => g.Name == "Group B");
     }
@@ -109,7 +109,7 @@ public class GroupQueryHandlerTests
 
         // Assert
         Assert.NotNull(result.Items);
-        Assert.Equal(2, result.TotalCount);
+        Assert.Equal(2, result.Total);
         Assert.Contains(result.Items, m => m.UserName == "User A");
     }
 
@@ -118,10 +118,14 @@ public class GroupQueryHandlerTests
     {
         // Arrange
         var groupPublicId = Guid.NewGuid();
-        var sharedAppIds = new List<Guid> { Guid.NewGuid(), Guid.NewGuid() };
+        var sharedApps = new List<SharedAppDto>
+        {
+            new SharedAppDto { AppPublicId = Guid.NewGuid(), AppRolePublicId = Guid.NewGuid(), AppRoleName = "Role 1" },
+            new SharedAppDto { AppPublicId = Guid.NewGuid(), AppRolePublicId = Guid.NewGuid(), AppRoleName = "Role 2" }
+        };
 
-        _groupRepository.GetSharedAppPublicIdsAsync(groupPublicId, Arg.Any<CancellationToken>())
-            .Returns(sharedAppIds);
+        _groupRepository.GetSharedAppsAsync(groupPublicId, Arg.Any<CancellationToken>())
+            .Returns(sharedApps);
 
         var handler = new GetSharedAppsQueryHandler(_groupRepository);
         var query = new GetSharedAppsQuery { GroupPublicId = groupPublicId };
@@ -131,7 +135,7 @@ public class GroupQueryHandlerTests
 
         // Assert
         Assert.NotNull(result);
-        Assert.Equal(sharedAppIds, result);
+        Assert.Equal(sharedApps, result);
     }
 
     [Fact]
