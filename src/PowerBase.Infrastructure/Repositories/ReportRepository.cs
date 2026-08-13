@@ -1,5 +1,6 @@
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
@@ -83,6 +84,45 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
               ))
           )
         ORDER BY r.DisplayOrder, r.Name
+        """;
+
+    // Same scoping + role-based Visibility predicate as ListByTableSql, projected down to the grid's
+    // slim columns and made searchable/sortable/paged. {0} = whitelisted "column direction" fragment,
+    // built from a fixed C# switch (ResolveSortColumn) — never from raw user input.
+    private const string ListByTablePagedSqlTemplate = """
+        SELECT r.PublicId AS Id, r.Name, r.Description, r.ReportType, r.Visibility, r.IsDefault, r.CreatedOn
+        FROM meta.Report r
+        WHERE r.AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
+          AND r.IsDeleted = 0
+          AND (@search IS NULL OR r.Name LIKE @search OR r.ReportType LIKE @search OR r.Visibility LIKE @search)
+          AND (
+              r.Visibility = 'Shared'
+              OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
+              OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
+                  SELECT 1 FROM meta.AppRoleReport arr
+                  JOIN meta.AppUser au ON au.AppRoleId = arr.AppRoleId
+                  WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.IsDeleted = 0
+              ))
+          )
+        ORDER BY {0}
+        OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+        """;
+
+    private const string CountByTableFilteredSql = """
+        SELECT COUNT(1)
+        FROM meta.Report r
+        WHERE r.AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
+          AND r.IsDeleted = 0
+          AND (@search IS NULL OR r.Name LIKE @search)
+          AND (
+              r.Visibility = 'Shared'
+              OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
+              OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
+                  SELECT 1 FROM meta.AppRoleReport arr
+                  JOIN meta.AppUser au ON au.AppRoleId = arr.AppRoleId
+                  WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.IsDeleted = 0
+              ))
+          )
         """;
 
     private const string ListByAppSql = $"""
@@ -251,6 +291,46 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
             new CommandDefinition(ListByTableSql, new { tablePublicId, userId = QueryContext.UserId }, cancellationToken: ct));
         return results.AsList();
     }
+
+    public async Task<IReadOnlyList<ReportListItemDto>> ListByTablePagedAsync(
+        Guid tablePublicId, int page, int pageSize, string? search, string sortBy, bool sortDesc, CancellationToken ct = default)
+    {
+        var column = ResolveSortColumn(sortBy);
+        var sql = string.Format(ListByTablePagedSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}, r.Id");
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<ReportListItemDto>(
+            new CommandDefinition(sql, new
+            {
+                tablePublicId,
+                userId = QueryContext.UserId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                offset = (page - 1) * pageSize,
+                pageSize
+            }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<int> CountByTableAsync(Guid tablePublicId, string? search, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(CountByTableFilteredSql, new
+            {
+                tablePublicId,
+                userId = QueryContext.UserId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+            }, cancellationToken: ct));
+    }
+
+    private static string ResolveSortColumn(string sortBy) => sortBy switch
+    {
+        "reportType" => "r.ReportType",
+        "visibility" => "r.Visibility",
+        "isDefault" => "r.IsDefault",
+        "createdOn" => "r.CreatedOn",
+        _ => "r.Name",
+    };
 
     public async Task<Report?> GetDefaultByTableAsync(Guid tablePublicId, CancellationToken ct = default)
     {

@@ -14,6 +14,7 @@ using PowerBase.Application.Reports.Queries.GetReport;
 using PowerBase.Application.Reports.Queries.GetDefaultReportSettings;
 using PowerBase.Application.Reports.Queries.ListReports;
 using PowerBase.Application.Reports.Queries.ListReportsByTable;
+using PowerBase.Application.Reports.Queries.ListReportsByTablePaged;
 using PowerBase.Application.Reports.Queries.ExportReport;
 using PowerBase.Application.Reports.Queries.ResolveDefaultReport;
 using PowerBase.Application.Reports.Queries.RunReport;
@@ -34,6 +35,7 @@ public class ReportsController : ControllerBase
     private readonly GetReportQueryHandler _getHandler;
     private readonly ListReportsQueryHandler _listHandler;
     private readonly ListReportsByTableQueryHandler _listByTableHandler;
+    private readonly ListReportsByTablePagedQueryHandler _listByTablePagedHandler;
     private readonly RunReportQueryHandler _runHandler;
     private readonly ExportReportQueryHandler _exportHandler;
     private readonly GetDefaultReportSettingsQueryHandler _getDefaultSettingsHandler;
@@ -50,6 +52,7 @@ public class ReportsController : ControllerBase
         GetReportQueryHandler getHandler,
         ListReportsQueryHandler listHandler,
         ListReportsByTableQueryHandler listByTableHandler,
+        ListReportsByTablePagedQueryHandler listByTablePagedHandler,
         RunReportQueryHandler runHandler,
         ExportReportQueryHandler exportHandler,
         GetDefaultReportSettingsQueryHandler getDefaultSettingsHandler,
@@ -65,6 +68,7 @@ public class ReportsController : ControllerBase
         _getHandler = getHandler;
         _listHandler = listHandler;
         _listByTableHandler = listByTableHandler;
+        _listByTablePagedHandler = listByTablePagedHandler;
         _runHandler = runHandler;
         _exportHandler = exportHandler;
         _getDefaultSettingsHandler = getDefaultSettingsHandler;
@@ -108,16 +112,28 @@ public class ReportsController : ControllerBase
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
 
-    /// <summary>List all reports for a specific table.</summary>
+    /// <summary>List reports for a table. Supports paging, search (by name), and sorting (name,
+    /// reportType, visibility, isDefault, createdOn). Same role-based visibility rules as before —
+    /// a user only sees Shared reports, their own Personal reports, and role-scoped reports their
+    /// role grants.</summary>
     [HttpGet("tables/{tableId:guid}/reports")]
     [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
-    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<ReportResponse>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiListResponse<ReportListItemResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> ListByTable(Guid tableId, CancellationToken ct)
+    public async Task<IActionResult> ListByTable(
+        Guid tableId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? search = null,
+        [FromQuery] string sortBy = "name",
+        [FromQuery] string sortDirection = "asc",
+        CancellationToken ct = default)
     {
-        var reports = await _listByTableHandler.HandleAsync(new ListReportsByTableQuery(tableId), ct);
-        return Ok(new ApiResponse<IReadOnlyList<ReportResponse>>(reports.Select(MapToResponse).ToList()));
+        var sortDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
+        var result = await _listByTablePagedHandler.HandleAsync(new ListReportsByTablePagedQuery(tableId, page, pageSize, search, sortBy, sortDesc), ct);
+        var items = result.Items.Select(MapToListItemResponse).ToList();
+        return Ok(new ApiListResponse<ReportListItemResponse>(items, result.Total, result.Page, result.PageSize));
     }
 
     /// <summary>Get report form settings.</summary>
@@ -401,6 +417,17 @@ public class ReportsController : ControllerBase
         }
         return result.Count > 0 ? result : null;
     }
+
+    private static ReportListItemResponse MapToListItemResponse(PowerBase.Application.Common.Models.ReportListItemDto r) => new()
+    {
+        Id = r.Id,
+        Name = r.Name,
+        Description = r.Description,
+        ReportType = r.ReportType,
+        Visibility = r.Visibility,
+        IsDefault = r.IsDefault,
+        CreatedOn = r.CreatedOn,
+    };
 
     private static ReportResponse MapToResponse(ReportDetailResult r) => new()
     {

@@ -19,7 +19,7 @@ public class AppField
     public int? Scale { get; set; }
     public int DisplayOrder { get; set; }
     public bool IsRequired { get; set; }
-    public bool IsRequiredInForm { get; set; }
+    //public bool IsRequiredInForm { get; set; }
     public bool IsUnique { get; set; }
     public bool IsPrimary { get; set; }
     public bool IsSystem { get; set; }

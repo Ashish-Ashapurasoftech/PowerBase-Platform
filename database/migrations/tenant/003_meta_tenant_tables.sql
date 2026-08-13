@@ -96,7 +96,7 @@ BEGIN
         Scale              INT           NULL,
         DisplayOrder       INT           NOT NULL DEFAULT 0,
         IsRequired         BIT           NOT NULL DEFAULT 0,
-        IsRequiredInForm   BIT           NOT NULL DEFAULT 0,
+        --IsRequiredInForm   BIT           NOT NULL DEFAULT 0,
         IsUnique           BIT           NOT NULL DEFAULT 0,
         IsPrimary          BIT           NOT NULL DEFAULT 0,
         IsSystem           BIT           NOT NULL DEFAULT 0,

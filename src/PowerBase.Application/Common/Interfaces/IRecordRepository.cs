@@ -12,6 +12,11 @@ public interface IRecordRepository
     /// <summary>Resolve record PublicIds to their internal row Ids (used by parent-delete restrict).</summary>
     Task<IReadOnlyList<long>> GetIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default);
 
+    /// <summary>Same lookup as <see cref="GetIdsByPublicIdsAsync"/>, but keyed by PublicId so callers can
+    /// tell which requested ids exist and correlate each row Id back to the record that asked for it
+    /// (used by mass update to validate every record before writing anything).</summary>
+    Task<IReadOnlyDictionary<Guid, long>> GetIdsByPublicIdsMapAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default);
+
     /// <summary>Count non-deleted child records whose reference column (f_{referenceFid}) points at the parent row.</summary>
     Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default);
 
@@ -67,6 +72,13 @@ public interface IRecordRepository
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId,
         IReadOnlyDictionary<long, object?> values, CancellationToken ct = default);
 
+    /// <summary>Writes the same set of field values to every row in <paramref name="recordIds"/> in a
+    /// single UPDATE statement (implicitly atomic — either every matched row is updated or none is).
+    /// Used by mass update, after constraint validation has already passed for every record.</summary>
+    Task<int> MassUpdateAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> recordIds,
+        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default);
+
     Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default);
 
     Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
@@ -77,6 +89,11 @@ public interface IRecordRepository
 
     /// <summary>Returns true if any non-deleted rows have a duplicate non-null value in the field's column.</summary>
     Task<bool> HasDuplicatesAsync(AppTable table, AppField field, CancellationToken ct = default);
+
+    /// <summary>Returns true if any other non-deleted row already has <paramref name="value"/> in the
+    /// field's column — the per-write check behind the Unique constraint. <paramref name="excludeRecordId"/>
+    /// (the record's internal row Id, not PublicId) excludes the record being updated from the check.</summary>
+    Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, CancellationToken ct = default);
 
     /// <summary>Returns true if any non-deleted row has a NULL or empty-string value in the field's
     /// column (a candidate key field must be populated on every row).</summary>
