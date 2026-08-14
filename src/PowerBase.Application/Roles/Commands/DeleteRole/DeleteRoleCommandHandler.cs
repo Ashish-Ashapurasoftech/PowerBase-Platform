@@ -8,17 +8,25 @@ public class DeleteRoleCommandHandler
 {
     private readonly ITenantRepository _tenantRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IQueryContext _queryContext;
 
-    public DeleteRoleCommandHandler(ITenantRepository tenantRepo, IAuditRepository auditRepo)
+    public DeleteRoleCommandHandler(ITenantRepository tenantRepo, IAuditRepository auditRepo, IQueryContext queryContext)
     {
         _tenantRepo = tenantRepo;
         _auditRepo = auditRepo;
+        _queryContext = queryContext;
     }
 
     public async Task HandleAsync(DeleteRoleCommand command, CancellationToken ct = default)
     {
         var role = await _tenantRepo.GetRoleByPublicIdAsync(command.PublicId, ct)
             ?? throw new NotFoundException("TenantRole", command.PublicId);
+
+        if (!string.IsNullOrEmpty(_queryContext.TenantRole) &&
+            string.Equals(role.Name, _queryContext.TenantRole, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new UnauthorizedActionException("delete your own role");
+        }
 
         if (role.IsSystem)
             throw new UnauthorizedActionException("System roles cannot be deleted.");

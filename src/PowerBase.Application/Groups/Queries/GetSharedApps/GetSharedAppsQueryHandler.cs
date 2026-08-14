@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Groups.Common;
 
 namespace PowerBase.Application.Groups.Queries.GetSharedApps;
 
@@ -11,8 +12,8 @@ public class GetSharedAppsQueryHandler
         _groupRepository = groupRepository;
     }
 
-    public async Task<IEnumerable<Guid>> HandleAsync(GetSharedAppsQuery query, CancellationToken ct = default)
+    public async Task<IEnumerable<SharedAppDto>> HandleAsync(GetSharedAppsQuery query, CancellationToken ct = default)
     {
-        return await _groupRepository.GetSharedAppPublicIdsAsync(query.GroupPublicId, ct);
+        return await _groupRepository.GetSharedAppsAsync(query.GroupPublicId, ct);
     }
 }

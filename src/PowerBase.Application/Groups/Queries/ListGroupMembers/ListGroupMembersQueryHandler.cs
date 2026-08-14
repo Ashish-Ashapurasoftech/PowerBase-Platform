@@ -12,8 +12,19 @@ public class ListGroupMembersQueryHandler
         _groupRepository = groupRepository;
     }
 
-    public async Task<(IEnumerable<GroupMemberDto> Items, int TotalCount)> HandleAsync(ListGroupMembersQuery query, CancellationToken ct = default)
+    public async Task<ListGroupMembersResult> HandleAsync(ListGroupMembersQuery query, CancellationToken ct = default)
     {
-        return await _groupRepository.ListMembersAsync(query.GroupPublicId, query.Page, query.PageSize, ct);
+        var page = query.Page < 1 ? 1 : query.Page;
+        var pageSize = query.PageSize is < 1 or > 10000 ? 20 : query.PageSize;
+
+        var (items, total) = await _groupRepository.ListMembersAsync(query.GroupPublicId, page, pageSize, ct);
+
+        return new ListGroupMembersResult
+        {
+            Items = items.ToList(),
+            Total = total,
+            Page = page,
+            PageSize = pageSize
+        };
     }
 }
