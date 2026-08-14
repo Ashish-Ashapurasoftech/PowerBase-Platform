@@ -106,7 +106,7 @@ public class CreateTenantCommandHandler
             await _provisioningService.ProvisionAsync(tenantId, command.ServerConfig, ct);
 
             var user = await _userRepo.GetByIdAsync(_queryContext.UserId, ct);
-            var token = _jwtService.GenerateToken(user, tenantId, out var jwtId, out var expiresAt);
+            var token = _jwtService.GenerateToken(user, tenantId, DefaultTenantRoles.Administrator, out var jwtId, out var expiresAt);
             await _auditRepo.CreateSessionAsync(user.Id, tenantId, jwtId, _queryContext.IpAddress, expiresAt, ct: ct);
 
             return new CreateTenantResult

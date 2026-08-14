@@ -13,11 +13,16 @@ public record AppUserDetail(
     string Status,
     bool ShowInUserPickers,
     DateTime CreatedOn,
-    bool IsOwner);
+    bool IsOwner,
+    bool IsFromGroup);
 
 public interface IAppUserRepository
 {
     Task<IReadOnlyList<AppUserDetail>> ListByAppIdAsync(long appId, CancellationToken ct = default);
+    Task<IReadOnlyList<AppUserDetail>> ListForUserPickerAsync(long appId, CancellationToken ct = default);
+    Task<IReadOnlyList<AppUserDetail>> ListByAppPagedAsync(long appId,int page,int pageSize,string? search,string? role,string sortBy,bool sortDesc,CancellationToken ct = default);
+    Task<IReadOnlyList<AppUserDetail>> ListByAppFilteredAsync(long appId,string? search,string? role,string sortBy,bool sortDesc,CancellationToken ct = default);
+    Task<int> CountByAppAsync(long appId,string? search,string? role,CancellationToken ct = default);
     Task<AppUser?> GetByAppAndUserAsync(long appId, long userId, CancellationToken ct = default);
     Task CreateAsync(AppUser appUser, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task UpdateRoleAsync(long appId, long userId, long newRoleId, CancellationToken ct = default);
@@ -26,4 +31,6 @@ public interface IAppUserRepository
     Task<string?> GetUserRoleNameAsync(long appId, long userId, CancellationToken ct = default);
     Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default);
     Task<IReadOnlySet<string>> GetUserAppPermissionsAsync(long appId, long userId, CancellationToken ct = default);
+    Task<IReadOnlyList<long>> GetUserAppRoleIdsAsync(long appId, long userId, CancellationToken ct = default);
+    Task<PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.UserEffectivePermissionsDto> GetUserEffectivePermissionsAsync(Guid userPublicId, CancellationToken ct = default);
 }

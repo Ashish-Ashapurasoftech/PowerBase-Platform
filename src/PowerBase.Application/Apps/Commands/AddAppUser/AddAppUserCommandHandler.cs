@@ -42,7 +42,7 @@ public class AddAppUserCommandHandler
 
         var existing = await _appUserRepo.GetByAppAndUserAsync(appId, user.Id, ct);
         if (existing is not null)
-            throw new DuplicateException("AppUser", "userId", user.Id.ToString());
+            throw new DuplicateException("AppUser", $"User '{user.Email}' is already added to this application.");
 
         long roleId;
         if (command.RolePublicId.HasValue)

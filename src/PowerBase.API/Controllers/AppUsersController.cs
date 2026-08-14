@@ -8,6 +8,7 @@ using PowerBase.Application.Apps.Commands.InviteAppUser;
 using PowerBase.Application.Apps.Commands.RemoveAppUser;
 using PowerBase.Application.Apps.Commands.UpdateUserPickerVisibility;
 using PowerBase.Application.Apps.Queries.ListAppUsers;
+using PowerBase.Application.Common.Interfaces;
 
 namespace PowerBase.API.Controllers;
 
@@ -17,6 +18,7 @@ namespace PowerBase.API.Controllers;
 public class AppUsersController : ControllerBase
 {
     private readonly ListAppUsersQueryHandler _listHandler;
+    private readonly ListAppUsersForPickerQueryHandler _listPickerHandler;
     private readonly AddAppUserCommandHandler _addHandler;
     private readonly InviteAppUserCommandHandler _inviteHandler;
     private readonly ChangeAppUserRoleCommandHandler _changeRoleHandler;
@@ -26,6 +28,7 @@ public class AppUsersController : ControllerBase
 
     public AppUsersController(
         ListAppUsersQueryHandler listHandler,
+        ListAppUsersForPickerQueryHandler listPickerHandler,
         AddAppUserCommandHandler addHandler,
         InviteAppUserCommandHandler inviteHandler,
         ChangeAppUserRoleCommandHandler changeRoleHandler,
@@ -34,6 +37,7 @@ public class AppUsersController : ControllerBase
         IConfiguration config)
     {
         _listHandler = listHandler;
+        _listPickerHandler = listPickerHandler;
         _addHandler = addHandler;
         _inviteHandler = inviteHandler;
         _changeRoleHandler = changeRoleHandler;
@@ -42,13 +46,38 @@ public class AppUsersController : ControllerBase
         _frontendBaseUrl = config["Frontend:BaseUrl"] ?? "http://localhost:4200";
     }
 
-    /// <summary>List all users with access to this app.</summary>
+    /// <summary>List all users with access to this app (paginated).</summary>
     [HttpGet]
-    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<AppUserResponse>>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> List([FromRoute] Guid appId, CancellationToken ct)
+    [ProducesResponseType(typeof(ApiListResponse<AppUserResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> List(
+        Guid appId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? search = null,
+        [FromQuery] string sortBy = "userName",
+        [FromQuery] bool sortDesc = false,
+        [FromQuery] string? sortOrder = null,
+        [FromQuery] string? role = null,
+        CancellationToken ct = default)
     {
-        var users = await _listHandler.HandleAsync(new ListAppUsersQuery(appId), ct);
-        var response = users.Select(u => new AppUserResponse
+        bool actualSortDesc = sortDesc || sortOrder?.ToLower() == "desc";
+
+        var result = await _listHandler.HandleAsync(new ListAppUsersQuery(
+            AppPublicId: appId,
+            Page: page,
+            PageSize: pageSize,
+            Search: search,
+            SortBy: sortBy,
+            SortDesc: actualSortDesc,
+            Role: role), ct);
+
+        var items = result.Items.Select(MapToListItemResponse).ToList();
+        return Ok(new ApiListResponse<AppUserResponse>(items, result.Total, result.Page, result.PageSize));
+    }
+
+    private static AppUserResponse MapToListItemResponse(AppUserResult u)
+    {
+        return new AppUserResponse
         {
             PublicId = u.PublicId,
             UserPublicId = u.UserPublicId,
@@ -60,25 +89,53 @@ public class AppUsersController : ControllerBase
             ShowInUserPickers = u.ShowInUserPickers,
             AddedOn = u.AddedOn.ToString("o"),
             IsOwner = u.IsOwner,
-        }).ToList();
-        return Ok(new ApiResponse<IReadOnlyList<AppUserResponse>>(response));
+            IsFromGroup = u.IsFromGroup,
+        };
+    }
+
+    /// <summary>List users configured to be visible in user pickers for this app.</summary>
+    [HttpGet("picker")]
+    [ProducesResponseType(typeof(IReadOnlyList<AppUserPickerResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListForPicker([FromRoute] Guid appId, CancellationToken ct)
+    {
+        var users = await _listPickerHandler.HandleAsync(new ListAppUsersForPickerQuery(appId), ct);
+        var response = users.Select(u => new AppUserPickerResponse(u.UserPublicId, u.UserName, u.UserEmail)).ToList();
+        return Ok(response);
     }
 
     /// <summary>Export all users of this app to CSV.</summary>
     [HttpGet("export")]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
-    public async Task<IActionResult> Export([FromRoute] Guid appId, CancellationToken ct)
+    public async Task<IActionResult> Export(
+        [FromRoute] Guid appId,
+        [FromQuery] string? search = null,
+        [FromQuery] string sortBy = "userName",
+        [FromQuery] bool sortDesc = false,
+        [FromQuery] string? sortOrder = null,
+        [FromQuery] string? role = null,
+        CancellationToken ct = default)
     {
-        var users = await _listHandler.HandleAsync(new ListAppUsersQuery(appId), ct);
+        bool actualSortDesc = sortDesc || sortOrder?.ToLower() == "desc";
+
+        var result = await _listHandler.HandleAsync(new ListAppUsersQuery(
+            AppPublicId: appId,
+            Page: 1,
+            PageSize: 1,
+            Search: search,
+            SortBy: sortBy,
+            SortDesc: actualSortDesc,
+            Role: role,
+            IsExport: true), ct);
 
         var csvBuilder = new System.Text.StringBuilder();
-        csvBuilder.AppendLine("Name,Email,AppRole,AddedOn");
+        csvBuilder.AppendLine("Name,Email,AccessVia,AppRole,AddedOn");
 
-        foreach (var user in users)
+        foreach (var user in result.Items)
         {
             csvBuilder.AppendLine(string.Join(",",
                 EscapeCsvField(user.UserName),
                 EscapeCsvField(user.UserEmail),
+                EscapeCsvField(user.IsFromGroup ? "Group" : "Individual"),
                 EscapeCsvField(user.RoleName),
                 EscapeCsvField(user.AddedOn.ToString("o"))
             ));
@@ -173,3 +230,4 @@ public class AppUsersController : ControllerBase
 
 public record InviteAppUserRequest(string Email, Guid? RolePublicId);
 public record UpdateUserPickerVisibilityRequest(bool ShowInUserPickers);
+public record AppUserPickerResponse(Guid UserPublicId, string UserName, string UserEmail);

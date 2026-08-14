@@ -50,6 +50,8 @@ public static class PermissionCodes
     /// PagesUpdate) to create or edit a page whose PageType is "Code".</summary>
     public const string PagesCode    = "pages:code";
 
+    public const string TokenCreate      = "token:create";
+
     /// <summary>
     /// Structural/admin permission codes assigned to regular app members by default.
     /// Record data access (view/add/modify/delete/field-level) is governed by table-level
@@ -63,5 +65,6 @@ public static class PermissionCodes
         ReportsRead, ReportsRun,
         FormsRead,
         PagesRead,
+        TokenCreate,
     };
 }

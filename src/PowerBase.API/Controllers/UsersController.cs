@@ -14,6 +14,7 @@ namespace PowerBase.API.Controllers;
 
 [ApiController]
 [Route("tenants/users")]
+[RequireAuth]
 public class UsersController : ControllerBase
 {
     private readonly ListUsersQueryHandler _listHandler;
@@ -38,7 +39,6 @@ public class UsersController : ControllerBase
 
     /// <summary>List all users in the current tenant.</summary>
     [HttpGet]
-    [RequirePermission(PermissionCodes.UsersManage)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<TenantUserResponse>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
@@ -51,6 +51,7 @@ public class UsersController : ControllerBase
 
     /// <summary>Export all users in the current tenant to CSV.</summary>
     [HttpGet("export")]
+    [RequireTenantAdmin]
     [RequirePermission(PermissionCodes.UsersManage)]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -96,6 +97,7 @@ public class UsersController : ControllerBase
 
     /// <summary>Invite an existing user to the current tenant.</summary>
     [HttpPost("invite")]
+    [RequireTenantAdmin]
     [RequirePermission(PermissionCodes.UsersInvite)]
     [ProducesResponseType(typeof(ApiResponse<TenantUserResponse>), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -111,6 +113,7 @@ public class UsersController : ControllerBase
 
     /// <summary>Change the role assigned to a user in the current tenant.</summary>
     [HttpPatch("{userPublicId:guid}")]
+    [RequireTenantAdmin]
     [RequirePermission(PermissionCodes.UsersManage)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -124,6 +127,7 @@ public class UsersController : ControllerBase
 
     /// <summary>Remove a user from the current tenant.</summary>
     [HttpDelete("{userPublicId:guid}")]
+    [RequireTenantAdmin]
     [RequirePermission(PermissionCodes.UsersManage)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
