@@ -12,7 +12,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class AppRepository : TenantRepositoryBase, IAppRepository
 {
-    private const string SelectColumns = "Id, PublicId, OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, Branding, LayoutSettings, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
+    private const string SelectColumns = "Id, PublicId, OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsEncrypted, Branding, LayoutSettings, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
 
     private const string GetByPublicIdSql = $"""
         SELECT {SelectColumns}
@@ -37,7 +37,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     private const string ListByUserSql = $"""
         SELECT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
-               a.Status, a.Formatting, a.SecurityOptions, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
+               a.Status, a.Formatting, a.SecurityOptions, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
         JOIN meta.AppUser au ON au.AppId = a.Id
@@ -60,7 +60,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     private const string ListAllByUserSql = $"""
         SELECT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
-               a.Status, a.Formatting, a.SecurityOptions, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
+               a.Status, a.Formatting, a.SecurityOptions, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
         JOIN meta.AppUser au ON au.AppId = a.Id
@@ -88,9 +88,9 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         """;
 
     private const string InsertSql = """
-        INSERT INTO meta.App (OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsDeleted, CreatedOn, CreatedBy)
+        INSERT INTO meta.App (OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsEncrypted, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.PublicId, INSERTED.Id
-        VALUES (@ownerId, @ownerName, @name, @description, @icon, @color, @status, @formatting, @securityOptions, 0, SYSUTCDATETIME(), @createdBy)
+        VALUES (@ownerId, @ownerName, @name, @description, @icon, @color, @status, @formatting, @securityOptions, @isEncrypted, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string SetDefaultRoleSql = """
@@ -112,6 +112,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             Color       = @color,
             Formatting  = @formatting,
             SecurityOptions = @securityOptions,
+            IsEncrypted = @isEncrypted,
             ModifiedOn  = SYSUTCDATETIME(),
             ModifiedBy  = @modifiedBy
         WHERE PublicId  = @publicId
@@ -138,11 +139,13 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         """;
 
     private readonly IConfiguration _configuration;
+    private readonly IEncryptionService _encryptionService;
 
-    public AppRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IConfiguration configuration)
+    public AppRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IConfiguration configuration, IEncryptionService encryptionService)
         : base(connectionFactory, queryContext)
     {
         _configuration = configuration;
+        _encryptionService = encryptionService;
     }
 
     public async Task<App> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
@@ -204,19 +207,43 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             status = app.Status,
             formatting = app.Formatting,
             securityOptions = app.SecurityOptions,
+            isEncrypted = app.IsEncrypted,
             createdBy = QueryContext.UserId,
         };
+
+        // If IsEncrypted is enabled, but no DEK exists in SecurityOptions, generate one and store it.
+        // We use string.Empty or JSON serialization in practice. For simplicity, we assume SecurityOptions holds the DEK.
+        if (app.IsEncrypted && string.IsNullOrEmpty(app.SecurityOptions))
+        {
+            // We need a dummy AppId for DEK generation since the App isn't created yet,
+            // but we can generate the DEK using publicId instead for the derivation info.
+            // Or generate it in a transaction AFTER insert. Let's do it after insert below.
+        }
 
         if (transaction is not null)
         {
             var row = await transaction.Connection!.QuerySingleAsync<(Guid PublicId, long Id)>(
                 new CommandDefinition(InsertSql, parameters, transaction, cancellationToken: ct));
+            
+            if (app.IsEncrypted && string.IsNullOrEmpty(app.SecurityOptions))
+            {
+                var wrappedDek = await _encryptionService.GenerateAndWrapDekAsync(QueryContext.TenantId, row.Id, ct);
+                await transaction.Connection!.ExecuteAsync("UPDATE meta.App SET SecurityOptions = @wrappedDek WHERE Id = @Id", new { wrappedDek, row.Id }, transaction);
+            }
             return row;
         }
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.QuerySingleAsync<(Guid PublicId, long Id)>(
+        var insertedRow = await connection.QuerySingleAsync<(Guid PublicId, long Id)>(
             new CommandDefinition(InsertSql, parameters, cancellationToken: ct));
+
+        if (app.IsEncrypted && string.IsNullOrEmpty(app.SecurityOptions))
+        {
+            var wrappedDek = await _encryptionService.GenerateAndWrapDekAsync(QueryContext.TenantId, insertedRow.Id, ct);
+            await connection.ExecuteAsync("UPDATE meta.App SET SecurityOptions = @wrappedDek WHERE Id = @Id", new { wrappedDek, Id = insertedRow.Id });
+        }
+
+        return insertedRow;
     }
 
     public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, CancellationToken ct = default)
@@ -261,13 +288,13 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             new CommandDefinition(GetDefaultRoleIdSql, new { appId }, cancellationToken: ct));
     }
 
-    public async Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, string? formatting, string? securityOptions, CancellationToken ct = default)
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, string? formatting, string? securityOptions, bool isEncrypted, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
             new CommandDefinition(UpdateSql, new
             {
-                publicId, name, description, icon, color, formatting, securityOptions,
+                publicId, name, description, icon, color, formatting, securityOptions, isEncrypted,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

@@ -33,7 +33,7 @@ public class UpdateAppCommandHandler
 
         var formattingStr = command.Formatting != null ? JsonSerializer.Serialize(command.Formatting) : null;
         var securityStr = command.SecurityOptions != null ? JsonSerializer.Serialize(command.SecurityOptions) : null;
-        var affected = await _appRepo.UpdateAsync(command.AppPublicId, command.Name, command.Description, command.Icon, command.Color, formattingStr, securityStr, ct);
+        var affected = await _appRepo.UpdateAsync(command.AppPublicId, command.Name, command.Description, command.Icon, command.Color, formattingStr, securityStr, app.IsEncrypted, ct);
         if (affected == 0)
             throw new NotFoundException("App", command.AppPublicId);
 

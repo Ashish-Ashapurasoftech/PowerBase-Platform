@@ -60,6 +60,27 @@ public class SchemaEngineService : ISchemaEngineService
             new CommandDefinition(GetFieldTypeSqlDataTypeSql, new { id = field.FieldTypeId }, cancellationToken: ct))
             ?? throw new InvalidOperationException($"Unknown or inactive field type id: {field.FieldTypeId}");
 
+        var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(connection.ConnectionString);
+        var supportsEnclaves = builder.ColumnEncryptionSetting == Microsoft.Data.SqlClient.SqlConnectionColumnEncryptionSetting.Enabled;
+
+        var collationClause = "";
+        var encryptionClause = "";
+
+        if (field.IsEncrypted)
+        {
+            if (supportsEnclaves)
+            {
+                collationClause = (sqlDataType.Contains("VARCHAR", StringComparison.OrdinalIgnoreCase) || sqlDataType.Contains("CHAR", StringComparison.OrdinalIgnoreCase))
+                    ? " COLLATE Latin1_General_BIN2"
+                    : "";
+                encryptionClause = " ENCRYPTED WITH (COLUMN_ENCRYPTION_KEY = [CEK1], ENCRYPTION_TYPE = RANDOMIZED, ALGORITHM = 'AEAD_AES_256_CBC_HMAC_SHA_256', ENCLAVE_COMPUTATIONS)";
+            }
+            else
+            {
+                sqlDataType = "VARCHAR(MAX)";
+            }
+        }
+
         var physicalTable = PhysicalNaming.FullTableName(table.Id);
         var tableName = PhysicalNaming.TableName(table.Id);
         var physicalColumn = PhysicalNaming.ColumnName(field.Fid!.Value);
@@ -74,7 +95,7 @@ public class SchemaEngineService : ISchemaEngineService
                   AND t.name = '{tableName}'
                   AND c.name = '{physicalColumn}')
             BEGIN
-                ALTER TABLE {physicalTable} ADD {physicalColumn} {sqlDataType} NULL;
+                ALTER TABLE {physicalTable} ADD {physicalColumn} {sqlDataType}{collationClause}{encryptionClause} NULL;
             END
             """;
 
@@ -93,7 +114,7 @@ public class SchemaEngineService : ISchemaEngineService
                       AND t.name = '{tableName}'
                       AND c.name = '{endColumn}')
                 BEGIN
-                    ALTER TABLE {physicalTable} ADD {endColumn} {sqlDataType} NULL;
+                    ALTER TABLE {physicalTable} ADD {endColumn} {sqlDataType}{collationClause}{encryptionClause} NULL;
                 END
                 """;
             await connection.ExecuteAsync(new CommandDefinition(endSql, cancellationToken: ct));

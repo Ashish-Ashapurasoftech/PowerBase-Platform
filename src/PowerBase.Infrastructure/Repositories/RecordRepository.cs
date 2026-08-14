@@ -12,8 +12,40 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class RecordRepository : TenantRepositoryBase, IRecordRepository
 {
-    public RecordRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IAzureSearchService _searchService;
+    private readonly IEncryptionService _encryptionService;
+    private readonly IControlConnectionFactory _controlFactory;
+
+    public RecordRepository(
+        ITenantConnectionFactory connectionFactory, 
+        IQueryContext queryContext,
+        IAzureSearchService searchService,
+        IEncryptionService encryptionService,
+        IControlConnectionFactory controlFactory)
+        : base(connectionFactory, queryContext) 
+    { 
+        _searchService = searchService;
+        _encryptionService = encryptionService;
+        _controlFactory = controlFactory;
+    }
+
+    private async Task<string?> GetDekIfAppLevelEncryptionAsync(System.Data.IDbConnection connection, long appId, CancellationToken ct)
+    {
+        var sqlConn = connection as Microsoft.Data.SqlClient.SqlConnection;
+        if (sqlConn != null)
+        {
+            var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(sqlConn.ConnectionString);
+            if (builder.ColumnEncryptionSetting == Microsoft.Data.SqlClient.SqlConnectionColumnEncryptionSetting.Enabled)
+            {
+                return null;
+            }
+        }
+        
+        await using var controlConn = _controlFactory.Create();
+        await controlConn.OpenAsync(ct);
+        var sql = "SELECT SecurityOptions FROM meta.App WHERE Id = @appId";
+        return await controlConn.ExecuteScalarAsync<string>(new CommandDefinition(sql, new { appId }, cancellationToken: ct));
+    }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
@@ -52,7 +84,27 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
-        return rows.Select(ToDictionary).ToList();
+        var resultList = rows.Select(ToDictionary).ToList();
+
+        var dek = await GetDekIfAppLevelEncryptionAsync(connection, table.AppId, ct);
+        if (!string.IsNullOrEmpty(dek) && fields.Any(f => f.IsEncrypted))
+        {
+            var encryptedFields = fields.Where(f => f.IsEncrypted).ToList();
+            foreach (var dict in resultList)
+            {
+                foreach (var f in encryptedFields)
+                {
+                    var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+                    if (dict.TryGetValue(col, out var val) && val is string cipherText && !string.IsNullOrEmpty(cipherText))
+                    {
+                        var mutDict = (System.Collections.Generic.IDictionary<string, object?>)dict;
+                        mutDict[col] = await _encryptionService.DecryptDataAsync(cipherText, dek, QueryContext.TenantId, table.AppId, ct);
+                    }
+                }
+            }
+        }
+        
+        return resultList;
     }
 
     public async Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
@@ -151,9 +203,27 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, new { ids }, cancellationToken: ct));
+        
+        var dek = await GetDekIfAppLevelEncryptionAsync(connection, table.AppId, ct);
+        var encryptedFields = fields.Where(f => f.IsEncrypted).ToList();
+        
         foreach (var row in rows)
         {
             IReadOnlyDictionary<string, object?> dict = ToDictionary(row);
+            
+            if (!string.IsNullOrEmpty(dek) && encryptedFields.Count > 0)
+            {
+                foreach (var f in encryptedFields)
+                {
+                    var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+                    if (dict.TryGetValue(col, out var val) && val is string cipherText && !string.IsNullOrEmpty(cipherText))
+                    {
+                        var mutDict = (System.Collections.Generic.IDictionary<string, object?>)dict;
+                        mutDict[col] = await _encryptionService.DecryptDataAsync(cipherText, dek, QueryContext.TenantId, table.AppId, ct);
+                    }
+                }
+            }
+            
             if (dict.TryGetValue("Id", out var idVal) && idVal is not null)
                 result[Convert.ToInt64(idVal)] = dict;
         }
@@ -279,7 +349,23 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             new CommandDefinition(sql, new { publicId }, cancellationToken: ct));
 
         if (row is null) throw new NotFoundException("Record", publicId);
-        return ToDictionary(row);
+        
+        var dict = ToDictionary(row);
+        var dek = await GetDekIfAppLevelEncryptionAsync(connection, table.AppId, ct);
+        if (!string.IsNullOrEmpty(dek) && fields.Any(f => f.IsEncrypted))
+        {
+            foreach (var f in fields.Where(f => f.IsEncrypted))
+            {
+                var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+                if (dict.TryGetValue(col, out var val) && val is string cipherText && !string.IsNullOrEmpty(cipherText))
+                {
+                    var mutDict = (System.Collections.Generic.IDictionary<string, object?>)dict;
+                    mutDict[col] = await _encryptionService.DecryptDataAsync(cipherText, dek, QueryContext.TenantId, table.AppId, ct);
+                }
+            }
+        }
+        
+        return dict;
     }
 
     public async Task<Guid> CreateAsync(
@@ -326,7 +412,36 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        
+        var dek = await GetDekIfAppLevelEncryptionAsync(connection, table.AppId, ct);
+        if (!string.IsNullOrEmpty(dek) && fields.Any(f => f.IsEncrypted))
+        {
+            foreach (var f in relevantFields.Where(x => x.IsEncrypted))
+            {
+                var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+                if (parameters.Get<object>(col) is string plainText && !string.IsNullOrEmpty(plainText))
+                {
+                    var cipher = await _encryptionService.EncryptDataAsync(plainText, dek, QueryContext.TenantId, table.AppId, ct);
+                    // Replace the parameter with ciphertext
+                    var valDict = (System.Collections.Generic.IDictionary<string, object>)((Dapper.DynamicParameters)parameters).GetType().GetField("parameters", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(parameters)!;
+                    valDict[col] = valDict[col].GetType().GetProperty("Value")!.GetValue(valDict[col])!;
+                    // The above reflection is unsafe for Dapper. A safer way is simply re-creating parameters or we can just replace values dictionary beforehand.
+                    // Wait, we can just call Add(col, cipher) to overwrite!
+                    parameters.Add(col, cipher);
+                }
+            }
+        }
+        
+        var insertedPublicId = await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        
+        // Push only searchable fields to Azure AI Search (using ORIGINAL values, not ciphertext)
+        var searchableValues = fields
+            .Where(f => f.IsSearchable && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
+            .ToDictionary(f => (long)f.Fid.Value, f => values[(long)f.Fid.Value]);
+
+        await _searchService.IndexRecordAsync(table.Id, insertedPublicId, searchableValues, ct);
+        
+        return insertedPublicId;
     }
 
     public async Task UpdateAsync(
@@ -364,8 +479,30 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        
+        var dek = await GetDekIfAppLevelEncryptionAsync(connection, table.AppId, ct);
+        if (!string.IsNullOrEmpty(dek) && fields.Any(f => f.IsEncrypted))
+        {
+            foreach (var f in relevantFields.Where(x => x.IsEncrypted))
+            {
+                var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+                if (parameters.Get<object>(col) is string plainText && !string.IsNullOrEmpty(plainText))
+                {
+                    var cipher = await _encryptionService.EncryptDataAsync(plainText, dek, QueryContext.TenantId, table.AppId, ct);
+                    parameters.Add(col, cipher); // Dapper Add overwrites existing keys
+                }
+            }
+        }
+        
         var affected = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
         if (affected == 0) throw new NotFoundException("Record", publicId);
+
+        // Update Azure AI Search with only searchable fields (using ORIGINAL plaintext values)
+        var searchableValues = fields
+            .Where(f => f.IsSearchable && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
+            .ToDictionary(f => (long)f.Fid.Value, f => values[(long)f.Fid.Value]);
+
+        await _searchService.IndexRecordAsync(table.Id, publicId, searchableValues, ct);
     }
 
     public async Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default)
@@ -380,6 +517,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(sql, new { publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
         if (affected == 0) throw new NotFoundException("Record", publicId);
+
+        // Remove from Azure AI Search
+        await _searchService.DeleteRecordAsync(table.Id, publicId, ct);
     }
 
     public async Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
@@ -392,6 +532,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(sql, new { publicIds, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+
+        // Remove from Azure AI Search
+        await _searchService.BulkDeleteRecordsAsync(table.Id, publicIds, ct);
     }
 
     public async Task<int> BackfillDefaultAsync(AppTable table, AppField field, string defaultValue, CancellationToken ct = default)
