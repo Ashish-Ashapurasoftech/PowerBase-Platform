@@ -100,7 +100,7 @@ public class ImportAppFromPblCommandHandlerTests
         var saveFormRuleHandler = new SaveFormRuleCommandHandler(_formRuleRepo, _queryContext, _auditRepo, _formRepo, _fieldRepo, _formulaExpressionValidator);
 
         var createAppRoleHandler = new CreateAppRoleCommandHandler(_appRepo, _appRoleRepo, _queryContext, _auditRepo, _appRolePermissionRepo);
-        var updateTablePermissionsHandler = new UpdateTablePermissionsCommandHandler(_appRoleRepo, _appRolePermissionRepo, _tableRepo, _auditRepo);
+        var updateTablePermissionsHandler = new UpdateTablePermissionsCommandHandler(_appRoleRepo, _appRolePermissionRepo, _tableRepo, _auditRepo, _queryContext, _appUserRepo);
 
         var deleteAppHandler = new DeleteAppCommandHandler(_appRepo, _auditRepo);
 
