@@ -24,7 +24,7 @@ public sealed class FieldEncryptionContext
     private readonly IEncryptionService _encryptionService;
     private readonly long _tenantId;
     private readonly long _appId;
-    private readonly string? _wrappedDek;   // null → encryption not active
+    private string? _wrappedDek;   // null → encryption not active
 
     private FieldEncryptionContext(IEncryptionService svc, long tenantId, long appId, string? wrappedDek)
     {
@@ -34,8 +34,11 @@ public sealed class FieldEncryptionContext
         _wrappedDek = wrappedDek;
     }
 
-    /// <summary>Whether encryption is active for this app.</summary>
+    /// <summary>Whether encryption is active (DEK is available).</summary>
     public bool IsActive => !string.IsNullOrEmpty(_wrappedDek);
+
+    /// <summary>Whether the App is marked as globally encrypted.</summary>
+    public bool IsAppEncrypted { get; private set; }
 
     // ------------------------------------------------------------------
     // Factory
@@ -54,24 +57,30 @@ public sealed class FieldEncryptionContext
         CancellationToken ct = default)
     {
         const string sql = """
-            SELECT SecurityOptions
+            SELECT SecurityOptions, IsEncrypted
             FROM meta.App
-            WHERE Id = @appId AND IsEncrypted = 1 AND IsDeleted = 0
+            WHERE Id = @appId AND IsDeleted = 0
             """;
 
         string? wrappedDek = null;
+        bool isAppEncrypted = false;
         try
         {
-            var secOpts = await tenantConnection.ExecuteScalarAsync<string>(
+            var row = await tenantConnection.QuerySingleOrDefaultAsync(
                 new CommandDefinition(sql, new { appId }, cancellationToken: ct));
 
-            if (!string.IsNullOrEmpty(secOpts) && secOpts.TrimStart().StartsWith("{"))
+            if (row != null)
             {
-                var settings = System.Text.Json.JsonSerializer.Deserialize<
-                    PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings>(
-                        secOpts,
-                        new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                wrappedDek = settings?.WrappedDek;
+                isAppEncrypted = row.IsEncrypted;
+                string secOpts = row.SecurityOptions;
+                if (!string.IsNullOrEmpty(secOpts) && secOpts.TrimStart().StartsWith("{"))
+                {
+                    var settings = System.Text.Json.JsonSerializer.Deserialize<
+                        PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings>(
+                            secOpts,
+                            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    wrappedDek = settings?.WrappedDek;
+                }
             }
         }
         catch
@@ -79,7 +88,26 @@ public sealed class FieldEncryptionContext
             // Any failure → treat app as non-encrypted; no crash
         }
 
-        return new FieldEncryptionContext(encryptionService, tenantId, appId, wrappedDek);
+        var ctx = new FieldEncryptionContext(encryptionService, tenantId, appId, wrappedDek);
+        ctx.IsAppEncrypted = isAppEncrypted;
+        return ctx;
+    }
+
+    /// <summary>
+    /// Lazily generates and persists a Master Encryption Key (DEK) for the App if it doesn't have one.
+    /// Used when a user enables field-level encryption on an unencrypted app.
+    /// </summary>
+    public async Task EnsureDekAsync(IDbConnection tenantConnection, CancellationToken ct = default)
+    {
+        if (IsActive) return;
+
+        _wrappedDek = await _encryptionService.GenerateAndWrapDekAsync(_tenantId, _appId, ct);
+        
+        var settings = new PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings { WrappedDek = _wrappedDek };
+        var json = System.Text.Json.JsonSerializer.Serialize(settings);
+        
+        const string sql = "UPDATE meta.App SET SecurityOptions = @json WHERE Id = @appId";
+        await tenantConnection.ExecuteAsync(new CommandDefinition(sql, new { json, appId = _appId }, cancellationToken: ct));
     }
 
     // ------------------------------------------------------------------
@@ -87,13 +115,11 @@ public sealed class FieldEncryptionContext
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// When the App has encryption enabled, ALL non-system data fields are
-    /// encrypted — the field-level IsEncrypted flag is not required.
-    /// System fields (Id, CreatedOn, ModifiedOn, CreatedBy, ModifiedBy)
-    /// are never encrypted because they are needed for queries/sorting.
+    /// If App is globally encrypted, encrypt ALL non-system fields.
+    /// Otherwise, encrypt ONLY non-system fields explicitly marked as IsEncrypted = true.
     /// </summary>
-    private static IEnumerable<AppField> FieldsToEncrypt(IEnumerable<AppField> fields)
-        => fields.Where(f => f.Fid.HasValue && !f.IsSystem);
+    private IEnumerable<AppField> FieldsToEncrypt(IEnumerable<AppField> fields)
+        => fields.Where(f => f.Fid.HasValue && !f.IsSystem && (this.IsAppEncrypted || f.IsEncrypted));
 
     // ------------------------------------------------------------------
     // Encrypt helpers

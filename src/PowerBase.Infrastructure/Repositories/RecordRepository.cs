@@ -317,6 +317,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     {
         var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
 
+        // Dynamically initialize DEK if an encrypted field is present but app wasn't globally encrypted
+        var enc = await GetEncryptionContextAsync(await ConnectionFactory.CreateAsync(ct), table.AppId, ct);
+        if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
+        {
+            await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
+            await enc.EnsureDekAsync(tenantConn, ct);
+        }
+
         // Build the SQL shape first (column names only, no values yet)
         string sql;
         var colParts = new List<string>();
@@ -355,7 +363,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
 
         // Encrypt flagged field values (no-op if app is not encrypted)
-        var enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
+        enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
         var encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
 
         // Build parameters using encrypted values
@@ -400,6 +408,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         // Encrypt flagged field values before UPDATE (no-op if app is not encrypted)
         var enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
+        if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
+        {
+            await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
+            await enc.EnsureDekAsync(tenantConn, ct);
+        }
         var encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
 
         // Build set-clause parameters with potentially-encrypted values
@@ -759,7 +772,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var encContext = await GetEncryptionContextAsync(connection, table.AppId, ct);
-        bool requiresClientSideDistinct = encContext.IsActive && !field.IsSystem;
+        bool requiresClientSideDistinct = encContext.IsActive && !field.IsSystem && field.IsEncrypted;
 
         var sql = requiresClientSideDistinct 
             ? $"""
