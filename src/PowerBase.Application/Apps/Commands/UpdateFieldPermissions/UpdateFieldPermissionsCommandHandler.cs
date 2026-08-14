@@ -12,25 +12,37 @@ public class UpdateFieldPermissionsCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IQueryContext _queryContext;
+    private readonly IAppUserRepository _appUserRepo;
 
     public UpdateFieldPermissionsCommandHandler(
         IAppRoleRepository appRoleRepo,
         IAppRolePermissionRepository permRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IQueryContext queryContext,
+        IAppUserRepository appUserRepo)
     {
         _appRoleRepo = appRoleRepo;
         _permRepo = permRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _auditRepo = auditRepo;
+        _queryContext = queryContext;
+        _appUserRepo = appUserRepo;
     }
 
     public async Task HandleAsync(UpdateFieldPermissionsCommand command, CancellationToken ct = default)
     {
         var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId, ct)
                    ?? throw new NotFoundException("AppRole", command.RolePublicId);
+
+        var currentUserRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(role.AppId, _queryContext.UserId, ct);
+        if (currentUserRolePublicId == command.RolePublicId)
+        {
+            throw new UnauthorizedActionException("modify field permissions for your own app role");
+        }
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
         // Only persist non-default ('Modify') entries to keep the table lean.

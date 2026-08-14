@@ -9,18 +9,26 @@ public class UpdateRolePermissionsCommandHandler
     private readonly ITenantRepository _tenantRepo;
     private readonly IPermissionRepository _permissionRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IQueryContext _queryContext;
 
-    public UpdateRolePermissionsCommandHandler(ITenantRepository tenantRepo, IPermissionRepository permissionRepo, IAuditRepository auditRepo)
+    public UpdateRolePermissionsCommandHandler(ITenantRepository tenantRepo, IPermissionRepository permissionRepo, IAuditRepository auditRepo, IQueryContext queryContext)
     {
         _tenantRepo = tenantRepo;
         _permissionRepo = permissionRepo;
         _auditRepo = auditRepo;
+        _queryContext = queryContext;
     }
 
     public async Task HandleAsync(UpdateRolePermissionsCommand command, CancellationToken ct = default)
     {
         var role = await _tenantRepo.GetRoleByPublicIdAsync(command.RolePublicId, ct)
             ?? throw new NotFoundException("TenantRole", command.RolePublicId);
+
+        if (!string.IsNullOrEmpty(_queryContext.TenantRole) &&
+            string.Equals(role.Name, _queryContext.TenantRole, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new UnauthorizedActionException("modify your own role's permissions");
+        }
 
         var allPerms = await _permissionRepo.GetAllAsync(ct);
         var allCodes = allPerms.Select(p => p.Code).ToHashSet();

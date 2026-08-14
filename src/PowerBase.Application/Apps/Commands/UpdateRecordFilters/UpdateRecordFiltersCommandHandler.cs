@@ -12,23 +12,35 @@ public class UpdateRecordFiltersCommandHandler
     private readonly IAppRolePermissionRepository _permRepo;
     private readonly IAppTableRepository _tableRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IQueryContext _queryContext;
+    private readonly IAppUserRepository _appUserRepo;
 
     public UpdateRecordFiltersCommandHandler(
         IAppRoleRepository appRoleRepo,
         IAppRolePermissionRepository permRepo,
         IAppTableRepository tableRepo,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IQueryContext queryContext,
+        IAppUserRepository appUserRepo)
     {
         _appRoleRepo = appRoleRepo;
         _permRepo = permRepo;
         _tableRepo = tableRepo;
         _auditRepo = auditRepo;
+        _queryContext = queryContext;
+        _appUserRepo = appUserRepo;
     }
 
     public async Task HandleAsync(UpdateRecordFiltersCommand command, CancellationToken ct = default)
     {
         var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId, ct)
                    ?? throw new NotFoundException("AppRole", command.RolePublicId);
+
+        var currentUserRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(role.AppId, _queryContext.UserId, ct);
+        if (currentUserRolePublicId == command.RolePublicId)
+        {
+            throw new UnauthorizedActionException("modify record filters for your own app role");
+        }
 
         var rows = new List<AppRoleRecordFilter>();
         foreach (var f in command.Filters)
