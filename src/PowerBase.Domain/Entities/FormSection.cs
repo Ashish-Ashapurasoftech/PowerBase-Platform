@@ -12,4 +12,17 @@ public class FormSection
     public string? ColumnWidths { get; set; }
     public List<FormElement> Elements { get; set; } = new();   // kept for backward-compat; populated from Blocks by the repo
     public List<FormSectionBlock> Blocks { get; set; } = [];
+
+    // ── Grid-snap canvas (Phase 8) ──
+    public int GridCols { get; set; } = 12;
+    public long? FormPageId { get; set; }
+    public bool IsPinned { get; set; }
+    public string? BackgroundColor { get; set; }
+    public string? BackgroundType { get; set; }
+    public string? BackgroundImage { get; set; }
+    public string? BorderColor { get; set; }
+    public int? BorderWidth { get; set; }
+    public bool ShowDividers { get; set; } = true;
+    public string? DividerColor { get; set; }
+    public int? DividerWidthPx { get; set; }
 }

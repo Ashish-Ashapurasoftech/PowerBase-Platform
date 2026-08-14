@@ -290,11 +290,23 @@ public class FormsController : ControllerBase
                     e.HelpTextOverride,
                     e.IsReadOnly,
                     e.IsRequired,
-                    e.DisplayAs)).ToList()
-            )).ToList()
+                    e.DisplayAs,
+                    e.ColStart, e.RowStart, e.ColSpan, e.RowSpan,
+                    e.GroupId, e.CloneGroupId, e.PagePublicId, e.TextStyle,
+                    e.BackgroundColor, e.BorderColor, e.BorderWidth,
+                    e.ContentWidthMode, e.ContentWidthValue, e.ContentWidthUnit)).ToList(),
+                b.ColStart, b.ColSpan, b.BackgroundType, b.BackgroundImage,
+                b.DividerMode, b.DividerColor, b.DividerWidthPx
+            )).ToList(),
+            s.GridCols, s.PagePublicId, s.IsPinned, s.BackgroundColor, s.BackgroundType,
+            s.BackgroundImage, s.BorderColor, s.BorderWidth, s.ShowDividers,
+            s.DividerColor, s.DividerWidthPx
         )).ToList();
 
-        await _saveLayoutHandler.HandleAsync(new SaveFormLayoutCommand(publicId, sections), ct);
+        var pages = request.Pages?.Select(p => new FormPageLayout(p.PublicId, p.Heading, p.DisplayOrder)).ToList();
+
+        await _saveLayoutHandler.HandleAsync(new SaveFormLayoutCommand(
+            publicId, sections, pages, request.PageNavMode, request.AlwaysTabsOnView, request.ThemeJson), ct);
         return NoContent();
     }
 
@@ -437,7 +449,17 @@ public class FormsController : ControllerBase
 
     private static FormLayoutResponse MapToLayoutResponse(FormLayoutDetail layout) => new()
     {
-        FormId   = layout.FormId,
+        FormId           = layout.FormId,
+        PageNavMode      = layout.PageNavMode,
+        AlwaysTabsOnView = layout.AlwaysTabsOnView,
+        ThemeJson        = layout.ThemeJson,
+        Pages            = layout.Pages.Select(p => new FormPageResponse
+        {
+            DbId         = p.DbId,
+            Id           = p.Id,
+            Heading      = p.Heading,
+            DisplayOrder = p.DisplayOrder,
+        }).ToList(),
         Sections = layout.Sections.Select(s => new FormSectionResponse
         {
             DbId         = s.DbId,
@@ -447,6 +469,17 @@ public class FormsController : ControllerBase
             ColumnWidths = s.ColumnWidths,
             IsCollapsed  = s.IsCollapsed,
             DisplayOrder = s.DisplayOrder,
+            GridCols        = s.GridCols,
+            PageId          = s.PageId,
+            IsPinned        = s.IsPinned,
+            BackgroundColor = s.BackgroundColor,
+            BackgroundType  = s.BackgroundType,
+            BackgroundImage = s.BackgroundImage,
+            BorderColor     = s.BorderColor,
+            BorderWidth     = s.BorderWidth,
+            ShowDividers    = s.ShowDividers,
+            DividerColor    = s.DividerColor,
+            DividerWidthPx  = s.DividerWidthPx,
             Blocks       = s.Blocks.Select(b => new FormBlockResponse
             {
                 DbId            = b.DbId,
@@ -455,6 +488,13 @@ public class FormsController : ControllerBase
                 BackgroundColor = b.BackgroundColor,
                 Width           = b.Width,
                 DisplayOrder    = b.DisplayOrder,
+                ColStart        = b.ColStart,
+                ColSpan         = b.ColSpan,
+                BackgroundType  = b.BackgroundType,
+                BackgroundImage = b.BackgroundImage,
+                DividerMode     = b.DividerMode,
+                DividerColor    = b.DividerColor,
+                DividerWidthPx  = b.DividerWidthPx,
                 Elements        = b.Elements.Select(e => new FormElementResponse
                 {
                     DbId             = e.DbId,
@@ -474,6 +514,20 @@ public class FormsController : ControllerBase
                     IsRequired       = e.IsRequired,
                     DisplayAs        = e.DisplayAs,
                     DisplayOrder     = e.DisplayOrder,
+                    ColStart          = e.ColStart,
+                    RowStart          = e.RowStart,
+                    ColSpan           = e.ColSpan,
+                    RowSpan           = e.RowSpan,
+                    GroupId           = e.GroupId,
+                    CloneGroupId      = e.CloneGroupId,
+                    PageId            = e.PageId,
+                    TextStyle         = e.TextStyle,
+                    BackgroundColor   = e.BackgroundColor,
+                    BorderColor       = e.BorderColor,
+                    BorderWidth       = e.BorderWidth,
+                    ContentWidthMode  = e.ContentWidthMode,
+                    ContentWidthValue = e.ContentWidthValue,
+                    ContentWidthUnit  = e.ContentWidthUnit,
                 }).ToList(),
             }).ToList(),
         }).ToList(),

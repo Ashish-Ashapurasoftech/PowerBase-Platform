@@ -4,6 +4,18 @@ public class FormLayoutResponse
 {
     public Guid FormId { get; init; }
     public List<FormSectionResponse> Sections { get; init; } = [];
+    public List<FormPageResponse> Pages { get; init; } = [];
+    public string PageNavMode { get; init; } = "tabs";
+    public bool AlwaysTabsOnView { get; init; } = true;
+    public string? ThemeJson { get; init; }
+}
+
+public class FormPageResponse
+{
+    public long DbId { get; init; }
+    public Guid Id { get; init; }
+    public string Heading { get; init; } = "Page";
+    public int DisplayOrder { get; init; }
 }
 
 public class FormSectionResponse
@@ -16,6 +28,17 @@ public class FormSectionResponse
     public bool IsCollapsed { get; init; }
     public int DisplayOrder { get; init; }
     public List<FormBlockResponse> Blocks { get; init; } = [];
+    public int GridCols { get; init; } = 12;
+    public Guid? PageId { get; init; }
+    public bool IsPinned { get; init; }
+    public string? BackgroundColor { get; init; }
+    public string? BackgroundType { get; init; }
+    public string? BackgroundImage { get; init; }
+    public string? BorderColor { get; init; }
+    public int? BorderWidth { get; init; }
+    public bool ShowDividers { get; init; } = true;
+    public string? DividerColor { get; init; }
+    public int? DividerWidthPx { get; init; }
 }
 
 public class FormBlockResponse
@@ -27,6 +50,13 @@ public class FormBlockResponse
     public int? Width { get; init; }
     public int DisplayOrder { get; init; }
     public List<FormElementResponse> Elements { get; init; } = [];
+    public int? ColStart { get; init; }
+    public int? ColSpan { get; init; }
+    public string? BackgroundType { get; init; }
+    public string? BackgroundImage { get; init; }
+    public string? DividerMode { get; init; }
+    public string? DividerColor { get; init; }
+    public int? DividerWidthPx { get; init; }
 }
 
 public class FormElementResponse
@@ -48,4 +78,18 @@ public class FormElementResponse
     public bool IsRequired { get; init; }
     public string? DisplayAs { get; init; }
     public int DisplayOrder { get; init; }
+    public int? ColStart { get; init; }
+    public int? RowStart { get; init; }
+    public int? ColSpan { get; init; }
+    public int? RowSpan { get; init; }
+    public Guid? GroupId { get; init; }
+    public Guid? CloneGroupId { get; init; }
+    public Guid? PageId { get; init; }
+    public string? TextStyle { get; init; }
+    public string? BackgroundColor { get; init; }
+    public string? BorderColor { get; init; }
+    public int? BorderWidth { get; init; }
+    public string? ContentWidthMode { get; init; }
+    public int? ContentWidthValue { get; init; }
+    public string? ContentWidthUnit { get; init; }
 }
