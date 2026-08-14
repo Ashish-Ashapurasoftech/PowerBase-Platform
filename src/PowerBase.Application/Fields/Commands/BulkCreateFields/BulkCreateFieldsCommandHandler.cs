@@ -108,6 +108,7 @@ public class BulkCreateFieldsCommandHandler
                 IsFilterable = true,
                 IsReportable = true,
                 IsAuditable = item.IsAuditable,
+                IsEncrypted = item.IsEncrypted,
             };
 
             var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);

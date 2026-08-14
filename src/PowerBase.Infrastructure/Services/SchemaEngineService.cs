@@ -63,10 +63,17 @@ public class SchemaEngineService : ISchemaEngineService
         var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(connection.ConnectionString);
         var supportsEnclaves = builder.ColumnEncryptionSetting == Microsoft.Data.SqlClient.SqlConnectionColumnEncryptionSetting.Enabled;
 
+        // Check if the parent App has encryption enabled — if so, ALL columns store ciphertext
+        const string appEncryptedSql = "SELECT IsEncrypted FROM meta.App WHERE Id = @appId AND IsDeleted = 0";
+        var appIsEncrypted = await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(appEncryptedSql, new { appId = table.AppId }, cancellationToken: ct));
+
+        var shouldEncryptColumn = appIsEncrypted || field.IsEncrypted;
+
         var collationClause = "";
         var encryptionClause = "";
 
-        if (field.IsEncrypted)
+        if (shouldEncryptColumn)
         {
             if (supportsEnclaves)
             {
@@ -77,6 +84,7 @@ public class SchemaEngineService : ISchemaEngineService
             }
             else
             {
+                // Local AES encryption: store as VARCHAR(MAX) to hold the Base64 ciphertext
                 sqlDataType = "VARCHAR(MAX)";
             }
         }

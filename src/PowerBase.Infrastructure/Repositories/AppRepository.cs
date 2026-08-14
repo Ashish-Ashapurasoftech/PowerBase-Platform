@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
+using PowerBase.Domain.ValueObjects;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
@@ -225,10 +226,18 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             var row = await transaction.Connection!.QuerySingleAsync<(Guid PublicId, long Id)>(
                 new CommandDefinition(InsertSql, parameters, transaction, cancellationToken: ct));
             
-            if (app.IsEncrypted && string.IsNullOrEmpty(app.SecurityOptions))
+            if (app.IsEncrypted)
             {
-                var wrappedDek = await _encryptionService.GenerateAndWrapDekAsync(QueryContext.TenantId, row.Id, ct);
-                await transaction.Connection!.ExecuteAsync("UPDATE meta.App SET SecurityOptions = @wrappedDek WHERE Id = @Id", new { wrappedDek, row.Id }, transaction);
+                var security = string.IsNullOrEmpty(app.SecurityOptions) || !app.SecurityOptions.TrimStart().StartsWith("{")
+                    ? new AppSecurityOptionsSettings()
+                    : System.Text.Json.JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
+
+                if (string.IsNullOrEmpty(security.WrappedDek))
+                {
+                    security.WrappedDek = await _encryptionService.GenerateAndWrapDekAsync(QueryContext.TenantId, row.Id, ct);
+                    var serializedSecurity = System.Text.Json.JsonSerializer.Serialize(security);
+                    await transaction.Connection!.ExecuteAsync("UPDATE meta.App SET SecurityOptions = @serializedSecurity WHERE Id = @Id", new { serializedSecurity, row.Id }, transaction);
+                }
             }
             return row;
         }
@@ -237,10 +246,18 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         var insertedRow = await connection.QuerySingleAsync<(Guid PublicId, long Id)>(
             new CommandDefinition(InsertSql, parameters, cancellationToken: ct));
 
-        if (app.IsEncrypted && string.IsNullOrEmpty(app.SecurityOptions))
+        if (app.IsEncrypted)
         {
-            var wrappedDek = await _encryptionService.GenerateAndWrapDekAsync(QueryContext.TenantId, insertedRow.Id, ct);
-            await connection.ExecuteAsync("UPDATE meta.App SET SecurityOptions = @wrappedDek WHERE Id = @Id", new { wrappedDek, Id = insertedRow.Id });
+            var security = string.IsNullOrEmpty(app.SecurityOptions) || !app.SecurityOptions.TrimStart().StartsWith("{")
+                ? new AppSecurityOptionsSettings()
+                : System.Text.Json.JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
+
+            if (string.IsNullOrEmpty(security.WrappedDek))
+            {
+                security.WrappedDek = await _encryptionService.GenerateAndWrapDekAsync(QueryContext.TenantId, insertedRow.Id, ct);
+                var serializedSecurity = System.Text.Json.JsonSerializer.Serialize(security);
+                await connection.ExecuteAsync("UPDATE meta.App SET SecurityOptions = @serializedSecurity WHERE Id = @Id", new { serializedSecurity, Id = insertedRow.Id });
+            }
         }
 
         return insertedRow;

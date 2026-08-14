@@ -9,4 +9,5 @@ public record CreateFieldCommand(
     bool IsRequired,
     bool IsAuditable = true,
     string? Settings = null,
-    string? DefaultValue = null);
+    string? DefaultValue = null,
+    bool IsEncrypted = false);

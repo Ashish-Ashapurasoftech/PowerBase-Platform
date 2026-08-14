@@ -85,13 +85,24 @@ public class UpdateFieldCommandHandler
             }
         }
 
+        // ── Encryption lock ─────────────────────────────────────────────────────
+        // Once a field is encrypted its existing data is ciphertext. Allowing the
+        // flag to be toggled back to false would make the ciphertext unreadable.
+        if (existing.IsEncrypted && !command.IsEncrypted)
+        {
+            throw new ValidationException(new Dictionary<string, string[]>
+            {
+                ["IsEncrypted"] = ["A field that has been encrypted cannot be un-encrypted. Existing data would become unreadable."]
+            });
+        }
+
         var affected = await _fieldRepo.UpdateAsync(
             existing.PublicId, table.Id,
             command.Name, command.Label, command.Description,
             command.IsRequired, command.DefaultValue,
             command.IsSearchable, command.IsSortable,
             command.IsFilterable, command.IsReportable, command.IsAuditable,
-            command.IsUnique, command.Settings, ct);
+            command.IsUnique, command.IsEncrypted, command.Settings, ct);
 
         if (affected == 0)
             throw new NotFoundException("Field", command.FieldFid);

@@ -81,6 +81,7 @@ public class CreateAppCommandHandler
             Status = "Active",
             CreatedOn = now,
             CreatedBy = _queryContext.UserId,
+            IsEncrypted = command.IsEncrypted
         };
 
         await _uow.BeginAsync(ct);
@@ -209,7 +210,7 @@ public class CreateAppCommandHandler
         // Process Custom Fields
         if (spec.Fields != null && spec.Fields.Any())
         {
-            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name, Settings: f.Settings)).ToList();
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name, Settings: f.Settings, IsEncrypted: f.IsEncrypted)).ToList();
             await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
         }
     }

@@ -94,6 +94,8 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             IsSearchable = @isSearchable, IsSortable = @isSortable,
             IsFilterable = @isFilterable, IsReportable = @isReportable, IsAuditable = @isAuditable,
             IsUnique = @isUnique,
+            -- IsEncrypted may only move false→true; the handler enforces this — never set to 0 here
+            IsEncrypted = CASE WHEN IsEncrypted = 1 THEN 1 ELSE @isEncrypted END,
             Settings = @settings,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
@@ -258,7 +260,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<int> UpdateAsync(Guid publicId, long tableId, string name, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
-        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, string? settings, CancellationToken ct = default)
+        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, string? settings, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
@@ -266,7 +268,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             {
                 publicId, tableId, name, label, description,
                 isRequired, defaultValue, isSearchable, isSortable,
-                isFilterable, isReportable, isAuditable, isUnique, settings,
+                isFilterable, isReportable, isAuditable, isUnique, isEncrypted, settings,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

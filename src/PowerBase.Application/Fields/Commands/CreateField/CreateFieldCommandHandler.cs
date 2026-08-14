@@ -97,6 +97,7 @@ public class CreateFieldCommandHandler
             IsFilterable = true,
             IsReportable = true,
             IsAuditable = command.IsAuditable,
+            IsEncrypted = command.IsEncrypted,
         };
 
         var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);

@@ -28,7 +28,8 @@ public class AesEncryptionService : IEncryptionService
         {
             if (_cachedMasterKey != null) return _cachedMasterKey;
 
-            var isLocal = _configuration.GetValue<bool>("Encryption:IsEncryptionLocal");
+            var isLocalStr = _configuration["Encryption:IsEncryptionLocal"];
+            var isLocal = !string.IsNullOrEmpty(isLocalStr) && bool.Parse(isLocalStr);
             string masterKeyBase64;
 
             if (isLocal)
@@ -43,7 +44,7 @@ public class AesEncryptionService : IEncryptionService
                 var keyName = _configuration["Encryption:MasterKeyName"] 
                     ?? throw new InvalidOperationException("Encryption:MasterKeyName is not configured.");
 
-                var client = new SecretClient(new Uri(kvUrl), new DefaultAzureCredential());
+                var client = new SecretClient(new Uri(kvUrl), new Azure.Identity.DefaultAzureCredential());
                 var secret = await client.GetSecretAsync(keyName, cancellationToken: ct);
                 masterKeyBase64 = secret.Value.Value;
             }
