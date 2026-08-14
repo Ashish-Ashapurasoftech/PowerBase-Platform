@@ -148,7 +148,7 @@ public class AppSeeder : IAppSeeder
             DisplayOrder = 1,
             Blocks       = [defaultBlock],
         };
-        await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct);
+        await _formRepo.SaveLayoutAsync(formId, [defaultSection], ct: ct);
 
         // Seed default table-permission rows for every existing role in the app
         await _permRepo.SeedDefaultsForTableAsync(table.Id, table.AppId, ct);

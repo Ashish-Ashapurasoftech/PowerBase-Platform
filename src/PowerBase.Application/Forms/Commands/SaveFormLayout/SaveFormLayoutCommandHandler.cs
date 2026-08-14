@@ -64,12 +64,31 @@ public class SaveFormLayoutCommandHandler
             Name        = s.Name,
             ColumnCount = s.Blocks.Count,
             IsCollapsed = s.IsCollapsed,
+            GridCols        = s.GridCols ?? 12,
+            // PagePublicId is resolved to a FormPageId by the repository, which knows the
+            // freshly-(re)inserted page ids — this layer only carries the public identity through.
+            BackgroundColor = s.BackgroundColor,
+            BackgroundType  = s.BackgroundType,
+            BackgroundImage = s.BackgroundImage,
+            BorderColor     = s.BorderColor,
+            BorderWidth     = s.BorderWidth,
+            ShowDividers    = s.ShowDividers ?? true,
+            DividerColor    = s.DividerColor,
+            DividerWidthPx  = s.DividerWidthPx,
+            IsPinned        = s.IsPinned ?? false,
             Blocks      = s.Blocks.Select(b => new FormSectionBlock
             {
                 PublicId        = b.PublicId ?? Guid.Empty,
                 Heading         = b.Heading,
                 BackgroundColor = b.BackgroundColor,
                 Width           = b.Width,
+                ColStart        = b.ColStart,
+                ColSpan         = b.ColSpan,
+                BackgroundType  = b.BackgroundType,
+                BackgroundImage = b.BackgroundImage,
+                DividerMode     = b.DividerMode,
+                DividerColor    = b.DividerColor,
+                DividerWidthPx  = b.DividerWidthPx,
                 Elements        = b.Elements.Select(e => new FormElement
                 {
                     PublicId         = e.PublicId ?? Guid.Empty,
@@ -87,11 +106,48 @@ public class SaveFormLayoutCommandHandler
                     IsReadOnly       = e.IsReadOnly,
                     IsRequired       = e.IsRequired,
                     DisplayAs        = e.DisplayAs,
+                    ColStart          = e.ColStart,
+                    RowStart          = e.RowStart,
+                    ColSpan           = e.ColSpan,
+                    RowSpan           = e.RowSpan,
+                    GroupId           = e.GroupId,
+                    CloneGroupId      = e.CloneGroupId,
+                    TextStyle         = e.TextStyle,
+                    BackgroundColor   = e.BackgroundColor,
+                    BorderColor       = e.BorderColor,
+                    BorderWidth       = e.BorderWidth,
+                    ContentWidthMode  = e.ContentWidthMode,
+                    ContentWidthValue = e.ContentWidthValue,
+                    ContentWidthUnit  = e.ContentWidthUnit,
                 }).ToList(),
             }).ToList(),
         }).ToList();
 
-        await _formRepo.SaveLayoutAsync(form.Id, sections, ct);
+        // Section/element -> page linkage is carried as a PublicId (FormSectionLayout.PagePublicId /
+        // FormElementLayout.PagePublicId) alongside the page list itself, since the FormPage rows
+        // are being re-inserted in this same save and don't have stable internal ids yet either.
+        var pages = command.Pages?.Select(p => new FormPage
+        {
+            PublicId     = p.PublicId ?? Guid.Empty,
+            FormId       = form.Id,
+            Heading      = p.Heading,
+            DisplayOrder = p.DisplayOrder,
+        }).ToList();
+
+        var sectionPageLinks = command.Sections
+            .Select((s, i) => (Section: sections[i], PagePublicId: s.PagePublicId))
+            .Where(x => x.PagePublicId.HasValue)
+            .ToDictionary(x => x.Section, x => x.PagePublicId!.Value);
+
+        var elementPageLinks = command.Sections
+            .SelectMany(s => s.Blocks)
+            .SelectMany(b => b.Elements)
+            .Zip(sections.SelectMany(s => s.Blocks).SelectMany(b => b.Elements))
+            .Where(x => x.First.PagePublicId.HasValue)
+            .ToDictionary(x => x.Second, x => x.First.PagePublicId!.Value);
+
+        await _formRepo.SaveLayoutAsync(form.Id, sections, pages, command.PageNavMode,
+            command.AlwaysTabsOnView, command.ThemeJson, sectionPageLinks, elementPageLinks, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.Form, form.Id.ToString(),

@@ -10,4 +10,13 @@ public class FormSectionBlock
     public int? Width { get; set; }
     public int DisplayOrder { get; set; }
     public List<FormElement> Elements { get; set; } = [];
+
+    // ── Grid-snap canvas (Phase 8) ──
+    public int? ColStart { get; set; }
+    public int? ColSpan { get; set; }
+    public string? BackgroundType { get; set; }
+    public string? BackgroundImage { get; set; }
+    public string? DividerMode { get; set; }
+    public string? DividerColor { get; set; }
+    public int? DividerWidthPx { get; set; }
 }
