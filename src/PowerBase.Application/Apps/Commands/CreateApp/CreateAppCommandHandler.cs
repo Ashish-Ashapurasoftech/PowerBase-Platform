@@ -94,6 +94,7 @@ public class CreateAppCommandHandler
                 Name = "Administrator",
                 IsSystem = true,
                 IsDefault = false,
+                Rank = 1,
             }, _uow.Transaction, ct);
 
             await _appRoleRepo.SetPermissionsAsync(adminRoleId, new[]
@@ -115,6 +116,7 @@ public class CreateAppCommandHandler
                 Name = "Participant",
                 IsSystem = true,
                 IsDefault = false,
+                Rank = 2,
             }, _uow.Transaction, ct);
 
             await _appRoleRepo.SetPermissionsAsync(participantRoleId, new[]
@@ -133,6 +135,7 @@ public class CreateAppCommandHandler
                 Name = "Viewer",
                 IsSystem = true,
                 IsDefault = true,
+                Rank = 3,
             }, _uow.Transaction, ct);
 
             await _appRoleRepo.SetPermissionsAsync(viewerRoleId, new[]

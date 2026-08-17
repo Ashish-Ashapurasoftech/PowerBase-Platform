@@ -191,7 +191,10 @@ public class DefaultReportSettingsHandlerTests
         Name: "Viewer",
         IsDefault: false,
         IsSystem: false,
-        Permissions: []
+        Permissions: [],
+        ManageableRolesType: "None",
+        Rank: null,
+        ManageableRolePublicIds: Array.Empty<Guid>()
     );
 
     private static Report MakeReport(Guid publicId, bool isDefault = false, string name = "Report") => new()

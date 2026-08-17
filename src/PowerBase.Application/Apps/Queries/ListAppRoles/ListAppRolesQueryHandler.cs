@@ -7,7 +7,10 @@ public record AppRoleResult(
     string Name,
     bool IsDefault,
     bool IsSystem,
-    IReadOnlyList<string> Permissions);
+    IReadOnlyList<string> Permissions,
+    string ManageableRolesType,
+    int? Rank,
+    IReadOnlyList<Guid> ManageableRolePublicIds);
 
 public class ListAppRolesQueryHandler
 {
@@ -25,6 +28,6 @@ public class ListAppRolesQueryHandler
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
         var roles = await _appRoleRepo.ListDetailsByAppIdAsync(appId, ct);
         return roles.Select(r => new AppRoleResult(
-            r.PublicId, r.Name, r.IsDefault, r.IsSystem, r.Permissions)).ToList();
+            r.PublicId, r.Name, r.IsDefault, r.IsSystem, r.Permissions, r.ManageableRolesType, r.Rank, r.ManageableRolePublicIds)).ToList();
     }
 }
