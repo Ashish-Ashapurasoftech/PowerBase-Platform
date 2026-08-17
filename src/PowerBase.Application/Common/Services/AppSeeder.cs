@@ -15,6 +15,7 @@ public class AppSeeder : IAppSeeder
     private readonly IFieldTypeRepository _fieldTypeRepo;
     private readonly IFormRepository _formRepo;
     private readonly IAppRolePermissionRepository _permRepo;
+    private readonly IFieldNameResolver _fieldNameResolver;
 
     public AppSeeder(
         IAppTableRepository tableRepo,
@@ -23,7 +24,8 @@ public class AppSeeder : IAppSeeder
         IReportRepository reportRepo,
         IFieldTypeRepository fieldTypeRepo,
         IFormRepository formRepo,
-        IAppRolePermissionRepository permRepo)
+        IAppRolePermissionRepository permRepo,
+        IFieldNameResolver fieldNameResolver)
     {
         _tableRepo = tableRepo;
         _schemaEngine = schemaEngine;
@@ -32,6 +34,7 @@ public class AppSeeder : IAppSeeder
         _fieldTypeRepo = fieldTypeRepo;
         _formRepo = formRepo;
         _permRepo = permRepo;
+        _fieldNameResolver = fieldNameResolver;
     }
 
     public async Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, bool seedDefaultViews = true, CancellationToken ct = default)
@@ -52,7 +55,9 @@ public class AppSeeder : IAppSeeder
         var dateTimeTypeId = await _fieldTypeRepo.GetIdByCodeAsync("DateTime", ct);
 
         // Fid values match Quickbase conventions: Record ID# = 3, system fields occupy 1–5.
-        (string Name, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order, int Fid)[] systemFieldDefs =
+        // "Label" here is the human-readable display value; Name is auto-generated from it
+        // (S_<slug>, since these are system fields) and never shown to users.
+        (string Label, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order, int Fid)[] systemFieldDefs =
         [
             ("Record ID#",       numberTypeId,   "Id",         true,  false, 1, 3),
             ("Date Created",     dateTimeTypeId, "CreatedOn",  true,  true,  2, 1),
@@ -62,13 +67,14 @@ public class AppSeeder : IAppSeeder
         ];
 
         var seededFids = new Dictionary<string, int>();
-        foreach (var (name, typeId, physCol, sortable, filterable, order, fid) in systemFieldDefs)
+        foreach (var (label, typeId, physCol, sortable, filterable, order, fid) in systemFieldDefs)
         {
             var f = new AppField
             {
                 AppTableId = table.Id,
                 FieldTypeId = typeId,
-                Name = name,
+                Name = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, label, isSystem: true, ct),
+                Label = label,
                 PhysicalColumnName = physCol,
                 IsSystem = true,
                 IsReportable = true,
@@ -79,7 +85,7 @@ public class AppSeeder : IAppSeeder
                 Fid = fid,
             };
             await _fieldRepo.CreateAsync(f, ct);
-            seededFids[name] = fid;
+            seededFids[label] = fid;
         }
 
         // Default reports and Main Form are skipped when the caller is supplying its own (import) —

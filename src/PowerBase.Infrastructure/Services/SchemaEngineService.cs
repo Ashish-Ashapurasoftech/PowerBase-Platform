@@ -10,7 +10,7 @@ public class SchemaEngineService : ISchemaEngineService
 {
     private readonly ITenantConnectionFactory _connectionFactory;
 
-    private const string GetFieldTypeSqlDataTypeSql = "SELECT SqlDataType FROM core.FieldType WHERE Id = @id AND IsActive = 1";
+    private const string GetFieldTypeSqlDataTypeSql = "SELECT SqlDataType FROM core.FieldType WHERE Id = @id";
 
     public SchemaEngineService(ITenantConnectionFactory connectionFactory)
     {

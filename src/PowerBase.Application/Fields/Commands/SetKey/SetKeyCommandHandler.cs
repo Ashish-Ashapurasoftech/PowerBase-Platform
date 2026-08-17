@@ -100,7 +100,7 @@ public class SetKeyCommandHandler
         {
             await _fieldRepo.UpdateAsync(
                 newKeyField.PublicId, table.Id,
-                newKeyField.Name, newKeyField.Label, newKeyField.Description,
+                newKeyField.Label, newKeyField.Description,
                 isRequired: true, newKeyField.DefaultValue,
                 newKeyField.IsSearchable, newKeyField.IsSortable,
                 newKeyField.IsFilterable, newKeyField.IsReportable, newKeyField.IsAuditable,
@@ -177,8 +177,8 @@ public class SetKeyCommandHandler
         else
         {
             var creationTypeCode = newKeyField?.TypeCode ?? "Reference";
-            var name = $"Related {parentTable.SingularLabel ?? parentTable.Name}";
-            var created = await _fieldFactory.CreateAsync(childTable, creationTypeCode, name, null, isRequired: false,
+            var label = $"Related {parentTable.SingularLabel ?? parentTable.Name}";
+            var created = await _fieldFactory.CreateAsync(childTable, creationTypeCode, label, isRequired: false,
                 new ReferenceSettings { ParentTableId = parentTable.Id }, ct);
             if (creationTypeCode != "Reference")
             {

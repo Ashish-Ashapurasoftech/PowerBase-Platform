@@ -85,6 +85,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return ids.AsList();
     }
 
+    public async Task<IReadOnlyDictionary<Guid, long>> GetIdsByPublicIdsMapAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default)
+    {
+        if (publicIds.Count == 0) return new Dictionary<Guid, long>();
+        var sql = $"SELECT PublicId, Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @publicIds AND IsDeleted = 0";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<(Guid PublicId, long Id)>(new CommandDefinition(sql, new { publicIds }, cancellationToken: ct));
+        return rows.ToDictionary(r => r.PublicId, r => r.Id);
+    }
+
     public async Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(referenceFid);
@@ -366,6 +375,47 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
         if (affected == 0) throw new NotFoundException("Record", publicId);
+    }
+
+    public async Task<int> MassUpdateAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> recordIds,
+        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
+    {
+        var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
+        if (relevantFields.Count == 0 || recordIds.Count == 0) return 0;
+
+        var parameters = new DynamicParameters();
+        parameters.Add("ids", recordIds);
+        parameters.Add("modifiedBy", QueryContext.UserId);
+
+        var setClauses = new List<string>();
+        foreach (var f in relevantFields)
+        {
+            var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+            if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
+            {
+                var endCol = PhysicalNaming.EndColumnName(f.Fid!.Value);
+                var (startVal, endVal) = SplitRangeValue(values[(long)f.Fid.Value]);
+                setClauses.Add($"{col} = @{col}"); parameters.Add(col, startVal);
+                setClauses.Add($"{endCol} = @{endCol}"); parameters.Add(endCol, endVal);
+            }
+            else
+            {
+                setClauses.Add($"{col} = @{col}"); parameters.Add(col, values[(long)f.Fid.Value]);
+            }
+        }
+
+        // A single UPDATE statement is implicitly transactional in SQL Server — either every matched
+        // row is written or none is, satisfying the all-or-nothing requirement without an explicit
+        // BEGIN TRAN (and without needing per-record round trips, since every record gets the same values).
+        var sql = $"""
+            UPDATE {PhysicalNaming.FullTableName(table.Id)}
+            SET {string.Join(", ", setClauses)}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+            WHERE Id IN @ids AND IsDeleted = 0
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
     public async Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default)
@@ -763,6 +813,21 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
+    public async Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, CancellationToken ct = default)
+    {
+        var col = PhysicalNaming.ColumnName(field.Fid!.Value);
+        var sql = $"""
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1 FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0 AND {col} = @value
+                  AND (@excludeRecordId IS NULL OR Id <> @excludeRecordId)
+            ) THEN 1 ELSE 0 END AS BIT)
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(sql, new { value, excludeRecordId }, cancellationToken: ct));
     }
 
     public async Task<bool> HasNullsAsync(AppTable table, AppField field, CancellationToken ct = default)

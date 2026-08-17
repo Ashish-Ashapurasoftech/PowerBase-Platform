@@ -56,11 +56,10 @@ public class RelationshipsController : ControllerBase
             appId,
             request.ParentTablePublicId,
             request.ChildTablePublicId,
-            request.ReferenceFieldName,
             request.ReferenceFieldLabel,
             request.IsReferenceRequired,
-            request.Lookups.Select(l => new CreateLookupSpec(l.SourceFid, l.Name, l.Label)).ToList(),
-            request.Summaries.Select(s => new CreateSummarySpec(s.Name, s.Label, s.Function, s.TargetFid)).ToList(),
+            request.Lookups.Select(l => new CreateLookupSpec(l.SourceFid, l.Label)).ToList(),
+            request.Summaries.Select(s => new CreateSummarySpec(s.Label, s.Function, s.TargetFid)).ToList(),
             request.ReferenceFieldFid);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<RelationshipDto>(result));
@@ -107,7 +106,7 @@ public class RelationshipsController : ControllerBase
     public async Task<IActionResult> AddLookups(Guid appId, Guid id, [FromBody] AddLookupFieldsRequest request, CancellationToken ct)
     {
         var command = new AddLookupFieldsCommand(id,
-            request.Lookups.Select(l => new AddLookupSpec(l.SourceFid, l.Name, l.Label)).ToList());
+            request.Lookups.Select(l => new AddLookupSpec(l.SourceFid, l.Label)).ToList());
         var result = await _addLookups.HandleAsync(command, ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
@@ -121,7 +120,7 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> AddSummary(Guid appId, Guid id, [FromBody] AddSummaryFieldRequest request, CancellationToken ct)
     {
-        var command = new AddSummaryFieldCommand(id, request.Name, request.Label, request.Function, request.TargetFid, request.MatchingCriteria);
+        var command = new AddSummaryFieldCommand(id, request.Label, request.Function, request.TargetFid, request.MatchingCriteria);
         var result = await _addSummary.HandleAsync(command, ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
