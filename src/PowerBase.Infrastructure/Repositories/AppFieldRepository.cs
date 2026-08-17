@@ -94,8 +94,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             IsSearchable = @isSearchable, IsSortable = @isSortable,
             IsFilterable = @isFilterable, IsReportable = @isReportable, IsAuditable = @isAuditable,
             IsUnique = @isUnique,
-            -- IsEncrypted may only move false→true; the handler enforces this — never set to 0 here
-            IsEncrypted = CASE WHEN IsEncrypted = 1 THEN 1 ELSE @isEncrypted END,
+            IsEncrypted = @isEncrypted,
             Settings = @settings,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0

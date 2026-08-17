@@ -149,6 +149,7 @@ public class BulkCreateFieldsCommandHandler
                 Fid = field.Fid,
                 Settings = field.Settings,
                 CreatedOn = DateTime.UtcNow,
+                IsEncrypted = field.IsEncrypted,
             });
         }
 

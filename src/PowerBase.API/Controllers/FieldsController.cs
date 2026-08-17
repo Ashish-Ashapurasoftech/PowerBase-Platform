@@ -177,6 +177,7 @@ public class FieldsController : ControllerBase
         Fid = r.Fid,
         Settings = r.Settings,
         CreatedOn = r.CreatedOn,
+        IsEncrypted = r.IsEncrypted,
     };
 
     private static FieldResponse MapToResponse(AppField f) => new()

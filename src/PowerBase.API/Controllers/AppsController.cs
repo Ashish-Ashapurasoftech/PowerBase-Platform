@@ -277,6 +277,7 @@ public class AppsController : ControllerBase
         Color = result.Color,
         Status = result.Status,
         CreatedOn = result.CreatedOn,
+        IsEncrypted = result.IsEncrypted
     };
 
     private static AppResponse MapToAppResponse(PowerBase.Domain.Entities.App app)
@@ -300,6 +301,7 @@ public class AppsController : ControllerBase
             SecurityOptions = security,
             Status = app.Status,
             CreatedOn = app.CreatedOn,
+            IsEncrypted = app.IsEncrypted,
         };
     }
 
@@ -325,6 +327,7 @@ public class AppsController : ControllerBase
             Status = app.Status,
             CreatedOn = app.CreatedOn,
             OwnerName = app.OwnerName,
+            IsEncrypted = app.IsEncrypted,
         };
     }
 }

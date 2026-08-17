@@ -16,6 +16,7 @@ public class CreateAppResult
     public string? Color { get; init; }
     public string Status { get; init; } = string.Empty;
     public DateTime CreatedOn { get; init; }
+    public bool IsEncrypted { get; init; }
 }
 
 public class CreateAppCommandHandler
@@ -180,6 +181,7 @@ public class CreateAppCommandHandler
                 Color = app.Color,
                 Status = app.Status,
                 CreatedOn = now,
+                IsEncrypted = app.IsEncrypted
             };
         }
         catch

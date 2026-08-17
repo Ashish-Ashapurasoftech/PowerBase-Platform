@@ -86,14 +86,22 @@ public class UpdateFieldCommandHandler
         }
 
         // ── Encryption lock ─────────────────────────────────────────────────────
-        // Once a field is encrypted its existing data is ciphertext. Allowing the
-        // flag to be toggled back to false would make the ciphertext unreadable.
-        if (existing.IsEncrypted && !command.IsEncrypted)
+        // We only allow toggling encryption (ON or OFF) for an existing field if the table has zero records.
+        // Otherwise, existing plaintext/ciphertext data would become unreadable.
+        if (existing.IsEncrypted != command.IsEncrypted)
         {
-            throw new ValidationException(new Dictionary<string, string[]>
+            var recordCount = await _recordRepo.CountAsync(table, Array.Empty<AppField>(), ct: ct);
+            if (recordCount > 0)
             {
-                ["IsEncrypted"] = ["A field that has been encrypted cannot be un-encrypted. Existing data would become unreadable."]
-            });
+                var errorMsg = existing.IsEncrypted 
+                    ? "A field that has been encrypted cannot be un-encrypted if the table has existing records." 
+                    : "Encryption can only be enabled when creating a new field or if the table has no records.";
+                
+                throw new ValidationException(new Dictionary<string, string[]>
+                {
+                    ["IsEncrypted"] = [errorMsg]
+                });
+            }
         }
 
         var affected = await _fieldRepo.UpdateAsync(

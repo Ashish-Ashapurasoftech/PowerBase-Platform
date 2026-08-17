@@ -61,6 +61,7 @@ public class BulkDeleteRecordsCommandHandler
         }
 
         await _recordRepo.BulkDeleteAsync(table, command.RecordPublicIds, ct);
+        await _tableRepo.DecrementRecordCountByAsync(table.Id, command.RecordPublicIds.Count, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Deleted,
