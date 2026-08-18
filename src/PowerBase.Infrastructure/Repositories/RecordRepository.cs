@@ -731,32 +731,17 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             // No sub-field specified: return empty so the frontend uses text mode
             return (new List<string>(), false);
         }
-        else if (field.TypeCode == "User")
-        {
-            // Resolve stored PublicId GUIDs to UserName via meta.AppUser
-            var guidList = processedValues.ToList();
-            if (guidList.Count > 0)
-            {
-                var inList = string.Join(",", guidList.Select((_, idx) => $"@uid{idx}"));
-                var userNameSql = $"""
-                    SELECT CAST(UserPublicId AS NVARCHAR(36)) AS UserPublicId, UserName
-                    FROM meta.AppUser
-                    WHERE CAST(UserPublicId AS NVARCHAR(36)) IN ({inList}) AND IsDeleted = 0
-                    """;
-                var nameParams = new DynamicParameters();
-                for (int idx = 0; idx < guidList.Count; idx++)
-                    nameParams.Add($"uid{idx}", guidList[idx]);
-                
-                var userRows = await connection.QueryAsync<(string UserPublicId, string UserName)>(
-                    new CommandDefinition(userNameSql, nameParams, cancellationToken: ct));
-                var nameMap = userRows.ToDictionary(r => r.UserPublicId, r => r.UserName, StringComparer.OrdinalIgnoreCase);
-                processedValues = guidList.Select(id => 
-                {
-                    var name = nameMap.TryGetValue(id, out var n) ? n : id;
-                    return $"{id}|{name}";
-                });
-            }
-        }
+        // User/MultiUser name resolution intentionally does NOT happen here — CreatedBy/
+        // ModifiedBy/User-typed columns store a plain BIGINT user id (core.[User].Id), not a
+        // meta.AppUser.PublicId GUID, and meta.AppUser lives in the TENANT database this
+        // repository is already connected to, while the actual user directory (core.[User])
+        // is in the CONTROL database, reached only through IUserRepository. A previous version
+        // tried to resolve names in-line here via `CAST(UserPublicId AS NVARCHAR(36))` against
+        // meta.AppUser — that join could never match a plain integer id against a GUID column,
+        // so it silently fell back to "id" as its own "name" for every value (the "2|2" bug).
+        // GetDistinctFieldValuesQueryHandler resolves names afterward via IUserRepository,
+        // the same control-DB lookup RunReportQueryHandler.ResolveUserNamesAsync already uses
+        // for the main record grid.
 
         var distinctList = processedValues.Distinct().ToList();
         bool exceedsLimit = distinctList.Count > limit;
