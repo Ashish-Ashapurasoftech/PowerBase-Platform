@@ -52,11 +52,26 @@ public class UserTokensController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetMyTokens(CancellationToken ct)
+    public async Task<IActionResult> GetMyTokens(
+        [FromQuery] string? search,
+        [FromQuery] bool? isActive,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string sortBy = "createdAt",
+        [FromQuery] bool sortDesc = true,
+        CancellationToken ct = default)
     {
-        var query = new GetMyUserTokensQuery();
+        var query = new GetMyUserTokensQuery
+        {
+            Search = search,
+            IsActive = isActive,
+            Page = page,
+            PageSize = pageSize,
+            SortBy = sortBy,
+            SortDesc = sortDesc
+        };
         var result = await _getMyTokensHandler.HandleAsync(query, ct);
-        return Ok(new { data = result });
+        return Ok(new { data = result.Items, items = result.Items, totalCount = result.TotalCount, page = result.Page, pageSize = result.PageSize });
     }
 
     /// <summary>Rotate a Token</summary>

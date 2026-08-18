@@ -109,8 +109,17 @@ public class UserTokenQueryHandlerTests
             }
         };
 
-        _userTokenRepository.GetMyTokensAsync(1001, 500, Arg.Any<CancellationToken>())
-            .Returns(tokens);
+        _userTokenRepository.GetMyTokensPagedAsync(
+            1001,
+            500,
+            null,
+            null,
+            1,
+            20,
+            "createdAt",
+            true,
+            Arg.Any<CancellationToken>())
+            .Returns((tokens, 1));
 
         var handler = new GetMyUserTokensQueryHandler(_userTokenRepository, _queryContext);
         var query = new GetMyUserTokensQuery();
@@ -120,7 +129,8 @@ public class UserTokenQueryHandlerTests
 
         // Assert
         Assert.NotNull(result);
-        Assert.Single(result);
-        Assert.Equal("My Token", result.First().TokenName);
+        Assert.Equal(1, result.TotalCount);
+        Assert.Single(result.Items);
+        Assert.Equal("My Token", result.Items.First().TokenName);
     }
 }
