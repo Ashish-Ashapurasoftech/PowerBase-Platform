@@ -47,7 +47,7 @@ public class FieldsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Create(Guid tableId, [FromBody] CreateFieldRequest request, CancellationToken ct)
     {
-        var command = new CreateFieldCommand(tableId, request.TypeCode, request.Name, request.Label, request.Description, request.IsRequired, request.IsAuditable, request.Settings, request.DefaultValue);
+        var command = new CreateFieldCommand(tableId, request.TypeCode, request.Name, request.Label, request.Description, request.IsRequired, request.IsAuditable, request.Settings, request.DefaultValue, request.IsEncrypted);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<FieldResponse>(MapToResponse(result)));
     }
@@ -63,7 +63,7 @@ public class FieldsController : ControllerBase
     public async Task<IActionResult> BulkCreate(Guid tableId, [FromBody] BulkCreateFieldsRequest request, CancellationToken ct)
     {
         var items = request.Fields
-            .Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name, f.Label, f.Description, f.IsRequired, f.IsAuditable, f.Settings, f.DefaultValue))
+            .Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name, f.Label, f.Description, f.IsRequired, f.IsAuditable, f.Settings, f.DefaultValue, f.IsEncrypted))
             .ToList();
         var command = new BulkCreateFieldsCommand(tableId, items);
         var results = await _bulkCreateHandler.HandleAsync(command, ct);
@@ -99,7 +99,7 @@ public class FieldsController : ControllerBase
             request.IsRequired, request.DefaultValue,
             request.IsSearchable, request.IsSortable,
             request.IsFilterable, request.IsReportable, request.IsAuditable,
-            request.IsUnique, request.Settings), ct);
+            request.IsUnique, request.IsEncrypted, request.Settings), ct);
         return NoContent();
     }
 
@@ -177,6 +177,7 @@ public class FieldsController : ControllerBase
         Fid = r.Fid,
         Settings = r.Settings,
         CreatedOn = r.CreatedOn,
+        IsEncrypted = r.IsEncrypted,
     };
 
     private static FieldResponse MapToResponse(AppField f) => new()
@@ -197,6 +198,7 @@ public class FieldsController : ControllerBase
         IsAuditable = f.IsAuditable,
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
+        IsEncrypted = f.IsEncrypted,
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,

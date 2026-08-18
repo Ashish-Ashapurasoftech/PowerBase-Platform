@@ -183,6 +183,8 @@ builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService, PowerBase.Application.Records.RecordWriteService>();
 builder.Services.AddScoped<IAppSeeder, AppSeeder>();
+builder.Services.AddScoped<IAzureSearchService, AzureSearchService>();
+builder.Services.AddSingleton<IEncryptionService, AesEncryptionService>();
 
 // Field Settings Validators
 builder.Services.AddScoped<IFieldSettingsValidator, TextSettingsValidator>();
@@ -421,8 +423,10 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
-
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 // Serve statically uploaded files from the configured local path
 var localPath = app.Configuration.GetValue<string>("Storage:LocalPath") ?? "C:\\PowerbaseUploads";
 if (!System.IO.Directory.Exists(localPath))

@@ -14,4 +14,5 @@ public class AppResponse
     public string Status { get; init; } = string.Empty;
     public DateTime CreatedOn { get; init; }
     public string? OwnerName { get; init; }
+    public bool IsEncrypted { get; init; }
 }
