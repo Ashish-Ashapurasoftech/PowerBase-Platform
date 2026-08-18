@@ -19,4 +19,5 @@ public interface IAppTableRepository
     Task DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task IncrementRecordCountAsync(long id, CancellationToken ct = default);
     Task DecrementRecordCountAsync(long id, CancellationToken ct = default);
+    Task DecrementRecordCountByAsync(long id, int count, CancellationToken ct = default);
 }

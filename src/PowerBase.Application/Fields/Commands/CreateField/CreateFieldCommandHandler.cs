@@ -20,6 +20,7 @@ public class CreateFieldResult
     public int? Fid { get; init; }
     public string? Settings { get; init; }
     public DateTime CreatedOn { get; init; }
+    public bool IsEncrypted { get; init; }
 }
 
 public class CreateFieldCommandHandler
@@ -97,6 +98,7 @@ public class CreateFieldCommandHandler
             IsFilterable = true,
             IsReportable = true,
             IsAuditable = command.IsAuditable,
+            IsEncrypted = command.IsEncrypted,
         };
 
         var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
@@ -137,6 +139,7 @@ public class CreateFieldCommandHandler
             Fid = field.Fid,
             Settings = field.Settings,
             CreatedOn = DateTime.UtcNow,
+            IsEncrypted = field.IsEncrypted,
         };
     }
 }

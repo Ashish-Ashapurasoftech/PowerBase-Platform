@@ -17,7 +17,8 @@ public record TableSpec(
 public record AppFieldSpec(
     string Name,
     string TypeCode,
-    string? Settings = null
+    string? Settings = null,
+    bool IsEncrypted = false
 );
 
 public record CreateAppCommand(
@@ -25,5 +26,6 @@ public record CreateAppCommand(
     string? Description,
     string? Icon,
     string? Color,
-    IReadOnlyList<TableSpec> Tables
+    IReadOnlyList<TableSpec> Tables,
+    bool IsEncrypted = false
 );

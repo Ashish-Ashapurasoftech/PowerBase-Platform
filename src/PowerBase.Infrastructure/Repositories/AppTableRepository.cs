@@ -115,6 +115,10 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         UPDATE meta.AppTable SET RecordCount = RecordCount - 1 WHERE Id = @id AND RecordCount > 0
         """;
 
+    private const string DecrementRecordCountBySql = """
+        UPDATE meta.AppTable SET RecordCount = CASE WHEN RecordCount >= @count THEN RecordCount - @count ELSE 0 END WHERE Id = @id
+        """;
+
     public AppTableRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
         : base(connectionFactory, queryContext) { }
 
@@ -253,5 +257,12 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(DecrementRecordCountSql, new { id }, cancellationToken: ct));
+    }
+
+    public async Task DecrementRecordCountByAsync(long id, int count, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(DecrementRecordCountBySql, new { id, count }, cancellationToken: ct));
     }
 }

@@ -108,6 +108,7 @@ public class BulkCreateFieldsCommandHandler
                 IsFilterable = true,
                 IsReportable = true,
                 IsAuditable = item.IsAuditable,
+                IsEncrypted = item.IsEncrypted,
             };
 
             var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
@@ -148,6 +149,7 @@ public class BulkCreateFieldsCommandHandler
                 Fid = field.Fid,
                 Settings = field.Settings,
                 CreatedOn = DateTime.UtcNow,
+                IsEncrypted = field.IsEncrypted,
             });
         }
 

@@ -12,7 +12,7 @@ public class TenantConnectionResolver : ITenantConnectionResolver
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
 
     private const string GetRoutingSql = """
-        SELECT DatabaseName, ServerRef, ConnectionSecretRef, ProvisioningState
+        SELECT DatabaseName, ServerRef, ConnectionSecretRef, ProvisioningState, SupportsSecureEnclaves
         FROM meta.Tenant
         WHERE Id = @tenantId AND IsDeleted = 0
         """;
@@ -48,6 +48,12 @@ public class TenantConnectionResolver : ITenantConnectionResolver
         {
             InitialCatalog = row.DatabaseName
         };
+
+        if (row.SupportsSecureEnclaves)
+        {
+            builder.ColumnEncryptionSetting = SqlConnectionColumnEncryptionSetting.Enabled;
+        }
+
         var result = builder.ToString();
 
         _cache.Set(cacheKey, result, CacheTtl);
@@ -61,5 +67,6 @@ public class TenantConnectionResolver : ITenantConnectionResolver
         string DatabaseName,
         string? ServerRef,
         string? ConnectionSecretRef,
-        string ProvisioningState);
+        string ProvisioningState,
+        bool SupportsSecureEnclaves);
 }
