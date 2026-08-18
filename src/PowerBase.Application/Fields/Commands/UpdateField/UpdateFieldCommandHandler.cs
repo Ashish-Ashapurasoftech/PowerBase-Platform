@@ -85,13 +85,32 @@ public class UpdateFieldCommandHandler
             }
         }
 
+        // ── Encryption lock ─────────────────────────────────────────────────────
+        // We only allow toggling encryption (ON or OFF) for an existing field if the table has zero records.
+        // Otherwise, existing plaintext/ciphertext data would become unreadable.
+        if (existing.IsEncrypted != command.IsEncrypted)
+        {
+            var recordCount = await _recordRepo.CountAsync(table, Array.Empty<AppField>(), ct: ct);
+            if (recordCount > 0)
+            {
+                var errorMsg = existing.IsEncrypted 
+                    ? "A field that has been encrypted cannot be un-encrypted if the table has existing records." 
+                    : "Encryption can only be enabled when creating a new field or if the table has no records.";
+                
+                throw new ValidationException(new Dictionary<string, string[]>
+                {
+                    ["IsEncrypted"] = [errorMsg]
+                });
+            }
+        }
+
         var affected = await _fieldRepo.UpdateAsync(
             existing.PublicId, table.Id,
             command.Name, command.Label, command.Description,
             command.IsRequired, command.DefaultValue,
             command.IsSearchable, command.IsSortable,
             command.IsFilterable, command.IsReportable, command.IsAuditable,
-            command.IsUnique, command.Settings, ct);
+            command.IsUnique, command.IsEncrypted, command.Settings, ct);
 
         if (affected == 0)
             throw new NotFoundException("Field", command.FieldFid);

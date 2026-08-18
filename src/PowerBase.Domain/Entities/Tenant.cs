@@ -8,6 +8,7 @@ public class Tenant
     public string Slug { get; set; } = string.Empty;
     public string PlanCode { get; set; } = "Free";
     public string Status { get; set; } = "Active";
+    public bool SupportsSecureEnclaves { get; set; }
     public bool IsDeleted { get; set; }
     public DateTime CreatedOn { get; set; }
     public long CreatedBy { get; set; }
