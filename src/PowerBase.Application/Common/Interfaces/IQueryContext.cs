@@ -11,5 +11,8 @@ public interface IQueryContext
     IReadOnlySet<string> Permissions { get; }
     string TenantRole { get; }
     bool IsTenantAdmin { get; }
+    bool IsUserToken { get; }
+    bool TokenAccessAllApps { get; }
+    IReadOnlySet<long> AllowedAppIds { get; }
     void SetTenantId(long tenantId);
 }

@@ -14,6 +14,9 @@ public class QueryContext : IQueryContext
     public IReadOnlySet<string> Permissions { get; set; } = new HashSet<string>();
     public string TenantRole { get; set; } = string.Empty;
     public bool IsTenantAdmin => TenantRole == DefaultTenantRoles.Administrator;
+    public bool IsUserToken { get; set; }
+    public bool TokenAccessAllApps { get; set; } = true;
+    public IReadOnlySet<long> AllowedAppIds { get; set; } = new HashSet<long>();
 
     public void SetTenantId(long tenantId) => TenantId = tenantId;
 }
