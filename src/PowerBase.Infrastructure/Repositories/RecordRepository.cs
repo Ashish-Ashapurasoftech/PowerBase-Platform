@@ -389,10 +389,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         // Push only searchable fields to Azure AI Search (using ORIGINAL plaintext values)
         var searchableValues = fields
-            .Where(f => f.IsSearchable && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
-            .ToDictionary(f => (long)f.Fid.Value, f => values[(long)f.Fid.Value]);
+            .Where(f => f.IsSearchable && f.Fid.HasValue && values.ContainsKey(f.Fid.Value))
+            .ToDictionary(f => (long)f.Fid!.Value, f => values[f.Fid!.Value]);
 
-        await _searchService.IndexRecordAsync(table.Id, insertedPublicId, searchableValues, ct);
+        await _searchService.IndexRecordAsync(QueryContext.TenantId, table.AppId, table.Id, insertedPublicId, searchableValues, ct);
 
         return insertedPublicId;
     }
@@ -448,10 +448,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         // Update Azure AI Search with only searchable fields (using ORIGINAL plaintext values)
         var searchableValues = fields
-            .Where(f => f.IsSearchable && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
-            .ToDictionary(f => (long)f.Fid.Value, f => values[(long)f.Fid.Value]);
+            .Where(f => f.IsSearchable && f.Fid.HasValue && values.ContainsKey(f.Fid.Value))
+            .ToDictionary(f => (long)f.Fid!.Value, f => values[f.Fid!.Value]);
 
-        await _searchService.IndexRecordAsync(table.Id, publicId, searchableValues, ct);
+        await _searchService.IndexRecordAsync(QueryContext.TenantId, table.AppId, table.Id, publicId, searchableValues, ct);
     }
 
     public async Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default)

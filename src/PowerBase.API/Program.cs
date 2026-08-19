@@ -337,6 +337,8 @@ builder.Services.AddScoped<DeleteRecordCommandHandler>();
 builder.Services.AddScoped<BulkDeleteRecordsCommandHandler>();
 builder.Services.AddScoped<ListRecordsQueryHandler>();
 builder.Services.AddScoped<GetRecordQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Records.Queries.SearchGlobalRecords.SearchGlobalRecordsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetDistinctFieldValues.GetDistinctFieldValuesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.CreateRelationship.CreateRelationshipCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.DeleteRelationship.DeleteRelationshipCommandHandler>();

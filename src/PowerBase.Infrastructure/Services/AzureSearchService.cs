@@ -31,15 +31,17 @@ public class AzureSearchService : IAzureSearchService
         }
     }
 
-    public async Task IndexRecordAsync(long tableId, Guid publicId, IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
+    public async Task IndexRecordAsync(long tenantId, long appId, long tableId, Guid publicId, IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
     {
         if (!_isEnabled) return;
 
         // Map the dictionary values into a dynamic object format for Azure Search
-        // Format: { "id": "...", "tableId": 123, "f_1": "value", "f_2": 45 }
+        // Format: { "id": "...", "tenantId": "...", "appId": 123, "tableId": 123, "f_1": "value" }
         var document = new Dictionary<string, object>
         {
             { "id", publicId.ToString() }, // Azure AI Search requires an 'id' field
+            { "tenantId", tenantId.ToString() },
+            { "appId", appId },
             { "tableId", tableId }
         };
 
@@ -107,6 +109,45 @@ public class AzureSearchService : IAzureSearchService
         catch (RequestFailedException ex)
         {
             throw new InvalidOperationException($"Failed to search records for table {tableId} in Azure AI Search.", ex);
+        }
+    }
+    public async Task<IReadOnlyList<GlobalSearchResult>> SearchGlobalAsync(long tenantId, string searchText, long? appId = null, CancellationToken ct = default)
+    {
+        if (!_isEnabled || string.IsNullOrWhiteSpace(searchText)) return [];
+
+        var filter = $"tenantId eq '{tenantId}'";
+        if (appId.HasValue)
+        {
+            filter += $" and appId eq {appId.Value}";
+        }
+
+        var options = new SearchOptions
+        {
+            Filter = filter,
+            Size = 50 // Global search limits results across tables
+        };
+        options.Select.Add("id");
+        options.Select.Add("appId");
+        options.Select.Add("tableId");
+
+        try
+        {
+            var response = await _searchClient.SearchAsync<SearchDocument>(searchText, options, cancellationToken: ct);
+            var results = new List<GlobalSearchResult>();
+            await foreach (var result in response.Value.GetResultsAsync())
+            {
+                if (Guid.TryParse(result.Document["id"]?.ToString(), out var id))
+                {
+                    var docAppId = Convert.ToInt64(result.Document["appId"]);
+                    var docTableId = Convert.ToInt64(result.Document["tableId"]);
+                    results.Add(new GlobalSearchResult(id, docAppId, docTableId));
+                }
+            }
+            return results;
+        }
+        catch (RequestFailedException ex)
+        {
+            throw new InvalidOperationException($"Failed to search global records for tenant {tenantId} in Azure AI Search.", ex);
         }
     }
 }
