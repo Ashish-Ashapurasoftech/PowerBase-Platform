@@ -14,6 +14,9 @@ public interface IAppTableRepository
     /// when null, all tables are returned (full listing use case).</summary>
     Task<IReadOnlyList<AppTableListItemDto>> ListByAppPagedAsync(long appId, int page, int pageSize, string? search, string sortBy, bool sortDesc, bool? isShowInBar = null, CancellationToken ct = default);
     Task<int> CountByAppAsync(long appId, string? search, bool? isShowInBar = null, CancellationToken ct = default);
+    /// <summary>Slim, unpaginated listing for nav surfaces (sidebar, top nav, table switcher) — every
+    /// table in the app, no search/sort/paging. Callers filter (isShowInBar) and search client-side.</summary>
+    Task<IReadOnlyList<AppTableNavItemDto>> ListNavByAppAsync(long appId, CancellationToken ct = default);
     Task<bool> NameExistsInAppAsync(long appId, string name, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> CreateAsync(AppTable table, CancellationToken ct = default);
     Task UpdatePhysicalNameAsync(long id, string physicalTableName, CancellationToken ct = default);

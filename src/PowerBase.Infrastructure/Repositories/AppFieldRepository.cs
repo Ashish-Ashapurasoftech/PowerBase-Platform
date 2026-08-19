@@ -249,8 +249,20 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private static readonly HashSet<string> CategoryFilterValues =
         new(StringComparer.OrdinalIgnoreCase) { "Text", "Numeric", "Date", "Other", "User", "Formula", "Relationship", "Action" };
 
+    /// <summary>Exact field-type codes the Field List "Show" dropdown can filter to individually via
+    /// a "Type:&lt;code&gt;" filter value — finer-grained than the Category filter above (e.g. just
+    /// Duration fields, not the whole Date category). Some of these codes collide with a category
+    /// name (Text, User), which is exactly why the "Type:" prefix exists — it disambiguates which
+    /// of the two the caller means.</summary>
+    private static readonly HashSet<string> TypeCodeFilterValues =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Text", "Duration", "Boolean", "Phone", "Address", "Email",
+            "User", "MultiUser", "MultiSelect", "File", "Url", "ReportLink",
+        };
+
     /// <summary>Resolves the "filter" dropdown value into a whitelisted SQL predicate fragment (never
-    /// built from raw user input) plus the category parameter value when the filter is a category.
+    /// built from raw user input) plus the parameter value when the filter needs one.
     /// "All Fields", blank, or an unrecognized value returns no filter (the full dataset).</summary>
     private static (string Fragment, string? CategoryFilter) ResolveFilterFragment(string? filter)
     {
@@ -258,6 +270,23 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             return (string.Empty, null);
 
         var value = filter.Trim();
+
+        // "Type:<code>" — exact field-type match, e.g. "Type:Duration".
+        if (value.StartsWith("Type:", StringComparison.OrdinalIgnoreCase))
+        {
+            var typeCode = value["Type:".Length..];
+            return TypeCodeFilterValues.TryGetValue(typeCode, out var resolvedType)
+                ? ("AND ft.Code = @categoryFilter", resolvedType)
+                : (string.Empty, null);
+        }
+
+        // "Name:<exact name>" — e.g. "Name:Record ID#" for the built-in key field.
+        if (value.StartsWith("Name:", StringComparison.OrdinalIgnoreCase))
+        {
+            var name = value["Name:".Length..];
+            return string.IsNullOrEmpty(name) ? (string.Empty, null) : ("AND af.Name = @categoryFilter", name);
+        }
+
         if (CategoryFilterValues.TryGetValue(value, out var category))
             return ("AND ft.Category = @categoryFilter", category);
 
@@ -268,6 +297,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             var v when string.Equals(v, "Required Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsRequired = 1", null),
             var v when string.Equals(v, "Reportable Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsReportable = 1", null),
             var v when string.Equals(v, "Searchable Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsSearchable = 1", null),
+            var v when string.Equals(v, "Filterable Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsFilterable = 1", null),
             var v when string.Equals(v, "Unique Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsUnique = 1", null),
             var v when string.Equals(v, "Auditable Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsAuditable = 1", null),
             _ => (string.Empty, null), // "All Fields" and anything unrecognized
@@ -356,9 +386,13 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         
+        // core.FieldType (tenant DB — see database/migrations/tenant/002_core_fieldtype.sql) has no
+        // IsActive column — it's a static reference table, unlike the control-DB copy of the same
+        // table name. That extra predicate made this throw "Invalid column name 'IsActive'" any time
+        // a relationship whose reference field pre-existed got force-deleted (e.g. deleting its table).
         var numberTypeId = await connection.QuerySingleAsync<long>(
             new CommandDefinition(
-                "SELECT Id FROM core.FieldType WHERE Code = 'Number' AND IsActive = 1",
+                "SELECT Id FROM core.FieldType WHERE Code = 'Number'",
                 cancellationToken: ct));
 
         await connection.ExecuteAsync(

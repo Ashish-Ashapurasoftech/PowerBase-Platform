@@ -96,24 +96,27 @@ public class AppsController : ControllerBase
     [RequirePermission(PermissionCodes.AppsRead)]
     [ProducesResponseType(typeof(ApiListResponse<AppResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> List([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default)
+    public async Task<IActionResult> List([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? sortField = null, [FromQuery] string sortOrder = "asc", CancellationToken ct = default)
     {
-        var result = await _listHandler.HandleAsync(new ListAppsQuery(page, pageSize), ct);
+        var result = await _listHandler.HandleAsync(new ListAppsQuery(page, pageSize, sortField, IsDescending(sortOrder)), ct);
         var items = result.Items.Select(MapToAppResponse).ToList();
         return Ok(new ApiListResponse<AppResponse>(items, result.Total, result.Page, result.PageSize));
     }
+
+    private static bool IsDescending(string? sortOrder) =>
+        string.Equals(sortOrder, "desc", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Search apps by name for the current tenant.</summary>
     [HttpGet("search")]
     [RequirePermission(PermissionCodes.AppsRead)]
     [ProducesResponseType(typeof(ApiListResponse<AppResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> Search([FromQuery] string name = "", [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default)
+    public async Task<IActionResult> Search([FromQuery] string name = "", [FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? sortField = null, [FromQuery] string sortOrder = "asc", CancellationToken ct = default)
     {
         var allItems = new List<PowerBase.Domain.Entities.App>();
         int currentPage = 1;
         int batchSize = 100;
-        
+
         while (true)
         {
             var batchResult = await _listHandler.HandleAsync(new ListAppsQuery(currentPage, batchSize), ct);
@@ -133,6 +136,8 @@ public class AppsController : ControllerBase
             .Where(a => string.IsNullOrEmpty(name) || a.Name.Contains(name.Trim(), StringComparison.OrdinalIgnoreCase))
             .ToList();
 
+        filtered = ApplySearchSort(filtered, sortField, IsDescending(sortOrder));
+
         var paginated = filtered
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
@@ -140,6 +145,23 @@ public class AppsController : ControllerBase
             .ToList();
 
         return Ok(new ApiListResponse<AppResponse>(paginated, filtered.Count, page, pageSize));
+    }
+
+    /// <summary>Same whitelist as AppRepository.ResolveAppSortColumn — the search path sorts
+    ///  in-memory (it already materializes every matching row for the name filter) rather than in
+    ///  SQL, but must honor the same set of sortable columns as the plain list endpoint.</summary>
+    private static List<PowerBase.Domain.Entities.App> ApplySearchSort(List<PowerBase.Domain.Entities.App> items, string? sortField, bool descending)
+    {
+        Func<PowerBase.Domain.Entities.App, object?> keySelector = sortField?.Trim().ToLowerInvariant() switch
+        {
+            "ownername" => a => a.OwnerName,
+            "createdon" => a => a.CreatedOn,
+            "status" => a => a.Status,
+            _ => a => a.Name,
+        };
+        return descending
+            ? items.OrderByDescending(keySelector).ToList()
+            : items.OrderBy(keySelector).ToList();
     }
 
     private static readonly string[] ExportColumns =

@@ -19,6 +19,10 @@ public class ListFieldsQueryHandler
         "isFilterable", "isReportable", "isAuditable", "isUnique", "isSystem", "fid", "createdOn",
     };
 
+    /// <summary>Fid of the built-in Record ID# field — the implicit key when the table has no
+    /// explicit KeyFieldId set. Mirrors SetKeyCommandHandler.RecordIdFid.</summary>
+    private const int RecordIdFid = 3;
+
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
 
@@ -38,6 +42,13 @@ public class ListFieldsQueryHandler
 
         var items = await _fieldRepo.ListByTablePagedAsync(table.Id, page, pageSize, query.Search, sortBy, query.SortDesc, query.Filter, ct);
         var total = await _fieldRepo.CountByTableAsync(table.Id, query.Search, query.Filter, ct);
+
+        foreach (var item in items)
+        {
+            item.IsKeyField = table.KeyFieldId.HasValue
+                ? item.Id == table.KeyFieldId.Value
+                : item.Fid == RecordIdFid;
+        }
 
         return new ListFieldsResult { Items = items, Total = total, Page = page, PageSize = pageSize };
     }

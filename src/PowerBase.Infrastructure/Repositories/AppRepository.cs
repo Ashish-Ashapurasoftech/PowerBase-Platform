@@ -35,7 +35,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         WHERE IsDeleted = 0
         """;
 
-    private const string ListByUserSql = $"""
+    private const string ListByUserSqlTemplate = """
         SELECT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
                a.Status, a.Formatting, a.SecurityOptions, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
@@ -45,9 +45,26 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
           AND au.IsDeleted = 0
           AND a.IsDeleted  = 0
           AND a.Status = @Status
-        ORDER BY a.Name
+        ORDER BY {0}
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
         """;
+
+    /// <summary>Whitelists sortField -> a safe ORDER BY column expression — never interpolate the
+    ///  caller-supplied field directly into SQL. Unknown/omitted fields fall back to the previous
+    ///  fixed Name-ascending order so existing callers (and this whitelist's DEFAULT branch) don't
+    ///  see any behavior change.</summary>
+    private static string ResolveAppSortColumn(string? sortField, bool sortDescending)
+    {
+        var column = sortField?.Trim().ToLowerInvariant() switch
+        {
+            "name" => "a.Name",
+            "ownername" => "a.OwnerName",
+            "createdon" => "a.CreatedOn",
+            "status" => "a.Status",
+            _ => "a.Name",
+        };
+        return sortDescending ? $"{column} DESC" : $"{column} ASC";
+    }
 
     private const string CountByUserSql = """
         SELECT COUNT(1)
@@ -219,11 +236,12 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             new CommandDefinition(InsertSql, parameters, cancellationToken: ct));
     }
 
-    public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, CancellationToken ct = default)
+    public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, string? sortField = null, bool sortDescending = false, CancellationToken ct = default)
     {
+        var sql = string.Format(ListByUserSqlTemplate, ResolveAppSortColumn(sortField, sortDescending));
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var results = await connection.QueryAsync<AppListItemDto>(
-            new CommandDefinition(ListByUserSql, new { userId, Status = "Active", offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
+            new CommandDefinition(sql, new { userId, Status = "Active", offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
         return results.AsList();
     }
 

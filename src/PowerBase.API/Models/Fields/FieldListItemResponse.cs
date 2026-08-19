@@ -20,4 +20,6 @@ public class FieldListItemResponse
     public bool IsSystem { get; init; }
     public int? Fid { get; init; }
     public DateTime CreatedOn { get; init; }
+    /// <summary>Whether this is the table's current key field (Set Key feature).</summary>
+    public bool IsKeyField { get; init; }
 }

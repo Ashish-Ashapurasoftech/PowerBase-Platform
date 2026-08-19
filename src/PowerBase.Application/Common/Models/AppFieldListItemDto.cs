@@ -20,4 +20,9 @@ public class AppFieldListItemDto
     public bool IsSystem { get; set; }
     public int? Fid { get; set; }
     public DateTime CreatedOn { get; set; }
+    /// <summary>Whether this is the table's current key field (Set Key feature). Set by
+    /// <see cref="PowerBase.Application.Fields.Queries.ListFields.ListFieldsQueryHandler"/> after
+    /// the row is loaded — not part of the SQL projection, since it depends on the table's
+    /// KeyFieldId rather than anything on the field row itself.</summary>
+    public bool IsKeyField { get; set; }
 }

@@ -43,6 +43,13 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
         INNER JOIN meta.App a ON a.Id = t.AppId
         WHERE t.PublicId = @publicId AND t.TenantId = @tenantId AND a.PublicId = @appPublicId AND t.IsDeleted = 0;";
 
+    private const string BulkDeleteSql = @"
+        UPDATE t
+        SET t.IsDeleted = 1
+        FROM meta.AppToken t
+        INNER JOIN meta.App a ON a.Id = t.AppId
+        WHERE t.PublicId IN @publicIds AND t.TenantId = @tenantId AND a.PublicId = @appPublicId AND t.IsDeleted = 0;";
+
     private const string RotateSecretSql = @"
         UPDATE meta.AppToken
         SET TokenHash = @newTokenHash,
@@ -132,6 +139,17 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
             new CommandDefinition(DeleteSql, new { publicId, tenantId, appPublicId }, cancellationToken: ct));
 
         return rows > 0;
+    }
+
+    public async Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tenantId, Guid appPublicId, CancellationToken ct)
+    {
+        var ids = publicIds as ICollection<Guid> ?? publicIds.ToList();
+        if (ids.Count == 0) return 0;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+
+        return await connection.ExecuteAsync(
+            new CommandDefinition(BulkDeleteSql, new { publicIds = ids, tenantId, appPublicId }, cancellationToken: ct));
     }
 
     public async Task<bool> RotateSecretAsync(long id, string newTokenHash, string newTokenPrefix, CancellationToken ct)

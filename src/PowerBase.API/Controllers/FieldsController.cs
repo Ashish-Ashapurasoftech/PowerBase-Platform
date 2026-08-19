@@ -92,7 +92,7 @@ public class FieldsController : ControllerBase
         [FromQuery] int pageNumber = 1,
         [FromQuery] int pageSize = 20,
         [FromQuery] string? search = null,
-        [FromQuery] string sortBy = "name",
+        [FromQuery] string sortBy = "label",
         [FromQuery] string sortDirection = "asc",
         [FromQuery] string? filter = null,
         CancellationToken ct = default)
@@ -148,14 +148,14 @@ public class FieldsController : ControllerBase
     }
 
     /// <summary>Soft-delete a field (does not run DROP COLUMN).</summary>
-    [HttpDelete("tables/{tableId:guid}/fields/{fieldId:int}")]
+    [HttpDelete("tables/{tableId:guid}/fields/{publicId:guid}")]
     [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Delete(Guid tableId, int fieldId, CancellationToken ct)
+    public async Task<IActionResult> Delete(Guid tableId, Guid publicId, CancellationToken ct)
     {
-        await _deleteHandler.HandleAsync(new DeleteFieldCommand(tableId, fieldId), ct);
+        await _deleteHandler.HandleAsync(new DeleteFieldCommand(tableId, publicId), ct);
         return NoContent();
     }
 
@@ -241,6 +241,7 @@ public class FieldsController : ControllerBase
         IsSystem = f.IsSystem,
         Fid = f.Fid,
         CreatedOn = f.CreatedOn,
+        IsKeyField = f.IsKeyField,
     };
 
     private static FieldDetailResponse MapToDetailResponse(AppField f) => new()

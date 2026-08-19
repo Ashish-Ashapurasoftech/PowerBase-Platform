@@ -63,6 +63,16 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
         """;
 
+    // No paging/search/sort — every table in the app, ordered to match the rest of the app's
+    // canonical nav ordering (DisplayOrder, falling back to creation order for ties).
+    private const string ListNavByAppSql = """
+        SELECT t.PublicId, t.Name, t.SingularLabel, t.Icon, t.IsShowInBar
+        FROM meta.AppTable t
+        WHERE t.AppId = @appId
+          AND t.IsDeleted = 0
+        ORDER BY t.DisplayOrder, t.CreatedOn
+        """;
+
     private const string CountByAppSql = """
         SELECT COUNT(1)
         FROM meta.AppTable t
@@ -200,6 +210,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             "recordCount"   => "t.RecordCount",
             "fieldCount"    => "FieldCount",
             "createdOn"     => "t.CreatedOn",
+            "isShowInBar"   => "t.IsShowInBar",
             _               => "t.Name",
         };
         var sql = string.Format(ListByAppPagedSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}, t.Id");
@@ -214,6 +225,14 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
                 offset = (page - 1) * pageSize,
                 pageSize
             }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<IReadOnlyList<AppTableNavItemDto>> ListNavByAppAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<AppTableNavItemDto>(
+            new CommandDefinition(ListNavByAppSql, new { appId }, cancellationToken: ct));
         return rows.ToList();
     }
 

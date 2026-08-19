@@ -52,7 +52,7 @@ public sealed class InvokeButtonActionCommandHandler
 
         var buttonField = fields.FirstOrDefault(f => f.Fid == command.ButtonFid)
             ?? throw new NotFoundException("Field", command.ButtonFid);
-        if (buttonField.TypeCode != "ActionButton")
+        if (!PhysicalNaming.IsActionButtonTypeCode(buttonField.TypeCode))
             throw new BadRequestException("NOT_AN_ACTION_BUTTON", "The specified field is not an Action Button.");
 
         var settings = ParseSettings(buttonField.Settings)
