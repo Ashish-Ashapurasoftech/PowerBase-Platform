@@ -1,3 +1,4 @@
+using System.Data;
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
@@ -271,25 +272,31 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             }, cancellationToken: ct));
     }
 
-    public async Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default)
+    public async Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null)
     {
+        var parameters = new { publicId, tableId, deletedBy = QueryContext.UserId };
+        if (transaction is not null)
+        {
+            return await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(SoftDeleteFieldSql, parameters, transaction, cancellationToken: ct));
+        }
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
-            new CommandDefinition(SoftDeleteFieldSql, new
-            {
-                publicId, tableId, deletedBy = QueryContext.UserId,
-            }, cancellationToken: ct));
+            new CommandDefinition(SoftDeleteFieldSql, parameters, cancellationToken: ct));
     }
 
-    public async Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default)
+    public async Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null)
     {
         if (!publicIds.Any()) return 0;
+        var parameters = new { publicIds, tableId, deletedBy = QueryContext.UserId };
+        if (transaction is not null)
+        {
+            return await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(SoftBulkDeleteFieldsSql, parameters, transaction, cancellationToken: ct));
+        }
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
-            new CommandDefinition(SoftBulkDeleteFieldsSql, new
-            {
-                publicIds, tableId, deletedBy = QueryContext.UserId,
-            }, cancellationToken: ct));
+            new CommandDefinition(SoftBulkDeleteFieldsSql, parameters, cancellationToken: ct));
     }
 
     public async Task<FieldUsageDto> GetFieldUsageAsync(long tableId, long fieldId, int fid, long appId, CancellationToken ct = default)

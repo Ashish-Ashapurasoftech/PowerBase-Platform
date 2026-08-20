@@ -94,7 +94,8 @@ public class TableHandlerTests
         _relRepo.ListByTableAsync(table.Id).Returns(new List<Relationship>());
         
         var deleteRelHandler = new DeleteRelationshipCommandHandler(_tableRepo, _fieldRepo, _relRepo, _recordRepo, _auditRepo);
-        var sut = new DeleteTableCommandHandler(_tableRepo, _auditRepo, _relRepo, deleteRelHandler);
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var sut = new DeleteTableCommandHandler(_tableRepo, _fieldRepo, pipelineRepo, _auditRepo, _relRepo, deleteRelHandler);
 
         await sut.HandleAsync(new DeleteTableCommand(id));
 

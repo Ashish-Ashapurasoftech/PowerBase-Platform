@@ -146,6 +146,25 @@ builder.Services.AddSwaggerGen(c =>
 
 // Infrastructure
 builder.Services.AddMemoryCache();
+builder.Services.AddHttpClient();
+var executionSection = builder.Configuration.GetSection("PipelineExecution");
+builder.Services.Configure<PowerBase.Application.Common.Configurations.PipelineExecutionOptions>(executionSection);
+
+var executionOptions = executionSection.Get<PowerBase.Application.Common.Configurations.PipelineExecutionOptions>() 
+                       ?? new PowerBase.Application.Common.Configurations.PipelineExecutionOptions();
+PowerBase.Application.Common.Configurations.PipelineExecutionOptionsValidator.Validate(executionOptions);
+
+// Register Main DB queue repo
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IMainPipelineQueueRepository, PowerBase.Infrastructure.Repositories.MainPipelineQueueRepository>();
+
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineEngine, PowerBase.Application.Pipelines.PipelineEngine>();
+builder.Services.AddHostedService<PowerBase.API.Pipelines.PipelineSchedulerWorker>();
+
+// Unconditional Database Queue Registrations
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineExecutionQueue, PowerBase.Infrastructure.Pipelines.DatabasePipelineExecutionQueue>();
+builder.Services.AddHostedService<PowerBase.API.Pipelines.DatabasePipelineExecutionWorker>();
+builder.Services.AddHostedService<PowerBase.API.Pipelines.DatabasePipelineOutboxRelay>();
+builder.Services.AddHostedService<PowerBase.API.Pipelines.DatabasePipelineCleanupService>();
 builder.Services.AddSingleton<DbConnectionFactory>(); // shim — kept for compatibility
 builder.Services.AddSingleton<IControlConnectionFactory, ControlConnectionFactory>();
 if (!string.IsNullOrEmpty(builder.Configuration["KeyVault:Uri"]))
@@ -165,7 +184,7 @@ builder.Services.AddScoped<ITenantConnectionFactory, TenantConnectionFactory>();
 builder.Services.AddScoped<ControlUnitOfWork>();
 builder.Services.AddScoped<IControlUnitOfWork>(sp => sp.GetRequiredService<ControlUnitOfWork>());
 builder.Services.AddScoped<TenantUnitOfWork>();
-builder.Services.AddScoped<ITenantUnitOfWork>(sp => sp.GetRequiredService<TenantUnitOfWork>());
+builder.Services.AddScoped<ITenantUnitOfWork>(sp => new PowerBase.Infrastructure.UOW.TriggerPublishingTenantUnitOfWork(sp.GetRequiredService<TenantUnitOfWork>()));
 builder.Services.AddScoped<UnitOfWork>();
 builder.Services.AddScoped<IUnitOfWork>(sp => sp.GetRequiredService<ControlUnitOfWork>());
 
@@ -184,6 +203,8 @@ builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService, PowerBase.Application.Records.RecordWriteService>();
 builder.Services.AddScoped<IAppSeeder, AppSeeder>();
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineTriggerInterceptor, PowerBase.Infrastructure.Pipelines.PipelineTriggerInterceptor>();
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineAuditFormatter, PowerBase.Application.Pipelines.PipelineAuditFormatter>();
 
 // Field Settings Validators
 builder.Services.AddScoped<IFieldSettingsValidator, TextSettingsValidator>();
@@ -252,11 +273,28 @@ builder.Services.AddScoped<IFormRuleRepository, FormRuleRepository>();
 builder.Services.AddScoped<IRelationshipRepository, RelationshipRepository>();
 builder.Services.AddScoped<IAdminRepository, AdminRepository>();
 builder.Services.AddScoped<IPageRepository, PageRepository>();
+builder.Services.AddScoped<IPipelineRepository, PipelineRepository>();
+builder.Services.AddScoped<IPipelineStepIdempotencyRepository, PipelineStepIdempotencyRepository>();
 builder.Services.AddScoped<IUserTokenRepository, UserTokenRepository>();
 builder.Services.AddScoped<IAppTokenRepository, AppTokenRepository>();
 builder.Services.AddScoped<IGroupRepository, GroupRepository>();
 
+
 // Handlers
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.CreatePipeline.CreatePipelineCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.CopyPipeline.CopyPipelineCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.UpdatePipeline.UpdatePipelineCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.SavePipelineSteps.SavePipelineStepsCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.DeletePipeline.DeletePipelineCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.DeletePipelines.DeletePipelinesCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipeline.GetPipelineQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelines.ListPipelinesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelineRuns.ListPipelineRunsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineRunSteps.GetPipelineRunStepsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineSchedule.GetPipelineScheduleQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.UpdatePipelineSchedule.UpdatePipelineScheduleCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.DeletePipelineSchedule.DeletePipelineScheduleCommandHandler>();
+
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.CreateUserToken.CreateUserTokenCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetMyUserTokens.GetMyUserTokensQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetAdminUserTokens.GetAdminUserTokensQueryHandler>();
@@ -422,7 +460,10 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 
 // Serve statically uploaded files from the configured local path
 var localPath = app.Configuration.GetValue<string>("Storage:LocalPath") ?? "C:\\PowerbaseUploads";

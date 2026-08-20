@@ -61,6 +61,7 @@ public class CreateAppRoleCommandHandler
             PermissionCodes.ReportsRead,
             PermissionCodes.ReportsRun,
             PermissionCodes.FormsRead,
+            PermissionCodes.PowerFlowsRead
         };
         await _appRoleRepo.SetPermissionsAsync(id, defaultPermissions, null, ct);
 

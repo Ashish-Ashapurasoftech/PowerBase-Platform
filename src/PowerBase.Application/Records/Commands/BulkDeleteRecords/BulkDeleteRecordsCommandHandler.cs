@@ -1,6 +1,8 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.Enums;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Records.Commands.BulkDeleteRecords;
@@ -13,6 +15,9 @@ public class BulkDeleteRecordsCommandHandler
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
     private readonly IRelationshipRepository _relRepo;
+    private readonly IPipelineTriggerInterceptor _triggerInterceptor;
+    private readonly ITenantUnitOfWork _uow;
+    private readonly IQueryContext _queryContext;
 
     public BulkDeleteRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -20,7 +25,10 @@ public class BulkDeleteRecordsCommandHandler
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
         IAuditRepository auditRepo,
-        IRelationshipRepository relRepo)
+        IRelationshipRepository relRepo,
+        IPipelineTriggerInterceptor triggerInterceptor,
+        ITenantUnitOfWork uow,
+        IQueryContext queryContext)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -28,6 +36,9 @@ public class BulkDeleteRecordsCommandHandler
         _enforcer = enforcer;
         _auditRepo = auditRepo;
         _relRepo = relRepo;
+        _triggerInterceptor = triggerInterceptor;
+        _uow = uow;
+        _queryContext = queryContext;
     }
 
     public async Task HandleAsync(BulkDeleteRecordsCommand command, CancellationToken ct = default)
@@ -36,6 +47,8 @@ public class BulkDeleteRecordsCommandHandler
             throw new ValidationException(new Dictionary<string, string[]> { ["ids"] = ["At least one record ID is required."] });
         if (command.RecordPublicIds.Count > 500)
             throw new ValidationException(new Dictionary<string, string[]> { ["ids"] = ["Cannot delete more than 500 records at once."] });
+
+        var uniqueRecordPublicIds = command.RecordPublicIds.Distinct().ToList();
 
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
@@ -47,7 +60,7 @@ public class BulkDeleteRecordsCommandHandler
                 throw new UnauthorizedActionException("You do not have permission to delete records from this table.");
             if (access.ViewScope == RecordScopes.OwnRecords || access.ModifyScope == RecordScopes.OwnRecords)
             {
-                foreach (var id in command.RecordPublicIds)
+                foreach (var id in uniqueRecordPublicIds)
                     await _enforcer.EnsureRecordOwnedAsync(table, id, ct);
             }
         }
@@ -56,18 +69,74 @@ public class BulkDeleteRecordsCommandHandler
         var parentRels = await _relRepo.ListByParentTableAsync(table.Id, ct);
         if (parentRels.Count > 0)
         {
-            var ids = await _recordRepo.GetIdsByPublicIdsAsync(table, command.RecordPublicIds, ct);
+            var ids = await _recordRepo.GetIdsByPublicIdsAsync(table, uniqueRecordPublicIds, ct);
             await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _fieldRepo, _recordRepo, ct);
         }
 
-        await _recordRepo.BulkDeleteAsync(table, command.RecordPublicIds, ct);
+        await _uow.BeginAsync(ct);
+        try
+        {
+            // Load record values for interceptor before they are deleted from DB
+            var oldRecordsValues = new List<PipelineRecordChange>();
+            foreach (var id in uniqueRecordPublicIds)
+            {
+                try
+                {
+                    var valuesDict = await _recordRepo.GetByPublicIdAsync(table, fields, id, ct);
+                    // Convert string keys to long field IDs
+                    var beforeValues = new Dictionary<long, object?>();
+                    foreach (var f in fields)
+                    {
+                        if (f.Fid.HasValue)
+                        {
+                            var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
+                            if (valuesDict.TryGetValue(colKey, out var val))
+                            {
+                                beforeValues[f.Id] = val;
+                            }
+                        }
+                    }
+                    oldRecordsValues.Add(new PipelineRecordChange(
+                        id,
+                        beforeValues,
+                        new Dictionary<long, object?>(),
+                        new List<long>(),
+                        PipelineRecordEventType.Deleted
+                    ));
+                }
+                catch
+                {
+                    // Skip if not found
+                }
+            }
 
-        await _auditRepo.LogActivityAsync(
-            AuditActions.Deleted,
-            AuditEntityTypes.Record,
-            command.TablePublicId.ToString(),
-            $"{command.RecordPublicIds.Count} record(s) bulk-deleted from {table.Name}",
-            appId: table.AppId,
-            ct: ct);
+            // Intercept triggers
+            await _triggerInterceptor.InterceptBulkAsync(
+                table,
+                fields,
+                oldRecordsValues,
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                _queryContext.UserId,
+                ct
+            );
+
+            await _recordRepo.BulkDeleteAsync(table, uniqueRecordPublicIds, _uow.Transaction, ct);
+
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Deleted,
+                AuditEntityTypes.Record,
+                command.TablePublicId.ToString(),
+                $"{uniqueRecordPublicIds.Count} record(s) bulk-deleted from {table.Name}",
+                appId: table.AppId,
+                ct: ct);
+
+            await _uow.CommitAsync(ct);
+        }
+        catch
+        {
+            await _uow.RollbackAsync(ct);
+            throw;
+        }
     }
 }

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\src\PowerBase.Application\PowerBase.Application.csproj" />
     <ProjectReference Include="..\..\src\PowerBase.Domain\PowerBase.Domain.csproj" />
     <ProjectReference Include="..\..\src\PowerBase.Infrastructure\PowerBase.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\PowerBase.API\PowerBase.API.csproj" />
   </ItemGroup>
 
 </Project>

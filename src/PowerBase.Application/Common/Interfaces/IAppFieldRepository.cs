@@ -1,3 +1,4 @@
+using System.Data;
 using PowerBase.Domain.Entities;
 using PowerBase.Application.Fields.Queries.GetFieldUsage;
 
@@ -29,7 +30,7 @@ public interface IAppFieldRepository
     Task<int> UpdateAsync(Guid publicId, long tableId, string name, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
         bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, string? settings, CancellationToken ct = default);
-    Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default);
-    Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default);
+    Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null);
+    Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null);
     Task<FieldUsageDto> GetFieldUsageAsync(long tableId, long fieldId, int fid, long appId, CancellationToken ct = default);
 }

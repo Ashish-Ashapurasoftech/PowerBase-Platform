@@ -109,9 +109,9 @@ public class FieldsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Delete(Guid tableId, int fieldId, CancellationToken ct)
+    public async Task<IActionResult> Delete(Guid tableId, int fieldId, [FromQuery] bool force, CancellationToken ct)
     {
-        await _deleteHandler.HandleAsync(new DeleteFieldCommand(tableId, fieldId), ct);
+        await _deleteHandler.HandleAsync(new DeleteFieldCommand(tableId, fieldId, force), ct);
         return NoContent();
     }
 
@@ -122,9 +122,9 @@ public class FieldsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> BulkDelete(
         [FromServices] PowerBase.Application.Fields.Commands.BulkDeleteFields.BulkDeleteFieldsCommandHandler bulkDeleteHandler,
-        Guid tableId, [FromBody] BulkDeleteFieldsRequest request, CancellationToken ct)
+        Guid tableId, [FromBody] BulkDeleteFieldsRequest request, [FromQuery] bool force, CancellationToken ct)
     {
-        await bulkDeleteHandler.HandleAsync(new PowerBase.Application.Fields.Commands.BulkDeleteFields.BulkDeleteFieldsCommand(tableId, request.FieldIds), ct);
+        await bulkDeleteHandler.HandleAsync(new PowerBase.Application.Fields.Commands.BulkDeleteFields.BulkDeleteFieldsCommand(tableId, request.FieldIds, force), ct);
         return NoContent();
     }
 

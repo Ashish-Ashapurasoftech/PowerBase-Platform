@@ -2,10 +2,11 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Exceptions;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace PowerBase.API.Attributes;
 
-public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId, ByPagePublicId }
+public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId, ByPagePublicId, ByPipelinePublicId }
 
 /// <summary>
 /// Requires the caller to be an app member (any role). Does NOT require a specific permission code.
@@ -152,6 +153,11 @@ internal class AppPermissionFilter : IAsyncActionFilter
                 case AppAccessResolver.ByPagePublicId:
                     var pagePubId = Guid.Parse(route["publicId"]!.ToString()!);
                     await _accessService.RequirePermissionByPagePublicIdAsync(pagePubId, _permissionCode, context.HttpContext.RequestAborted);
+                    break;
+
+                case AppAccessResolver.ByPipelinePublicId:
+                    var pipelinePubId = Guid.Parse(route["publicId"]!.ToString()!);
+                    await _accessService.RequirePermissionByPipelinePublicIdAsync(pipelinePubId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
             }
         }

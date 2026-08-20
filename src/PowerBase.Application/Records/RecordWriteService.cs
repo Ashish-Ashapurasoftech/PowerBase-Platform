@@ -24,7 +24,9 @@ public interface IRecordWriteService
         IReadOnlyDictionary<long, object?> fieldValues,
         string auditAction,
         string entityTitle,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        System.Data.IDbTransaction? transaction = null,
+        bool suppressInterception = false);
 }
 
 public sealed class RecordWriteService : IRecordWriteService
@@ -34,19 +36,57 @@ public sealed class RecordWriteService : IRecordWriteService
     private readonly IRecordRepository _recordRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IPipelineTriggerInterceptor _triggerInterceptor;
 
     public RecordWriteService(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IAppUserRepository appUserRepo,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IPipelineTriggerInterceptor triggerInterceptor)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _appUserRepo = appUserRepo;
         _auditRepo = auditRepo;
+        _triggerInterceptor = triggerInterceptor;
+    }
+
+    private static bool AreValuesEqual(object? val1, object? val2, string? typeCode)
+    {
+        if (val1 == null && val2 == null) return true;
+        if (val1 == null || val2 == null) return false;
+
+        // Numeric normalization
+        if (typeCode == "Number" || typeCode == "Numeric" || typeCode == "Decimal" || typeCode == "Integer" || typeCode == "Int")
+        {
+            if (decimal.TryParse(val1.ToString(), out var d1) && decimal.TryParse(val2.ToString(), out var d2))
+            {
+                return d1 == d2;
+            }
+        }
+
+        // Date/Time normalization
+        if (typeCode == "Date" || typeCode == "DateTime" || typeCode == "Time")
+        {
+            if (DateTime.TryParse(val1.ToString(), out var dt1) && DateTime.TryParse(val2.ToString(), out var dt2))
+            {
+                return dt1 == dt2;
+            }
+        }
+
+        // Boolean normalization
+        if (typeCode == "Boolean" || typeCode == "Bool")
+        {
+            if (bool.TryParse(val1.ToString(), out var b1) && bool.TryParse(val2.ToString(), out var b2))
+            {
+                return b1 == b2;
+            }
+        }
+
+        return string.Equals(val1.ToString()?.Trim(), val2.ToString()?.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<IReadOnlyDictionary<long, object?>> ApplyAsync(
@@ -56,7 +96,9 @@ public sealed class RecordWriteService : IRecordWriteService
         IReadOnlyDictionary<long, object?> fieldValues,
         string auditAction,
         string entityTitle,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        System.Data.IDbTransaction? transaction = null,
+        bool suppressInterception = false)
     {
         // Reference fields must point at an existing parent record.
         var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
@@ -68,7 +110,35 @@ public sealed class RecordWriteService : IRecordWriteService
         foreach (var kvp in refOverrides)
             effectiveValues[kvp.Key] = kvp.Value;
 
-        await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, ct);
+        await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct);
+
+        // Build before/after values and genuinely changed field IDs keyed by f.Id
+        var beforeValues = new Dictionary<long, object?>();
+        var afterValues = new Dictionary<long, object?>();
+        var changedFieldIds = new List<long>();
+
+        foreach (var f in fields)
+        {
+            if (f.Fid.HasValue)
+            {
+                var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
+                var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
+                beforeValues[f.Id] = oldVal;
+
+                if (effectiveValues.TryGetValue(f.Fid.Value, out var newVal))
+                {
+                    afterValues[f.Id] = newVal;
+                    if (!AreValuesEqual(oldVal, newVal, f.TypeCode))
+                    {
+                        changedFieldIds.Add(f.Id);
+                    }
+                }
+                else
+                {
+                    afterValues[f.Id] = oldVal;
+                }
+            }
+        }
 
         // Build field-level diff — only fields where value actually changed, keyed by display label
         var candidateFields = fields.Where(f =>
@@ -127,6 +197,11 @@ public sealed class RecordWriteService : IRecordWriteService
             oldValues: JsonSerializer.Serialize(oldValuesDict),
             newValues: JsonSerializer.Serialize(newValuesDict),
             ct: ct);
+
+        if (!suppressInterception)
+        {
+            await _triggerInterceptor.InterceptAsync(table, fields, recordPublicId, afterValues, "record-updated", ct, beforeValues, changedFieldIds);
+        }
 
         return effectiveValues;
     }

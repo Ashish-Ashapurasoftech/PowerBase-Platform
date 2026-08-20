@@ -14,6 +14,8 @@ public static class AuditEntityTypes
     public const string Form     = "Form";
     public const string FormRule = "FormRule";
     public const string Page     = "Page";
+    public const string Pipeline = "Pipeline";
+    public const string PipelineConnection = "PipelineConnection";
     public const string UserToken = "UserToken";
     public const string AppToken = "AppToken";
     public const string Group = "Group";

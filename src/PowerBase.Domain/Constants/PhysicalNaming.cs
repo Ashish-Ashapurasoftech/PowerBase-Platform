@@ -1,3 +1,5 @@
+using PowerBase.Domain.Entities;
+
 namespace PowerBase.Domain.Constants;
 
 public static class PhysicalNaming
@@ -7,6 +9,13 @@ public static class PhysicalNaming
     public static string ColumnName(int fid) => $"f_{fid}";
     /// <summary>Second physical column for range field types (end / max).</summary>
     public static string EndColumnName(int fid) => $"f_{fid}_e";
+
+    public static string GetPhysicalColumnName(AppField field)
+    {
+        return field.IsSystem && !string.IsNullOrWhiteSpace(field.PhysicalColumnName)
+            ? field.PhysicalColumnName
+            : ColumnName(field.Fid!.Value);
+    }
 
     public static bool IsRangeTypeCode(string typeCode) =>
         typeCode is "DateRange" or "NumericRange";
