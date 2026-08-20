@@ -18,4 +18,5 @@ public interface IUserTokenRepository
     Task<UserToken?> GetByHashAsync(string hash, CancellationToken ct);
     Task UpdateLastUsedAtAsync(long id, CancellationToken ct);
     Task<bool> UpdateDetailsAsync(long id, string tokenName, string? description, bool accessAllApps, IEnumerable<Guid>? allowedAppPublicIds, CancellationToken ct);
+    Task<IReadOnlySet<long>> GetAllowedAppIdsAsync(long userTokenId, CancellationToken ct = default);
 }

@@ -21,6 +21,8 @@ public class AppTable
     public long? DefaultRecordPickerField2Id { get; set; }
     public long? DefaultRecordPickerField3Id { get; set; }
     public int RecordCount { get; set; }
+    /// <summary>Whether this table appears in the sidebar/navigation bar. Defaults to true.</summary>
+    public bool IsShowInBar { get; set; } = true;
     public bool IsSystem { get; set; }
     public int DisplayOrder { get; set; }
     public bool IsDeleted { get; set; }

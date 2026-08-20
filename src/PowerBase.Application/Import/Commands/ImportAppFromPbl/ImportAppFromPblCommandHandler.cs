@@ -187,7 +187,9 @@ public class ImportAppFromPblCommandHandler
                     continue;
                 }
 
-                fieldSpecs.Add(new AppFieldSpec(field.Name, field.TypeCode, field.Settings));
+                // Preserve the imported file's exact Name (its stable third-party identifier) rather
+                // than regenerating one — see AppFieldSpec.Name.
+                fieldSpecs.Add(new AppFieldSpec(field.Label ?? field.Name, field.TypeCode, field.Settings, Name: field.Name));
             }
 
             // Only let the seeder add its stock "Main Form"/"List All"/"List Changes" when this
@@ -444,7 +446,9 @@ public class ImportAppFromPblCommandHandler
                     continue;
                 }
 
-                formulaItems.Add(new BulkCreateFieldItem("Formula", field.Name, Settings: translation.SettingsJson));
+                // Preserve the imported file's exact Name (its stable third-party identifier) rather
+                // than regenerating one — see BulkCreateFieldItem.Name.
+                formulaItems.Add(new BulkCreateFieldItem("Formula", field.Label ?? field.Name, Settings: translation.SettingsJson, Name: field.Name));
             }
 
             if (formulaItems.Count > 0)
@@ -494,7 +498,10 @@ public class ImportAppFromPblCommandHandler
                     skipped.Add(new ImportSkippedItem { LogicalRef = lookup.LogicalRef, Name = lookup.Name, Reason = $"Lookup source field '{lookup.SourceFieldName}' was not created on '{parentName}'." });
                     continue;
                 }
-                lookupSpecs.Add(new CreateLookupSpec(sourceFid, lookup.Name, lookup.Label, lookup.SourceSubField));
+                // Note: relationship-created fields don't carry the Name-preservation escape hatch that
+                // plain/formula fields do (see AppFieldSpec.Name) — re-importing a file with lookups
+                // gets freshly generated Names rather than the originally-exported ones.
+                lookupSpecs.Add(new CreateLookupSpec(sourceFid, lookup.Label ?? lookup.Name, lookup.SourceSubField));
             }
 
             var summarySpecs = new List<CreateSummarySpec>();
@@ -510,15 +517,14 @@ public class ImportAppFromPblCommandHandler
                     }
                     targetFid = fid;
                 }
-                summarySpecs.Add(new CreateSummarySpec(summary.Name, summary.Label, summary.Function, targetFid, summary.TargetSubField));
+                summarySpecs.Add(new CreateSummarySpec(summary.Label ?? summary.Name, summary.Function, targetFid, summary.TargetSubField));
             }
 
             await _createRelationshipHandler.HandleAsync(new CreateRelationshipCommand(
                 appPublicId,
                 parentTable.PublicId,
                 childTable.PublicId,
-                rel.ReferenceFieldName,
-                rel.ReferenceFieldLabel,
+                rel.ReferenceFieldLabel ?? rel.ReferenceFieldName,
                 rel.IsReferenceRequired,
                 lookupSpecs,
                 summarySpecs), ct);

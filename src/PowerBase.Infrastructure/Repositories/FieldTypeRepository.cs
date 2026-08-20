@@ -8,9 +8,15 @@ namespace PowerBase.Infrastructure.Repositories;
 public class FieldTypeRepository : TenantRepositoryBase, IFieldTypeRepository
 {
     private const string GetByCodeSql = """
-        SELECT Id, Code, DisplayName, Category, SqlDataType, SupportsDefault, SupportsRequired, SupportsUnique, DisplayOrder, IsActive
+        SELECT Id, Code, DisplayName, Category, SqlDataType, Icon
         FROM core.FieldType
-        WHERE Code = @code AND IsActive = 1
+        WHERE Code = @code
+        """;
+
+    private const string ListAllSql = """
+        SELECT Id, Code, DisplayName, Category, SqlDataType, Icon
+        FROM core.FieldType
+        ORDER BY Id
         """;
 
     public FieldTypeRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -25,8 +31,15 @@ public class FieldTypeRepository : TenantRepositoryBase, IFieldTypeRepository
 
     public async Task<int> GetIdByCodeAsync(string code, CancellationToken ct = default)
     {
-        const string sql = "SELECT Id FROM core.FieldType WHERE Code = @code AND IsActive = 1";
+        const string sql = "SELECT Id FROM core.FieldType WHERE Code = @code";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, new { code }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<FieldType>> ListAllAsync(CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<FieldType>(new CommandDefinition(ListAllSql, cancellationToken: ct));
+        return rows.ToList();
     }
 }

@@ -1,5 +1,6 @@
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
@@ -34,10 +35,45 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         ORDER BY af.Id
         """;
 
+    // {0} = whitelisted "column direction" fragment; {1} = whitelisted filter-predicate fragment —
+    // both built from fixed C# switches (ResolveSortColumn/ResolveFilterFragment), never from raw
+    // user input, so string.Format here can't introduce SQL injection.
+    private const string ListByTablePagedSqlTemplate = """
+        SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
+               af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
+               af.IsUnique, af.IsSystem, af.Fid, af.CreatedOn
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+          AND af.IsDeleted = 0
+          AND (@search IS NULL OR af.Label LIKE @search)
+          {1}
+        ORDER BY {0}
+        OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+        """;
+
+    private const string CountByTableFilteredSqlTemplate = """
+        SELECT COUNT(1)
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+          AND af.IsDeleted = 0
+          AND (@search IS NULL OR af.Label LIKE @search)
+          {0}
+        """;
+
     private const string NameExistsSql = """
         SELECT CAST(CASE WHEN EXISTS (
             SELECT 1 FROM meta.AppField
             WHERE AppTableId = @tableId AND Name = @name AND IsDeleted = 0
+        ) THEN 1 ELSE 0 END AS BIT)
+        """;
+
+    private const string LabelExistsSql = """
+        SELECT CAST(CASE WHEN EXISTS (
+            SELECT 1 FROM meta.AppField
+            WHERE AppTableId = @tableId AND Label = @label AND IsDeleted = 0
+              AND (@excludeFieldId IS NULL OR Id <> @excludeFieldId)
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
@@ -89,7 +125,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     private const string UpdateFieldSql = """
         UPDATE meta.AppField
-        SET Name = @name, Label = @label, Description = @description,
+        SET Label = @label, Description = @description,
             IsRequired = @isRequired, DefaultValue = @defaultValue,
             IsSearchable = @isSearchable, IsSortable = @isSortable,
             IsFilterable = @isFilterable, IsReportable = @isReportable, IsAuditable = @isAuditable,
@@ -155,11 +191,132 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         return results.AsList();
     }
 
+    public async Task<IReadOnlyList<AppFieldListItemDto>> ListByTablePagedAsync(
+        long tableId, int page, int pageSize, string? search, string sortBy, bool sortDesc, string? filter, CancellationToken ct = default)
+    {
+        var column = ResolveSortColumn(sortBy);
+        var (filterFragment, categoryFilter) = ResolveFilterFragment(filter);
+        var sql = string.Format(ListByTablePagedSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}, af.Id", filterFragment);
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<AppFieldListItemDto>(
+            new CommandDefinition(sql, new
+            {
+                tableId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                categoryFilter,
+                offset = (page - 1) * pageSize,
+                pageSize
+            }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<int> CountByTableAsync(long tableId, string? search, string? filter, CancellationToken ct = default)
+    {
+        var (filterFragment, categoryFilter) = ResolveFilterFragment(filter);
+        var sql = string.Format(CountByTableFilteredSqlTemplate, filterFragment);
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(sql, new
+            {
+                tableId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                categoryFilter,
+            }, cancellationToken: ct));
+    }
+
+    /// <summary>Maps a grid column name to its SQL sort expression. Settings is intentionally not
+    /// sortable (excluded from the grid entirely). Unknown values fall back to Name.</summary>
+    private static string ResolveSortColumn(string sortBy) => sortBy switch
+    {
+        "id" => "af.Id",
+        "label" => "af.Label",
+        "description" => "af.Description",
+        "typeCode" => "TypeCode",
+        "isRequired" => "af.IsRequired",
+        "isSearchable" => "af.IsSearchable",
+        "isSortable" => "af.IsSortable",
+        "isFilterable" => "af.IsFilterable",
+        "isReportable" => "af.IsReportable",
+        "isAuditable" => "af.IsAuditable",
+        "isUnique" => "af.IsUnique",
+        "isSystem" => "af.IsSystem",
+        "fid" => "af.Fid",
+        "createdOn" => "af.CreatedOn",
+        _ => "af.Name",
+    };
+
+    private static readonly HashSet<string> CategoryFilterValues =
+        new(StringComparer.OrdinalIgnoreCase) { "Text", "Numeric", "Date", "Other", "User", "Formula", "Relationship", "Action" };
+
+    /// <summary>Exact field-type codes the Field List "Show" dropdown can filter to individually via
+    /// a "Type:&lt;code&gt;" filter value — finer-grained than the Category filter above (e.g. just
+    /// Duration fields, not the whole Date category). Some of these codes collide with a category
+    /// name (Text, User), which is exactly why the "Type:" prefix exists — it disambiguates which
+    /// of the two the caller means.</summary>
+    private static readonly HashSet<string> TypeCodeFilterValues =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Text", "Duration", "Boolean", "Phone", "Address", "Email",
+            "User", "MultiUser", "MultiSelect", "File", "Url", "ReportLink",
+        };
+
+    /// <summary>Resolves the "filter" dropdown value into a whitelisted SQL predicate fragment (never
+    /// built from raw user input) plus the parameter value when the filter needs one.
+    /// "All Fields", blank, or an unrecognized value returns no filter (the full dataset).</summary>
+    private static (string Fragment, string? CategoryFilter) ResolveFilterFragment(string? filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter))
+            return (string.Empty, null);
+
+        var value = filter.Trim();
+
+        // "Type:<code>" — exact field-type match, e.g. "Type:Duration".
+        if (value.StartsWith("Type:", StringComparison.OrdinalIgnoreCase))
+        {
+            var typeCode = value["Type:".Length..];
+            return TypeCodeFilterValues.TryGetValue(typeCode, out var resolvedType)
+                ? ("AND ft.Code = @categoryFilter", resolvedType)
+                : (string.Empty, null);
+        }
+
+        // "Name:<exact name>" — e.g. "Name:Record ID#" for the built-in key field.
+        if (value.StartsWith("Name:", StringComparison.OrdinalIgnoreCase))
+        {
+            var name = value["Name:".Length..];
+            return string.IsNullOrEmpty(name) ? (string.Empty, null) : ("AND af.Name = @categoryFilter", name);
+        }
+
+        if (CategoryFilterValues.TryGetValue(value, out var category))
+            return ("AND ft.Category = @categoryFilter", category);
+
+        return value switch
+        {
+            var v when string.Equals(v, "System Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsSystem = 1", null),
+            var v when string.Equals(v, "Custom Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsSystem = 0", null),
+            var v when string.Equals(v, "Required Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsRequired = 1", null),
+            var v when string.Equals(v, "Reportable Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsReportable = 1", null),
+            var v when string.Equals(v, "Searchable Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsSearchable = 1", null),
+            var v when string.Equals(v, "Filterable Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsFilterable = 1", null),
+            var v when string.Equals(v, "Unique Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsUnique = 1", null),
+            var v when string.Equals(v, "Auditable Fields", StringComparison.OrdinalIgnoreCase) => ("AND af.IsAuditable = 1", null),
+            _ => (string.Empty, null), // "All Fields" and anything unrecognized
+        };
+    }
+
     public async Task<bool> NameExistsInTableAsync(long tableId, string name, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(NameExistsSql, new { tableId, name }, cancellationToken: ct));
+    }
+
+    public async Task<bool> LabelExistsInTableAsync(long tableId, string label, long? excludeFieldId = null, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(LabelExistsSql, new { tableId, label, excludeFieldId }, cancellationToken: ct));
     }
 
     public async Task<int> GetNextFidAsync(long tableId, CancellationToken ct = default)
@@ -231,9 +388,13 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         
+        // core.FieldType (tenant DB — see database/migrations/tenant/002_core_fieldtype.sql) has no
+        // IsActive column — it's a static reference table, unlike the control-DB copy of the same
+        // table name. That extra predicate made this throw "Invalid column name 'IsActive'" any time
+        // a relationship whose reference field pre-existed got force-deleted (e.g. deleting its table).
         var numberTypeId = await connection.QuerySingleAsync<long>(
             new CommandDefinition(
-                "SELECT Id FROM core.FieldType WHERE Code = 'Number' AND IsActive = 1",
+                "SELECT Id FROM core.FieldType WHERE Code = 'Number'",
                 cancellationToken: ct));
 
         await connection.ExecuteAsync(
@@ -258,7 +419,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
     }
 
-    public async Task<int> UpdateAsync(Guid publicId, long tableId, string name, string? label, string? description,
+    public async Task<int> UpdateAsync(Guid publicId, long tableId, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
         bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, string? settings, CancellationToken ct = default)
     {
@@ -266,7 +427,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         return await connection.ExecuteAsync(
             new CommandDefinition(UpdateFieldSql, new
             {
-                publicId, tableId, name, label, description,
+                publicId, tableId, label, description,
                 isRequired, defaultValue, isSearchable, isSortable,
                 isFilterable, isReportable, isAuditable, isUnique, isEncrypted, settings,
                 modifiedBy = QueryContext.UserId,

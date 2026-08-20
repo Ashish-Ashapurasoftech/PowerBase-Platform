@@ -6,6 +6,7 @@ using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
 using PowerBase.Application.Tables.Queries.GetTable;
 using PowerBase.Application.Tables.Queries.ListTables;
+using PowerBase.Application.Tables.Queries.ListTableNavItems;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -124,13 +125,41 @@ public class TableHandlerTests
     public async Task ListTables_ReturnsTablesForApp()
     {
         var app = MakeApp();
-        var tables = new List<AppTable> { MakeTable(), MakeTable(21) };
+        var items = new List<PowerBase.Application.Common.Models.AppTableListItemDto>
+        {
+            new() { PublicId = Guid.NewGuid(), Name = "Contacts" },
+            new() { PublicId = Guid.NewGuid(), Name = "Companies" },
+        };
         _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
-        _tableRepo.ListByAppAsync(app.Id).Returns(tables);
+        _tableRepo.ListByAppPagedAsync(app.Id, 1, 20, null, "name", false, null, Arg.Any<CancellationToken>()).Returns(items);
+        _tableRepo.CountByAppAsync(app.Id, null, null, Arg.Any<CancellationToken>()).Returns(2);
         var sut = new ListTablesQueryHandler(_appRepo, _tableRepo);
 
         var result = await sut.HandleAsync(new ListTablesQuery(app.PublicId));
 
+        result.Items.Should().HaveCount(2);
+        result.Total.Should().Be(2);
+    }
+
+    // --- ListTableNavItemsQueryHandler ---
+
+    [Fact]
+    public async Task ListTableNavItems_ReturnsEveryTableForApp_Unpaginated()
+    {
+        var app = MakeApp();
+        var items = new List<PowerBase.Application.Common.Models.AppTableNavItemDto>
+        {
+            new() { PublicId = Guid.NewGuid(), Name = "Contacts", IsShowInBar = true },
+            new() { PublicId = Guid.NewGuid(), Name = "Companies", IsShowInBar = false },
+        };
+        _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
+        _tableRepo.ListNavByAppAsync(app.Id, Arg.Any<CancellationToken>()).Returns(items);
+        var sut = new ListTableNavItemsQueryHandler(_appRepo, _tableRepo);
+
+        var result = await sut.HandleAsync(new ListTableNavItemsQuery(app.PublicId));
+
         result.Should().HaveCount(2);
+        result.Should().Contain(t => t.Name == "Contacts" && t.IsShowInBar);
+        result.Should().Contain(t => t.Name == "Companies" && !t.IsShowInBar);
     }
 }

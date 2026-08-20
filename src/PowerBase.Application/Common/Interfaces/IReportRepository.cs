@@ -1,3 +1,4 @@
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Common.Interfaces;
@@ -9,6 +10,11 @@ public interface IReportRepository
     Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Report>> ListAllByAppAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Report>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default);
+    /// <summary>Slim, paged, searchable (by Name), sortable listing for the reports grid — same
+    /// role-based Visibility filtering as <see cref="ListByTableAsync"/>, just paginated.</summary>
+    Task<IReadOnlyList<ReportListItemDto>> ListByTablePagedAsync(
+        Guid tablePublicId, int page, int pageSize, string? search, string sortBy, bool sortDesc, CancellationToken ct = default);
+    Task<int> CountByTableAsync(Guid tablePublicId, string? search, CancellationToken ct = default);
     Task<Report?> GetDefaultByTableAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<Report?> GetVisibleReportAsync(Guid publicId, CancellationToken ct = default);
     Task<Report?> GetFirstVisibleReportByTableAsync(Guid tablePublicId, CancellationToken ct = default);

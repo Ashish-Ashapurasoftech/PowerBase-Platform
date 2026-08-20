@@ -187,6 +187,15 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
         return publicIds;
     }
 
+    public async Task<IReadOnlySet<long>> GetAllowedAppIdsAsync(long userTokenId, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        var ids = await connection.QueryAsync<long>(
+            new CommandDefinition(GetAllowedAppIdsSql, new { userTokenId }, cancellationToken: ct)
+        );
+        return ids.ToHashSet();
+    }
+
     public async Task<(IEnumerable<UserToken> Items, int TotalCount)> GetMyTokensPagedAsync(
         long userId, 
         long tenantId, 
