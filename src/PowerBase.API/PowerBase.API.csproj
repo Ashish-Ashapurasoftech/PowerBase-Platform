@@ -28,4 +28,14 @@
     </Content>
   </ItemGroup>
 
+  <!-- Automatically run migrations after building in Debug mode -->
+  <Target Name="RunMigrations" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+    <Message Importance="High" Text="Running PowerBase Migrator for Control Plane..." />
+    <Exec Command="dotnet run --project ..\PowerBase.Migrator\PowerBase.Migrator.csproj -- migrate control" IgnoreExitCode="true" />
+    
+    <Message Importance="High" Text="Running PowerBase Migrator for All Tenants..." />
+    <Exec Command="dotnet run --project ..\PowerBase.Migrator\PowerBase.Migrator.csproj -- migrate tenants" IgnoreExitCode="true" />
+  </Target>
+
 </Project>
+      

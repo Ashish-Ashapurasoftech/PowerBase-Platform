@@ -22,7 +22,8 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     private const string SelectColumns = """
         Id, PublicId, AppTableId, Name, IsDefault, AutoAddNewFields,
         ShowBuiltInFields, SaveOptions, DisplayOrder, IsDeleted,
-        CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion
+        CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion,
+        PageNavMode, AlwaysTabsOnView, ThemeJson
         """;
 
     private const string GetByPublicIdSql = $"""
@@ -122,14 +123,23 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         )
         """;
 
+    private const string GetPagesSql = """
+        SELECT Id, PublicId, FormId, Heading, DisplayOrder
+        FROM meta.FormPage WHERE FormId = @formId ORDER BY DisplayOrder
+        """;
+
     private const string GetSectionsSql = """
-        SELECT Id, PublicId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder
+        SELECT Id, PublicId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder,
+               GridCols, FormPageId, IsPinned, BackgroundColor, BackgroundType, BackgroundImage,
+               BorderColor, BorderWidth, ShowDividers, DividerColor, DividerWidthPx
         FROM meta.FormSection WHERE FormId = @formId ORDER BY DisplayOrder
         """;
 
     private const string GetBlocksSql = """
         SELECT fsb.Id, fsb.PublicId, fsb.FormSectionId,
-               fsb.Heading, fsb.BackgroundColor, fsb.Width, fsb.DisplayOrder
+               fsb.Heading, fsb.BackgroundColor, fsb.Width, fsb.DisplayOrder,
+               fsb.ColStart, fsb.ColSpan, fsb.BackgroundType, fsb.BackgroundImage,
+               fsb.DividerMode, fsb.DividerColor, fsb.DividerWidthPx
         FROM meta.FormSectionBlock fsb
         JOIN meta.FormSection fs ON fs.Id = fsb.FormSectionId
         WHERE fs.FormId = @formId
@@ -141,7 +151,10 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                fe.AppFieldId, fe.ElementType, fe.ElementContent,
                fe.LabelMode, fe.CustomLabel, fe.ShowOnAdd, fe.ShowOnEdit, fe.ShowOnView,
                fe.WidthMode, fe.WidthValue, fe.HelpTextOverride, fe.IsReadOnly,
-               fe.IsRequired, fe.DisplayAs, fe.DisplayOrder
+               fe.IsRequired, fe.DisplayAs, fe.DisplayOrder,
+               fe.ColStart, fe.RowStart, fe.ColSpan, fe.RowSpan, fe.GroupId, fe.CloneGroupId,
+               fe.FormPageId, fe.TextStyle, fe.BackgroundColor, fe.BorderColor, fe.BorderWidth,
+               fe.ContentWidthMode, fe.ContentWidthValue, fe.ContentWidthUnit
         FROM meta.FormElement fe
         JOIN meta.FormSection fs ON fs.Id = fe.FormSectionId
         JOIN meta.Form f ON f.Id = fs.FormId
@@ -152,6 +165,21 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         """;
 
     private const string DeleteSectionsSql = "DELETE FROM meta.FormSection WHERE FormId = @formId";
+    private const string DeletePagesSql = "DELETE FROM meta.FormPage WHERE FormId = @formId";
+
+    private const string InsertPageSql = """
+        INSERT INTO meta.FormPage (PublicId, FormId, Heading, DisplayOrder)
+        OUTPUT INSERTED.Id
+        VALUES (ISNULL(@publicId, NEWID()), @formId, @heading, @displayOrder)
+        """;
+
+    private const string UpdateFormLayoutMetaSql = """
+        UPDATE meta.Form
+        SET PageNavMode      = ISNULL(@pageNavMode, PageNavMode),
+            AlwaysTabsOnView = ISNULL(@alwaysTabsOnView, AlwaysTabsOnView),
+            ThemeJson        = @themeJson
+        WHERE Id = @formId
+        """;
 
     // Saving a layout re-inserts every section/block/element, so rule action targets — which are
     // FK'd to the rows about to be deleted — have to be released first and re-pointed afterwards.
@@ -197,27 +225,43 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     // these ids back to rule action targets in a later pass, and the form designer, which already
     // sends the existing publicId for rows it is re-saving — depend on this round-tripping.
     private const string InsertSectionSql = """
-        INSERT INTO meta.FormSection (PublicId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder)
+        INSERT INTO meta.FormSection
+            (PublicId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder,
+             GridCols, FormPageId, IsPinned, BackgroundColor, BackgroundType, BackgroundImage,
+             BorderColor, BorderWidth, ShowDividers, DividerColor, DividerWidthPx)
         OUTPUT INSERTED.Id
-        VALUES (ISNULL(@publicId, NEWID()), @formId, @name, @columnCount, @columnWidths, @isCollapsed, @displayOrder)
+        VALUES
+            (ISNULL(@publicId, NEWID()), @formId, @name, @columnCount, @columnWidths, @isCollapsed, @displayOrder,
+             @gridCols, @formPageId, @isPinned, @backgroundColor, @backgroundType, @backgroundImage,
+             @borderColor, @borderWidth, @showDividers, @dividerColor, @dividerWidthPx)
         """;
 
     private const string InsertBlockSql = """
-        INSERT INTO meta.FormSectionBlock (PublicId, FormSectionId, Heading, BackgroundColor, Width, DisplayOrder)
+        INSERT INTO meta.FormSectionBlock
+            (PublicId, FormSectionId, Heading, BackgroundColor, Width, DisplayOrder,
+             ColStart, ColSpan, BackgroundType, BackgroundImage, DividerMode, DividerColor, DividerWidthPx)
         OUTPUT INSERTED.Id
-        VALUES (ISNULL(@publicId, NEWID()), @formSectionId, @heading, @backgroundColor, @width, @displayOrder)
+        VALUES
+            (ISNULL(@publicId, NEWID()), @formSectionId, @heading, @backgroundColor, @width, @displayOrder,
+             @colStart, @colSpan, @backgroundType, @backgroundImage, @dividerMode, @dividerColor, @dividerWidthPx)
         """;
 
     private const string InsertElementSql = """
         INSERT INTO meta.FormElement
             (PublicId, FormSectionId, FormSectionBlockId, AppFieldId, ElementType, ElementContent,
              LabelMode, CustomLabel, ShowOnAdd, ShowOnEdit, ShowOnView,
-             WidthMode, WidthValue, HelpTextOverride, IsReadOnly, IsRequired, DisplayAs, DisplayOrder)
+             WidthMode, WidthValue, HelpTextOverride, IsReadOnly, IsRequired, DisplayAs, DisplayOrder,
+             ColStart, RowStart, ColSpan, RowSpan, GroupId, CloneGroupId, FormPageId,
+             TextStyle, BackgroundColor, BorderColor, BorderWidth,
+             ContentWidthMode, ContentWidthValue, ContentWidthUnit)
         OUTPUT INSERTED.Id
         VALUES
             (ISNULL(@publicId, NEWID()), @formSectionId, @formSectionBlockId, @appFieldId, @elementType, @elementContent,
              @labelMode, @customLabel, @showOnAdd, @showOnEdit, @showOnView,
-             @widthMode, @widthValue, @helpTextOverride, @isReadOnly, @isRequired, @displayAs, @displayOrder)
+             @widthMode, @widthValue, @helpTextOverride, @isReadOnly, @isRequired, @displayAs, @displayOrder,
+             @colStart, @rowStart, @colSpan, @rowSpan, @groupId, @cloneGroupId, @formPageId,
+             @textStyle, @backgroundColor, @borderColor, @borderWidth,
+             @contentWidthMode, @contentWidthValue, @contentWidthUnit)
         """;
 
     private const string AppendFieldSql = """
@@ -308,6 +352,14 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
             new CommandDefinition(SoftDeleteSql, new { publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
+    public async Task<IReadOnlyList<FormPage>> GetPagesAsync(long formId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        var pages = await conn.QueryAsync<FormPage>(
+            new CommandDefinition(GetPagesSql, new { formId }, cancellationToken: ct));
+        return pages.ToList();
+    }
+
     public async Task<IReadOnlyList<FormSection>> GetLayoutAsync(long formId, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
@@ -349,7 +401,16 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     /// to SQL NULL so the insert falls back to generating one.</summary>
     private static Guid? AsSuppliedPublicId(Guid publicId) => publicId == Guid.Empty ? null : publicId;
 
-    public async Task SaveLayoutAsync(long formId, IReadOnlyList<FormSection> sections, CancellationToken ct = default)
+    public async Task SaveLayoutAsync(
+        long formId,
+        IReadOnlyList<FormSection> sections,
+        IReadOnlyList<FormPage>? pages = null,
+        string? pageNavMode = null,
+        bool? alwaysTabsOnView = null,
+        string? themeJson = null,
+        IReadOnlyDictionary<FormSection, Guid>? sectionPageLinks = null,
+        IReadOnlyDictionary<FormElement, Guid>? elementPageLinks = null,
+        CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.OpenAsync(ct);
@@ -363,6 +424,33 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         await conn.ExecuteAsync(new CommandDefinition(NullRuleActionTargetsSql, new { formId }, tx, cancellationToken: ct));
         await conn.ExecuteAsync(new CommandDefinition(DeleteSectionsSql, new { formId }, tx, cancellationToken: ct));
 
+        // Pages are re-inserted the same way sections are — ON DELETE CASCADE on FormSection/
+        // FormElement's FK to FormPage means deleting the pages first would also null those FKs
+        // out, so pages go first, sections/elements re-point to the fresh page ids afterwards.
+        await conn.ExecuteAsync(new CommandDefinition(DeletePagesSql, new { formId }, tx, cancellationToken: ct));
+
+        var pageIdByPublicId = new Dictionary<Guid, long>();
+        if (pages is { Count: > 0 })
+        {
+            for (var pi = 0; pi < pages.Count; pi++)
+            {
+                var page = pages[pi];
+                var pageId = await conn.QuerySingleAsync<long>(new CommandDefinition(InsertPageSql, new
+                {
+                    publicId     = AsSuppliedPublicId(page.PublicId),
+                    formId,
+                    heading      = page.Heading,
+                    displayOrder = pi + 1,
+                }, tx, cancellationToken: ct));
+
+                // A caller-supplied PublicId round-trips identity; a brand-new page's generated
+                // PublicId is unknown here, so section/element links naming it wouldn't resolve —
+                // acceptable, since a link can only ever name a page the caller already knows about.
+                if (page.PublicId != Guid.Empty)
+                    pageIdByPublicId[page.PublicId] = pageId;
+            }
+        }
+
         // PublicId → freshly-inserted Id, for re-pointing the targets captured above. Only rows
         // whose PublicId the caller supplied can be matched; a brand-new row had no rule aimed at
         // it in the first place, so nothing is lost by leaving it out.
@@ -373,16 +461,30 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         for (var si = 0; si < sections.Count; si++)
         {
             var section = sections[si];
+            long? formPageId = sectionPageLinks != null && sectionPageLinks.TryGetValue(section, out var sectionPagePublicId)
+                && pageIdByPublicId.TryGetValue(sectionPagePublicId, out var sPageId) ? sPageId : null;
+
             var sectionId = await conn.QuerySingleAsync<long>(
                 new CommandDefinition(InsertSectionSql, new
                 {
-                    publicId     = AsSuppliedPublicId(section.PublicId),
+                    publicId        = AsSuppliedPublicId(section.PublicId),
                     formId,
-                    name         = section.Name,
-                    columnCount  = section.Blocks.Count,
-                    columnWidths = (string?)null,
-                    isCollapsed  = section.IsCollapsed,
-                    displayOrder = si + 1,
+                    name            = section.Name,
+                    columnCount     = section.Blocks.Count,
+                    columnWidths    = (string?)null,
+                    isCollapsed     = section.IsCollapsed,
+                    displayOrder    = si + 1,
+                    gridCols        = section.GridCols,
+                    formPageId,
+                    isPinned        = section.IsPinned,
+                    backgroundColor = section.BackgroundColor,
+                    backgroundType  = section.BackgroundType,
+                    backgroundImage = section.BackgroundImage,
+                    borderColor     = section.BorderColor,
+                    borderWidth     = section.BorderWidth,
+                    showDividers    = section.ShowDividers,
+                    dividerColor    = section.DividerColor,
+                    dividerWidthPx  = section.DividerWidthPx,
                 }, tx, cancellationToken: ct));
 
             if (section.PublicId != Guid.Empty)
@@ -400,6 +502,13 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                         backgroundColor = block.BackgroundColor,
                         width           = block.Width,
                         displayOrder    = bi + 1,
+                        colStart        = block.ColStart,
+                        colSpan         = block.ColSpan,
+                        backgroundType  = block.BackgroundType,
+                        backgroundImage = block.BackgroundImage,
+                        dividerMode     = block.DividerMode,
+                        dividerColor    = block.DividerColor,
+                        dividerWidthPx  = block.DividerWidthPx,
                     }, tx, cancellationToken: ct));
 
                 if (block.PublicId != Guid.Empty)
@@ -408,6 +517,9 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                 for (var ei = 0; ei < block.Elements.Count; ei++)
                 {
                     var el = block.Elements[ei];
+                    long? elFormPageId = elementPageLinks != null && elementPageLinks.TryGetValue(el, out var elPagePublicId)
+                        && pageIdByPublicId.TryGetValue(elPagePublicId, out var ePageId) ? ePageId : null;
+
                     var elementId = await conn.QuerySingleAsync<long>(new CommandDefinition(InsertElementSql, new
                     {
                         publicId           = AsSuppliedPublicId(el.PublicId),
@@ -428,6 +540,20 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                         isRequired         = el.IsRequired,
                         displayAs          = el.DisplayAs,
                         displayOrder       = ei + 1,
+                        colStart           = el.ColStart,
+                        rowStart           = el.RowStart,
+                        colSpan            = el.ColSpan,
+                        rowSpan            = el.RowSpan,
+                        groupId            = el.GroupId,
+                        cloneGroupId       = el.CloneGroupId,
+                        formPageId         = elFormPageId,
+                        textStyle          = el.TextStyle,
+                        backgroundColor    = el.BackgroundColor,
+                        borderColor        = el.BorderColor,
+                        borderWidth        = el.BorderWidth,
+                        contentWidthMode   = el.ContentWidthMode,
+                        contentWidthValue  = el.ContentWidthValue,
+                        contentWidthUnit   = el.ContentWidthUnit,
                     }, tx, cancellationToken: ct));
 
                     if (el.PublicId != Guid.Empty)
@@ -458,6 +584,20 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
             }, tx, cancellationToken: ct));
         }
 
+        // Skipped entirely while the caller sends none of the three (today: every existing client),
+        // so an old client's save never touches these columns. themeJson is a plain overwrite (not
+        // ISNULL-guarded like the other two) once this block does run — Phase 8.8's "reset to
+        // Branding default" UI will need a way to request that overwrite with a null value
+        // specifically, which this null-means-omitted signature doesn't yet distinguish; revisit
+        // when that UI lands rather than adding an unused sentinel now.
+        if (pageNavMode != null || alwaysTabsOnView != null || themeJson != null)
+        {
+            await conn.ExecuteAsync(new CommandDefinition(UpdateFormLayoutMetaSql, new
+            {
+                formId, pageNavMode, alwaysTabsOnView, themeJson,
+            }, tx, cancellationToken: ct));
+        }
+
         await tx.CommitAsync(ct);
 
         static long? Lookup(Dictionary<Guid, long> map, Guid? publicId) =>
@@ -479,6 +619,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     {
         var source = await GetByPublicIdAsync(sourcePublicId, ct);
         var sourceLayout = await GetLayoutAsync(source.Id, ct);
+        var sourcePages = await GetPagesAsync(source.Id, ct);
 
         var newForm = new Form
         {
@@ -493,7 +634,28 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         };
 
         var (newId, newPublicId) = await CreateAsync(newForm, ct);
-        await SaveLayoutAsync(newId, sourceLayout, ct);
+
+        // Pages get fresh PublicIds — meta.FormPage.PublicId is unique across the whole table, not
+        // scoped per form, so reusing the source's would collide. Sections/elements link to a page
+        // via the *old* FormPageId (populated on the entities by GetLayoutAsync), remapped here to
+        // the new page's fresh identity so SaveLayoutAsync can resolve it against the rows it's
+        // about to (re-)insert.
+        var newPages = sourcePages.Select(p => new FormPage
+        {
+            PublicId = Guid.NewGuid(), FormId = newId, Heading = p.Heading, DisplayOrder = p.DisplayOrder,
+        }).ToList();
+        var newPageIdByOldPageId = sourcePages.Zip(newPages, (old, fresh) => (old.Id, fresh.PublicId))
+            .ToDictionary(x => x.Id, x => x.PublicId);
+
+        var sectionPageLinks = sourceLayout
+            .Where(s => s.FormPageId.HasValue && newPageIdByOldPageId.ContainsKey(s.FormPageId.Value))
+            .ToDictionary(s => s, s => newPageIdByOldPageId[s.FormPageId!.Value]);
+        var elementPageLinks = sourceLayout.SelectMany(s => s.Blocks).SelectMany(b => b.Elements)
+            .Where(e => e.FormPageId.HasValue && newPageIdByOldPageId.ContainsKey(e.FormPageId.Value))
+            .ToDictionary(e => e, e => newPageIdByOldPageId[e.FormPageId!.Value]);
+
+        await SaveLayoutAsync(newId, sourceLayout, newPages, source.PageNavMode, source.AlwaysTabsOnView,
+            source.ThemeJson, sectionPageLinks, elementPageLinks, ct);
         return (newId, newPublicId);
     }
 

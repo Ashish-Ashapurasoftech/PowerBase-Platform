@@ -46,6 +46,12 @@ public class SaveFormLayoutCommandHandlerTests
         await _formRepo.SaveLayoutAsync(
             Arg.Any<long>(),
             Arg.Do<IReadOnlyList<FormSection>>(s => captured = s),
+            Arg.Any<IReadOnlyList<FormPage>?>(),
+            Arg.Any<string?>(),
+            Arg.Any<bool?>(),
+            Arg.Any<string?>(),
+            Arg.Any<IReadOnlyDictionary<FormSection, Guid>?>(),
+            Arg.Any<IReadOnlyDictionary<FormElement, Guid>?>(),
             Arg.Any<CancellationToken>());
 
         await CreateSut().HandleAsync(command);

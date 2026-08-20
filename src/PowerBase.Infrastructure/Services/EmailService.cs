@@ -170,6 +170,37 @@ public class EmailService : IEmailService
         await client.SendMailAsync(message, ct);
     }
 
+    public async Task SendEmailAsync(string toEmail, string subject, string body, bool isHtml = false, CancellationToken ct = default)
+    {
+        var smtpHost = _config["Email:SmtpHost"];
+        if (string.IsNullOrWhiteSpace(smtpHost))
+        {
+            _logger.LogInformation("[EmailService DEV] To: {To} | Subject: {Subject}\n{Body}", toEmail, subject, body);
+            return;
+        }
+
+        var smtpPort = int.TryParse(_config["Email:SmtpPort"], out var p) ? p : 587;
+        var fromAddress = _config["Email:FromAddress"] ?? "noreply@powerbase.io";
+        var fromName = _config["Email:FromName"] ?? "PowerBase";
+        var username = _config["Email:Username"];
+        var password = _config["Email:Password"];
+
+        using var client = new SmtpClient(smtpHost, smtpPort)
+        {
+            EnableSsl = true,
+            Credentials = !string.IsNullOrWhiteSpace(username) ? new NetworkCredential(username, password) : null,
+        };
+
+        using var message = new MailMessage(new MailAddress(fromAddress, fromName), new MailAddress(toEmail))
+        {
+            Subject = subject,
+            Body = body,
+            IsBodyHtml = isHtml,
+        };
+
+        await client.SendMailAsync(message, ct);
+    }
+
     public async Task SendEmailAsync(string toEmail, string subject, string body, string? cc = null, string? bcc = null, IEnumerable<string>? attachmentPaths = null, string? fromAddress = null, CancellationToken ct = default)
     {
         var smtpHost = _config["Email:SmtpHost"];
@@ -245,6 +276,6 @@ public class EmailService : IEmailService
                    $"<p><strong>Abort Depth:</strong> {depth}</p>" +
                    $"<p><strong>Error Message:</strong> {message}</p>";
 
-        await SendEmailAsync(adminEmail, subject, body, ct: ct);
+        await SendEmailAsync(adminEmail, subject, body, isHtml: true, ct: ct);
     }
 }

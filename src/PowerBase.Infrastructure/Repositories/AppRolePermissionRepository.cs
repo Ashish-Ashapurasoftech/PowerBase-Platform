@@ -80,7 +80,7 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
     // ── Field-level ──────────────────────────────────────────────────────────
 
     private const string GetFieldPermissionsSql = """
-        SELECT f.PublicId AS FieldPublicId, f.Name AS FieldName, fp.Access
+        SELECT f.PublicId AS FieldPublicId, COALESCE(NULLIF(f.Label, ''), f.Name) AS FieldName, fp.Access
         FROM meta.AppRoleFieldPermission fp
         JOIN meta.AppField f ON f.Id = fp.AppFieldId AND f.IsDeleted = 0
         WHERE fp.AppRoleId = @appRoleId AND f.AppTableId = @appTableId

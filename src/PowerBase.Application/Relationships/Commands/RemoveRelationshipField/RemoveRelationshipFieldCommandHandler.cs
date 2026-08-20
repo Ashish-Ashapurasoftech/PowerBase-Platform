@@ -59,7 +59,7 @@ public class RemoveRelationshipFieldCommandHandler
         var appId = (await _tableRepo.GetByIdAsync(field.AppTableId, ct)).AppId;
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),
-            $"Field '{field.Name}' removed from relationship", appId: appId, ct: ct);
+            $"Field '{field.Label ?? field.Name}' removed from relationship", appId: appId, ct: ct);
 
         return await _queries.GetAsync(rel.PublicId, ct);
     }

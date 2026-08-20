@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
+using PowerBase.Domain.ValueObjects;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
@@ -12,7 +13,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class AppRepository : TenantRepositoryBase, IAppRepository
 {
-    private const string SelectColumns = "Id, PublicId, OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, Branding, LayoutSettings, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
+    private const string SelectColumns = "Id, PublicId, OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsEncrypted, Branding, LayoutSettings, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
 
     private const string GetByPublicIdSql = $"""
         SELECT {SelectColumns}
@@ -35,9 +36,9 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         WHERE IsDeleted = 0
         """;
 
-    private const string ListByUserSql = $"""
+    private const string ListByUserSqlTemplate = """
         SELECT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
-               a.Status, a.Formatting, a.SecurityOptions, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
+               a.Status, a.Formatting, a.SecurityOptions, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
         JOIN meta.AppUser au ON au.AppId = a.Id
@@ -45,9 +46,26 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
           AND au.IsDeleted = 0
           AND a.IsDeleted  = 0
           AND a.Status = @Status
-        ORDER BY a.Name
+        ORDER BY {0}
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
         """;
+
+    /// <summary>Whitelists sortField -> a safe ORDER BY column expression — never interpolate the
+    ///  caller-supplied field directly into SQL. Unknown/omitted fields fall back to the previous
+    ///  fixed Name-ascending order so existing callers (and this whitelist's DEFAULT branch) don't
+    ///  see any behavior change.</summary>
+    private static string ResolveAppSortColumn(string? sortField, bool sortDescending)
+    {
+        var column = sortField?.Trim().ToLowerInvariant() switch
+        {
+            "name" => "a.Name",
+            "ownername" => "a.OwnerName",
+            "createdon" => "a.CreatedOn",
+            "status" => "a.Status",
+            _ => "a.Name",
+        };
+        return sortDescending ? $"{column} DESC" : $"{column} ASC";
+    }
 
     private const string CountByUserSql = """
         SELECT COUNT(1)
@@ -60,7 +78,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     private const string ListAllByUserSql = $"""
         SELECT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
-               a.Status, a.Formatting, a.SecurityOptions, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
+               a.Status, a.Formatting, a.SecurityOptions, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
         JOIN meta.AppUser au ON au.AppId = a.Id
@@ -88,9 +106,9 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         """;
 
     private const string InsertSql = """
-        INSERT INTO meta.App (OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsDeleted, CreatedOn, CreatedBy)
+        INSERT INTO meta.App (OwnerId, OwnerName, Name, Description, Icon, Color, Status, Formatting, SecurityOptions, IsEncrypted, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.PublicId, INSERTED.Id
-        VALUES (@ownerId, @ownerName, @name, @description, @icon, @color, @status, @formatting, @securityOptions, 0, SYSUTCDATETIME(), @createdBy)
+        VALUES (@ownerId, @ownerName, @name, @description, @icon, @color, @status, @formatting, @securityOptions, @isEncrypted, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string SetDefaultRoleSql = """
@@ -112,6 +130,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             Color       = @color,
             Formatting  = @formatting,
             SecurityOptions = @securityOptions,
+            IsEncrypted = @isEncrypted,
             ModifiedOn  = SYSUTCDATETIME(),
             ModifiedBy  = @modifiedBy
         WHERE PublicId  = @publicId
@@ -138,11 +157,13 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         """;
 
     private readonly IConfiguration _configuration;
+    private readonly IEncryptionService _encryptionService;
 
-    public AppRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IConfiguration configuration)
+    public AppRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IConfiguration configuration, IEncryptionService encryptionService)
         : base(connectionFactory, queryContext)
     {
         _configuration = configuration;
+        _encryptionService = encryptionService;
     }
 
     public async Task<App> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
@@ -204,26 +225,67 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             status = app.Status,
             formatting = app.Formatting,
             securityOptions = app.SecurityOptions,
+            isEncrypted = app.IsEncrypted,
             createdBy = QueryContext.UserId,
         };
+
+        // If IsEncrypted is enabled, but no DEK exists in SecurityOptions, generate one and store it.
+        // We use string.Empty or JSON serialization in practice. For simplicity, we assume SecurityOptions holds the DEK.
+        if (app.IsEncrypted && string.IsNullOrEmpty(app.SecurityOptions))
+        {
+            // We need a dummy AppId for DEK generation since the App isn't created yet,
+            // but we can generate the DEK using publicId instead for the derivation info.
+            // Or generate it in a transaction AFTER insert. Let's do it after insert below.
+        }
 
         if (transaction is not null)
         {
             var row = await transaction.Connection!.QuerySingleAsync<(Guid PublicId, long Id)>(
                 new CommandDefinition(InsertSql, parameters, transaction, cancellationToken: ct));
+            
+            if (app.IsEncrypted)
+            {
+                var security = string.IsNullOrEmpty(app.SecurityOptions) || !app.SecurityOptions.TrimStart().StartsWith("{")
+                    ? new AppSecurityOptionsSettings()
+                    : System.Text.Json.JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
+
+                if (string.IsNullOrEmpty(security.WrappedDek))
+                {
+                    security.WrappedDek = await _encryptionService.GenerateAndWrapDekAsync(QueryContext.TenantId, row.Id, ct);
+                    var serializedSecurity = System.Text.Json.JsonSerializer.Serialize(security);
+                    await transaction.Connection!.ExecuteAsync("UPDATE meta.App SET SecurityOptions = @serializedSecurity WHERE Id = @Id", new { serializedSecurity, row.Id }, transaction);
+                }
+            }
             return row;
         }
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.QuerySingleAsync<(Guid PublicId, long Id)>(
+        var insertedRow = await connection.QuerySingleAsync<(Guid PublicId, long Id)>(
             new CommandDefinition(InsertSql, parameters, cancellationToken: ct));
+
+        if (app.IsEncrypted)
+        {
+            var security = string.IsNullOrEmpty(app.SecurityOptions) || !app.SecurityOptions.TrimStart().StartsWith("{")
+                ? new AppSecurityOptionsSettings()
+                : System.Text.Json.JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
+
+            if (string.IsNullOrEmpty(security.WrappedDek))
+            {
+                security.WrappedDek = await _encryptionService.GenerateAndWrapDekAsync(QueryContext.TenantId, insertedRow.Id, ct);
+                var serializedSecurity = System.Text.Json.JsonSerializer.Serialize(security);
+                await connection.ExecuteAsync("UPDATE meta.App SET SecurityOptions = @serializedSecurity WHERE Id = @Id", new { serializedSecurity, Id = insertedRow.Id });
+            }
+        }
+
+        return insertedRow;
     }
 
-    public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, CancellationToken ct = default)
+    public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, string? sortField = null, bool sortDescending = false, CancellationToken ct = default)
     {
+        var sql = string.Format(ListByUserSqlTemplate, ResolveAppSortColumn(sortField, sortDescending));
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var results = await connection.QueryAsync<AppListItemDto>(
-            new CommandDefinition(ListByUserSql, new { userId, Status = "Active", offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
+            new CommandDefinition(sql, new { userId, Status = "Active", offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
         return results.AsList();
     }
 
@@ -261,13 +323,13 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
             new CommandDefinition(GetDefaultRoleIdSql, new { appId }, cancellationToken: ct));
     }
 
-    public async Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, string? formatting, string? securityOptions, CancellationToken ct = default)
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, string? formatting, string? securityOptions, bool isEncrypted, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
             new CommandDefinition(UpdateSql, new
             {
-                publicId, name, description, icon, color, formatting, securityOptions,
+                publicId, name, description, icon, color, formatting, securityOptions, isEncrypted,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

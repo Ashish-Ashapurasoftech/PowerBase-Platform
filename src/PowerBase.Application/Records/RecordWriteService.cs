@@ -110,6 +110,11 @@ public sealed class RecordWriteService : IRecordWriteService
         foreach (var kvp in refOverrides)
             effectiveValues[kvp.Key] = kvp.Value;
 
+        // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
+        // values about to be persisted, excluding this record itself from the Unique collision check.
+        var recordId = Convert.ToInt64(oldRecord["Id"]);
+        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct);
+
         await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct);
 
         // Build before/after values and genuinely changed field IDs keyed by f.Id

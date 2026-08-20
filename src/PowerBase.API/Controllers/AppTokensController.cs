@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
 using PowerBase.API.Models.AppTokens;
+using PowerBase.Application.AppTokens.Commands.BulkDeleteAppTokens;
 using PowerBase.Application.AppTokens.Commands.CreateAppToken;
 using PowerBase.Application.AppTokens.Commands.DeleteAppToken;
 using PowerBase.Application.AppTokens.Commands.RotateAppToken;
@@ -19,19 +20,22 @@ public class AppTokensController : ControllerBase
     private readonly UpdateAppTokenStatusCommandHandler _updateStatusHandler;
     private readonly RotateAppTokenCommandHandler _rotateHandler;
     private readonly DeleteAppTokenCommandHandler _deleteHandler;
+    private readonly BulkDeleteAppTokensCommandHandler _bulkDeleteHandler;
 
     public AppTokensController(
         CreateAppTokenCommandHandler createHandler,
         GetAppTokensQueryHandler getAppTokensHandler,
         UpdateAppTokenStatusCommandHandler updateStatusHandler,
         RotateAppTokenCommandHandler rotateHandler,
-        DeleteAppTokenCommandHandler deleteHandler)
+        DeleteAppTokenCommandHandler deleteHandler,
+        BulkDeleteAppTokensCommandHandler bulkDeleteHandler)
     {
         _createHandler = createHandler;
         _getAppTokensHandler = getAppTokensHandler;
         _updateStatusHandler = updateStatusHandler;
         _rotateHandler = rotateHandler;
         _deleteHandler = deleteHandler;
+        _bulkDeleteHandler = bulkDeleteHandler;
     }
 
     /// <summary>Create an App Token for a specific App</summary>
@@ -57,6 +61,8 @@ public class AppTokensController : ControllerBase
         [FromQuery] bool? isActive,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
+        [FromQuery] string sortBy = "tokenName",
+        [FromQuery] bool sortDesc = false,
         CancellationToken ct = default)
     {
         var query = new GetAppTokensQuery
@@ -65,7 +71,9 @@ public class AppTokensController : ControllerBase
             Search = search,
             IsActive = isActive,
             Page = page,
-            PageSize = pageSize
+            PageSize = pageSize,
+            SortBy = sortBy,
+            SortDesc = sortDesc
         };
 
         var result = await _getAppTokensHandler.HandleAsync(query, ct);
@@ -111,5 +119,16 @@ public class AppTokensController : ControllerBase
     {
         await _deleteHandler.HandleAsync(appPublicId, publicId, ct);
         return Ok(new { success = true });
+    }
+
+    /// <summary>Bulk-delete multiple App Tokens by their public IDs in a single request.</summary>
+    [HttpPost("bulk-delete")]
+    public async Task<IActionResult> BulkDeleteTokens(
+        [FromRoute] Guid appPublicId,
+        [FromBody] BulkDeleteAppTokensRequest request,
+        CancellationToken ct)
+    {
+        var deletedCount = await _bulkDeleteHandler.HandleAsync(new BulkDeleteAppTokensCommand(appPublicId, request.PublicIds), ct);
+        return Ok(new { success = true, deletedCount });
     }
 }

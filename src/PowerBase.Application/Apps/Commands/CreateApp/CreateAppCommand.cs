@@ -15,9 +15,14 @@ public record TableSpec(
 );
 
 public record AppFieldSpec(
-    string Name,
+    string Label,
     string TypeCode,
-    string? Settings = null
+    string? Settings = null,
+    bool IsEncrypted = false,
+    /// <summary>Internal-only escape hatch — never populated from the public Create App request.
+    /// Used exclusively by PBL/QBL app import to preserve a field's exact original Name. Null
+    /// (the normal case) auto-generates Name from Label.</summary>
+    string? Name = null
 );
 
 public record CreateAppCommand(
@@ -25,5 +30,6 @@ public record CreateAppCommand(
     string? Description,
     string? Icon,
     string? Color,
-    IReadOnlyList<TableSpec> Tables
+    IReadOnlyList<TableSpec> Tables,
+    bool IsEncrypted = false
 );

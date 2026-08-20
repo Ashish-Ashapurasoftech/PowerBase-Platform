@@ -17,6 +17,7 @@ public class BulkCreateFieldsCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly IFormRepository _formRepo;
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
+    private readonly IFieldNameResolver _fieldNameResolver;
 
     public BulkCreateFieldsCommandHandler(
         IAppTableRepository tableRepo,
@@ -26,7 +27,8 @@ public class BulkCreateFieldsCommandHandler
         IQueryContext queryContext,
         IAuditRepository auditRepo,
         IFormRepository formRepo,
-        FieldSettingsValidatorRegistry settingsRegistry)
+        FieldSettingsValidatorRegistry settingsRegistry,
+        IFieldNameResolver fieldNameResolver)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -36,6 +38,7 @@ public class BulkCreateFieldsCommandHandler
         _auditRepo = auditRepo;
         _formRepo = formRepo;
         _settingsRegistry = settingsRegistry;
+        _fieldNameResolver = fieldNameResolver;
     }
 
     public async Task<IReadOnlyList<CreateFieldResult>> HandleAsync(BulkCreateFieldsCommand command, CancellationToken ct = default)
@@ -54,7 +57,7 @@ public class BulkCreateFieldsCommandHandler
         {
             var item = command.Fields[i];
             var singleCmd = new CreateFieldCommand(
-                command.TablePublicId, item.TypeCode, item.Name, item.Label,
+                command.TablePublicId, item.TypeCode, item.Label,
                 item.Description, item.IsRequired, item.IsAuditable, item.Settings, item.DefaultValue);
 
             var validation = await validator.ValidateAsync(singleCmd, ct);
@@ -80,10 +83,23 @@ public class BulkCreateFieldsCommandHandler
 
         foreach (var item in command.Fields)
         {
-            // Check for duplicate name within the table (includes fields added in this batch
-            // because each CreateAsync commits immediately).
-            if (await _fieldRepo.NameExistsInTableAsync(table.Id, item.Name, ct))
-                throw new DuplicateException("Field", "name", item.Name);
+            // item.Name is only ever set by trusted internal callers (PBL/QBL import) preserving a
+            // field's original stable identifier; the public API never supplies it, so the normal
+            // path always auto-generates Name from Label (and enforces per-table Label uniqueness —
+            // includes fields added earlier in this batch, since each CreateAsync commits immediately).
+            string name;
+            if (!string.IsNullOrWhiteSpace(item.Name))
+            {
+                if (await _fieldRepo.NameExistsInTableAsync(table.Id, item.Name, ct))
+                    throw new DuplicateException("Field", "name", item.Name);
+                name = item.Name;
+            }
+            else
+            {
+                if (await _fieldRepo.LabelExistsInTableAsync(table.Id, item.Label, ct: ct))
+                    throw new DuplicateException("Field", "label", item.Label);
+                name = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, item.Label, isSystem: false, ct);
+            }
 
             var fieldType = await _fieldTypeRepo.GetByCodeAsync(item.TypeCode, ct)
                 ?? throw new NotFoundException("FieldType", item.TypeCode);
@@ -95,7 +111,7 @@ public class BulkCreateFieldsCommandHandler
                 AppTableId = table.Id,
                 FieldTypeId = fieldType.Id,
                 TypeCode = fieldType.Code,
-                Name = item.Name,
+                Name = name,
                 Label = item.Label,
                 Description = item.Description,
                 IsRequired = item.IsRequired,
@@ -103,11 +119,12 @@ public class BulkCreateFieldsCommandHandler
                 Fid = nextFid,
                 Settings = item.Settings,
                 CreatedBy = _queryContext.UserId,
-                IsSearchable = true,
+                IsSearchable = false,
                 IsSortable = true,
                 IsFilterable = true,
                 IsReportable = true,
                 IsAuditable = item.IsAuditable,
+                IsEncrypted = item.IsEncrypted,
             };
 
             var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
@@ -132,7 +149,7 @@ public class BulkCreateFieldsCommandHandler
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(),
-                $"Field added: {item.Name} To TableName : {table.Name}", appId: table.AppId, ct: ct);
+                $"Field added: {item.Label} To TableName : {table.Name}", appId: table.AppId, ct: ct);
 
             results.Add(new CreateFieldResult
             {
@@ -148,6 +165,7 @@ public class BulkCreateFieldsCommandHandler
                 Fid = field.Fid,
                 Settings = field.Settings,
                 CreatedOn = DateTime.UtcNow,
+                IsEncrypted = field.IsEncrypted,
             });
         }
 

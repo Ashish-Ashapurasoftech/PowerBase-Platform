@@ -17,6 +17,9 @@ public class QueryContext : IQueryContext
     public string? PipelineChainJson { get; set; }
     public string TenantRole { get; set; } = string.Empty;
     public bool IsTenantAdmin => TenantRole == DefaultTenantRoles.Administrator;
+    public bool IsUserToken { get; set; }
+    public bool TokenAccessAllApps { get; set; } = true;
+    public IReadOnlySet<long> AllowedAppIds { get; set; } = new HashSet<long>();
 
     public void SetTenantId(long tenantId) => TenantId = tenantId;
 

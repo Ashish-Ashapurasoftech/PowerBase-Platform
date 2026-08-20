@@ -23,11 +23,12 @@ public class RenderPageQueryHandlerTests
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
     private readonly PowerBase.Application.Formulas.IFormulaProjector _formulaProjector = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
     private readonly PowerBase.Application.Relationships.IRelationalProjector _relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
+    private readonly IAzureSearchService _searchService = Substitute.For<IAzureSearchService>();
 
     private RenderPageQueryHandler MakeSut()
     {
         var runReportHandler = new RunReportQueryHandler(
-            _reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+            _reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService);
         return new RenderPageQueryHandler(_pageRepo, _reportRepo, _tableRepo, runReportHandler);
     }
 

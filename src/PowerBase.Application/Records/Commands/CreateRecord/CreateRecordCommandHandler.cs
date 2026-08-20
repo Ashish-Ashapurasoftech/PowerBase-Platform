@@ -83,6 +83,10 @@ public class CreateRecordCommandHandler
                 effectiveValues[(long)field.Fid.Value] = _formulaDefaults.Resolve(field.DefaultValue, field, fields, effectiveValues, table);
         }
 
+        // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
+        // values about to be persisted, after defaults and reference-override resolution.
+        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: true, excludeRecordId: null, ct);
+
         Guid publicId;
         await _uow.BeginAsync(ct);
         try

@@ -22,10 +22,10 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
     // ── CREATE ───────────────────────────────────────────────────────────────
 
     private const string InsertGroupSql = @"
-        INSERT INTO meta.[Group] (PublicId, Name, Description, AppRoleId, CreatedOn, CreatedBy)
-        OUTPUT INSERTED.Id, INSERTED.PublicId, INSERTED.Name, INSERTED.Description, INSERTED.AppRoleId,
+        INSERT INTO meta.[Group] (PublicId, Name, Description, CreatedOn, CreatedBy)
+        OUTPUT INSERTED.Id, INSERTED.PublicId, INSERTED.Name, INSERTED.Description,
                INSERTED.CreatedOn, INSERTED.CreatedBy, INSERTED.IsDeleted, INSERTED.RowVersion
-        VALUES (@PublicId, @Name, @Description, @AppRoleId, @CreatedOn, @CreatedBy);";
+        VALUES (@PublicId, @Name, @Description, @CreatedOn, @CreatedBy);";
 
     public async Task<Group> CreateAsync(Group group, CancellationToken ct = default)
     {
@@ -36,11 +36,9 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
     // ── READ ─────────────────────────────────────────────────────────────────
 
     private const string GetByPublicIdSql = @"
-        SELECT g.Id, g.PublicId, g.Name, g.Description, g.AppRoleId, g.CreatedOn,
-               ar.PublicId AS AppRolePublicId, ar.Name AS AppRoleName,
+        SELECT g.Id, g.PublicId, g.Name, g.Description, g.CreatedOn,
                (SELECT COUNT(1) FROM meta.GroupMember gm WHERE gm.GroupId = g.Id AND gm.IsDeleted = 0) AS MemberCount
         FROM meta.[Group] g
-        LEFT JOIN meta.AppRole ar ON ar.Id = g.AppRoleId
         WHERE g.PublicId = @publicId AND g.IsDeleted = 0;";
 
     public async Task<GroupDto?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
@@ -51,11 +49,9 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
     }
 
     private const string ListPagedSql = @"
-        SELECT g.Id, g.PublicId, g.Name, g.Description, g.AppRoleId, g.CreatedOn,
-               ar.PublicId AS AppRolePublicId, ar.Name AS AppRoleName,
+        SELECT g.Id, g.PublicId, g.Name, g.Description, g.CreatedOn,
                (SELECT COUNT(1) FROM meta.GroupMember gm WHERE gm.GroupId = g.Id AND gm.IsDeleted = 0) AS MemberCount
         FROM meta.[Group] g
-        LEFT JOIN meta.AppRole ar ON ar.Id = g.AppRoleId
         WHERE g.IsDeleted = 0
           AND (@search IS NULL OR g.Name LIKE '%' + @search + '%' OR g.Description LIKE '%' + @search + '%')
         ORDER BY g.Name
@@ -84,22 +80,21 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
 
     private const string UpdateGroupSql = @"
         UPDATE meta.[Group]
-        SET Name = @name, Description = @description, AppRoleId = @appRoleId, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        SET Name = @name, Description = @description, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @publicId AND IsDeleted = 0;
         SELECT @@ROWCOUNT;";
 
-    public async Task<bool> UpdateAsync(Guid publicId, string name, string? description, long? appRoleId, long modifiedBy, CancellationToken ct = default)
+    public async Task<bool> UpdateAsync(Guid publicId, string name, string? description, long modifiedBy, CancellationToken ct = default)
     {
         await using var conn = await OpenConnectionAsync(ct);
         var rows = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
-            UpdateGroupSql, new { publicId, name, description, appRoleId, modifiedBy }, cancellationToken: ct));
+            UpdateGroupSql, new { publicId, name, description, modifiedBy }, cancellationToken: ct));
         return rows > 0;
     }
 
     // ── DELETE ────────────────────────────────────────────────────────────────
 
     private const string DeleteGroupSql = @"
-        UPDATE meta.GroupMember SET IsDeleted = 1 WHERE GroupId = (SELECT Id FROM meta.[Group] WHERE PublicId = @publicId AND IsDeleted = 0);
         UPDATE meta.[Group]
         SET IsDeleted = 1, DeletedOn = SYSUTCDATETIME(), DeletedBy = @deletedBy
         WHERE PublicId = @publicId AND IsDeleted = 0;
@@ -186,63 +181,62 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
 
         if (!userIds.Any()) return 0;
 
+        // Batch-fetch user details in one query — avoids N+1 control DB connections
+        var users = (await ctrlConn.QueryAsync(
+            "SELECT Id, PublicId, Name, Email FROM core.[User] WHERE Id IN @userIds AND IsDeleted = 0",
+            new { userIds })).ToDictionary(u => (long)u.Id);
+
         var added = 0;
         var sharedApps = (await conn.QueryAsync<dynamic>(new CommandDefinition(
             "SELECT AppId, AppRoleId FROM meta.GroupApp WHERE GroupId = @groupId AND IsDeleted = 0",
             new { groupId = groupId.Value }, cancellationToken: ct))).ToList();
 
+        const string upsertSql = @"
+            IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId)
+            BEGIN
+                UPDATE meta.AppUser
+                SET Status = 'Active',
+                    IsDeleted = 0,
+                    AppRoleId = CASE WHEN IsFromGroup = 1 THEN @appRoleId ELSE AppRoleId END,
+                    GroupId = CASE WHEN IsFromGroup = 1 THEN @groupId ELSE GroupId END,
+                    UpdatedOn = SYSUTCDATETIME()
+                WHERE AppId = @appId AND UserId = @userId
+            END
+            ELSE
+            BEGIN
+                INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
+                VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId)
+            END";
+
         foreach (var userId in userIds)
         {
             var res = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
                 InsertMemberSql, new { groupId = groupId.Value, userId, addedBy }, cancellationToken: ct));
-            
+
             if (res > 0)
             {
                 added += res;
-                await using var ctrlConn2 = _controlFactory.Create();
-                await ctrlConn2.OpenAsync(ct);
-                var user = await ctrlConn2.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
-                    "SELECT PublicId, Name, Email FROM core.[User] WHERE Id = @userId AND IsDeleted = 0",
-                    new { userId }, cancellationToken: ct));
+                if (!users.TryGetValue(userId, out var user)) continue;
 
-                if (user is not null)
+                foreach (var app in sharedApps)
                 {
-                    const string upsertSql = @"
-                        IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId)
-                        BEGIN
-                            UPDATE meta.AppUser
-                            SET Status = 'Active',
-                                IsDeleted = 0,
-                                AppRoleId = CASE WHEN IsFromGroup = 1 THEN @appRoleId ELSE AppRoleId END,
-                                GroupId = CASE WHEN IsFromGroup = 1 THEN @groupId ELSE GroupId END,
-                                UpdatedOn = SYSUTCDATETIME()
-                            WHERE AppId = @appId AND UserId = @userId
-                        END
-                        ELSE
-                        BEGIN
-                            INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
-                            VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId)
-                        END";
-
-                    foreach (var app in sharedApps)
+                    await conn.ExecuteAsync(new CommandDefinition(upsertSql, new
                     {
-                        await conn.ExecuteAsync(new CommandDefinition(upsertSql, new
-                        {
-                            appId = (long)app.AppId,
-                            userId,
-                            userPublicId = (Guid)user.PublicId,
-                            userName = (string)user.Name,
-                            userEmail = (string)user.Email,
-                            appRoleId = (long)app.AppRoleId,
-                            groupId = groupId.Value,
-                            addedBy
-                        }, cancellationToken: ct));
-                    }
+                        appId = (long)app.AppId,
+                        userId,
+                        userPublicId = (Guid)user.PublicId,
+                        userName = (string)user.Name,
+                        userEmail = (string)user.Email,
+                        appRoleId = (long)app.AppRoleId,
+                        groupId = groupId.Value,
+                        addedBy
+                    }, cancellationToken: ct));
                 }
             }
         }
         return added;
     }
+
 
     private const string RemoveMemberSql = @"
         UPDATE gm
@@ -327,7 +321,7 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
         FROM meta.GroupMember gm
         INNER JOIN meta.[Group] g ON g.Id = gm.GroupId
         WHERE g.PublicId = @groupPublicId AND g.IsDeleted = 0 AND gm.IsDeleted = 0
-        ORDER BY gm.UserId
+        ORDER BY gm.CreatedOn DESC
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
 
         SELECT COUNT(1)
@@ -367,7 +361,7 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
                 UserEmail    = u is not null ? (string)u.Email  : string.Empty,
                 AddedOn      = r.AddedOn,
             };
-        }).OrderBy(m => m.UserName).ToList();
+        }).ToList();
 
         return (items, total);
     }
@@ -457,17 +451,18 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
         return false;
     }
 
-    public async Task<IEnumerable<Guid>> GetSharedAppPublicIdsAsync(Guid groupPublicId, CancellationToken ct = default)
+    public async Task<IEnumerable<SharedAppDto>> GetSharedAppsAsync(Guid groupPublicId, CancellationToken ct = default)
     {
         await using var conn = await OpenConnectionAsync(ct);
         const string sql = @"
-            SELECT a.PublicId
+            SELECT a.PublicId AS AppPublicId, ar.PublicId AS AppRolePublicId, ar.Name AS AppRoleName
             FROM meta.GroupApp ga
             INNER JOIN meta.[Group] g ON g.Id = ga.GroupId
             INNER JOIN meta.App a ON a.Id = ga.AppId
+            LEFT JOIN meta.AppRole ar ON ar.Id = ga.AppRoleId
             WHERE g.PublicId = @groupPublicId AND ga.IsDeleted = 0 AND a.IsDeleted = 0;";
 
-        return await conn.QueryAsync<Guid>(new CommandDefinition(sql, new { groupPublicId }, cancellationToken: ct));
+        return await conn.QueryAsync<SharedAppDto>(new CommandDefinition(sql, new { groupPublicId }, cancellationToken: ct));
     }
     private async Task SyncAppUsersForGroupAndAppsAsync(long groupId, IEnumerable<long> appIds, long createdBy, CancellationToken ct)
     {

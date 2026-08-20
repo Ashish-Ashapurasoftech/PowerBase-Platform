@@ -19,4 +19,11 @@ public class Form
     public DateTime? DeletedOn { get; set; }
     public long? DeletedBy { get; set; }
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
+
+    // ── Grid-snap canvas (Phase 8) ──
+    public string? PageNavMode { get; set; }
+    public bool? AlwaysTabsOnView { get; set; }
+    /// <summary>Per-form theme override, JSON-encoded (FormTheme on the frontend).
+    /// Null = inherit the app's Branding tokens.</summary>
+    public string? ThemeJson { get; set; }
 }

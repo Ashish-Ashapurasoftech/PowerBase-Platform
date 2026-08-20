@@ -44,6 +44,13 @@ public class JwtMiddleware
                         ctx.UserName = user.Name;
                         ctx.UserEmail = user.Email;
                         ctx.IpAddress = context.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
+                        ctx.IsUserToken = true;
+                        ctx.TokenAccessAllApps = userToken.AccessAllApps;
+
+                        if (!userToken.AccessAllApps)
+                        {
+                            ctx.AllowedAppIds = await userTokenRepository.GetAllowedAppIdsAsync(userToken.Id, context.RequestAborted);
+                        }
 
                         if (userToken.TenantId > 0)
                         {
@@ -66,6 +73,9 @@ public class JwtMiddleware
                 ctx.UserEmail   = userEmail;
                 ctx.IpAddress   = context.Connection.RemoteIpAddress?.ToString() ?? string.Empty;
                 ctx.TenantRole  = tenantRole;
+                ctx.IsUserToken = false;
+                ctx.TokenAccessAllApps = true;
+                ctx.AllowedAppIds = new HashSet<long>();
                 if (tenantId > 0)
                     ctx.Permissions = await permissionRepo.GetPermissionsAsync(userId, tenantId);
             }

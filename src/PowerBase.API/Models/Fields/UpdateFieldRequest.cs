@@ -1,8 +1,7 @@
 namespace PowerBase.API.Models.Fields;
 
 public record UpdateFieldRequest(
-    string Name,
-    string? Label,
+    string Label,
     string? Description,
     bool IsRequired,
     string? DefaultValue,
@@ -12,4 +11,5 @@ public record UpdateFieldRequest(
     bool IsReportable,
     bool IsAuditable,
     bool IsUnique,
+    bool IsEncrypted,
     string? Settings);

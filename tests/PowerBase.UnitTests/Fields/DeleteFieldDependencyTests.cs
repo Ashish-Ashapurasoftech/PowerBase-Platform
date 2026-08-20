@@ -28,7 +28,7 @@ public class DeleteFieldDependencyTests
         new() { Id = id, PublicId = Guid.NewGuid(), Name = "TestTable", AppId = 1 };
 
     private static AppField MakeField(Guid publicId, int fid, bool isSystem = false) =>
-        new() { Id = 1, PublicId = publicId, Name = "TestField", Fid = fid, IsSystem = isSystem };
+        new() { Id = 1, PublicId = publicId, Name = "TestField", Fid = fid, IsSystem = isSystem, AppTableId = 5 };
 
     [Fact]
     public async Task DeleteField_WhenFieldReferencedInActivePipeline_ThrowsValidationException()
@@ -40,7 +40,7 @@ public class DeleteFieldDependencyTests
         var field = MakeField(fieldId, fid);
         
         _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
-        _fieldRepo.GetByFidInTableAsync(table.Id, fid, Arg.Any<CancellationToken>()).Returns(field);
+        _fieldRepo.GetByPublicIdAsync(fieldId, Arg.Any<CancellationToken>()).Returns(field);
         
         // Mock active pipeline reference
         _pipelineRepo.GetActivePipelineReferencesForFieldAsync(fid, Arg.Any<CancellationToken>())
@@ -49,11 +49,11 @@ public class DeleteFieldDependencyTests
         var sut = CreateDeleteFieldSut();
 
         // Act & Assert
-        var exception = await sut.Invoking(s => s.HandleAsync(new DeleteFieldCommand(table.PublicId, fid)))
+        var exception = await sut.Invoking(s => s.HandleAsync(new DeleteFieldCommand(table.PublicId, fieldId)))
             .Should().ThrowAsync<ValidationException>();
 
         exception.Which.Errors.Should().ContainKey("Field");
-        exception.Which.Errors["Field"][0].Should().Contain("referenced in the following active pipelines");
+        exception.Which.Errors["Field"][0].Should().Contain("referenced in the following active PowerFlows");
 
         await _fieldRepo.DidNotReceive().DeleteAsync(Arg.Any<Guid>(), Arg.Any<long>(), Arg.Any<CancellationToken>());
     }
@@ -68,7 +68,7 @@ public class DeleteFieldDependencyTests
         var field = MakeField(fieldId, fid);
         
         _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
-        _fieldRepo.GetByFidInTableAsync(table.Id, fid, Arg.Any<CancellationToken>()).Returns(field);
+        _fieldRepo.GetByPublicIdAsync(fieldId, Arg.Any<CancellationToken>()).Returns(field);
         
         // Mock no active references
         _pipelineRepo.GetActivePipelineReferencesForFieldAsync(fid, Arg.Any<CancellationToken>())
@@ -78,7 +78,7 @@ public class DeleteFieldDependencyTests
         var sut = CreateDeleteFieldSut();
 
         // Act
-        await sut.HandleAsync(new DeleteFieldCommand(table.PublicId, fid));
+        await sut.HandleAsync(new DeleteFieldCommand(table.PublicId, fieldId));
 
         // Assert
         await _fieldRepo.Received(1).DeleteAsync(fieldId, table.Id, Arg.Any<CancellationToken>());

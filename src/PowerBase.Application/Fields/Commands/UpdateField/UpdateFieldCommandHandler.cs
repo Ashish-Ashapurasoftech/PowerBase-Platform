@@ -36,8 +36,8 @@ public class UpdateFieldCommandHandler
 
     public async Task HandleAsync(UpdateFieldCommand command, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(command.Name))
-            throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name is required."] });
+        if (string.IsNullOrWhiteSpace(command.Label))
+            throw new ValidationException(new Dictionary<string, string[]> { ["Label"] = ["Label is required."] });
 
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
@@ -45,8 +45,16 @@ public class UpdateFieldCommandHandler
         //   (a) get its TypeCode for Settings validation,
         //   (b) detect the optional→required transition (for NULL backfill),
         //   (c) enforce the required+None+default invariant.
-        var existing = await _fieldRepo.GetByFidInTableAsync(table.Id, command.FieldFid, ct)
-                       ?? throw new NotFoundException("Field", command.FieldFid);
+        var existing = await _fieldRepo.GetByPublicIdAsync(command.FieldPublicId, ct)
+                       ?? throw new NotFoundException("Field", command.FieldPublicId);
+
+        // Defend against a caller supplying a field PublicId from a different table than the one
+        // named in the route (and thus than the one the permission check above just authorized).
+        if (existing.AppTableId != table.Id)
+            throw new NotFoundException("Field", command.FieldPublicId);
+
+        if (await _fieldRepo.LabelExistsInTableAsync(table.Id, command.Label, excludeFieldId: existing.Id, ct: ct))
+            throw new DuplicateException("Field", "label", command.Label);
 
         // Validate per-type Settings JSON against the field's current type.
         var settingsErrors = _settingsRegistry.Validate(existing.TypeCode, command.Settings);
@@ -64,8 +72,8 @@ public class UpdateFieldCommandHandler
                 {
                     ["DefaultValue"] =
                     [
-                        $"'{command.Name}' is required but does not have a default value. Because some users are not " +
-                        $"allowed to modify '{command.Name}', those users will not be able to add new records. " +
+                        $"'{command.Label}' is required but does not have a default value. Because some users are not " +
+                        $"allowed to modify '{command.Label}', those users will not be able to add new records. " +
                         "Supply a default value or uncheck Required."
                     ],
                 });
@@ -80,21 +88,40 @@ public class UpdateFieldCommandHandler
             {
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
-                    ["IsUnique"] = [$"Cannot make '{command.Name}' unique — duplicate values already exist. Remove duplicates first."]
+                    ["IsUnique"] = [$"Cannot make '{command.Label}' unique — duplicate values already exist. Remove duplicates first."]
+                });
+            }
+        }
+
+        // ── Encryption lock ─────────────────────────────────────────────────────
+        // We only allow toggling encryption (ON or OFF) for an existing field if the table has zero records.
+        // Otherwise, existing plaintext/ciphertext data would become unreadable.
+        if (existing.IsEncrypted != command.IsEncrypted)
+        {
+            var recordCount = await _recordRepo.CountAsync(table, Array.Empty<AppField>(), ct: ct);
+            if (recordCount > 0)
+            {
+                var errorMsg = existing.IsEncrypted 
+                    ? "A field that has been encrypted cannot be un-encrypted if the table has existing records." 
+                    : "Encryption can only be enabled when creating a new field or if the table has no records.";
+                
+                throw new ValidationException(new Dictionary<string, string[]>
+                {
+                    ["IsEncrypted"] = [errorMsg]
                 });
             }
         }
 
         var affected = await _fieldRepo.UpdateAsync(
             existing.PublicId, table.Id,
-            command.Name, command.Label, command.Description,
+            command.Label, command.Description,
             command.IsRequired, command.DefaultValue,
             command.IsSearchable, command.IsSortable,
             command.IsFilterable, command.IsReportable, command.IsAuditable,
-            command.IsUnique, command.Settings, ct);
+            command.IsUnique, command.IsEncrypted, command.Settings, ct);
 
         if (affected == 0)
-            throw new NotFoundException("Field", command.FieldFid);
+            throw new NotFoundException("Field", command.FieldPublicId);
 
         // Unique index: create or drop after the metadata row is committed.
         if (command.IsUnique != existing.IsUnique)
@@ -114,6 +141,6 @@ public class UpdateFieldCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
-            $"Field modified: {command.Name} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+            $"Field modified: {command.Label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
     }
 }

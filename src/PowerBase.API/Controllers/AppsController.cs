@@ -3,6 +3,7 @@ using PowerBase.API.Attributes;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Apps;
+using PowerBase.Application.Apps.Commands.BulkDeleteApps;
 using PowerBase.Application.Apps.Commands.CreateApp;
 using PowerBase.Application.Apps.Commands.DeleteApp;
 using PowerBase.Application.Apps.Commands.UpdateApp;
@@ -25,6 +26,7 @@ public class AppsController : ControllerBase
     private readonly CreateAppCommandHandler _createHandler;
     private readonly UpdateAppCommandHandler _updateHandler;
     private readonly DeleteAppCommandHandler _deleteHandler;
+    private readonly BulkDeleteAppsCommandHandler _bulkDeleteHandler;
     private readonly GetAppQueryHandler _getHandler;
     private readonly ListAppsQueryHandler _listHandler;
     private readonly PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler _getPermissionsHandler;
@@ -38,6 +40,7 @@ public class AppsController : ControllerBase
         CreateAppCommandHandler createHandler,
         UpdateAppCommandHandler updateHandler,
         DeleteAppCommandHandler deleteHandler,
+        BulkDeleteAppsCommandHandler bulkDeleteHandler,
         GetAppQueryHandler getHandler,
         ListAppsQueryHandler listHandler,
         PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler getPermissionsHandler,
@@ -50,6 +53,7 @@ public class AppsController : ControllerBase
         _createHandler = createHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
+        _bulkDeleteHandler = bulkDeleteHandler;
         _getHandler = getHandler;
         _listHandler = listHandler;
         _getPermissionsHandler = getPermissionsHandler;
@@ -81,7 +85,8 @@ public class AppsController : ControllerBase
                 t.Icon,
                 t.Description,
                 t.Config,
-                t.Fields?.Select(f => new AppFieldSpec(f.Name, f.TypeCode)).ToList())).ToList());
+                t.Fields?.Select(f => new AppFieldSpec(f.Label, f.TypeCode, f.Settings, f.IsEncrypted)).ToList())).ToList(),
+            request.IsEncrypted);
         var result = await _createHandler.HandleAsync(command, ct);
         var response = MapToAppResponse(result);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<AppResponse>(response));
@@ -92,24 +97,27 @@ public class AppsController : ControllerBase
     [RequirePermission(PermissionCodes.AppsRead)]
     [ProducesResponseType(typeof(ApiListResponse<AppResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> List([FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default)
+    public async Task<IActionResult> List([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? sortField = null, [FromQuery] string sortOrder = "asc", CancellationToken ct = default)
     {
-        var result = await _listHandler.HandleAsync(new ListAppsQuery(page, pageSize), ct);
+        var result = await _listHandler.HandleAsync(new ListAppsQuery(page, pageSize, sortField, IsDescending(sortOrder)), ct);
         var items = result.Items.Select(MapToAppResponse).ToList();
         return Ok(new ApiListResponse<AppResponse>(items, result.Total, result.Page, result.PageSize));
     }
+
+    private static bool IsDescending(string? sortOrder) =>
+        string.Equals(sortOrder, "desc", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Search apps by name for the current tenant.</summary>
     [HttpGet("search")]
     [RequirePermission(PermissionCodes.AppsRead)]
     [ProducesResponseType(typeof(ApiListResponse<AppResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> Search([FromQuery] string name = "", [FromQuery] int page = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default)
+    public async Task<IActionResult> Search([FromQuery] string name = "", [FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? sortField = null, [FromQuery] string sortOrder = "asc", CancellationToken ct = default)
     {
         var allItems = new List<PowerBase.Domain.Entities.App>();
         int currentPage = 1;
         int batchSize = 100;
-        
+
         while (true)
         {
             var batchResult = await _listHandler.HandleAsync(new ListAppsQuery(currentPage, batchSize), ct);
@@ -129,6 +137,8 @@ public class AppsController : ControllerBase
             .Where(a => string.IsNullOrEmpty(name) || a.Name.Contains(name.Trim(), StringComparison.OrdinalIgnoreCase))
             .ToList();
 
+        filtered = ApplySearchSort(filtered, sortField, IsDescending(sortOrder));
+
         var paginated = filtered
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
@@ -138,17 +148,48 @@ public class AppsController : ControllerBase
         return Ok(new ApiListResponse<AppResponse>(paginated, filtered.Count, page, pageSize));
     }
 
-    /// <summary>Export all apps for the current tenant to CSV.</summary>
+    /// <summary>Same whitelist as AppRepository.ResolveAppSortColumn — the search path sorts
+    ///  in-memory (it already materializes every matching row for the name filter) rather than in
+    ///  SQL, but must honor the same set of sortable columns as the plain list endpoint.</summary>
+    private static List<PowerBase.Domain.Entities.App> ApplySearchSort(List<PowerBase.Domain.Entities.App> items, string? sortField, bool descending)
+    {
+        Func<PowerBase.Domain.Entities.App, object?> keySelector = sortField?.Trim().ToLowerInvariant() switch
+        {
+            "ownername" => a => a.OwnerName,
+            "createdon" => a => a.CreatedOn,
+            "status" => a => a.Status,
+            _ => a => a.Name,
+        };
+        return descending
+            ? items.OrderByDescending(keySelector).ToList()
+            : items.OrderBy(keySelector).ToList();
+    }
+
+    private static readonly string[] ExportColumns =
+        ["PublicId", "Name", "Description", "Color", "Icon", "Status", "CreatedOn", "OwnerName"];
+
+    private async Task<IReadOnlyList<PowerBase.Domain.Entities.App>> GetExportItemsAsync(string? name, CancellationToken ct)
+    {
+        var allItems = await _appRepo.ListAllByUserAsync(_queryContext.UserId, ct);
+        if (string.IsNullOrWhiteSpace(name))
+            return allItems;
+
+        return allItems
+            .Where(a => a.Name.Contains(name.Trim(), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    /// <summary>Export apps for the current tenant to CSV. Filters by name when <paramref name="name"/> is supplied.</summary>
     [HttpGet("export")]
     [RequirePermission(PermissionCodes.AppsRead)]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> Export(CancellationToken ct = default)
+    public async Task<IActionResult> Export([FromQuery] string? name = null, CancellationToken ct = default)
     {
-        var allItems = await _appRepo.ListAllByUserAsync(_queryContext.UserId, ct);
+        var allItems = await GetExportItemsAsync(name, ct);
 
         var csvBuilder = new System.Text.StringBuilder();
-        csvBuilder.AppendLine("PublicId,Name,Description,Color,Icon,Status,CreatedOn");
+        csvBuilder.AppendLine(string.Join(",", ExportColumns));
 
         foreach (var app in allItems)
         {
@@ -159,12 +200,53 @@ public class AppsController : ControllerBase
                 EscapeCsvField(app.Color),
                 EscapeCsvField(app.Icon),
                 EscapeCsvField(app.Status),
-                EscapeCsvField(app.CreatedOn.ToString("o"))
+                EscapeCsvField(app.CreatedOn.ToString("MM-dd-yyyy")),
+                EscapeCsvField(app.OwnerName)
             ));
         }
 
         var bytes = System.Text.Encoding.UTF8.GetBytes(csvBuilder.ToString());
         return File(bytes, "text/csv", "apps.csv");
+    }
+
+    /// <summary>Export apps for the current tenant to Excel (.xlsx). Filters by name when <paramref name="name"/> is supplied.</summary>
+    [HttpGet("export/xlsx")]
+    [RequirePermission(PermissionCodes.AppsRead)]
+    [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> ExportXlsx([FromQuery] string? name = null, CancellationToken ct = default)
+    {
+        var allItems = await GetExportItemsAsync(name, ct);
+
+        using var wb = new ClosedXML.Excel.XLWorkbook();
+        var ws = wb.Worksheets.Add("Apps");
+
+        for (var ci = 0; ci < ExportColumns.Length; ci++)
+        {
+            var cell = ws.Cell(1, ci + 1);
+            cell.Value = ExportColumns[ci];
+            cell.Style.Font.Bold = true;
+        }
+
+        var row = 2;
+        foreach (var app in allItems)
+        {
+            ws.Cell(row, 1).Value = app.PublicId.ToString();
+            ws.Cell(row, 2).Value = app.Name;
+            ws.Cell(row, 3).Value = app.Description ?? string.Empty;
+            ws.Cell(row, 4).Value = app.Color ?? string.Empty;
+            ws.Cell(row, 5).Value = app.Icon ?? string.Empty;
+            ws.Cell(row, 6).Value = app.Status;
+            ws.Cell(row, 7).Value = app.CreatedOn.ToString("MM-dd-yyyy");
+            ws.Cell(row, 8).Value = app.OwnerName ?? string.Empty;
+            row++;
+        }
+
+        ws.Columns().AdjustToContents();
+
+        using var ms = new MemoryStream();
+        wb.SaveAs(ms);
+        return File(ms.ToArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "apps.xlsx");
     }
 
     private static string EscapeCsvField(string? field)
@@ -228,7 +310,7 @@ public class AppsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateAppRequest request, CancellationToken ct)
     {
-        await _updateHandler.HandleAsync(new UpdateAppCommand(publicId, request.Name, request.Description, request.Icon, request.Color, request.Formatting, request.SecurityOptions), ct);
+        await _updateHandler.HandleAsync(new UpdateAppCommand(publicId, request.Name, request.Description, request.Icon, request.Color, request.Formatting, request.SecurityOptions, request.IsEncrypted), ct);
         return NoContent();
     }
 
@@ -241,6 +323,19 @@ public class AppsController : ControllerBase
     public async Task<IActionResult> Delete(Guid publicId, CancellationToken ct)
     {
         await _deleteHandler.HandleAsync(new DeleteAppCommand(publicId), ct);
+        return NoContent();
+    }
+
+    /// <summary>Soft-delete multiple apps by their public IDs.</summary>
+    [HttpDelete("bulk")]
+    [RequirePermission(PermissionCodes.AppsDelete)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> BulkDelete([FromBody] BulkDeleteAppsRequest request, CancellationToken ct)
+    {
+        await _bulkDeleteHandler.HandleAsync(new BulkDeleteAppsCommand(request.PublicIds), ct);
         return NoContent();
     }
 
@@ -276,40 +371,18 @@ public class AppsController : ControllerBase
         Color = result.Color,
         Status = result.Status,
         CreatedOn = result.CreatedOn,
+        OwnerName = result.OwnerName,
+        IsEncrypted = result.IsEncrypted
     };
 
     private static AppResponse MapToAppResponse(PowerBase.Domain.Entities.App app)
     {
         var formatting = string.IsNullOrEmpty(app.Formatting)
-            ? new AppFormattingSettings()
+            ? null
             : JsonSerializer.Deserialize<AppFormattingSettings>(app.Formatting, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppFormattingSettings();
 
         var security = string.IsNullOrEmpty(app.SecurityOptions)
-            ? new AppSecurityOptionsSettings()
-            : JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
-
-        return new AppResponse
-        {
-            PublicId = app.PublicId,
-            Name = app.Name,
-            Description = app.Description,
-            Icon = app.Icon,
-            Color = app.Color,
-            Formatting = formatting,
-            SecurityOptions = security,
-            Status = app.Status,
-            CreatedOn = app.CreatedOn,
-        };
-    }
-
-    private static AppResponse MapToAppResponse(AppListItemDto app)
-    {
-        var formatting = string.IsNullOrEmpty(app.Formatting)
-            ? new AppFormattingSettings()
-            : JsonSerializer.Deserialize<AppFormattingSettings>(app.Formatting, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppFormattingSettings();
-
-        var security = string.IsNullOrEmpty(app.SecurityOptions)
-            ? new AppSecurityOptionsSettings()
+            ? null
             : JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
 
         return new AppResponse
@@ -324,6 +397,33 @@ public class AppsController : ControllerBase
             Status = app.Status,
             CreatedOn = app.CreatedOn,
             OwnerName = app.OwnerName,
+            IsEncrypted = app.IsEncrypted,
+        };
+    }
+
+    private static AppResponse MapToAppResponse(AppListItemDto app)
+    {
+        var formatting = string.IsNullOrEmpty(app.Formatting)
+            ? null
+            : JsonSerializer.Deserialize<AppFormattingSettings>(app.Formatting, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppFormattingSettings();
+
+        var security = string.IsNullOrEmpty(app.SecurityOptions)
+            ? null
+            : JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
+
+        return new AppResponse
+        {
+            PublicId = app.PublicId,
+            Name = app.Name,
+            Description = app.Description,
+            Icon = app.Icon,
+            Color = app.Color,
+            Formatting = formatting,
+            SecurityOptions = security,
+            Status = app.Status,
+            CreatedOn = app.CreatedOn,
+            OwnerName = app.OwnerName,
+            IsEncrypted = app.IsEncrypted,
         };
     }
 }

@@ -19,7 +19,7 @@ public class AppField
     public int? Scale { get; set; }
     public int DisplayOrder { get; set; }
     public bool IsRequired { get; set; }
-    public bool IsRequiredInForm { get; set; }
+    //public bool IsRequiredInForm { get; set; }
     public bool IsUnique { get; set; }
     public bool IsPrimary { get; set; }
     public bool IsSystem { get; set; }
@@ -28,6 +28,7 @@ public class AppField
     public bool IsFilterable { get; set; }
     public bool IsReportable { get; set; }
     public bool IsAuditable { get; set; } = true;
+    public bool IsEncrypted { get; set; }
     public int? Fid { get; set; }
     public string? Settings { get; set; }
     public bool IsDeleted { get; set; }

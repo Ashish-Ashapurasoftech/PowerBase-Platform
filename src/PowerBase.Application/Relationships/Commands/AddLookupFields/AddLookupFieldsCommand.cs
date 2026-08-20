@@ -4,4 +4,4 @@ namespace PowerBase.Application.Relationships.Commands.AddLookupFields;
 public record AddLookupFieldsCommand(Guid RelationshipPublicId, IReadOnlyList<AddLookupSpec> Lookups);
 
 /// <summary>A parent field to pull down as a Lookup. <paramref name="SourceFid"/> is the parent field's Fid.</summary>
-public record AddLookupSpec(int SourceFid, string Name, string? Label);
+public record AddLookupSpec(int SourceFid, string Label);

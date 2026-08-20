@@ -1,3 +1,3 @@
 namespace PowerBase.Application.Fields.Commands.DeleteField;
 
-public record DeleteFieldCommand(Guid TablePublicId, int FieldFid, bool Force = false);
+public record DeleteFieldCommand(Guid TablePublicId, Guid FieldPublicId, bool Force = false);

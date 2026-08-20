@@ -10,8 +10,7 @@ namespace PowerBase.Application.Relationships.Commands.AddSummaryField;
 /// </summary>
 public record AddSummaryFieldCommand(
     Guid RelationshipPublicId,
-    string Name,
-    string? Label,
+    string Label,
     string Function,
     int? TargetFid,
     FilterGroup? MatchingCriteria);

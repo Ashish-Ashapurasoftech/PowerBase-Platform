@@ -11,8 +11,7 @@ public class AddLookupFieldsRequest
 /// <summary>Add a summary field to an existing relationship's parent table.</summary>
 public class AddSummaryFieldRequest
 {
-    public string Name { get; set; } = string.Empty;
-    public string? Label { get; set; }
+    public string Label { get; set; } = string.Empty;
     /// <summary>Count | Exists | Sum | Avg | Min | Max.</summary>
     public string Function { get; set; } = "Count";
     /// <summary>Child field Fid to aggregate; required for Sum/Avg/Min/Max, null for Count/Exists.</summary>

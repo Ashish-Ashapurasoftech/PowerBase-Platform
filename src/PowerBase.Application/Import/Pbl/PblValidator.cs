@@ -291,6 +291,11 @@ public class PblValidator
     private static HashSet<string> ValidateFields(PblTable table, List<PblIssue> issues, HashSet<string> seenRefs)
     {
         var seenFieldNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Name stays the import cross-reference key (see PblFormModels/PblReportModels doc comments) and
+        // is preserved as-is rather than regenerated — a literal Name collision would still break that
+        // cross-referencing, so it's still checked. Label is what users now actually see/edit, so its
+        // uniqueness is validated too (mirrors the live Create/BulkCreate Field API's Label-duplicate check).
+        var seenFieldLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var field in table.Fields ?? [])
         {
@@ -303,6 +308,12 @@ public class PblValidator
             else if (!seenFieldNames.Add(field.Name))
             {
                 issues.Add(Error("DUPLICATE_FIELD_NAME", $"Field name '{field.Name}' is used more than once in table '{table.Name}'.", field.LogicalRef));
+            }
+
+            var effectiveLabel = string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label;
+            if (!string.IsNullOrWhiteSpace(effectiveLabel) && !seenFieldLabels.Add(effectiveLabel))
+            {
+                issues.Add(Error("DUPLICATE_FIELD_LABEL", $"Field label '{effectiveLabel}' is used more than once in table '{table.Name}'.", field.LogicalRef));
             }
 
             if (string.IsNullOrWhiteSpace(field.TypeCode))

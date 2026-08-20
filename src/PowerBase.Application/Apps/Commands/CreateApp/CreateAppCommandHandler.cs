@@ -6,6 +6,8 @@ using PowerBase.Domain.Exceptions;
 namespace PowerBase.Application.Apps.Commands.CreateApp;
 
 using PowerBase.Application.Fields.Commands.BulkCreateFields;
+using PowerBase.Domain.ValueObjects;
+using System.Text.Json;
 
 public class CreateAppResult
 {
@@ -16,6 +18,8 @@ public class CreateAppResult
     public string? Color { get; init; }
     public string Status { get; init; } = string.Empty;
     public DateTime CreatedOn { get; init; }
+    public bool IsEncrypted { get; init; }
+    public string? OwnerName { get; init; }
 }
 
 public class CreateAppCommandHandler
@@ -79,8 +83,11 @@ public class CreateAppCommandHandler
             Icon = command.Icon,
             Color = command.Color,
             Status = "Active",
+            Formatting = JsonSerializer.Serialize(new AppFormattingSettings()),
+            SecurityOptions = JsonSerializer.Serialize(new AppSecurityOptionsSettings()),
             CreatedOn = now,
             CreatedBy = _queryContext.UserId,
+            IsEncrypted = command.IsEncrypted
         };
 
         await _uow.BeginAsync(ct);
@@ -182,6 +189,8 @@ public class CreateAppCommandHandler
                 Color = app.Color,
                 Status = app.Status,
                 CreatedOn = now,
+                IsEncrypted = app.IsEncrypted,
+                OwnerName = owner.Name
             };
         }
         catch
@@ -212,7 +221,7 @@ public class CreateAppCommandHandler
         // Process Custom Fields
         if (spec.Fields != null && spec.Fields.Any())
         {
-            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name, Settings: f.Settings)).ToList();
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label, Settings: f.Settings, IsEncrypted: f.IsEncrypted, Name: f.Name)).ToList();
             await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
         }
     }

@@ -15,9 +15,7 @@ public class CreateRelationshipCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IFieldTypeRepository _fieldTypeRepo;
     private readonly IRelationshipRepository _relRepo;
-    private readonly ISchemaEngineService _schemaEngine;
-    private readonly IFormRepository _formRepo;
-    private readonly IQueryContext _queryContext;
+    private readonly RelationshipFieldFactory _fieldFactory;
     private readonly IAuditRepository _auditRepo;
     private readonly IAppRepository _appRepo;
 
@@ -26,9 +24,7 @@ public class CreateRelationshipCommandHandler
         IAppFieldRepository fieldRepo,
         IFieldTypeRepository fieldTypeRepo,
         IRelationshipRepository relRepo,
-        ISchemaEngineService schemaEngine,
-        IFormRepository formRepo,
-        IQueryContext queryContext,
+        RelationshipFieldFactory fieldFactory,
         IAuditRepository auditRepo,
         IAppRepository appRepo)
     {
@@ -36,29 +32,22 @@ public class CreateRelationshipCommandHandler
         _fieldRepo = fieldRepo;
         _fieldTypeRepo = fieldTypeRepo;
         _relRepo = relRepo;
-        _schemaEngine = schemaEngine;
-        _formRepo = formRepo;
-        _queryContext = queryContext;
+        _fieldFactory = fieldFactory;
         _auditRepo = auditRepo;
         _appRepo = appRepo;
     }
 
     public async Task<RelationshipDto> HandleAsync(CreateRelationshipCommand command, CancellationToken ct = default)
     {
-        // A name is only required when we're creating a brand-new reference field. When reusing an existing
-        // child field (ReferenceFieldFid set) the field already has a name.
-        if (command.ReferenceFieldFid is null && string.IsNullOrWhiteSpace(command.ReferenceFieldName))
-            throw new ValidationException(new Dictionary<string, string[]> { ["referenceFieldName"] = ["Reference field name is required."] });
+        // A label is only required when we're creating a brand-new reference field. When reusing an existing
+        // child field (ReferenceFieldFid set) the field already has one.
+        if (command.ReferenceFieldFid is null && string.IsNullOrWhiteSpace(command.ReferenceFieldLabel))
+            throw new ValidationException(new Dictionary<string, string[]> { ["referenceFieldLabel"] = ["Reference field label is required."] });
 
         var parent = await _tableRepo.GetByPublicIdAsync(command.ParentTablePublicId, ct);
         var child = await _tableRepo.GetByPublicIdAsync(command.ChildTablePublicId, ct);
         if (parent.AppId != child.AppId)
             throw new ValidationException(new Dictionary<string, string[]> { ["tables"] = ["Both tables must belong to the same app."] });
-
-        var refType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Reference, ct) ?? throw new NotFoundException("FieldType", "Reference");
-        var lookupType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Lookup, ct) ?? throw new NotFoundException("FieldType", "Lookup");
-        var summaryType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Summary, ct) ?? throw new NotFoundException("FieldType", "Summary");
-        var reportLinkType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.ReportLink, ct) ?? throw new NotFoundException("FieldType", "ReportLink");
 
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
         var childFields = await _fieldRepo.ListByTableAsync(child.Id, ct);
@@ -69,8 +58,8 @@ public class CreateRelationshipCommandHandler
         var referenceIsExistingField = command.ReferenceFieldFid is not null;
         if (!referenceIsExistingField)
         {
-            refField = await CreateFieldAsync(
-                child, refType, command.ReferenceFieldName.Trim(), command.ReferenceFieldLabel?.Trim(),
+            refField = await _fieldFactory.CreateAsync(
+                child, FieldTypeCodeNames.Reference, command.ReferenceFieldLabel!.Trim(),
                 command.IsReferenceRequired,
                 new ReferenceSettings { ParentTableId = parent.Id }, ct);
         }
@@ -86,6 +75,9 @@ public class CreateRelationshipCommandHandler
                 {
                     ["referenceFieldFid"] = ["The reference field must be an existing, non-system Number field on the child table."],
                 });
+
+            var refType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Reference, ct)
+                ?? throw new NotFoundException("FieldType", "Reference");
 
             await _fieldRepo.UpdateFieldTypeAsync(
                 existing.Id, refType.Id,
@@ -122,7 +114,7 @@ public class CreateRelationshipCommandHandler
             var src = parentFields.FirstOrDefault(f => f.Fid == spec.SourceFid)
                 ?? throw new NotFoundException("Field", spec.SourceFid);
             ValidateSubField(spec.SourceSubField, src.TypeCode, "sourceSubField");
-            var lookup = await CreateFieldAsync(child, lookupType, spec.Name.Trim(), spec.Label?.Trim(), false,
+            var lookup = await _fieldFactory.CreateAsync(child, FieldTypeCodeNames.Lookup, spec.Label.Trim(), false,
                 new LookupSettings
                 {
                     RelationshipId = relId,
@@ -151,7 +143,7 @@ public class CreateRelationshipCommandHandler
                 {
                     ["targetSubField"] = [$"'{spec.Function}' can't aggregate an address sub-field (always text); use Count, Exists, Min, or Max."],
                 });
-            var summary = await CreateFieldAsync(parent, summaryType, spec.Name.Trim(), spec.Label?.Trim(), false,
+            var summary = await _fieldFactory.CreateAsync(parent, FieldTypeCodeNames.Summary, spec.Label.Trim(), false,
                 new SummarySettings
                 {
                     RelationshipId = relId,
@@ -168,10 +160,10 @@ public class CreateRelationshipCommandHandler
 
         // 5. Auto-create a Report Link on the parent: "See {child.Name}" — navigates to filtered child records.
         var appPublicId = await _appRepo.GetPublicIdByIdAsync(parent.AppId, ct);
-        var reportLinkName = $"{child.Name} records";
-        if (!await _fieldRepo.NameExistsInTableAsync(parent.Id, reportLinkName, ct))
+        var reportLinkLabel = $"{child.Name} records";
+        if (!await _fieldRepo.LabelExistsInTableAsync(parent.Id, reportLinkLabel, ct: ct))
         {
-            var reportLink = await CreateFieldAsync(parent, reportLinkType, reportLinkName, null, false,
+            var reportLink = await _fieldFactory.CreateAsync(parent, FieldTypeCodeNames.ReportLink, reportLinkLabel, false,
                 new ReportLinkSettings
                 {
                     RelationshipId = relId,
@@ -187,8 +179,8 @@ public class CreateRelationshipCommandHandler
         }
 
         // 6. Auto-append new fields to forms that opt in.
-        await AppendToAutoAddFormsAsync(child.PublicId, childAddFids, ct);
-        await AppendToAutoAddFormsAsync(parent.PublicId, parentAddFids, ct);
+        await _fieldFactory.AppendToAutoAddFormsAsync(child.PublicId, childAddFids, ct);
+        await _fieldFactory.AppendToAutoAddFormsAsync(parent.PublicId, parentAddFids, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, relId.ToString(),
@@ -206,53 +198,6 @@ public class CreateRelationshipCommandHandler
             ProxyFid = firstLookup?.Fid,
             Fields = createdFields,
         };
-    }
-
-    private async Task<AppField> CreateFieldAsync(
-        AppTable table, FieldType fieldType, string name, string? label, bool isRequired, object settingsObj, CancellationToken ct)
-    {
-        if (await _fieldRepo.NameExistsInTableAsync(table.Id, name, ct))
-            throw new DuplicateException("Field", "name", name);
-
-        var fid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
-        var field = new AppField
-        {
-            AppTableId = table.Id,
-            FieldTypeId = fieldType.Id,
-            TypeCode = fieldType.Code,
-            Name = name,
-            Label = label,
-            IsRequired = isRequired,
-            Fid = fid,
-            Settings = Serialize(settingsObj),
-            CreatedBy = _queryContext.UserId,
-            IsSearchable = true,
-            IsSortable = true,
-            IsFilterable = true,
-            IsReportable = true,
-        };
-
-        var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
-        field.Id = id;
-        field.PublicId = publicId;
-
-        if (!PhysicalNaming.IsComputedTypeCode(field.TypeCode))
-        {
-            var col = PhysicalNaming.ColumnName(fid);
-            await _fieldRepo.UpdatePhysicalColumnNameAsync(id, col, ct);
-            field.PhysicalColumnName = col;
-            await _schemaEngine.AddColumnAsync(table, field, ct);
-        }
-        return field;
-    }
-
-    private async Task AppendToAutoAddFormsAsync(Guid tablePublicId, IReadOnlyList<int> fids, CancellationToken ct)
-    {
-        if (fids.Count == 0) return;
-        var forms = await _formRepo.ListByTableAsync(tablePublicId, ct);
-        foreach (var form in forms.Where(f => f.AutoAddNewFields))
-            foreach (var fid in fids)
-                await _formRepo.AppendFieldToLastSectionAsync(form.Id, fid, ct);
     }
 
     /// <summary>A sub-field only makes sense against a composite Address field, and only for one

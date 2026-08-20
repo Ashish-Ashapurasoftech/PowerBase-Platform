@@ -13,6 +13,7 @@ public class TableResponse
     public string? PhysicalTableName { get; init; }
     public int RecordCount { get; set; }
     public int? FieldCount { get; set; }
+    public bool IsShowInBar { get; set; }
     public long? DefaultRecordPickerField1Id { get; set; }
     public long? DefaultRecordPickerField2Id { get; set; }
     public long? DefaultRecordPickerField3Id { get; set; }

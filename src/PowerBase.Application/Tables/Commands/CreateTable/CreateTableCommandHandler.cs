@@ -15,6 +15,7 @@ public class CreateTableResult
     public string? Icon { get; init; }
     public string PhysicalTableName { get; init; } = string.Empty;
     public int RecordCount { get; init; }
+    public bool IsShowInBar { get; init; }
     public DateTime CreatedOn { get; init; }
 }
 
@@ -81,6 +82,7 @@ public class CreateTableCommandHandler
             Icon = table.Icon,
             PhysicalTableName = table.PhysicalTableName ?? string.Empty,
             RecordCount = 0,
+            IsShowInBar = table.IsShowInBar,
             CreatedOn = DateTime.UtcNow,
         };
     }
