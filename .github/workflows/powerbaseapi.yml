@@ -2,7 +2,7 @@ name: Build and deploy .NET Core application to Web App powerbaseapi
 on:
   push:
     branches:
-    - HasimBhaiAPIRefacor
+    - publis
 permissions:
   id-token: write
   contents: read
