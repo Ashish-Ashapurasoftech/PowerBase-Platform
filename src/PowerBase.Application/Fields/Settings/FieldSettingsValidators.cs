@@ -251,7 +251,12 @@ public sealed class FormulaSettingsValidator : FieldSettingsValidatorBase<Formul
 
 public sealed class ActionButtonSettingsValidator : FieldSettingsValidatorBase<ActionButtonSettings>
 {
-    public override IReadOnlyList<string> SupportedTypeCodes => ["ActionButton"];
+    // Covers both shapes core.FieldType can have across tenant databases: the generic
+    // 'ActionButton' row some tenants were migrated to, and the four original per-variant
+    // rows (ActionButton_Signature/File/Prompt/Data) other tenants still have — see
+    // PhysicalNaming.IsActionButtonTypeCode for the full explanation.
+    public override IReadOnlyList<string> SupportedTypeCodes =>
+        ["ActionButton", "ActionButton_Signature", "ActionButton_File", "ActionButton_Prompt", "ActionButton_Data"];
 
     // Shape-only validation here (no table schema — target/capture Fid existence and
     // formula expressions are checked against the table's fields in the create/update

@@ -1,6 +1,7 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using PowerBase.Infrastructure.Migrations;
+using PowerBase.Migrator;
 
 var config = new ConfigurationBuilder()
     .AddJsonFile("appsettings.json", optional: false)
@@ -17,10 +18,12 @@ var controlMigrationsPath = Path.Combine(dbRoot, "migrations", "control");
 var tenantMigrationsPath  = Path.Combine(dbRoot, "migrations", "tenant");
 
 // Usage:
-//   dotnet run                           → root migrations (backwards-compat)
-//   dotnet run -- migrate control        → control-plane migrations
-//   dotnet run -- migrate tenant --id N  → tenant baseline against Powerbase_N
-//   dotnet run -- migrate tenants        → tenant baseline against ALL provisioned tenant DBs
+//   dotnet run                                 → root migrations (backwards-compat)
+//   dotnet run -- migrate control              → control-plane migrations
+//   dotnet run -- migrate tenant --id N        → tenant baseline against Powerbase_N
+//   dotnet run -- migrate tenants              → tenant baseline against ALL provisioned tenant DBs
+//   dotnet run -- backfill-field-names --id N  → regenerate AppField.Name from Label for tenant N
+//   dotnet run -- backfill-field-names         → same, for ALL provisioned tenant DBs
 
 Console.WriteLine("PowerBase Migrator");
 Console.WriteLine($"Server   : {MaskConnectionString(controlConnectionString)}");
@@ -34,7 +37,11 @@ try
             ? await RunSingleTenantAsync(idStr)
             : args is ["migrate", "tenants"]
                 ? await RunAllTenantsAsync()
-                : await RunRootAsync();
+                : args is ["backfill-field-names", "--id", var backfillIdStr]
+                    ? await RunFieldNameBackfillSingleTenantAsync(backfillIdStr)
+                    : args is ["backfill-field-names"]
+                        ? await RunFieldNameBackfillAllTenantsAsync()
+                        : await RunRootAsync();
 
     return exitCode;
 }
@@ -107,6 +114,58 @@ async Task<int> RunAllTenantsAsync()
         {
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"  FAILED: {ex.Message}");
+            Console.ResetColor();
+            errors++;
+        }
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"Tenants processed: {tenants.Count}  Errors: {errors}");
+    return errors > 0 ? 1 : 0;
+}
+
+async Task<int> RunFieldNameBackfillSingleTenantAsync(string idStr)
+{
+    if (!long.TryParse(idStr, out var tenantId))
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine($"Invalid tenant id: {idStr}");
+        Console.ResetColor();
+        return 1;
+    }
+
+    var (databaseName, _) = await GetTenantRoutingAsync(tenantId);
+    var tenantCs = BuildTenantConnectionString(controlConnectionString, databaseName);
+    Console.WriteLine($"Mode     : AppField.Name backfill → {databaseName}");
+    Console.WriteLine();
+    await FieldNameBackfill.RunAsync(tenantCs, $"Tenant {tenantId}");
+    return 0;
+}
+
+async Task<int> RunFieldNameBackfillAllTenantsAsync()
+{
+    Console.WriteLine("Mode     : AppField.Name backfill → all provisioned tenants");
+    Console.WriteLine();
+
+    var tenants = await GetAllProvisionedTenantsAsync();
+    if (tenants.Count == 0)
+    {
+        Console.WriteLine("No provisioned tenants found.");
+        return 0;
+    }
+
+    var errors = 0;
+    foreach (var (id, dbName) in tenants)
+    {
+        try
+        {
+            var tenantCs = BuildTenantConnectionString(controlConnectionString, dbName);
+            await FieldNameBackfill.RunAsync(tenantCs, $"Tenant {id} ({dbName})");
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  Tenant {id} ({dbName}) FAILED: {ex.Message}");
             Console.ResetColor();
             errors++;
         }

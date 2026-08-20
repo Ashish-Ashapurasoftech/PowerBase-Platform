@@ -13,7 +13,7 @@ public class CreateTableDto
 
 public class CreateAppFieldDto
 {
-    public string Name { get; set; } = string.Empty;
+    public string Label { get; set; } = string.Empty;
     public string TypeCode { get; set; } = "Text";
     public string? Settings { get; set; }
     public bool IsEncrypted { get; set; } = false;

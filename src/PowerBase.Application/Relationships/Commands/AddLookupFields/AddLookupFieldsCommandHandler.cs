@@ -53,7 +53,7 @@ public class AddLookupFieldsCommandHandler
             var src = parentFields.FirstOrDefault(f => f.Fid == spec.SourceFid)
                 ?? throw new NotFoundException("Field", spec.SourceFid);
             var lookup = await _fieldFactory.CreateAsync(child, nameof(Domain.Enums.FieldTypeCode.Lookup),
-                spec.Name.Trim(), spec.Label?.Trim(), false,
+                spec.Label.Trim(), false,
                 new LookupSettings
                 {
                     RelationshipId = rel.Id,

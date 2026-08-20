@@ -9,6 +9,7 @@ using PowerBase.Application.Records.Commands.BulkDeleteRecords;
 using PowerBase.Application.Records.Commands.CreateRecord;
 using PowerBase.Application.Records.Commands.DeleteRecord;
 using PowerBase.Application.Records.Commands.InvokeButtonAction;
+using PowerBase.Application.Records.Commands.MassUpdateRecords;
 using PowerBase.Application.Records.Commands.UpdateRecord;
 using PowerBase.Application.Records.Queries.GetRecord;
 using PowerBase.Application.Records.Queries.ListRecords;
@@ -22,6 +23,7 @@ public class RecordsController : ControllerBase
     private readonly UpdateRecordCommandHandler _updateHandler;
     private readonly DeleteRecordCommandHandler _deleteHandler;
     private readonly BulkDeleteRecordsCommandHandler _bulkDeleteHandler;
+    private readonly MassUpdateRecordsCommandHandler _massUpdateHandler;
     private readonly ListRecordsQueryHandler _listHandler;
     private readonly GetRecordQueryHandler _getHandler;
     private readonly GetDistinctFieldValuesQueryHandler _distinctHandler;
@@ -33,6 +35,7 @@ public class RecordsController : ControllerBase
         UpdateRecordCommandHandler updateHandler,
         DeleteRecordCommandHandler deleteHandler,
         BulkDeleteRecordsCommandHandler bulkDeleteHandler,
+        MassUpdateRecordsCommandHandler massUpdateHandler,
         ListRecordsQueryHandler listHandler,
         GetRecordQueryHandler getHandler,
         GetDistinctFieldValuesQueryHandler distinctHandler,
@@ -43,6 +46,7 @@ public class RecordsController : ControllerBase
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _bulkDeleteHandler = bulkDeleteHandler;
+        _massUpdateHandler = massUpdateHandler;
         _listHandler = listHandler;
         _getHandler = getHandler;
         _distinctHandler = distinctHandler;
@@ -163,6 +167,26 @@ public class RecordsController : ControllerBase
         await _bulkDeleteHandler.HandleAsync(new BulkDeleteRecordsCommand(tableId, request.Ids), ct);
         return NoContent();
     }
+
+    /// <summary>Apply the same field/value pairs to every listed record in one operation (up to 500).
+    /// All-or-nothing: every record and field is validated against the fields' Required/Unique
+    /// constraints (meta.AppField) before anything is written — a single validation failure fails the
+    /// whole request with a 400 listing every violation (recordId, fieldId, constraint type, message).</summary>
+    [HttpPost("tables/{tableId:guid}/records/mass-update")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<MassUpdateResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> MassUpdate(Guid tableId, [FromBody] MassUpdateRecordsRequest request, CancellationToken ct)
+    {
+        var command = new MassUpdateRecordsCommand(tableId, request.RecordIds, ParseFieldValues(request.Fields));
+        var affected = await _massUpdateHandler.HandleAsync(command, ct);
+        return Ok(new ApiResponse<MassUpdateResponse>(new MassUpdateResponse(affected)));
+    }
+
+    public record MassUpdateResponse(int UpdatedCount);
 
     /// <summary>Soft-delete a record.</summary>
     [HttpDelete("tables/{tableId:guid}/records/{id:guid}")]

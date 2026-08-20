@@ -19,7 +19,7 @@ public class CreateAppCommandValidator : AbstractValidator<CreateAppCommand>
             tables.RuleFor(t => t.Icon).MaximumLength(100).When(t => t.Icon is not null);
             tables.RuleForEach(t => t.Fields).ChildRules(fields =>
             {
-                fields.RuleFor(f => f.Name).NotEmpty().MaximumLength(200);
+                fields.RuleFor(f => f.Label).NotEmpty().MaximumLength(200);
                 fields.RuleFor(f => f.TypeCode).NotEmpty();
             });
         });

@@ -48,7 +48,7 @@ public sealed class FormulaProjector : IFormulaProjector
         AppTable? table = null)
     {
         var formulaFields = fields.Where(f => f.Fid.HasValue && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)).ToList();
-        var hasButtonFormulas = fields.Any(f => f.Fid.HasValue && f.TypeCode == "ActionButton" && !string.IsNullOrWhiteSpace(f.Settings));
+        var hasButtonFormulas = fields.Any(f => f.Fid.HasValue && PhysicalNaming.IsActionButtonTypeCode(f.TypeCode) && !string.IsNullOrWhiteSpace(f.Settings));
         if ((formulaFields.Count == 0 && !hasButtonFormulas) || rows.Count == 0)
             return seed ?? rows.Select(_ => EmptyMap).ToList();
 
@@ -128,7 +128,7 @@ public sealed class FormulaProjector : IFormulaProjector
         // Compiled once here; evaluated inside the row loop below.
         var JsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var compiledButtonSlots = new List<(long Fid, CompiledFormula? Label, CompiledFormula? Color)>();
-        foreach (var f in fields.Where(f => f.Fid.HasValue && f.TypeCode == "ActionButton" && !string.IsNullOrWhiteSpace(f.Settings)))
+        foreach (var f in fields.Where(f => f.Fid.HasValue && PhysicalNaming.IsActionButtonTypeCode(f.TypeCode) && !string.IsNullOrWhiteSpace(f.Settings)))
         {
             ActionButtonSettings? bs = null;
             try { bs = JsonSerializer.Deserialize<ActionButtonSettings>(f.Settings!, JsonOpts); } catch { }
