@@ -94,6 +94,7 @@ public class PipelinesController : ControllerBase
             sortDesc,
             isActive);
 
+
         var result = await _listHandler.HandleAsync(query, ct);
         var items = result.Items.Select(MapToListItemResponse).ToList();
         return Ok(new ApiListResponse<PipelineListItemResponse>(items, result.TotalCount, result.Page, result.PageSize));
