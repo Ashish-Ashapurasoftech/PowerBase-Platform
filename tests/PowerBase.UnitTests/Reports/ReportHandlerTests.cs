@@ -25,6 +25,7 @@ public class ReportHandlerTests
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
     private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
+    private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
     private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
     private readonly PowerBase.Application.Relationships.IRelationalProjector _relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
     private readonly IAzureSearchService _searchService = Substitute.For<IAzureSearchService>();
@@ -39,7 +40,7 @@ public class ReportHandlerTests
 
     private static AppField MakeField(long id = 1, bool reportable = true) => new()
     {
-        Id = id, Name = $"Field{id}", TypeCode = "Text", IsReportable = reportable,
+        Id = id, Fid = (int)id, Name = $"Field{id}", TypeCode = "Text", IsReportable = reportable,
     };
 
     private static Report MakeReport(long tableId, List<long>? columns = null, string reportType = "Table") => new()
@@ -66,6 +67,8 @@ public class ReportHandlerTests
     {
         _queryContext.TenantId.Returns(1L);
         _queryContext.UserId.Returns(1L);
+        _appUserRepo.GetUserAppPermissionsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string> { PermissionCodes.ReportsRead, PermissionCodes.ReportsCreate, PermissionCodes.ReportsUpdate });
 
         // Default: no relationship fields — an empty computed-value map per row.
         _relationalProjector.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
@@ -193,7 +196,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -229,7 +232,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -241,8 +244,8 @@ public class ReportHandlerTests
     public async Task RunReport_QuickSearchFieldIds_RestrictsSearchToThoseFields()
     {
         var table = MakeTable();
-        var field1 = new AppField { Id = 1, Name = "Field1", TypeCode = "Text", IsReportable = true, IsSearchable = true };
-        var field2 = new AppField { Id = 2, Name = "Field2", TypeCode = "Text", IsReportable = true, IsSearchable = true };
+        var field1 = new AppField { Id = 1, Fid = 1, Name = "Field1", TypeCode = "Text", IsReportable = true, IsSearchable = true };
+        var field2 = new AppField { Id = 2, Fid = 2, Name = "Field2", TypeCode = "Text", IsReportable = true, IsSearchable = true };
         var report = MakeReport(table.Id, []);
         _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
         _tableRepo.GetByIdAsync(table.Id).Returns(table);
@@ -258,7 +261,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = new HashSet<long>(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
 
         await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20, QuickSearch: "abc", QuickSearchFieldIds: [1]));
 
@@ -272,7 +275,7 @@ public class ReportHandlerTests
     public async Task RunReport_QuickSearchExact_UsesEqOperator()
     {
         var table = MakeTable();
-        var field1 = new AppField { Id = 1, Name = "Field1", TypeCode = "Text", IsReportable = true, IsSearchable = true };
+        var field1 = new AppField { Id = 1, Fid = 1, Name = "Field1", TypeCode = "Text", IsReportable = true, IsSearchable = true };
         var report = MakeReport(table.Id, []);
         _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
         _tableRepo.GetByIdAsync(table.Id).Returns(table);
@@ -288,7 +291,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = new HashSet<long>(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
 
         await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20, QuickSearch: "abc", QuickSearchExact: true));
 
@@ -296,5 +299,138 @@ public class ReportHandlerTests
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
             Arg.Is<FilterGroup?>(f => f != null && f.Nodes[0].Condition!.Operator == "eq"),
             Arg.Any<IReadOnlyList<SortSpec>?>());
+    }
+
+    [Fact]
+    public async Task RunReport_ReportBuilderWithoutTableAccess_MasksDataAndReturnsCountAndColumns()
+    {
+        var table = MakeTable();
+        var field1 = MakeField(1);
+        var report = MakeReport(table.Id, [1L]);
+        var row = new Dictionary<string, object?>
+        {
+            ["PublicId"] = Guid.NewGuid(),
+            ["CreatedOn"] = DateTime.UtcNow,
+            [PhysicalNaming.ColumnName(1)] = "ConfidentialSalary$100k",
+        };
+
+        _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
+        _tableRepo.GetByIdAsync(table.Id).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field1 });
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>(), restrictToCreatedBy: Arg.Any<long?>(), ct: Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>()).Returns(1);
+
+        // Access enforcer returns CanView = false (ViewScope = None)
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new TableAccessContext
+            {
+                Unrestricted = false,
+                ViewScope = RecordScopes.None,
+                ModifyScope = RecordScopes.None,
+                VisibleFields = [],
+                EditableFieldIds = new HashSet<long>(),
+            }));
+
+        // User has report builder capability
+        _appUserRepo.GetUserAppPermissionsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string> { PermissionCodes.ReportsCreate });
+
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+
+        var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
+
+        result.IsDataMasked.Should().BeTrue();
+        result.TotalCount.Should().Be(1);
+        result.Columns.Should().ContainSingle(c => c.FieldId == 1L);
+        // After fix: Table-type masked preview must return EMPTY Items — requirement says
+        // "row counts and aggregate outputs only — never raw record data".
+        result.Items.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RunReport_ReportsReadOnlyUser_WithoutTableAccess_ReturnsEmptyResult()
+    {
+        // Arrange: user has ONLY reports:read (viewer-level), NOT reports:create/update.
+        // With no table access, they are NOT a report builder — should get empty result,
+        // NOT masked preview.
+        var table = MakeTable();
+        var field1 = MakeField(1);
+        var report = MakeReport(table.Id, [1L]);
+
+        _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
+        _tableRepo.GetByIdAsync(table.Id).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field1 });
+
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new TableAccessContext
+            {
+                Unrestricted = false,
+                ViewScope = RecordScopes.None,
+                ModifyScope = RecordScopes.None,
+                VisibleFields = [],
+                EditableFieldIds = new HashSet<long>(),
+            }));
+
+        // Only ReportsRead — NOT a builder
+        _appUserRepo.GetUserAppPermissionsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string> { PermissionCodes.ReportsRead });
+
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+
+        var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
+
+        // Must be completely empty — no masked preview, no data
+        result.IsDataMasked.Should().BeFalse();
+        result.Items.Should().BeEmpty();
+        result.TotalCount.Should().Be(0);
+        result.Columns.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RunReport_TableType_MaskedPreview_ReturnsOnlyCountAndColumns_NoRows()
+    {
+        // Arrange: genuine report builder (has reports:create) with NO table data access.
+        // Must receive count + column structure ONLY — zero individual rows.
+        var table = MakeTable();
+        var field1 = MakeField(1);
+        var report = MakeReport(table.Id, [1L], reportType: "Table");
+        var row = new Dictionary<string, object?>
+        {
+            ["PublicId"] = Guid.NewGuid(),
+            ["CreatedOn"] = DateTime.UtcNow,
+            [PhysicalNaming.ColumnName(1)] = "SensitivePayrollData",
+        };
+
+        _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
+        _tableRepo.GetByIdAsync(table.Id).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field1 });
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>(), restrictToCreatedBy: Arg.Any<long?>(), ct: Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>> { row });
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>()).Returns(42);
+
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new TableAccessContext
+            {
+                Unrestricted = false,
+                ViewScope = RecordScopes.None,
+                ModifyScope = RecordScopes.None,
+                VisibleFields = [],
+                EditableFieldIds = new HashSet<long>(),
+            }));
+
+        _appUserRepo.GetUserAppPermissionsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string> { PermissionCodes.ReportsCreate });
+
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+
+        var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
+
+        result.IsDataMasked.Should().BeTrue();
+        result.TotalCount.Should().Be(42);            // count is exposed so builder can see scale
+        result.Columns.Should().ContainSingle(c => c.FieldId == 1L); // structure visible
+        result.Items.Should().BeEmpty();              // ZERO individual rows — no raw data at all
     }
 }

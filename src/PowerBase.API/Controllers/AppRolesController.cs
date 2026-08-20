@@ -73,6 +73,9 @@ public class AppRolesController : ControllerBase
             IsDefault = r.IsDefault,
             IsSystem = r.IsSystem,
             Permissions = r.Permissions,
+            ManageableRolesType = r.ManageableRolesType,
+            Rank = r.Rank,
+            ManageableRolePublicIds = r.ManageableRolePublicIds,
         }).ToList();
         return Ok(new ApiResponse<IReadOnlyList<AppRoleResponse>>(response));
     }
@@ -85,7 +88,14 @@ public class AppRolesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Create([FromRoute] Guid appId, [FromBody] CreateAppRoleRequest request, CancellationToken ct)
     {
-        var result = await _createHandler.HandleAsync(new CreateAppRoleCommand(appId, request.Name, request.IsDefault), ct);
+        var command = new CreateAppRoleCommand(
+            appId, 
+            request.Name, 
+            request.IsDefault, 
+            request.ManageableRolesType, 
+            request.Rank, 
+            request.ManageableRolePublicIds);
+        var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<AppRoleResponse>(new AppRoleResponse
         {
             PublicId = result.PublicId,
@@ -93,6 +103,9 @@ public class AppRolesController : ControllerBase
             IsDefault = result.IsDefault,
             IsSystem = false,
             Permissions = new[] { PermissionCodes.RecordsRead, PermissionCodes.RecordsCreate, PermissionCodes.RecordsUpdate },
+            ManageableRolesType = result.ManageableRolesType,
+            Rank = result.Rank,
+            ManageableRolePublicIds = result.ManageableRolePublicIds,
         }));
     }
 
@@ -108,7 +121,13 @@ public class AppRolesController : ControllerBase
         [FromBody] UpdateAppRoleRequest request,
         CancellationToken ct)
     {
-        await _updateHandler.HandleAsync(new UpdateAppRoleCommand(appId, rolePublicId, request.Permissions), ct);
+        await _updateHandler.HandleAsync(new UpdateAppRoleCommand(
+            appId, 
+            rolePublicId, 
+            request.Permissions,
+            request.ManageableRolesType,
+            request.Rank,
+            request.ManageableRolePublicIds), ct);
         return NoContent();
     }
 

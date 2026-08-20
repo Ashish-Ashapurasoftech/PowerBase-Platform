@@ -72,7 +72,18 @@ public class CreateAppCommandHandlerTests
 
         await sut.HandleAsync(new CreateAppCommand("My App", null, null, null, new[] { new TableSpec("Table 1") }));
 
-        await _appRoleRepo.Received(3).CreateAsync(Arg.Any<AppRole>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _appRoleRepo.Received(1).CreateAsync(
+            Arg.Is<AppRole>(r => r.Name == "Administrator" && r.Rank == 1),
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>());
+        await _appRoleRepo.Received(1).CreateAsync(
+            Arg.Is<AppRole>(r => r.Name == "Participant" && r.Rank == 2),
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>());
+        await _appRoleRepo.Received(1).CreateAsync(
+            Arg.Is<AppRole>(r => r.Name == "Viewer" && r.Rank == 3),
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>());
         await _appUserRepo.Received(1).CreateAsync(Arg.Any<AppUser>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
     }
 

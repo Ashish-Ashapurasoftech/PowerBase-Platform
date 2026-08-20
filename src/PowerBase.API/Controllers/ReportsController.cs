@@ -370,6 +370,7 @@ public class ReportsController : ControllerBase
         TotalCount = result.TotalCount,
         Page = result.Page,
         PageSize = result.PageSize,
+        IsDataMasked = result.IsDataMasked,
     };
 
     /// <summary>Export report results as CSV.</summary>

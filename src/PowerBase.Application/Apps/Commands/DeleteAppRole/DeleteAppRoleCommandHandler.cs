@@ -34,6 +34,48 @@ public class DeleteAppRoleCommandHandler
             throw new UnauthorizedActionException("delete your own app role");
         }
 
+        if (!_queryContext.IsSuperAdmin)
+        {
+            var actorAppUser = await _appUserRepo.GetByAppAndUserAsync(role.AppId, _queryContext.UserId, ct);
+            if (actorAppUser == null)
+            {
+                throw new UnauthorizedActionException("You are not a member of this application.");
+            }
+
+            if (!currentUserRolePublicId.HasValue)
+            {
+                throw new UnauthorizedActionException("Your role was not found.");
+            }
+
+            var actorRole = await _appRoleRepo.GetByPublicIdAsync(currentUserRolePublicId.Value, ct);
+            if (actorRole == null)
+            {
+                throw new UnauthorizedActionException("Your role was not found.");
+            }
+
+            // Hard Rule: Target role's rank must be strictly greater than actor's rank
+            int actorRank = actorRole.Rank ?? int.MaxValue;
+            int targetRank = role.Rank ?? int.MaxValue;
+            if (targetRank <= actorRank)
+            {
+                throw new UnauthorizedActionException("You cannot manage a role equal to or above your own.");
+            }
+
+            // Configured setting check
+            if (actorRole.ManageableRolesType == "None")
+            {
+                throw new UnauthorizedActionException("Your role is not allowed to manage any roles.");
+            }
+            else if (actorRole.ManageableRolesType == "Manual")
+            {
+                var manageableIds = await _appRoleRepo.GetManageableRolePublicIdsAsync(actorRole.Id, ct);
+                if (!manageableIds.Contains(role.PublicId))
+                {
+                    throw new UnauthorizedActionException("Your role is not allowed to manage this role.");
+                }
+            }
+        }
+
         if (role.IsSystem)
             throw new UnauthorizedActionException("System roles cannot be deleted.");
 

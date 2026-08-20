@@ -777,7 +777,7 @@ public class ImportAppFromPblCommandHandler
             var adoptedExisting = false;
             try
             {
-                var createdRole = await _createAppRoleHandler.HandleAsync(new CreateAppRoleCommand(appPublicId, role.Name, role.IsDefault), ct);
+                var createdRole = await _createAppRoleHandler.HandleAsync(new CreateAppRoleCommand(appPublicId, role.Name, role.IsDefault, Rank: 3), ct);
                 rolePublicId = createdRole.PublicId;
             }
             catch (DuplicateException)
