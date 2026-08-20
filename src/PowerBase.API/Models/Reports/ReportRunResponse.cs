@@ -9,6 +9,7 @@ public class ReportRunResponse
     public int TotalCount { get; init; }
     public int Page { get; init; }
     public int PageSize { get; init; }
+    public bool IsDataMasked { get; init; }
 }
 
 public class ReportColumnDto

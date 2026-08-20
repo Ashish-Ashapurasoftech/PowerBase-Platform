@@ -11,6 +11,8 @@ public class AppRole
     public bool IsSystem { get; set; }
     /// <summary>The Page (if any) this role lands on instead of the app's built-in dashboard.</summary>
     public long? HomePageId { get; set; }
+    public string ManageableRolesType { get; set; } = "None";
+    public int? Rank { get; set; }
 
     public DateTime CreatedOn { get; set; }
     public long CreatedBy { get; set; }

@@ -218,4 +218,76 @@ public class RecordHandlerTests
 
         result.Page.Should().Be(expectedPage);
     }
+
+    // ── Builder Data Isolation Tests ──────────────────────────────────────────
+    // These tests verify that a user who has builder-level permissions (e.g. Schema Builder
+    // has tables:create/update) but ViewScope = None on a table is FULLY blocked from
+    // accessing any record data. Builder permissions and data access are always separate.
+
+    [Fact]
+    public async Task GetRecord_SchemaBuilderWithViewScopeNone_ThrowsNotFoundException()
+    {
+        // Arrange: Schema Builder role — can create/update tables but ViewScope = None.
+        // The enforcer resolves ViewScope = None → CanView = false.
+        var table = MakeTable();
+        var recordId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+
+        // Enforcer returns no record access for this table
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext
+            {
+                Unrestricted = false,
+                ViewScope = RecordScopes.None,
+                ModifyScope = RecordScopes.None,
+                VisibleFields = [],
+                EditableFieldIds = new HashSet<long>(),
+            });
+
+        var sut = new GetRecordQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+
+        // Act & Assert: Record must not be accessible — returned as NotFoundException
+        // so the client cannot infer whether the record exists.
+        await sut.Invoking(s => s.HandleAsync(new GetRecordQuery(table.PublicId, recordId)))
+            .Should().ThrowAsync<NotFoundException>();
+
+        // Repository must never be called — no DB hit for a blocked user
+        await _recordRepo.DidNotReceive().GetByPublicIdAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ListRecords_SchemaBuilderWithViewScopeNone_ReturnsEmptyResult()
+    {
+        // Arrange: Schema Builder role — can create/update tables but ViewScope = None.
+        var table = MakeTable();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+
+        // Enforcer returns no record access for this table
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext
+            {
+                Unrestricted = false,
+                ViewScope = RecordScopes.None,
+                ModifyScope = RecordScopes.None,
+                VisibleFields = [],
+                EditableFieldIds = new HashSet<long>(),
+            });
+
+        var sut = new ListRecordsQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+
+        var result = await sut.HandleAsync(new ListRecordsQuery(table.PublicId, 1, 20));
+
+        // Must return empty — no items, no count, no data leakage
+        result.Items.Should().BeEmpty();
+        result.TotalCount.Should().Be(0);
+
+        // Repository must never be queried — short-circuits before any DB call
+        await _recordRepo.DidNotReceive().ListAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(),
+            Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>(),
+            Arg.Any<long?>(), Arg.Any<CancellationToken>());
+    }
 }
