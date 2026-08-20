@@ -85,7 +85,8 @@ public class AppsController : ControllerBase
                 t.Icon,
                 t.Description,
                 t.Config,
-                t.Fields?.Select(f => new AppFieldSpec(f.Label, f.TypeCode)).ToList())).ToList());
+                t.Fields?.Select(f => new AppFieldSpec(f.Label, f.TypeCode, f.Settings, f.IsEncrypted)).ToList())).ToList(),
+            request.IsEncrypted);
         var result = await _createHandler.HandleAsync(command, ct);
         var response = MapToAppResponse(result);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<AppResponse>(response));
@@ -309,7 +310,7 @@ public class AppsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid publicId, [FromBody] UpdateAppRequest request, CancellationToken ct)
     {
-        await _updateHandler.HandleAsync(new UpdateAppCommand(publicId, request.Name, request.Description, request.Icon, request.Color, request.Formatting, request.SecurityOptions), ct);
+        await _updateHandler.HandleAsync(new UpdateAppCommand(publicId, request.Name, request.Description, request.Icon, request.Color, request.Formatting, request.SecurityOptions, request.IsEncrypted), ct);
         return NoContent();
     }
 
@@ -370,7 +371,8 @@ public class AppsController : ControllerBase
         Color = result.Color,
         Status = result.Status,
         CreatedOn = result.CreatedOn,
-        OwnerName = result.OwnerName
+        OwnerName = result.OwnerName,
+        IsEncrypted = result.IsEncrypted
     };
 
     private static AppResponse MapToAppResponse(PowerBase.Domain.Entities.App app)
@@ -394,7 +396,8 @@ public class AppsController : ControllerBase
             SecurityOptions = security,
             Status = app.Status,
             CreatedOn = app.CreatedOn,
-            OwnerName = app.OwnerName
+            OwnerName = app.OwnerName,
+            IsEncrypted = app.IsEncrypted,
         };
     }
 
@@ -420,6 +423,7 @@ public class AppsController : ControllerBase
             Status = app.Status,
             CreatedOn = app.CreatedOn,
             OwnerName = app.OwnerName,
+            IsEncrypted = app.IsEncrypted,
         };
     }
 }

@@ -9,5 +9,6 @@ public class CreateFieldRequest
     public bool IsRequired { get; set; }
     public string? DefaultValue { get; set; }
     public bool IsAuditable { get; set; } = false;
+    public bool IsEncrypted { get; set; } = false;
     public string? Settings { get; set; }
 }

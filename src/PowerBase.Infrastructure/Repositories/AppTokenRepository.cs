@@ -75,7 +75,9 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
             new CommandDefinition(GetByPublicIdSql, new { publicId, tenantId, appPublicId }, cancellationToken: ct));
     }
 
-    public async Task<(IEnumerable<AppToken> Items, int TotalCount)> GetPagedAsync(long tenantId, Guid appPublicId, string? search, bool? isActive, int page, int pageSize, CancellationToken ct)
+    public async Task<(IEnumerable<AppToken> Items, int TotalCount)> GetPagedAsync(
+        long tenantId, Guid appPublicId, string? search, bool? isActive,
+        int page, int pageSize, string sortBy, bool sortDesc, CancellationToken ct)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
 
@@ -84,6 +86,18 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
 
         if (appId == null)
             return (Enumerable.Empty<AppToken>(), 0);
+
+        // Safe sort-column whitelist (prevents SQL injection)
+        var columnMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["tokenName"]  = "t.TokenName",
+            ["createdAt"]  = "t.CreatedAt",
+            ["isActive"]   = "t.IsActive",
+            ["lastUsedAt"] = "t.LastUsedAt"
+        };
+        var orderColumn = columnMap.TryGetValue(sortBy ?? "tokenName", out var col)
+            ? col : "t.TokenName";
+        var orderDir = sortDesc ? "DESC" : "ASC";
 
         var dynamicParams = new DynamicParameters();
         dynamicParams.Add("tenantId", tenantId);
@@ -109,7 +123,7 @@ public class AppTokenRepository : TenantRepositoryBase, IAppTokenRepository
             SELECT t.Id, t.PublicId, t.TenantId, t.AppId, t.CreatedByUserId, t.TokenName, t.Description, t.TokenHash, t.TokenPrefix, t.IsActive, t.CreatedAt, t.LastUsedAt, t.IsDeleted, t.RowVersion
             FROM meta.AppToken t
             {whereClause}
-            ORDER BY t.CreatedAt DESC
+            ORDER BY {orderColumn} {orderDir}, t.Id
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;";
 
         var totalCount = await connection.ExecuteScalarAsync<int>(

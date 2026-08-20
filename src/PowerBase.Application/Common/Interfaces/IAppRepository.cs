@@ -16,7 +16,7 @@ public interface IAppRepository
     Task<IReadOnlyList<App>> ListAllByUserAsync(long userId, CancellationToken ct = default);
     Task<bool> NameExistsAsync(string name, CancellationToken ct = default);
     Task<(Guid PublicId, long Id)> CreateAsync(App app, IDbTransaction? transaction = null, CancellationToken ct = default);
-    Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, string? formatting, string? securityOptions, CancellationToken ct = default);
+    Task<int> UpdateAsync(Guid publicId, string name, string? description, string? icon, string? color, string? formatting, string? securityOptions, bool isEncrypted, CancellationToken ct = default);
     Task<int> UpdateBrandingAsync(Guid publicId, string? branding, string? layoutSettings, CancellationToken ct = default);
     Task SetDefaultRoleAsync(long appId, long roleId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<long?> GetDefaultRoleIdAsync(long appId, CancellationToken ct = default);

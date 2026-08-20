@@ -61,6 +61,8 @@ public class AppTokensController : ControllerBase
         [FromQuery] bool? isActive,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
+        [FromQuery] string sortBy = "tokenName",
+        [FromQuery] bool sortDesc = false,
         CancellationToken ct = default)
     {
         var query = new GetAppTokensQuery
@@ -69,7 +71,9 @@ public class AppTokensController : ControllerBase
             Search = search,
             IsActive = isActive,
             Page = page,
-            PageSize = pageSize
+            PageSize = pageSize,
+            SortBy = sortBy,
+            SortDesc = sortDesc
         };
 
         var result = await _getAppTokensHandler.HandleAsync(query, ct);

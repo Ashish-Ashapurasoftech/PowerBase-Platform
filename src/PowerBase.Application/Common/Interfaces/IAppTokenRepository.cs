@@ -6,7 +6,7 @@ public interface IAppTokenRepository
 {
     Task<AppToken> CreateAsync(AppToken appToken, CancellationToken ct);
     Task<AppToken?> GetByPublicIdAsync(Guid publicId, long tenantId, Guid appPublicId, CancellationToken ct);
-    Task<(IEnumerable<AppToken> Items, int TotalCount)> GetPagedAsync(long tenantId, Guid appPublicId, string? search, bool? isActive, int page, int pageSize, CancellationToken ct);
+    Task<(IEnumerable<AppToken> Items, int TotalCount)> GetPagedAsync(long tenantId, Guid appPublicId, string? search, bool? isActive, int page, int pageSize, string sortBy, bool sortDesc, CancellationToken ct);
     Task<bool> UpdateStatusAsync(Guid publicId, long tenantId, Guid appPublicId, bool isActive, CancellationToken ct);
     Task<bool> DeleteAsync(Guid publicId, long tenantId, Guid appPublicId, CancellationToken ct);
     /// <summary>Soft-deletes every matching token in one statement (PublicId IN @publicIds) rather

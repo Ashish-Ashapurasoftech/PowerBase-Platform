@@ -13,4 +13,5 @@ public record UpdateFieldCommand(
     bool IsReportable,
     bool IsAuditable,
     bool IsUnique,
+    bool IsEncrypted,
     string? Settings);

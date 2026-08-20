@@ -14,7 +14,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         af.Id, af.PublicId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName, af.DefaultValue,
         af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
     private const string GetByIdInTableSql = $"""
@@ -80,11 +80,11 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string InsertSql = """
         INSERT INTO meta.AppField
             (AppTableId, FieldTypeId, Name, Label, Description, IsRequired, DefaultValue,
-             IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable, IsAuditable,
+             IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable, IsAuditable, IsEncrypted,
              Fid, Settings, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES (@tableId, @fieldTypeId, @name, @label, @description, @isRequired, @defaultValue,
-                @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable, @isAuditable,
+                @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable, @isAuditable, @isEncrypted,
                 @fid, @settings, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
@@ -130,6 +130,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             IsSearchable = @isSearchable, IsSortable = @isSortable,
             IsFilterable = @isFilterable, IsReportable = @isReportable, IsAuditable = @isAuditable,
             IsUnique = @isUnique,
+            IsEncrypted = @isEncrypted,
             Settings = @settings,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
@@ -352,6 +353,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 isFilterable = field.IsFilterable,
                 isReportable = field.IsReportable,
                 isAuditable = field.IsAuditable,
+                isEncrypted = field.IsEncrypted,
                 fid = field.Fid,
                 settings = field.Settings,
                 displayOrder = field.DisplayOrder,
@@ -419,7 +421,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<int> UpdateAsync(Guid publicId, long tableId, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
-        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, string? settings, CancellationToken ct = default)
+        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, string? settings, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
@@ -427,7 +429,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             {
                 publicId, tableId, label, description,
                 isRequired, defaultValue, isSearchable, isSortable,
-                isFilterable, isReportable, isAuditable, isUnique, settings,
+                isFilterable, isReportable, isAuditable, isUnique, isEncrypted, settings,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

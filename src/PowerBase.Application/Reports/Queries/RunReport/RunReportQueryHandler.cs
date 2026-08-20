@@ -34,6 +34,7 @@ public class RunReportQueryHandler
     private readonly IUserRepository _userRepo;
     private readonly IFormulaProjector _formulaProjector;
     private readonly Relationships.IRelationalProjector _relationalProjector;
+    private readonly IAzureSearchService _azureSearchService;
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
@@ -43,7 +44,8 @@ public class RunReportQueryHandler
         IRolePermissionEnforcer enforcer,
         IUserRepository userRepo,
         IFormulaProjector formulaProjector,
-        Relationships.IRelationalProjector relationalProjector)
+        Relationships.IRelationalProjector relationalProjector,
+        IAzureSearchService azureSearchService)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -53,6 +55,7 @@ public class RunReportQueryHandler
         _userRepo = userRepo;
         _formulaProjector = formulaProjector;
         _relationalProjector = relationalProjector;
+        _azureSearchService = azureSearchService;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -186,25 +189,60 @@ public class RunReportQueryHandler
         // widget scoped to "Selected fields"), otherwise every IsSearchable text-ish field.
         if (!string.IsNullOrWhiteSpace(quickSearch))
         {
-            var textFields = allFields.Where(f => f.IsSearchable && (f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")).ToList();
-            if (quickSearchFieldIds is { Count: > 0 })
+            var hasEncryptedSearchable = allFields.Any(f => f.IsEncrypted && f.IsSearchable);
+            
+            if (hasEncryptedSearchable)
             {
-                var allowed = quickSearchFieldIds.ToHashSet();
-                textFields = textFields.Where(f => allowed.Contains(f.Fid.HasValue ? (long)f.Fid.Value : f.Id)).ToList();
-            }
-            if (textFields.Count > 0)
-            {
-                var searchOperator = quickSearchExact ? "eq" : "contains";
-                var qsNodes = textFields.Select(f => new FilterNode
+                // Route query to Azure AI Search to bypass SQL encryption limitations
+                var aiMatches = await _azureSearchService.SearchRecordsAsync(table.Id, quickSearch, ct);
+                
+                if (aiMatches.Count == 0)
                 {
-                    Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = searchOperator, Value = quickSearch }
-                }).ToList();
+                    return new PagedReportRunResult { Page = page, PageSize = pageSize }; // Nothing found
+                }
+                
+                var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
+                if (matchedIds.Count == 0)
+                {
+                    return new PagedReportRunResult { Page = page, PageSize = pageSize }; // Nothing found
+                }
 
-                var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
-
+                var aiSearchGroup = new FilterGroup
+                {
+                    Logic = "or",
+                    Nodes = matchedIds.Select(id => new FilterNode 
+                    {
+                        Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = id.ToString() }
+                    }).ToList()
+                };
+                
                 filterTree = filterTree == null
-                    ? qsGroup
-                    : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = qsGroup }] };
+                    ? aiSearchGroup
+                    : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = aiSearchGroup }] };
+            }
+            else
+            {
+                // Standard SQL fallback for unencrypted tables
+                var textFields = allFields.Where(f => f.IsSearchable && (f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")).ToList();
+                if (quickSearchFieldIds is { Count: > 0 })
+                {
+                    var allowed = quickSearchFieldIds.ToHashSet();
+                    textFields = textFields.Where(f => allowed.Contains(f.Fid.HasValue ? (long)f.Fid.Value : f.Id)).ToList();
+                }
+                if (textFields.Count > 0)
+                {
+                    var searchOperator = quickSearchExact ? "eq" : "contains";
+                    var qsNodes = textFields.Select(f => new FilterNode
+                    {
+                        Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = searchOperator, Value = quickSearch }
+                    }).ToList();
+
+                    var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
+
+                    filterTree = filterTree == null
+                        ? qsGroup
+                        : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = qsGroup }] };
+                }
             }
         }
 

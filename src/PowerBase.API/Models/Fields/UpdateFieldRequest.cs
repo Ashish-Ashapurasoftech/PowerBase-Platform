@@ -11,4 +11,5 @@ public record UpdateFieldRequest(
     bool IsReportable,
     bool IsAuditable,
     bool IsUnique,
+    bool IsEncrypted,
     string? Settings);

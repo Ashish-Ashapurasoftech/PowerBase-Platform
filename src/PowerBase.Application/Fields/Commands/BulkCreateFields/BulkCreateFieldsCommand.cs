@@ -8,6 +8,7 @@ public record BulkCreateFieldItem(
     bool IsAuditable = false,
     string? Settings = null,
     string? DefaultValue = null,
+    bool IsEncrypted = false,
     /// <summary>Internal-only escape hatch — never populated from the public BulkCreateFields API request.
     /// Used exclusively by PBL/QBL app import to preserve a field's exact original Name (its stable
     /// third-party identifier) instead of regenerating one. Null (the normal case) auto-generates Name from Label.</summary>

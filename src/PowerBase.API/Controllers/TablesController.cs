@@ -307,6 +307,7 @@ public class TablesController : ControllerBase
         IsAuditable = f.IsAuditable,
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
+        IsEncrypted = f.IsEncrypted,
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,

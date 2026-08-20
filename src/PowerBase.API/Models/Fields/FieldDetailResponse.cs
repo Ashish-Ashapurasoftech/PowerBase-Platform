@@ -17,8 +17,11 @@ public class FieldDetailResponse
     public bool IsFilterable { get; init; }
     public bool IsReportable { get; init; }
     public bool IsAuditable { get; init; }
+
     public bool IsUnique { get; init; }
     public bool IsSystem { get; init; }
+
+    public bool IsEncrypted { get; init; }
     public int? Fid { get; init; }
     public string? Settings { get; init; }
     public DateTime CreatedOn { get; init; }

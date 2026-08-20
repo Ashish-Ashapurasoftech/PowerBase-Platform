@@ -11,6 +11,7 @@ public class App
     public string? Icon { get; set; }
     public string? Color { get; set; }
     public string Status { get; set; } = "Active";
+    public bool IsEncrypted { get; set; }
     public string? Formatting { get; set; }
     public string? SecurityOptions { get; set; }
     public string? Branding { get; set; }

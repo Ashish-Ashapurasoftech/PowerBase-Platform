@@ -27,6 +27,7 @@ public class ReportHandlerTests
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
     private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
     private readonly PowerBase.Application.Relationships.IRelationalProjector _relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
+    private readonly IAzureSearchService _searchService = Substitute.For<IAzureSearchService>();
 
     private static AppTable MakeTable(long id = 5) => new()
     {
@@ -192,7 +193,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -228,7 +229,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService);
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -257,7 +258,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = new HashSet<long>(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService);
 
         await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20, QuickSearch: "abc", QuickSearchFieldIds: [1]));
 
@@ -287,7 +288,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = new HashSet<long>(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService);
 
         await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20, QuickSearch: "abc", QuickSearchExact: true));
 

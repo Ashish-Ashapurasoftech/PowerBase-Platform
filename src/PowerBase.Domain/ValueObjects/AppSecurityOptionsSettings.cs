@@ -10,4 +10,5 @@ public class AppSecurityOptionsSettings
     public bool RequireAppTokens { get; set; } = true;
     public bool OnlyApprovedUsersAccess { get; set; } = false;
     public bool OnlyApprovedIpAddressesAccess { get; set; } = false;
+    public string? WrappedDek { get; set; }
 }

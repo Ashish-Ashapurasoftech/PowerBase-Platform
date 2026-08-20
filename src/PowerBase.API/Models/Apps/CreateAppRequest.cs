@@ -16,6 +16,7 @@ public class CreateAppFieldDto
     public string Label { get; set; } = string.Empty;
     public string TypeCode { get; set; } = "Text";
     public string? Settings { get; set; }
+    public bool IsEncrypted { get; set; } = false;
 }
 
 public class CreateAppRequest
@@ -24,5 +25,6 @@ public class CreateAppRequest
     public string? Description { get; set; }
     public string? Icon { get; set; }
     public string? Color { get; set; }
+    public bool IsEncrypted { get; set; } = false;
     public List<CreateTableDto> Tables { get; set; } = new();
 }
