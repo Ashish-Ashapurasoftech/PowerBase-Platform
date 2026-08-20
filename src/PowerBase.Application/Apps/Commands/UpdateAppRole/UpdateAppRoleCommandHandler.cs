@@ -44,37 +44,30 @@ public class UpdateAppRoleCommandHandler
         if (role is null)
             throw new NotFoundException("AppRole", command.RolePublicId);
 
-        var currentUserRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(role.AppId, _queryContext.UserId, ct);
-        if (currentUserRolePublicId == command.RolePublicId)
-        {
-            throw new UnauthorizedActionException("modify your own app role");
-        }
-
         var app = await _appRepo.GetByPublicIdAsync(command.AppPublicId, ct);
         if (app == null)
             throw new NotFoundException("App", command.AppPublicId);
 
-        bool isAuthorizedToConfigure = _queryContext.IsSuperAdmin || _queryContext.UserId == app.OwnerId;
-        int? actorRank = null;
+        var currentUserRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(role.AppId, _queryContext.UserId, ct);
         AppRole? actorRole = null;
+        if (currentUserRolePublicId.HasValue)
+        {
+            actorRole = await _appRoleRepo.GetByPublicIdAsync(currentUserRolePublicId.Value, ct);
+        }
+
+        bool isAdministrator = actorRole?.Name == "Administrator";
+        bool isAuthorizedToConfigure = _queryContext.IsSuperAdmin || _queryContext.UserId == app.OwnerId || isAdministrator;
+        int? actorRank = actorRole?.Rank;
+
+        if (!_queryContext.IsSuperAdmin && _queryContext.UserId != app.OwnerId && !isAdministrator && currentUserRolePublicId == command.RolePublicId)
+        {
+            throw new UnauthorizedActionException("modify your own app role");
+        }
 
         var actorAppUser = await _appUserRepo.GetByAppAndUserAsync(role.AppId, _queryContext.UserId, ct);
         if (actorAppUser == null && !_queryContext.IsSuperAdmin)
         {
             throw new UnauthorizedActionException("You are not a member of this application.");
-        }
-
-        if (currentUserRolePublicId.HasValue)
-        {
-            actorRole = await _appRoleRepo.GetByPublicIdAsync(currentUserRolePublicId.Value, ct);
-            if (actorRole != null)
-            {
-                actorRank = actorRole.Rank;
-                if (actorRole.Name == "Administrator")
-                {
-                    isAuthorizedToConfigure = true;
-                }
-            }
         }
 
         if (!_queryContext.IsSuperAdmin && _queryContext.UserId != app.OwnerId)

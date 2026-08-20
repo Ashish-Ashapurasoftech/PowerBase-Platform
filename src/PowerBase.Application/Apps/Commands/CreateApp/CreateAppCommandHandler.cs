@@ -97,6 +97,7 @@ public class CreateAppCommandHandler
                 IsSystem = true,
                 IsDefault = false,
                 Rank = 1,
+                ManageableRolesType = "Below",
             }, _uow.Transaction, ct);
 
             await _appRoleRepo.SetPermissionsAsync(adminRoleId, new[]

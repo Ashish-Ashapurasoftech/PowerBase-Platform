@@ -22,6 +22,7 @@ public class PagedReportRunResult
     public int TotalCount { get; init; }
     public int Page { get; init; }
     public int PageSize { get; init; }
+    public bool IsDataMasked { get; init; }
 }
 
 public class RunReportQueryHandler
@@ -35,6 +36,8 @@ public class RunReportQueryHandler
     private readonly IFormulaProjector _formulaProjector;
     private readonly Relationships.IRelationalProjector _relationalProjector;
     private readonly IAzureSearchService _azureSearchService;
+    private readonly IAppUserRepository _appUserRepo;
+    private readonly IQueryContext _queryContext;
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
@@ -45,7 +48,9 @@ public class RunReportQueryHandler
         IUserRepository userRepo,
         IFormulaProjector formulaProjector,
         Relationships.IRelationalProjector relationalProjector,
-        IAzureSearchService azureSearchService)
+        IAzureSearchService azureSearchService,
+        IAppUserRepository appUserRepo,
+        IQueryContext queryContext)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -56,6 +61,8 @@ public class RunReportQueryHandler
         _formulaProjector = formulaProjector;
         _relationalProjector = relationalProjector;
         _azureSearchService = azureSearchService;
+        _appUserRepo = appUserRepo;
+        _queryContext = queryContext;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -69,8 +76,33 @@ public class RunReportQueryHandler
         var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 
         var access = await _enforcer.GetTableAccessAsync(table, allFields, ct);
-        if (!access.CanView)
+
+        var appPerms = await _appUserRepo.GetUserAppPermissionsAsync(table.AppId, _queryContext.UserId, ct);
+        // Only genuine report designers (create or update capability) qualify for masked builder
+        // preview. ReportsRead is a viewer-level permission — those users have no design intent
+        // and must be blocked entirely when they lack table data access, not shown masked rows.
+        bool isReportBuilder = appPerms.Contains(Domain.Constants.PermissionCodes.ReportsCreate) ||
+                               appPerms.Contains(Domain.Constants.PermissionCodes.ReportsUpdate);
+
+        bool isMaskedPreview = !access.CanView && isReportBuilder;
+
+        if (!access.CanView && !isReportBuilder)
             return new PagedReportRunResult { Page = page, PageSize = pageSize };
+
+        if (isMaskedPreview)
+        {
+            // Report Builder Masked Mode: allow analyzing structure & aggregates without exposing raw records
+            access = new TableAccessContext
+            {
+                Unrestricted = false,
+                CanAdd = false,
+                CanDelete = false,
+                ViewScope = Domain.Constants.RecordScopes.AllRecords,
+                ModifyScope = Domain.Constants.RecordScopes.None,
+                VisibleFields = allFields,
+                EditableFieldIds = new HashSet<long>()
+            };
+        }
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
@@ -130,10 +162,10 @@ public class RunReportQueryHandler
         }
 
         if (report.ReportType is "Summary" or "Chart")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, query.RuntimeFilters, filterTree, ct);
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, query.RuntimeFilters, filterTree, isMaskedPreview, ct);
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
-            query.RuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, ct);
+            query.RuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, ct);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -148,6 +180,7 @@ public class RunReportQueryHandler
         string? quickSearch,
         IReadOnlyList<long>? quickSearchFieldIds,
         bool quickSearchExact,
+        bool isMaskedPreview,
         CancellationToken ct)
     {
         // Intersect report columns with fields the role can see (drop None-access fields)
@@ -304,6 +337,17 @@ public class RunReportQueryHandler
             var computed = _formulaProjector.Project(allFields, rows, relational, table);
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
         }
+
+        if (isMaskedPreview)
+        {
+            // Table-type masked preview: expose ONLY row count + column structure.
+            // Requirement [UPDATED]: "preview shows row counts and aggregate outputs only —
+            // never raw record data." Individual rows are suppressed entirely — even replacing
+            // values with placeholder dots would still reveal row count per page and data shape.
+            // Summary/Chart reports already return only aggregates via RunSummaryAsync.
+            items = [];
+        }
+
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
             FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id,
@@ -318,6 +362,7 @@ public class RunReportQueryHandler
             TotalCount = total,
             Page = page,
             PageSize = pageSize,
+            IsDataMasked = isMaskedPreview,
         };
     }
 
@@ -403,6 +448,7 @@ public class RunReportQueryHandler
         string? quickSearch,
         IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters,
         FilterGroup? savedAndRuntimeFilterTree,
+        bool isMaskedPreview,
         CancellationToken ct)
     {
         if (!definition.GroupByFieldId.HasValue)
@@ -524,6 +570,7 @@ public class RunReportQueryHandler
             TotalCount = rows.Count,
             Page = 1,
             PageSize = rows.Count > 0 ? rows.Count : pageSize,
+            IsDataMasked = isMaskedPreview,
         };
     }
 
