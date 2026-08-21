@@ -22,9 +22,15 @@ public class SearchController : ControllerBase
     [RequireAuth]
     [ProducesResponseType(typeof(ApiResponse<SearchGlobalRecordsResult>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> SearchGlobal([FromQuery] string query, [FromQuery] long? appId = null, CancellationToken ct = default)
+    public async Task<IActionResult> SearchGlobal([FromQuery] string query, [FromServices] IAppRepository appRepo, [FromQuery] Guid? appId = null, CancellationToken ct = default)
     {
-        var result = await _searchHandler.HandleAsync(new SearchGlobalRecordsQuery(query, appId), ct);
+        long? internalAppId = null;
+        if (appId.HasValue)
+        {
+            var app = await appRepo.GetByPublicIdAsync(appId.Value, ct);
+            internalAppId = app.Id;
+        }
+        var result = await _searchHandler.HandleAsync(new SearchGlobalRecordsQuery(query, internalAppId), ct);
         return Ok(new ApiResponse<SearchGlobalRecordsResult>(result));
     }
 }

@@ -34,8 +34,7 @@ public class RunReportQueryHandler
     private readonly IUserRepository _userRepo;
     private readonly IFormulaProjector _formulaProjector;
     private readonly Relationships.IRelationalProjector _relationalProjector;
-    private readonly IAzureSearchService _azureSearchService;
-
+    private readonly IAzureSearchService _searchService;
     public RunReportQueryHandler(
         IReportRepository reportRepo,
         IAppTableRepository tableRepo,
@@ -45,7 +44,7 @@ public class RunReportQueryHandler
         IUserRepository userRepo,
         IFormulaProjector formulaProjector,
         Relationships.IRelationalProjector relationalProjector,
-        IAzureSearchService azureSearchService)
+        IAzureSearchService searchService)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -55,7 +54,7 @@ public class RunReportQueryHandler
         _userRepo = userRepo;
         _formulaProjector = formulaProjector;
         _relationalProjector = relationalProjector;
-        _azureSearchService = azureSearchService;
+        _searchService = searchService;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -189,12 +188,12 @@ public class RunReportQueryHandler
         // widget scoped to "Selected fields"), otherwise every IsSearchable text-ish field.
         if (!string.IsNullOrWhiteSpace(quickSearch))
         {
-            var hasEncryptedSearchable = allFields.Any(f => f.IsEncrypted && f.IsSearchable);
+            var hasSearchable = allFields.Any(f => f.IsSearchable);
             
-            if (hasEncryptedSearchable)
+            if (hasSearchable)
             {
                 // Route query to Azure AI Search to bypass SQL encryption limitations
-                var aiMatches = await _azureSearchService.SearchRecordsAsync(table.Id, quickSearch, ct);
+                var aiMatches = await _searchService.SearchRecordsAsync(table.Id, quickSearch, ct);
                 
                 if (aiMatches.Count == 0)
                 {
@@ -246,9 +245,41 @@ public class RunReportQueryHandler
             }
         }
 
+        if (filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
+        {
+            var odata = OData.ODataFilterBuilder.Build(filterTree, allFields);
+            if (!string.IsNullOrWhiteSpace(odata))
+            {
+                var aiMatches = await _searchService.SearchRecordsByFilterAsync(table.Id, odata, ct);
+                if (aiMatches.Count == 0)
+                {
+                    return new PagedReportRunResult { Page = page, PageSize = pageSize }; // Nothing found
+                }
+
+                var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
+                if (matchedIds.Count == 0)
+                {
+                    return new PagedReportRunResult { Page = page, PageSize = pageSize }; // Nothing found
+                }
+
+                var aiSearchGroup = new FilterGroup
+                {
+                    Logic = "or",
+                    Nodes = matchedIds.Select(id => new FilterNode 
+                    {
+                        Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = id.ToString() }
+                    }).ToList()
+                };
+                
+                filterTree = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = aiSearchGroup }] };
+            }
+        }
+
         // Determine which field IDs are formula (compute-on-read, no physical column)
+        // OR are encrypted, so we must filter/sort them in memory instead of SQL.
         var formulaFids = allFields
-            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
+            .Where(f => (f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings)) || 
+                        (f.IsEncrypted && f.Fid.HasValue))
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
@@ -277,8 +308,8 @@ public class RunReportQueryHandler
             var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
 
             // Apply formula-field conditions in memory.
-            if (formulaConditions.Count > 0)
-                pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions);
+            if (formulaConditions != null)
+                pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions, allFields);
 
             // If any sort key is a formula field, re-sort all rows in memory (covers all sort keys).
             if (hasFormulaSorts)

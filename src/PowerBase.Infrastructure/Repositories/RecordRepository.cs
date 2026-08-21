@@ -12,23 +12,73 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class RecordRepository : TenantRepositoryBase, IRecordRepository
 {
-    private readonly IAzureSearchService _searchService;
+    private readonly IMessagePublisher _messagePublisher;
     private readonly IEncryptionService _encryptionService;
 
     public RecordRepository(
         ITenantConnectionFactory connectionFactory, 
         IQueryContext queryContext,
-        IAzureSearchService searchService,
+        IMessagePublisher messagePublisher,
         IEncryptionService encryptionService)
         : base(connectionFactory, queryContext) 
     { 
-        _searchService = searchService;
+        _messagePublisher = messagePublisher;
         _encryptionService = encryptionService;
     }
 
     private Task<Services.FieldEncryptionContext> GetEncryptionContextAsync(
         System.Data.IDbConnection connection, long appId, CancellationToken ct)
         => Services.FieldEncryptionContext.ResolveAsync(connection, appId, QueryContext.TenantId, _encryptionService, ct);
+
+    public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        
+        // Find the table that contains this record
+        var tableSql = @"SELECT t.Id, t.AppId, t.Name 
+                         FROM RecordMetadata rm 
+                         JOIN AppTables t ON rm.TableId = t.Id 
+                         WHERE rm.PublicId = @publicId AND rm.TenantId = @tenantId";
+        var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { publicId = recordPublicId, tenantId = QueryContext.TenantId });
+        if (tableInfo == null) return new Dictionary<long, object?>();
+
+        // Get fields for this table
+        var fieldsSql = "SELECT Id, AppTableId, Name, TypeCode, Settings, PhysicalColumnName, Fid, IsSystem, IsSearchable, IsFilterable, IsEncrypted FROM AppFields WHERE AppTableId = @tableId";
+        var fields = (await connection.QueryAsync<AppField>(fieldsSql, new { tableId = (long)tableInfo.Id })).ToList();
+        
+        var searchableFields = fields.Where(f => f.IsSearchable || f.IsFilterable).ToList();
+        if (searchableFields.Count == 0) return new Dictionary<long, object?>();
+
+        var fieldCols = BuildFieldColumnList(searchableFields);
+        var recordSql = $"SELECT {fieldCols} FROM {PhysicalNaming.TableName((long)tableInfo.Id)} WHERE Id = (SELECT RecordId FROM RecordMetadata WHERE PublicId = @publicId AND TenantId = @tenantId)";
+        var rawRow = (await connection.QueryAsync<dynamic>(recordSql, new { publicId = recordPublicId, tenantId = QueryContext.TenantId })).FirstOrDefault();
+        if (rawRow == null) return new Dictionary<long, object?>();
+
+        var rowDict = (IDictionary<string, object?>)rawRow;
+        var result = new Dictionary<long, object?>();
+
+        var enc = await GetEncryptionContextAsync(connection, (long)tableInfo.AppId, ct);
+
+        foreach (var f in searchableFields)
+        {
+            if (!f.Fid.HasValue) continue;
+            var colName = f.IsSystem ? f.PhysicalColumnName! : PhysicalNaming.ColumnName((int)f.Fid.Value);
+            
+            if (rowDict.TryGetValue(colName, out var val))
+            {
+                if (f.IsEncrypted && val is string cipherHex)
+                {
+                    result[(long)f.Fid.Value] = await enc.DecryptValueAsync(cipherHex, ct);
+                }
+                else
+                {
+                    result[(long)f.Fid.Value] = val;
+                }
+            }
+        }
+        
+        return result;
+    }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
@@ -361,7 +411,6 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-
         // Encrypt flagged field values (no-op if app is not encrypted)
         enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
         var encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
@@ -387,12 +436,20 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         var insertedPublicId = await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, cancellationToken: ct));
 
-        // Push only searchable fields to Azure AI Search (using ORIGINAL plaintext values)
+        // Push searchable/filterable fields to Azure AI Search (using ORIGINAL plaintext values)
         var searchableValues = fields
-            .Where(f => f.IsSearchable && f.Fid.HasValue && values.ContainsKey(f.Fid.Value))
+            .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey(f.Fid.Value))
             .ToDictionary(f => (long)f.Fid!.Value, f => values[f.Fid!.Value]);
 
-        await _searchService.IndexRecordAsync(QueryContext.TenantId, table.AppId, table.Id, insertedPublicId, searchableValues, ct);
+        var tenantId = QueryContext.TenantId;
+        _ = _messagePublisher.PublishAsync(new PowerBase.Application.Common.Models.SearchIndexMessage
+        {
+            Action = PowerBase.Application.Common.Models.IndexAction.Upsert,
+            TenantId = tenantId,
+            AppId = table.AppId,
+            TableId = table.Id,
+            RecordPublicId = insertedPublicId
+        }, default);
 
         return insertedPublicId;
     }
@@ -446,12 +503,21 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var affected = await connection.ExecuteAsync(new CommandDefinition(updateSql, parameters, cancellationToken: ct));
         if (affected == 0) throw new NotFoundException("Record", publicId);
 
-        // Update Azure AI Search with only searchable fields (using ORIGINAL plaintext values)
+
+        // Update Azure AI Search with searchable/filterable fields (using ORIGINAL plaintext values)
         var searchableValues = fields
-            .Where(f => f.IsSearchable && f.Fid.HasValue && values.ContainsKey(f.Fid.Value))
+            .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey(f.Fid.Value))
             .ToDictionary(f => (long)f.Fid!.Value, f => values[f.Fid!.Value]);
 
-        await _searchService.IndexRecordAsync(QueryContext.TenantId, table.AppId, table.Id, publicId, searchableValues, ct);
+        var tenantId = QueryContext.TenantId;
+        _ = _messagePublisher.PublishAsync(new PowerBase.Application.Common.Models.SearchIndexMessage
+        {
+            Action = PowerBase.Application.Common.Models.IndexAction.Upsert,
+            TenantId = tenantId,
+            AppId = table.AppId,
+            TableId = table.Id,
+            RecordPublicId = publicId
+        }, default);
     }
 
     public async Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default)
@@ -468,7 +534,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (affected == 0) throw new NotFoundException("Record", publicId);
 
         // Remove from Azure AI Search
-        await _searchService.DeleteRecordAsync(table.Id, publicId, ct);
+        _ = _messagePublisher.PublishAsync(new PowerBase.Application.Common.Models.SearchIndexMessage
+        {
+            Action = PowerBase.Application.Common.Models.IndexAction.Delete,
+            TenantId = QueryContext.TenantId,
+            AppId = table.AppId,
+            TableId = table.Id,
+            RecordPublicId = publicId
+        }, default);
     }
 
     public async Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
@@ -483,7 +556,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             new CommandDefinition(sql, new { publicIds, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
 
         // Remove from Azure AI Search
-        await _searchService.BulkDeleteRecordsAsync(table.Id, publicIds, ct);
+        var deleteMessages = publicIds.Select(id => new PowerBase.Application.Common.Models.SearchIndexMessage
+        {
+            Action = PowerBase.Application.Common.Models.IndexAction.Delete,
+            TenantId = QueryContext.TenantId,
+            AppId = table.AppId,
+            TableId = table.Id,
+            RecordPublicId = id
+        }).ToList();
+        _ = _messagePublisher.PublishBatchAsync(deleteMessages, default);
     }
 
     public async Task<int> BackfillDefaultAsync(AppTable table, AppField field, string defaultValue, CancellationToken ct = default)
@@ -664,7 +745,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // Use the physical column name for system fields (Id, CreatedOn, etc.) rather than f_{fid}
         AppField? resolvedField = null;
         string col;
-        if (fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var f))
+        if (cond.FieldId == -1)
+        {
+            col = "PublicId";
+        }
+        else if (fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var f))
         {
             resolvedField = f;
             col = f.IsSystem ? f.PhysicalColumnName! : PhysicalNaming.ColumnName((int)cond.FieldId);
