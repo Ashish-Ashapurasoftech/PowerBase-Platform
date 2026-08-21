@@ -65,12 +65,16 @@ public interface IRecordRepository
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default);
 
+    Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+
+    Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+
     Task<Guid> CreateAsync(
-        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, CancellationToken ct = default);
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
     Task UpdateAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId,
-        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default);
+        IReadOnlyDictionary<long, object?> values, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
     /// <summary>Writes the same set of field values to every row in <paramref name="recordIds"/> in a
     /// single UPDATE statement (implicitly atomic — either every matched row is updated or none is).
@@ -79,9 +83,9 @@ public interface IRecordRepository
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> recordIds,
         IReadOnlyDictionary<long, object?> values, CancellationToken ct = default);
 
-    Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default);
+    Task DeleteAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
-    Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
+    Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
     /// <summary>Set the given field's column to <paramref name="defaultValue"/> for all non-deleted rows
     /// whose value is currently NULL or empty. Used when an optional field becomes required. Returns rows affected.</summary>

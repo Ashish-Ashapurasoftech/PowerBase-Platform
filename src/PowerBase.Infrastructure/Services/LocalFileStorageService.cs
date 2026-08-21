@@ -14,18 +14,79 @@ public sealed class LocalFileStorageService : IFileStorageService
         _localPath = configuration["Storage:LocalPath"] ?? "C:\\PowerbaseUploads";
     }
 
-    public async Task<StoredFile> SaveAsync(Stream content, string fileName, string? contentType, CancellationToken ct = default)
+    public async Task<StoredFile> SaveAsync(Stream content, string fileName, string? contentType, CancellationToken ct = default, string? uniqueKey = null)
     {
         if (!Directory.Exists(_localPath))
             Directory.CreateDirectory(_localPath);
 
         var extension = Path.GetExtension(fileName);
-        var uniqueFileName = $"{Guid.NewGuid()}{extension}";
-        var physicalPath = Path.Combine(_localPath, uniqueFileName);
+        string uniqueFileName;
+        string physicalPath;
 
-        await using (var stream = new FileStream(physicalPath, FileMode.Create))
+        if (!string.IsNullOrEmpty(uniqueKey))
         {
-            await content.CopyToAsync(stream, ct);
+            uniqueFileName = $"{uniqueKey}{extension}";
+            physicalPath = Path.Combine(_localPath, uniqueFileName);
+
+            if (File.Exists(physicalPath))
+            {
+                return new StoredFile
+                {
+                    Name = fileName,
+                    Path = $"/files/{uniqueFileName}",
+                    Size = new FileInfo(physicalPath).Length,
+                    ContentType = contentType,
+                };
+            }
+
+            var tempFileName = $"{uniqueKey}.{Guid.NewGuid()}.tmp";
+            var tempPath = Path.Combine(_localPath, tempFileName);
+
+            try
+            {
+                await using (var stream = new FileStream(tempPath, FileMode.Create))
+                {
+                    await content.CopyToAsync(stream, ct);
+                }
+
+                try
+                {
+                    File.Move(tempPath, physicalPath, overwrite: false);
+                }
+                catch (System.IO.IOException) when (File.Exists(physicalPath))
+                {
+                    try
+                    {
+                        File.Delete(tempPath);
+                    }
+                    catch
+                    {
+                        // best-effort
+                    }
+                }
+            }
+            catch
+            {
+                try
+                {
+                    if (File.Exists(tempPath)) File.Delete(tempPath);
+                }
+                catch
+                {
+                    // best-effort
+                }
+                throw;
+            }
+        }
+        else
+        {
+            uniqueFileName = $"{Guid.NewGuid()}{extension}";
+            physicalPath = Path.Combine(_localPath, uniqueFileName);
+
+            await using (var stream = new FileStream(physicalPath, FileMode.Create))
+            {
+                await content.CopyToAsync(stream, ct);
+            }
         }
 
         return new StoredFile

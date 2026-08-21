@@ -17,6 +17,7 @@ public class UserTokenAppAccessEnforcementTests
     private readonly IPageRepository _pageRepo = Substitute.For<IPageRepository>();
     private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly IPipelineRepository _pipelineRepo = Substitute.For<IPipelineRepository>();
     private readonly AppAccessService _service;
 
     public UserTokenAppAccessEnforcementTests()
@@ -32,7 +33,8 @@ public class UserTokenAppAccessEnforcementTests
             _formRuleRepo,
             _pageRepo,
             _appUserRepo,
-            _queryContext);
+            _queryContext,
+            _pipelineRepo);
     }
 
     [Fact]

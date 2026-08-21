@@ -13,6 +13,8 @@ public class DeleteRecordCommandHandler
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
     private readonly IRelationshipRepository _relRepo;
+    private readonly IPipelineTriggerInterceptor _triggerInterceptor;
+    private readonly ITenantUnitOfWork _uow;
 
     public DeleteRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -20,7 +22,9 @@ public class DeleteRecordCommandHandler
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
         IAuditRepository auditRepo,
-        IRelationshipRepository relRepo)
+        IRelationshipRepository relRepo,
+        IPipelineTriggerInterceptor triggerInterceptor,
+        ITenantUnitOfWork uow)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -28,6 +32,8 @@ public class DeleteRecordCommandHandler
         _enforcer = enforcer;
         _auditRepo = auditRepo;
         _relRepo = relRepo;
+        _triggerInterceptor = triggerInterceptor;
+        _uow = uow;
     }
 
     public async Task HandleAsync(DeleteRecordCommand command, CancellationToken ct = default)
@@ -52,9 +58,36 @@ public class DeleteRecordCommandHandler
             await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _fieldRepo, _recordRepo, ct);
         }
 
-        await _recordRepo.DeleteAsync(table, command.RecordPublicId, ct);
-        await _tableRepo.DecrementRecordCountAsync(table.Id, ct);
-        await _auditRepo.LogActivityAsync(
-            AuditActions.Deleted, AuditEntityTypes.Record, command.RecordPublicId.ToString(), $"Record deleted from {table.Name} with ID {command.RecordPublicId}", appId: table.AppId, ct: ct);
+        var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, command.RecordPublicId, ct);
+        var oldValuesDict = new Dictionary<long, object?>();
+        foreach (var field in fields)
+        {
+            if (field.Fid.HasValue)
+            {
+                var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(field);
+                if (oldRecord.TryGetValue(colKey, out var val))
+                {
+                    oldValuesDict[field.Fid.Value] = val;
+                }
+            }
+        }
+
+        await _uow.BeginAsync(ct);
+        try
+        {
+            await _triggerInterceptor.InterceptAsync(table, fields, command.RecordPublicId, oldValuesDict, "record-deleted", ct);
+
+            await _recordRepo.DeleteAsync(table, command.RecordPublicId, _uow.Transaction, ct);
+            await _tableRepo.DecrementRecordCountAsync(table.Id, ct);
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Deleted, AuditEntityTypes.Record, command.RecordPublicId.ToString(), $"Record deleted from {table.Name} with ID {command.RecordPublicId}", appId: table.AppId, ct: ct);
+
+            await _uow.CommitAsync(ct);
+        }
+        catch
+        {
+            await _uow.RollbackAsync(ct);
+            throw;
+        }
     }
 }
