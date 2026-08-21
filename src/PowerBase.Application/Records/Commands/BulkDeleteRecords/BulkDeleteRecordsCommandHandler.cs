@@ -18,6 +18,7 @@ public class BulkDeleteRecordsCommandHandler
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly ITenantUnitOfWork _uow;
     private readonly IQueryContext _queryContext;
+    private readonly IMessagePublisher _messagePublisher;
 
     public BulkDeleteRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -28,7 +29,8 @@ public class BulkDeleteRecordsCommandHandler
         IRelationshipRepository relRepo,
         IPipelineTriggerInterceptor triggerInterceptor,
         ITenantUnitOfWork uow,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IMessagePublisher messagePublisher)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -39,6 +41,7 @@ public class BulkDeleteRecordsCommandHandler
         _triggerInterceptor = triggerInterceptor;
         _uow = uow;
         _queryContext = queryContext;
+        _messagePublisher = messagePublisher;
     }
 
     public async Task HandleAsync(BulkDeleteRecordsCommand command, CancellationToken ct = default)
@@ -121,7 +124,8 @@ public class BulkDeleteRecordsCommandHandler
                 ct
             );
 
-            await _recordRepo.BulkDeleteAsync(table, uniqueRecordPublicIds, _uow.Transaction, ct);
+            var indexMessages = new List<PowerBase.Application.Common.Models.SearchIndexMessage>();
+            await _recordRepo.BulkDeleteAsync(table, uniqueRecordPublicIds, _uow.Transaction, ct, msg => indexMessages.Add(msg));
             await _tableRepo.DecrementRecordCountByAsync(table.Id, uniqueRecordPublicIds.Count, ct);
 
 
@@ -135,6 +139,11 @@ public class BulkDeleteRecordsCommandHandler
                 ct: ct);
 
             await _uow.CommitAsync(ct);
+
+            if (indexMessages.Count > 0)
+            {
+                _ = _messagePublisher.PublishBatchAsync(indexMessages, default);
+            }
         }
         catch
         {

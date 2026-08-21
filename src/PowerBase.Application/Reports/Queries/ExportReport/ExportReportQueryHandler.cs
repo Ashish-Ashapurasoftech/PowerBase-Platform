@@ -20,6 +20,7 @@ public class ExportReportQueryHandler
     private readonly IUserRepository _userRepo;
     private readonly IFormulaProjector _formulaProjector;
     private readonly Relationships.IRelationalProjector _relationalProjector;
+    private readonly IAzureSearchService _searchService;
 
     public ExportReportQueryHandler(
         IReportRepository reportRepo,
@@ -29,7 +30,8 @@ public class ExportReportQueryHandler
         IRolePermissionEnforcer enforcer,
         IUserRepository userRepo,
         IFormulaProjector formulaProjector,
-        Relationships.IRelationalProjector relationalProjector)
+        Relationships.IRelationalProjector relationalProjector,
+        IAzureSearchService searchService)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -39,6 +41,7 @@ public class ExportReportQueryHandler
         _userRepo = userRepo;
         _formulaProjector = formulaProjector;
         _relationalProjector = relationalProjector;
+        _searchService = searchService;
     }
 
     public async Task<ExportResult> HandleAsync(ExportReportQuery query, CancellationToken ct = default)
@@ -134,10 +137,41 @@ public class ExportReportQueryHandler
                 };
         }
 
+        if (filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
+        {
+            var odata = RunReport.OData.ODataFilterBuilder.Build(filterTree, allFields);
+            if (!string.IsNullOrWhiteSpace(odata))
+            {
+                var aiMatches = await _searchService.SearchRecordsByFilterAsync(table.Id, odata, ct);
+                if (aiMatches.Count == 0)
+                {
+                    return BuildExport([], [], "export", format);
+                }
+
+                var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
+                if (matchedIds.Count == 0)
+                {
+                    return BuildExport([], [], "export", format);
+                }
+
+                var aiSearchGroup = new FilterGroup
+                {
+                    Logic = "or",
+                    Nodes = matchedIds.Select(id => new FilterNode 
+                    {
+                        Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = id.ToString() }
+                    }).ToList()
+                };
+                
+                filterTree = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = aiSearchGroup }] };
+            }
+        }
+
         // Formula fields have no physical column — strip them from the SQL filter/sort and
         // apply them in-memory after projection (same approach as RunReportQueryHandler).
         var formulaFids = allFields
-            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
+            .Where(f => (f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings)) || 
+                        (f.IsEncrypted && f.Fid.HasValue))
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
@@ -151,8 +185,8 @@ public class ExportReportQueryHandler
         var computed = _formulaProjector.Project(allFields, rows, relational, table);
         var pairs = rows.Zip(computed, (r, c) => (Row: r, Computed: c)).ToList();
 
-        if (formulaConditions.Count > 0)
-            pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions);
+        if (formulaConditions != null)
+            pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaConditions, allFields);
         if (hasFormulaSorts)
             pairs = FormulaFilterSorter.ApplySort(pairs, sortFields, allFields);
 

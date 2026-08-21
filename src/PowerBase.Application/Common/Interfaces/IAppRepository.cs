@@ -6,6 +6,7 @@ namespace PowerBase.Application.Common.Interfaces;
 
 public interface IAppRepository
 {
+    Task<App> GetByIdAsync(long id, CancellationToken ct = default);
     Task<App> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<Guid> GetPublicIdByIdAsync(long appId, CancellationToken ct = default);

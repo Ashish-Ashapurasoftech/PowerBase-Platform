@@ -33,31 +33,43 @@ public static class FormulaFilterSorter
         return false;
     }
 
-    /// <summary>
-    /// Removes nodes that reference formula fields from the tree (for SQL) and returns
-    /// a flat list of the removed formula conditions (to be re-applied in-memory).
-    /// The returned physical tree may be null when all nodes were formula conditions.
-    /// </summary>
-    public static (FilterGroup? physical, IReadOnlyList<FilterCondition> formulaConditions)
+    public static (FilterGroup? physical, FilterGroup? formulaTree)
         SplitFilterTree(FilterGroup? tree, HashSet<long> formulaFids)
     {
-        if (tree == null) return (null, []);
-        var collected = new List<FilterCondition>();
-        var physical = StripFormulaNodes(tree, formulaFids, collected);
-        return (physical, collected);
+        if (tree == null) return (null, null);
+        return SplitGroup(tree, formulaFids);
     }
 
-    /// <summary>
-    /// Applies formula field conditions (extracted by SplitFilterTree) in-memory.
-    /// All conditions are AND'd together on top of what SQL already filtered.
-    /// </summary>
     public static List<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)>
         ApplyFormulaFilters(
             IEnumerable<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)> pairs,
-            IReadOnlyList<FilterCondition> conditions)
+            FilterGroup formulaTree,
+            IReadOnlyList<AppField> allFields)
     {
-        if (conditions.Count == 0) return pairs.ToList();
-        return pairs.Where(p => conditions.All(c => MatchesCondition(p.Computed, c))).ToList();
+        var fieldLookup = allFields
+            .Where(f => f.Fid.HasValue)
+            .GroupBy(f => (long)f.Fid!.Value)
+            .ToDictionary(g => g.Key, g => g.First());
+
+        return pairs.Where(p => MatchesGroup(p, formulaTree, fieldLookup)).ToList();
+    }
+    
+    private static bool MatchesGroup((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p, FilterGroup group, Dictionary<long, AppField> fieldLookup)
+    {
+        if (group.Nodes.Count == 0) return true;
+        
+        if (group.Logic == "or")
+        {
+            return group.Nodes.Any(n => 
+                n.Condition != null ? MatchesCondition(p, n.Condition, fieldLookup) : 
+                n.Group != null ? MatchesGroup(p, n.Group, fieldLookup) : false);
+        }
+        else // and
+        {
+            return group.Nodes.All(n => 
+                n.Condition != null ? MatchesCondition(p, n.Condition, fieldLookup) : 
+                n.Group != null ? MatchesGroup(p, n.Group, fieldLookup) : false);
+        }
     }
 
     /// <summary>
@@ -108,32 +120,79 @@ public static class FormulaFilterSorter
 
     // ── Private ─────────────────────────────────────────────────────────────────
 
-    private static FilterGroup? StripFormulaNodes(
-        FilterGroup group, HashSet<long> formulaFids, List<FilterCondition> collected)
+    private static (FilterGroup? physical, FilterGroup? formula) SplitGroup(FilterGroup group, HashSet<long> formulaFids)
     {
-        var kept = new List<FilterNode>();
-        foreach (var node in group.Nodes)
+        var physicalNodes = new List<FilterNode>();
+        var formulaNodes = new List<FilterNode>();
+
+        if (group.Logic == "and")
         {
-            if (node.Condition != null)
+            foreach (var node in group.Nodes)
             {
-                if (formulaFids.Contains(node.Condition.FieldId))
-                    collected.Add(node.Condition);
-                else
-                    kept.Add(node);
-            }
-            else if (node.Group != null)
-            {
-                var sub = StripFormulaNodes(node.Group, formulaFids, collected);
-                if (sub != null)
-                    kept.Add(new FilterNode { Group = sub });
+                if (node.Condition != null)
+                {
+                    if (formulaFids.Contains(node.Condition.FieldId))
+                        formulaNodes.Add(node);
+                    else
+                        physicalNodes.Add(node);
+                }
+                else if (node.Group != null)
+                {
+                    var (p, f) = SplitGroup(node.Group, formulaFids);
+                    if (p != null) physicalNodes.Add(new FilterNode { Group = p });
+                    if (f != null) formulaNodes.Add(new FilterNode { Group = f });
+                }
             }
         }
-        return kept.Count > 0 ? new FilterGroup { Logic = group.Logic, Nodes = kept } : null;
+        else // or
+        {
+            // For OR, if any node is a formula node (or contains one), we must evaluate the ENTIRE OR group in memory.
+            // Why? Because A OR B cannot be split into SQL(A) AND Memory(B).
+            if (TreeContainsFormulaField(group, formulaFids))
+            {
+                // The whole group goes to memory.
+                formulaNodes.Add(new FilterNode { Group = group });
+            }
+            else
+            {
+                // The whole group goes to SQL.
+                physicalNodes.Add(new FilterNode { Group = group });
+            }
+        }
+
+        FilterGroup? physicalGroup = physicalNodes.Count > 0 ? new FilterGroup { Logic = "and", Nodes = physicalNodes } : null;
+        if (group.Logic == "or" && physicalNodes.Count == 1 && physicalNodes[0].Group != null)
+        {
+            physicalGroup = physicalNodes[0].Group;
+        }
+
+        FilterGroup? formulaGroup = formulaNodes.Count > 0 ? new FilterGroup { Logic = "and", Nodes = formulaNodes } : null;
+        if (group.Logic == "or" && formulaNodes.Count == 1 && formulaNodes[0].Group != null)
+        {
+            formulaGroup = formulaNodes[0].Group;
+        }
+
+        return (physicalGroup, formulaGroup);
     }
 
-    private static bool MatchesCondition(IReadOnlyDictionary<long, object?> computed, FilterCondition c)
+    private static bool MatchesCondition((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p, FilterCondition c, Dictionary<long, AppField> fieldLookup)
     {
-        computed.TryGetValue(c.FieldId, out var val);
+        fieldLookup.TryGetValue(c.FieldId, out var field);
+        object? val = null;
+
+        if (field != null && FormulaTypeMap.IsComputedField(field.TypeCode, field.Settings))
+        {
+            p.Computed.TryGetValue(c.FieldId, out val);
+        }
+        else if (field?.IsSystem == true && field.PhysicalColumnName != null)
+        {
+            p.Row.TryGetValue(field.PhysicalColumnName, out val);
+        }
+        else
+        {
+            var col = PhysicalNaming.ColumnName((int)c.FieldId);
+            p.Row.TryGetValue(col, out val);
+        }
 
         return c.Operator switch
         {

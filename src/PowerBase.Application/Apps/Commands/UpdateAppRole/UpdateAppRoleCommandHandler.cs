@@ -125,7 +125,7 @@ public class UpdateAppRoleCommandHandler
         {
             string manageableRolesType = command.ManageableRolesType ?? role.ManageableRolesType;
             int? rank = command.Rank.HasValue ? command.Rank.Value : role.Rank;
-            var allowedIds = command.ManageableRolePublicIds ?? (await _appRoleRepo.GetManageableRolePublicIdsAsync(role.Id, ct)) ?? new List<Guid>();
+            IReadOnlyList<Guid> allowedIds = command.ManageableRolePublicIds ?? (await _appRoleRepo.GetManageableRolePublicIdsAsync(role.Id, ct)) ?? Array.Empty<Guid>();
 
             if (manageableRolesType == "Manual" && allowedIds != null)
             {

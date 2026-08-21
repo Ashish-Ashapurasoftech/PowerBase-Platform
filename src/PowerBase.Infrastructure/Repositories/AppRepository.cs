@@ -22,6 +22,13 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
           AND IsDeleted = 0
         """;
 
+    private const string GetByIdSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.App
+        WHERE Id = @id
+          AND IsDeleted = 0
+        """;
+
     private const string ListSql = $"""
         SELECT {SelectColumns}
         FROM meta.App
@@ -172,6 +179,14 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         var app = await connection.QuerySingleOrDefaultAsync<App>(
             new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
         return app ?? throw new NotFoundException("App", publicId);
+    }
+
+    public async Task<App> GetByIdAsync(long id, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var app = await connection.QuerySingleOrDefaultAsync<App>(
+            new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
+        return app ?? throw new NotFoundException("App", id);
     }
 
     public async Task<IReadOnlyList<App>> ListAsync(int page, int pageSize, CancellationToken ct = default)
