@@ -214,7 +214,6 @@ builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaProjector, Pow
 builder.Services.AddScoped<PowerBase.Application.Relationships.IRelationalProjector, PowerBase.Application.Relationships.RelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.Queries.ValidateFormulaQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.Queries.EvaluateFormulaQueryHandler>();
-builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaDefaultResolver, PowerBase.Application.Formulas.FormulaDefaultResolver>();
 builder.Services.AddScoped<PowerBase.Application.Formulas.IFormulaExpressionValidator, PowerBase.Application.Formulas.FormulaExpressionValidator>();
 
 // Action Buttons (Field-Type spec)
