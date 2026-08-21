@@ -293,6 +293,7 @@ builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.SavePipeline
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.DeletePipeline.DeletePipelineCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.DeletePipelines.DeletePipelinesCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipeline.GetPipelineQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineEditor.GetPipelineEditorQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelines.ListPipelinesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelineRuns.ListPipelineRunsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineRunSteps.GetPipelineRunStepsQueryHandler>();

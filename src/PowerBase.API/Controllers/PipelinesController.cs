@@ -10,6 +10,7 @@ using PowerBase.Application.Pipelines.Commands.DeletePipelines;
 using PowerBase.Application.Pipelines.Commands.SavePipelineSteps;
 using PowerBase.Application.Pipelines.Commands.UpdatePipeline;
 using PowerBase.Application.Pipelines.Queries.GetPipeline;
+using PowerBase.Application.Pipelines.Queries.GetPipelineEditor;
 using PowerBase.Application.Pipelines.Queries.ListPipelines;
 using PowerBase.Application.Pipelines.Queries.GetPipelineSchedule;
 using PowerBase.Application.Pipelines.Commands.UpdatePipelineSchedule;
@@ -112,6 +113,29 @@ public class PipelinesController : ControllerBase
         var result = await _getHandler.HandleAsync(query, ct);
         var response = MapToDetailResponse(result);
         return Ok(new ApiResponse<PipelineDetailResponse>(response));
+    }
+
+    /// <summary>
+    /// Get a pipeline together with its complete editor metadata (resolved table/field
+    /// metadata for all step references the backend can resolve authoritatively).
+    /// Use this endpoint — not GET /pipelines/{id} — when opening the pipeline editor.
+    /// The frontend must await all ClientResolveRefs before rendering the editor.
+    /// </summary>
+    [HttpGet("pipelines/{publicId:guid}/editor")]
+    [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByPipelinePublicId)]
+    [ProducesResponseType(typeof(ApiResponse<PipelineEditorResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetEditor(
+        Guid publicId,
+        [FromServices] GetPipelineEditorQueryHandler editorHandler,
+        CancellationToken ct)
+    {
+        var query = new GetPipelineEditorQuery(publicId);
+        var result = await editorHandler.HandleAsync(query, ct);
+        var response = MapToEditorResponse(result);
+        return Ok(new ApiResponse<PipelineEditorResponse>(response));
     }
 
     /// <summary>Update a pipeline's basic metadata (name, description, isActive).</summary>
@@ -246,6 +270,69 @@ public class PipelinesController : ControllerBase
         ElseChildren = step.ElseChildren.Select(MapStepResponse).ToList(),
         SuccessChildren = step.SuccessChildren.Select(MapStepResponse).ToList(),
         ErrorChildren = step.ErrorChildren.Select(MapStepResponse).ToList()
+    };
+
+    private static PipelineEditorResponse MapToEditorResponse(PipelineEditorResult result) => new()
+    {
+        PublicId = result.PublicId,
+        AppPublicId = result.AppPublicId,
+        Name = result.Name,
+        Description = result.Description,
+        VariablesJson = result.VariablesJson,
+        IsActive = result.IsActive,
+        RowVersion = Convert.ToBase64String(result.RowVersion),
+        Steps = result.Steps.Select(MapEditorStepResponse).ToList(),
+        EditorTables = result.EditorTables.Select(t => new PipelineEditorTableDto
+        {
+            ConnectionPublicId = t.ConnectionPublicId,
+            AppPublicId = t.AppPublicId,
+            TablePublicId = t.TablePublicId,
+            TableName = t.TableName,
+            Fields = t.Fields.Select(f => new PipelineEditorFieldDto
+            {
+                PublicId = f.PublicId,
+                Name = f.Name,
+                Label = f.Label,
+                TypeCode = f.TypeCode,
+                Fid = f.Fid,
+                Settings = f.Settings,
+                DefaultValue = f.DefaultValue,
+                IsRequired = f.IsRequired,
+                IsSystem = f.IsSystem
+            }).ToList()
+        }).ToList(),
+        ClientResolveRefs = result.ClientResolveRefs.Select(r => new PipelineEditorClientRefDto
+        {
+            ConnectionPublicId = r.ConnectionPublicId,
+            AppPublicId = r.AppPublicId,
+            TablePublicId = r.TablePublicId,
+            Reason = r.Reason switch
+            {
+                PipelineEditorRefReason.SavedConnection => "saved_connection",
+                PipelineEditorRefReason.SystemConnection => "system_connection",
+                PipelineEditorRefReason.TableNotFound => "table_not_found",
+                PipelineEditorRefReason.AppNotFound => "app_not_found",
+                PipelineEditorRefReason.AccessDenied => "access_denied",
+                PipelineEditorRefReason.TenantNotFound => "tenant_not_found",
+                _ => "resolution_error"
+            }
+        }).ToList()
+    };
+
+    private static PipelineStepResponse MapEditorStepResponse(PipelineEditorStepResult step) => new()
+    {
+        PublicId = step.PublicId,
+        RefId = step.RefId,
+        DisplayOrder = step.DisplayOrder,
+        Type = step.Type,
+        Subtype = step.Subtype,
+        ConfigJson = step.ConfigJson,
+        ParentBranch = step.ParentBranch,
+        RowVersion = Convert.ToBase64String(step.RowVersion),
+        Children = step.Children.Select(MapEditorStepResponse).ToList(),
+        ElseChildren = step.ElseChildren.Select(MapEditorStepResponse).ToList(),
+        SuccessChildren = step.SuccessChildren.Select(MapEditorStepResponse).ToList(),
+        ErrorChildren = step.ErrorChildren.Select(MapEditorStepResponse).ToList()
     };
 
     /// <summary>Get a pipeline's schedule details.</summary>
