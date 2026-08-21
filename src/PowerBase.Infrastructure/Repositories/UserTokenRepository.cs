@@ -187,12 +187,74 @@ public class UserTokenRepository : ControlRepositoryBase, IUserTokenRepository
         return publicIds;
     }
 
-    public async Task<IEnumerable<UserToken>> GetMyTokensAsync(long userId, long tenantId, CancellationToken ct)
+    public async Task<IReadOnlySet<long>> GetAllowedAppIdsAsync(long userTokenId, CancellationToken ct = default)
     {
         await using var connection = ConnectionFactory.Create();
-        return await connection.QueryAsync<UserToken>(
-            new CommandDefinition(GetMyTokensSql, new { userId, tenantId }, cancellationToken: ct)
+        var ids = await connection.QueryAsync<long>(
+            new CommandDefinition(GetAllowedAppIdsSql, new { userTokenId }, cancellationToken: ct)
         );
+        return ids.ToHashSet();
+    }
+
+    public async Task<(IEnumerable<UserToken> Items, int TotalCount)> GetMyTokensPagedAsync(
+        long userId, 
+        long tenantId, 
+        string? search, 
+        bool? isActive, 
+        int page, 
+        int pageSize, 
+        string sortBy, 
+        bool sortDesc, 
+        CancellationToken ct)
+    {
+        await using var connection = ConnectionFactory.Create();
+
+        // Safe sort-column whitelist (prevents SQL injection)
+        var columnMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["tokenName"]  = "ut.TokenName",
+            ["createdAt"]  = "ut.CreatedAt",
+            ["isActive"]   = "ut.IsActive",
+            ["lastUsedAt"] = "ut.LastUsedAt"
+        };
+        var orderColumn = columnMap.TryGetValue(sortBy ?? "createdAt", out var col)
+            ? col : "ut.CreatedAt";
+        var orderDir = sortDesc ? "DESC" : "ASC";
+
+        var parameters = new DynamicParameters();
+        parameters.Add("userId", userId);
+        parameters.Add("tenantId", tenantId);
+        parameters.Add("offset", (page - 1) * pageSize);
+        parameters.Add("pageSize", pageSize);
+
+        var whereClause = "WHERE ut.UserId = @userId AND ut.TenantId = @tenantId AND ut.IsDeleted = 0";
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            whereClause += " AND (ut.TokenName LIKE @search OR ut.Description LIKE @search)";
+            parameters.Add("search", $"%{search}%");
+        }
+
+        if (isActive.HasValue)
+        {
+            whereClause += " AND ut.IsActive = @isActive";
+            parameters.Add("isActive", isActive.Value);
+        }
+
+        var countSql = $"SELECT COUNT(1) FROM core.UserToken ut {whereClause};";
+        var selectSql = $@"
+            SELECT ut.Id, ut.PublicId, ut.TenantId, ut.UserId, ut.TokenName, ut.Description, ut.TokenHash, ut.TokenPrefix, ut.IsActive, ut.AccessAllApps, ut.CreatedAt, ut.LastUsedAt, ut.IsDeleted, ut.RowVersion
+            FROM core.UserToken ut
+            {whereClause}
+            ORDER BY {orderColumn} {orderDir}, ut.Id
+            OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;";
+
+        var totalCount = await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(countSql, parameters, cancellationToken: ct));
+
+        var items = await connection.QueryAsync<UserToken>(
+            new CommandDefinition(selectSql, parameters, cancellationToken: ct));
+
+        return (items, totalCount);
     }
 
     public async Task<(IEnumerable<AdminUserTokenDto> Items, int TotalCount)> GetAdminTokensPagedAsync(

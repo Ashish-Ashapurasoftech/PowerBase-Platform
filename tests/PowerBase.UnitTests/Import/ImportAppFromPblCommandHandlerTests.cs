@@ -45,6 +45,7 @@ public class ImportAppFromPblCommandHandlerTests
     private readonly IFieldTypeRepository _fieldTypeRepo = Substitute.For<IFieldTypeRepository>();
     private readonly ISchemaEngineService _schemaEngine = Substitute.For<ISchemaEngineService>();
     private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
+    private readonly IFieldNameResolver _fieldNameResolver = Substitute.For<IFieldNameResolver>();
 
     // --- CreateReportCommandHandler's own dependency not shared with the above ---
     private readonly IReportRepository _reportRepo = Substitute.For<IReportRepository>();
@@ -79,7 +80,7 @@ public class ImportAppFromPblCommandHandlerTests
     {
         var bulkCreateHandler = new BulkCreateFieldsCommandHandler(
             _tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo, _formRepo,
-            new FieldSettingsValidatorRegistry(Array.Empty<IFieldSettingsValidator>()));
+            new FieldSettingsValidatorRegistry(Array.Empty<IFieldSettingsValidator>()), _fieldNameResolver);
 
         var createAppHandler = new CreateAppCommandHandler(
             _appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _auditRepo, _userRepo,
@@ -90,8 +91,10 @@ public class ImportAppFromPblCommandHandlerTests
         var createReportHandler = new CreateReportCommandHandler(
             _tableRepo, _fieldRepo, _reportRepo, _appUserRepo, _appRoleRepo, _queryContext, _auditRepo);
 
+        var relationshipFieldFactory = new PowerBase.Application.Relationships.RelationshipFieldFactory(
+            _fieldRepo, _fieldTypeRepo, _schemaEngine, _formRepo, _queryContext, _fieldNameResolver);
         var createRelationshipHandler = new CreateRelationshipCommandHandler(
-            _tableRepo, _fieldRepo, _fieldTypeRepo, _relRepo, _schemaEngine, _formRepo, _queryContext, _auditRepo, _appRepo);
+            _tableRepo, _fieldRepo, _fieldTypeRepo, _relRepo, relationshipFieldFactory, _auditRepo, _appRepo);
 
         var createFormHandler = new CreateFormCommandHandler(_tableRepo, _formRepo, _queryContext, _auditRepo);
         var saveFormLayoutHandler = new SaveFormLayoutCommandHandler(_formRepo, _fieldRepo, _queryContext, _auditRepo);
@@ -99,7 +102,7 @@ public class ImportAppFromPblCommandHandlerTests
         var createFormRuleHandler = new CreateFormRuleCommandHandler(_formRepo, _formRuleRepo, _queryContext, _auditRepo);
         var saveFormRuleHandler = new SaveFormRuleCommandHandler(_formRuleRepo, _queryContext, _auditRepo, _formRepo, _fieldRepo, _formulaExpressionValidator);
 
-        var createAppRoleHandler = new CreateAppRoleCommandHandler(_appRepo, _appRoleRepo, _queryContext, _auditRepo, _appRolePermissionRepo);
+        var createAppRoleHandler = new CreateAppRoleCommandHandler(_appRepo, _appRoleRepo, _queryContext, _auditRepo, _appRolePermissionRepo, _appUserRepo);
         var updateTablePermissionsHandler = new UpdateTablePermissionsCommandHandler(_appRoleRepo, _appRolePermissionRepo, _tableRepo, _auditRepo, _queryContext, _appUserRepo);
 
         var deleteAppHandler = new DeleteAppCommandHandler(_appRepo, _auditRepo);

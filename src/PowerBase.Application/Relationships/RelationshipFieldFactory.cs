@@ -22,28 +22,35 @@ public sealed class RelationshipFieldFactory
     private readonly ISchemaEngineService _schemaEngine;
     private readonly IFormRepository _formRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IFieldNameResolver _fieldNameResolver;
 
     public RelationshipFieldFactory(
         IAppFieldRepository fieldRepo,
         IFieldTypeRepository fieldTypeRepo,
         ISchemaEngineService schemaEngine,
         IFormRepository formRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IFieldNameResolver fieldNameResolver)
     {
         _fieldRepo = fieldRepo;
         _fieldTypeRepo = fieldTypeRepo;
         _schemaEngine = schemaEngine;
         _formRepo = formRepo;
         _queryContext = queryContext;
+        _fieldNameResolver = fieldNameResolver;
     }
 
+    /// <summary>Creates a relationship field (Reference/Lookup/Summary/ReportLink). Name is generated
+    /// from <paramref name="label"/> — callers never supply Name directly (see IFieldNameResolver).</summary>
     public async Task<AppField> CreateAsync(
-        AppTable table, string typeCode, string name, string? label, bool isRequired, object settingsObj, CancellationToken ct)
+        AppTable table, string typeCode, string label, bool isRequired, object settingsObj, CancellationToken ct)
     {
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(typeCode, ct) ?? throw new NotFoundException("FieldType", typeCode);
 
-        if (await _fieldRepo.NameExistsInTableAsync(table.Id, name, ct))
-            throw new DuplicateException("Field", "name", name);
+        if (await _fieldRepo.LabelExistsInTableAsync(table.Id, label, ct: ct))
+            throw new DuplicateException("Field", "label", label);
+
+        var name = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, label, isSystem: false, ct);
 
         var fid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
         var field = new AppField

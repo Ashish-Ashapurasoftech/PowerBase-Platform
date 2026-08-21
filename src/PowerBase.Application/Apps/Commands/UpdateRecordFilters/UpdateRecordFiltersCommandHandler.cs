@@ -37,9 +37,44 @@ public class UpdateRecordFiltersCommandHandler
                    ?? throw new NotFoundException("AppRole", command.RolePublicId);
 
         var currentUserRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(role.AppId, _queryContext.UserId, ct);
-        if (currentUserRolePublicId == command.RolePublicId)
+        AppRole? actorRole = null;
+        if (currentUserRolePublicId.HasValue)
         {
-            throw new UnauthorizedActionException("modify record filters for your own app role");
+            actorRole = await _appRoleRepo.GetByPublicIdAsync(currentUserRolePublicId.Value, ct);
+        }
+        bool isAdministrator = actorRole?.Name == "Administrator";
+
+        if (!_queryContext.IsSuperAdmin && !isAdministrator)
+        {
+            if (currentUserRolePublicId == command.RolePublicId)
+            {
+                throw new UnauthorizedActionException("modify record filters for your own app role");
+            }
+
+            if (actorRole == null)
+            {
+                throw new UnauthorizedActionException("Your role was not found.");
+            }
+
+            int actorRank = actorRole.Rank ?? int.MaxValue;
+            int targetRank = role.Rank ?? int.MaxValue;
+            if (targetRank <= actorRank)
+            {
+                throw new UnauthorizedActionException("You cannot manage a role equal to or above your own.");
+            }
+
+            if (actorRole.ManageableRolesType == "None")
+            {
+                throw new UnauthorizedActionException("Your role is not allowed to manage any roles.");
+            }
+            else if (actorRole.ManageableRolesType == "Manual")
+            {
+                var manageableIds = await _appRoleRepo.GetManageableRolePublicIdsAsync(actorRole.Id, ct);
+                if (!manageableIds.Contains(role.PublicId))
+                {
+                    throw new UnauthorizedActionException("Your role is not allowed to manage this role.");
+                }
+            }
         }
 
         var rows = new List<AppRoleRecordFilter>();

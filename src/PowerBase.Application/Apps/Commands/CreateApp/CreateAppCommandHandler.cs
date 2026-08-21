@@ -6,6 +6,8 @@ using PowerBase.Domain.Exceptions;
 namespace PowerBase.Application.Apps.Commands.CreateApp;
 
 using PowerBase.Application.Fields.Commands.BulkCreateFields;
+using PowerBase.Domain.ValueObjects;
+using System.Text.Json;
 
 public class CreateAppResult
 {
@@ -17,6 +19,7 @@ public class CreateAppResult
     public string Status { get; init; } = string.Empty;
     public DateTime CreatedOn { get; init; }
     public bool IsEncrypted { get; init; }
+    public string? OwnerName { get; init; }
 }
 
 public class CreateAppCommandHandler
@@ -80,6 +83,8 @@ public class CreateAppCommandHandler
             Icon = command.Icon,
             Color = command.Color,
             Status = "Active",
+            Formatting = JsonSerializer.Serialize(new AppFormattingSettings()),
+            SecurityOptions = JsonSerializer.Serialize(new AppSecurityOptionsSettings()),
             CreatedOn = now,
             CreatedBy = _queryContext.UserId,
             IsEncrypted = command.IsEncrypted
@@ -96,6 +101,8 @@ public class CreateAppCommandHandler
                 Name = "Administrator",
                 IsSystem = true,
                 IsDefault = false,
+                Rank = 1,
+                ManageableRolesType = "Below",
             }, _uow.Transaction, ct);
 
             await _appRoleRepo.SetPermissionsAsync(adminRoleId, new[]
@@ -108,7 +115,8 @@ public class CreateAppCommandHandler
                 PermissionCodes.FormsCreate, PermissionCodes.FormsRead, PermissionCodes.FormsUpdate, PermissionCodes.FormsDelete, PermissionCodes.FormsRulesManage,
                 PermissionCodes.PagesCreate, PermissionCodes.PagesRead, PermissionCodes.PagesUpdate, PermissionCodes.PagesDelete, PermissionCodes.PagesPublish, PermissionCodes.PagesCode,
                 PermissionCodes.UsersInvite, PermissionCodes.UsersManage, PermissionCodes.RolesManage,
-                PermissionCodes.AuditLogsRead,PermissionCodes.AuditLogsReadOfStream,
+                PermissionCodes.AuditLogsRead, PermissionCodes.AuditLogsReadOfStream,
+                PermissionCodes.PowerFlowsCreate, PermissionCodes.PowerFlowsRead, PermissionCodes.PowerFlowsUpdate, PermissionCodes.PowerFlowsDelete, PermissionCodes.PowerFlowsCopy,
             }, _uow.Transaction, ct);
 
             var (participantRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
@@ -117,6 +125,7 @@ public class CreateAppCommandHandler
                 Name = "Participant",
                 IsSystem = true,
                 IsDefault = false,
+                Rank = 2,
             }, _uow.Transaction, ct);
 
             await _appRoleRepo.SetPermissionsAsync(participantRoleId, new[]
@@ -127,6 +136,7 @@ public class CreateAppCommandHandler
                 PermissionCodes.ReportsCreate, PermissionCodes.ReportsRead, PermissionCodes.ReportsRun,
                 PermissionCodes.FormsRead,
                 PermissionCodes.PagesRead,
+                PermissionCodes.PowerFlowsRead
             }, _uow.Transaction, ct);
 
             var (viewerRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
@@ -135,6 +145,7 @@ public class CreateAppCommandHandler
                 Name = "Viewer",
                 IsSystem = true,
                 IsDefault = true,
+                Rank = 3,
             }, _uow.Transaction, ct);
 
             await _appRoleRepo.SetPermissionsAsync(viewerRoleId, new[]
@@ -144,6 +155,7 @@ public class CreateAppCommandHandler
                 PermissionCodes.ReportsRead, PermissionCodes.ReportsRun,
                 PermissionCodes.FormsRead,
                 PermissionCodes.PagesRead,
+                PermissionCodes.PowerFlowsRead
             }, _uow.Transaction, ct);
 
             await _appRepo.SetDefaultRoleAsync(appId, viewerRoleId, _uow.Transaction, ct);
@@ -181,7 +193,8 @@ public class CreateAppCommandHandler
                 Color = app.Color,
                 Status = app.Status,
                 CreatedOn = now,
-                IsEncrypted = app.IsEncrypted
+                IsEncrypted = app.IsEncrypted,
+                OwnerName = owner.Name
             };
         }
         catch
@@ -212,7 +225,7 @@ public class CreateAppCommandHandler
         // Process Custom Fields
         if (spec.Fields != null && spec.Fields.Any())
         {
-            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Name, Settings: f.Settings, IsEncrypted: f.IsEncrypted)).ToList();
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label, Settings: f.Settings, IsEncrypted: f.IsEncrypted, Name: f.Name)).ToList();
             await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
         }
     }

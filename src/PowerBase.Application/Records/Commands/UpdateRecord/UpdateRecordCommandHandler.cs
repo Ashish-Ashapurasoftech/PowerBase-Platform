@@ -10,17 +10,20 @@ public class UpdateRecordCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IRecordWriteService _writeService;
+    private readonly ITenantUnitOfWork _uow;
 
     public UpdateRecordCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRolePermissionEnforcer enforcer,
-        IRecordWriteService writeService)
+        IRecordWriteService writeService,
+        ITenantUnitOfWork uow)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _enforcer = enforcer;
         _writeService = writeService;
+        _uow = uow;
     }
 
     public async Task HandleAsync(UpdateRecordCommand command, CancellationToken ct = default)
@@ -56,8 +59,18 @@ public class UpdateRecordCommandHandler
                 throw new UnauthorizedActionException("You do not have permission to write to one or more of the specified fields.");
         }
 
-        await _writeService.ApplyAsync(
-            table, fields, command.RecordPublicId, command.FieldValues,
-            AuditActions.Updated, $"Record modified in {table.Name}", ct);
+        await _uow.BeginAsync(ct);
+        try
+        {
+            await _writeService.ApplyAsync(
+                table, fields, command.RecordPublicId, command.FieldValues,
+                AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction);
+            await _uow.CommitAsync(ct);
+        }
+        catch
+        {
+            await _uow.RollbackAsync(ct);
+            throw;
+        }
     }
 }

@@ -12,7 +12,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 {
     private const string SelectColumns = """
         Id, PublicId, AppId, Name, SingularLabel, PluralLabel, Description,
-        PhysicalTableName, DefaultReportSettings, DisplayFieldId, KeyFieldId, DefaultRecordPickerField1Id, DefaultRecordPickerField2Id, DefaultRecordPickerField3Id, RecordCount, IsSystem, DisplayOrder,
+        PhysicalTableName, DefaultReportSettings, DisplayFieldId, KeyFieldId, DefaultRecordPickerField1Id, DefaultRecordPickerField2Id, DefaultRecordPickerField3Id, RecordCount, IsShowInBar, IsSystem, DisplayOrder,
         IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion, Icon
         """;
 
@@ -37,7 +37,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     private const string ListByAppSql = """
         SELECT t.Id, t.PublicId, t.AppId, t.Name, t.SingularLabel, t.PluralLabel, t.Description,
-               t.PhysicalTableName, t.DisplayFieldId, t.KeyFieldId, t.DefaultRecordPickerField1Id, t.DefaultRecordPickerField2Id, t.DefaultRecordPickerField3Id, t.RecordCount, t.IsSystem, t.DisplayOrder,
+               t.PhysicalTableName, t.DisplayFieldId, t.KeyFieldId, t.DefaultRecordPickerField1Id, t.DefaultRecordPickerField2Id, t.DefaultRecordPickerField3Id, t.RecordCount, t.IsShowInBar, t.IsSystem, t.DisplayOrder,
                t.IsDeleted, t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy, t.RowVersion, t.Icon,
                f.Id, f.PublicId, f.AppTableId, f.FieldTypeId,
                f.Name, f.Label, f.Description, f.PhysicalColumnName, f.DefaultValue,
@@ -48,6 +48,38 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         WHERE t.AppId = @appId
           AND t.IsDeleted = 0
         ORDER BY t.DisplayOrder, t.Name, f.Id
+        """;
+
+    // {0} = whitelisted "column direction" fragment — never built from raw user input.
+    private const string ListByAppPagedSqlTemplate = """
+        SELECT t.PublicId, t.Name, t.SingularLabel, t.Icon, t.RecordCount, t.IsShowInBar, t.CreatedOn,
+               (SELECT COUNT(1) FROM meta.AppField f WHERE f.AppTableId = t.Id AND f.IsDeleted = 0) AS FieldCount
+        FROM meta.AppTable t
+        WHERE t.AppId = @appId
+          AND t.IsDeleted = 0
+          AND (@search IS NULL OR t.Name LIKE @search OR t.SingularLabel LIKE @search)
+          AND (@isShowInBar IS NULL OR t.IsShowInBar = @isShowInBar)
+        ORDER BY {0}
+        OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+        """;
+
+    // No paging/search/sort — every table in the app, ordered to match the rest of the app's
+    // canonical nav ordering (DisplayOrder, falling back to creation order for ties).
+    private const string ListNavByAppSql = """
+        SELECT t.PublicId, t.Name, t.SingularLabel, t.Icon, t.IsShowInBar
+        FROM meta.AppTable t
+        WHERE t.AppId = @appId
+          AND t.IsDeleted = 0
+        ORDER BY t.DisplayOrder, t.CreatedOn
+        """;
+
+    private const string CountByAppSql = """
+        SELECT COUNT(1)
+        FROM meta.AppTable t
+        WHERE t.AppId = @appId
+          AND t.IsDeleted = 0
+          AND (@search IS NULL OR t.Name LIKE @search OR t.SingularLabel LIKE @search)
+          AND (@isShowInBar IS NULL OR t.IsShowInBar = @isShowInBar)
         """;
 
     private const string NameExistsSql = """
@@ -77,6 +109,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             DefaultRecordPickerField1Id = @defaultRecordPickerField1Id,
             DefaultRecordPickerField2Id = @defaultRecordPickerField2Id,
             DefaultRecordPickerField3Id = @defaultRecordPickerField3Id,
+            IsShowInBar   = ISNULL(@isShowInBar, IsShowInBar),
             ModifiedOn    = SYSUTCDATETIME(),
             ModifiedBy    = @modifiedBy
         WHERE PublicId = @publicId AND IsDeleted = 0
@@ -173,6 +206,52 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         return lookup.Values.OrderBy(t => t.DisplayOrder).ThenBy(t => t.Name).ToList();
     }
 
+    public async Task<IReadOnlyList<AppTableListItemDto>> ListByAppPagedAsync(long appId, int page, int pageSize, string? search, string sortBy, bool sortDesc, bool? isShowInBar = null, CancellationToken ct = default)
+    {
+        var column = sortBy switch
+        {
+            "singularLabel" => "t.SingularLabel",
+            "recordCount"   => "t.RecordCount",
+            "fieldCount"    => "FieldCount",
+            "createdOn"     => "t.CreatedOn",
+            "isShowInBar"   => "t.IsShowInBar",
+            _               => "t.Name",
+        };
+        var sql = string.Format(ListByAppPagedSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}, t.Id");
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<AppTableListItemDto>(
+            new CommandDefinition(sql, new
+            {
+                appId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                isShowInBar,
+                offset = (page - 1) * pageSize,
+                pageSize
+            }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<IReadOnlyList<AppTableNavItemDto>> ListNavByAppAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<AppTableNavItemDto>(
+            new CommandDefinition(ListNavByAppSql, new { appId }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<int> CountByAppAsync(long appId, string? search, bool? isShowInBar = null, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(CountByAppSql, new
+            {
+                appId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                isShowInBar,
+            }, cancellationToken: ct));
+    }
+
     public async Task<bool> NameExistsInAppAsync(long appId, string name, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -204,7 +283,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             new CommandDefinition(UpdatePhysicalNameSql, new { id, physicalTableName }, cancellationToken: ct));
     }
 
-    public async Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, long? defaultRecordPickerField1Id = null, long? defaultRecordPickerField2Id = null, long? defaultRecordPickerField3Id = null, CancellationToken ct = default)
+    public async Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, long? defaultRecordPickerField1Id = null, long? defaultRecordPickerField2Id = null, long? defaultRecordPickerField3Id = null, bool? isShowInBar = null, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
@@ -212,6 +291,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             {
                 publicId, name, singularLabel, pluralLabel, description, icon,
                 defaultRecordPickerField1Id, defaultRecordPickerField2Id, defaultRecordPickerField3Id,
+                isShowInBar,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
     }

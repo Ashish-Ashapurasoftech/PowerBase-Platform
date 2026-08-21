@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text.Json;
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
@@ -153,6 +154,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var ids = await connection.QueryAsync<long>(new CommandDefinition(sql, new { publicIds }, cancellationToken: ct));
         return ids.AsList();
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, long>> GetIdsByPublicIdsMapAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default)
+    {
+        if (publicIds.Count == 0) return new Dictionary<Guid, long>();
+        var sql = $"SELECT PublicId, Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @publicIds AND IsDeleted = 0";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<(Guid PublicId, long Id)>(new CommandDefinition(sql, new { publicIds }, cancellationToken: ct));
+        return rows.ToDictionary(r => r.PublicId, r => r.Id);
     }
 
     public async Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default)
@@ -362,18 +372,36 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return dict;
     }
 
+    public async Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var sql = $"SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId = @publicId";
+        if (transaction is not null)
+        {
+            return await transaction.Connection!.QuerySingleAsync<long>(new CommandDefinition(sql, new { publicId }, transaction, cancellationToken: ct));
+        }
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleAsync<long>(new CommandDefinition(sql, new { publicId }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var sql = $"SELECT PublicId, Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @publicIds";
+        if (transaction is not null)
+        {
+            var rows = await transaction.Connection!.QueryAsync<(Guid PublicId, long Id)>(new CommandDefinition(sql, new { publicIds }, transaction, cancellationToken: ct));
+            return rows.ToDictionary(x => x.PublicId, x => x.Id);
+        }
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var resRows = await connection.QueryAsync<(Guid PublicId, long Id)>(new CommandDefinition(sql, new { publicIds }, cancellationToken: ct));
+        return resRows.ToDictionary(x => x.PublicId, x => x.Id);
+    }
+
     public async Task<Guid> CreateAsync(
-        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
-
-        // Dynamically initialize DEK if an encrypted field is present but app wasn't globally encrypted
-        var enc = await GetEncryptionContextAsync(await ConnectionFactory.CreateAsync(ct), table.AppId, ct);
-        if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
-        {
-            await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
-            await enc.EnsureDekAsync(tenantConn, ct);
-        }
 
         // Build the SQL shape first (column names only, no values yet)
         string sql;
@@ -410,10 +438,30 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 """;
         }
 
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
+
         // Encrypt flagged field values (no-op if app is not encrypted)
-        enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
-        var encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
+        Services.FieldEncryptionContext enc;
+        IReadOnlyDictionary<long, object?> encryptedValues;
+        if (transaction is not null)
+        {
+            enc = await GetEncryptionContextAsync(transaction.Connection!, table.AppId, ct);
+            if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
+            {
+                await enc.EnsureDekAsync(transaction.Connection!, ct);
+            }
+            encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
+        }
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
+            if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
+            {
+                await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
+                await enc.EnsureDekAsync(tenantConn, ct);
+            }
+            encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
+        }
 
         // Build parameters using encrypted values
         var parameters = new DynamicParameters();
@@ -434,7 +482,16 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
         }
 
-        var insertedPublicId = await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        Guid insertedPublicId;
+        if (transaction is not null)
+        {
+            insertedPublicId = await transaction.Connection!.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct));
+        }
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            insertedPublicId = await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        }
 
         // Push searchable/filterable fields to Azure AI Search (using ORIGINAL plaintext values)
         var searchableValues = fields
@@ -456,21 +513,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     public async Task UpdateAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId,
-        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
+        IReadOnlyDictionary<long, object?> values, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
         if (relevantFields.Count == 0) return;
-
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-
-        // Encrypt flagged field values before UPDATE (no-op if app is not encrypted)
-        var enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
-        if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
-        {
-            await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
-            await enc.EnsureDekAsync(tenantConn, ct);
-        }
-        var encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
 
         // Build set-clause parameters with potentially-encrypted values
         var parameters = new DynamicParameters();
@@ -483,14 +529,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
             {
                 var endCol = PhysicalNaming.EndColumnName(f.Fid!.Value);
-                var (startVal, endVal) = SplitRangeValue(encryptedValues.TryGetValue((long)f.Fid.Value, out var rv) ? rv : values[(long)f.Fid.Value]);
+                var (startVal, endVal) = SplitRangeValue(values[(long)f.Fid.Value]);
                 setClauses.Add($"{col} = @{col}"); parameters.Add(col, startVal);
                 setClauses.Add($"{endCol} = @{endCol}"); parameters.Add(endCol, endVal);
             }
             else
             {
                 setClauses.Add($"{col} = @{col}");
-                parameters.Add(col, encryptedValues.TryGetValue((long)f.Fid.Value, out var ev) ? ev : values[(long)f.Fid.Value]);
+                parameters.Add(col, values[(long)f.Fid.Value]);
             }
         }
 
@@ -500,8 +546,47 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             WHERE PublicId = @publicId AND IsDeleted = 0
             """;
 
-        var affected = await connection.ExecuteAsync(new CommandDefinition(updateSql, parameters, cancellationToken: ct));
-        if (affected == 0) throw new NotFoundException("Record", publicId);
+        if (transaction is not null)
+        {
+            var affectedTx = await transaction.Connection!.ExecuteAsync(new CommandDefinition(updateSql, parameters, transaction, cancellationToken: ct));
+            if (affectedTx == 0) throw new NotFoundException("Record", publicId);
+        }
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+
+            // Encrypt flagged field values before UPDATE (no-op if app is not encrypted)
+            var enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
+            if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
+            {
+                await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
+                await enc.EnsureDekAsync(tenantConn, ct);
+            }
+            var encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
+
+            // Re-bind parameters with encrypted values
+            parameters = new DynamicParameters();
+            parameters.Add("publicId", publicId);
+            parameters.Add("modifiedBy", QueryContext.UserId);
+            foreach (var f in relevantFields)
+            {
+                var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+                if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
+                {
+                    var endCol = PhysicalNaming.EndColumnName(f.Fid!.Value);
+                    var (startVal, endVal) = SplitRangeValue(encryptedValues.TryGetValue((long)f.Fid.Value, out var rv) ? rv : values[(long)f.Fid.Value]);
+                    parameters.Add(col, startVal);
+                    parameters.Add(endCol, endVal);
+                }
+                else
+                {
+                    parameters.Add(col, encryptedValues.TryGetValue((long)f.Fid.Value, out var ev) ? ev : values[(long)f.Fid.Value]);
+                }
+            }
+
+            var affected = await connection.ExecuteAsync(new CommandDefinition(updateSql, parameters, cancellationToken: ct));
+            if (affected == 0) throw new NotFoundException("Record", publicId);
+        }
 
 
         // Update Azure AI Search with searchable/filterable fields (using ORIGINAL plaintext values)
@@ -520,13 +605,62 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }, default);
     }
 
-    public async Task DeleteAsync(AppTable table, Guid publicId, CancellationToken ct = default)
+    public async Task<int> MassUpdateAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> recordIds,
+        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default)
+    {
+        var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
+        if (relevantFields.Count == 0 || recordIds.Count == 0) return 0;
+
+        var parameters = new DynamicParameters();
+        parameters.Add("ids", recordIds);
+        parameters.Add("modifiedBy", QueryContext.UserId);
+
+        var setClauses = new List<string>();
+        foreach (var f in relevantFields)
+        {
+            var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+            if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
+            {
+                var endCol = PhysicalNaming.EndColumnName(f.Fid!.Value);
+                var (startVal, endVal) = SplitRangeValue(values[(long)f.Fid.Value]);
+                setClauses.Add($"{col} = @{col}"); parameters.Add(col, startVal);
+                setClauses.Add($"{endCol} = @{endCol}"); parameters.Add(endCol, endVal);
+            }
+            else
+            {
+                setClauses.Add($"{col} = @{col}"); parameters.Add(col, values[(long)f.Fid.Value]);
+            }
+        }
+
+        // A single UPDATE statement is implicitly transactional in SQL Server — either every matched
+        // row is written or none is, satisfying the all-or-nothing requirement without an explicit
+        // BEGIN TRAN (and without needing per-record round trips, since every record gets the same values).
+        var sql = $"""
+            UPDATE {PhysicalNaming.FullTableName(table.Id)}
+            SET {string.Join(", ", setClauses)}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+            WHERE Id IN @ids AND IsDeleted = 0
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+    }
+
+    public async Task DeleteAsync(AppTable table, Guid publicId, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
             WHERE PublicId = @publicId AND IsDeleted = 0
             """;
+
+        if (transaction is not null)
+        {
+            var affectedTx = await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(sql, new { publicId, modifiedBy = QueryContext.UserId }, transaction, cancellationToken: ct));
+            if (affectedTx == 0) throw new NotFoundException("Record", publicId);
+            return;
+        }
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await connection.ExecuteAsync(
@@ -544,13 +678,21 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }, default);
     }
 
-    public async Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
+    public async Task BulkDeleteAsync(AppTable table, IReadOnlyList<Guid> publicIds, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
             WHERE PublicId IN @publicIds AND IsDeleted = 0
             """;
+
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(sql, new { publicIds, modifiedBy = QueryContext.UserId }, transaction, cancellationToken: ct));
+            return;
+        }
+
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(sql, new { publicIds, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
@@ -957,6 +1099,21 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
+    public async Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, CancellationToken ct = default)
+    {
+        var col = PhysicalNaming.ColumnName(field.Fid!.Value);
+        var sql = $"""
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1 FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0 AND {col} = @value
+                  AND (@excludeRecordId IS NULL OR Id <> @excludeRecordId)
+            ) THEN 1 ELSE 0 END AS BIT)
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(sql, new { value, excludeRecordId }, cancellationToken: ct));
     }
 
     public async Task<bool> HasNullsAsync(AppTable table, AppField field, CancellationToken ct = default)

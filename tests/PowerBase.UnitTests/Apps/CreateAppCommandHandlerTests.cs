@@ -18,7 +18,7 @@ public class CreateAppCommandHandlerTests
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
     private readonly IAppSeeder _appSeeder = Substitute.For<IAppSeeder>();
-    private readonly PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler _bulkCreateHandler = Substitute.For<PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler>(Substitute.For<PowerBase.Application.Common.Interfaces.IAppTableRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAppFieldRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFieldTypeRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.ISchemaEngineService>(), Substitute.For<PowerBase.Application.Common.Interfaces.IQueryContext>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAuditRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFormRepository>(), new PowerBase.Application.Fields.Settings.FieldSettingsValidatorRegistry(System.Array.Empty<PowerBase.Application.Fields.Settings.IFieldSettingsValidator>()));
+    private readonly PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler _bulkCreateHandler = Substitute.For<PowerBase.Application.Fields.Commands.BulkCreateFields.BulkCreateFieldsCommandHandler>(Substitute.For<PowerBase.Application.Common.Interfaces.IAppTableRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAppFieldRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFieldTypeRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.ISchemaEngineService>(), Substitute.For<PowerBase.Application.Common.Interfaces.IQueryContext>(), Substitute.For<PowerBase.Application.Common.Interfaces.IAuditRepository>(), Substitute.For<PowerBase.Application.Common.Interfaces.IFormRepository>(), new PowerBase.Application.Fields.Settings.FieldSettingsValidatorRegistry(System.Array.Empty<PowerBase.Application.Fields.Settings.IFieldSettingsValidator>()), Substitute.For<PowerBase.Application.Common.Interfaces.IFieldNameResolver>());
 
     private CreateAppCommandHandler CreateSut() => new(_appRepo, _appRoleRepo, _appUserRepo, _uow, _queryContext, _tableRepo, _auditRepo, _userRepo, _appSeeder, _bulkCreateHandler);
 
@@ -72,7 +72,18 @@ public class CreateAppCommandHandlerTests
 
         await sut.HandleAsync(new CreateAppCommand("My App", null, null, null, new[] { new TableSpec("Table 1") }));
 
-        await _appRoleRepo.Received(3).CreateAsync(Arg.Any<AppRole>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _appRoleRepo.Received(1).CreateAsync(
+            Arg.Is<AppRole>(r => r.Name == "Administrator" && r.Rank == 1),
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>());
+        await _appRoleRepo.Received(1).CreateAsync(
+            Arg.Is<AppRole>(r => r.Name == "Participant" && r.Rank == 2),
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>());
+        await _appRoleRepo.Received(1).CreateAsync(
+            Arg.Is<AppRole>(r => r.Name == "Viewer" && r.Rank == 3),
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>());
         await _appUserRepo.Received(1).CreateAsync(Arg.Any<AppUser>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
     }
 

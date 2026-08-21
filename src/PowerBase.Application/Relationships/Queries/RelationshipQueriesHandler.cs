@@ -73,7 +73,7 @@ public class RelationshipQueriesHandler
             var refField = childFields.FirstOrDefault(f => f.Id == rel.ReferenceFieldId);
             var fields = new List<RelationshipFieldDto>();
             if (refField is not null)
-                fields.Add(new(refField.PublicId, refField.Fid ?? 0, refField.Name, "reference", "Reference"));
+                fields.Add(new(refField.PublicId, refField.Fid ?? 0, refField.Label ?? refField.Name, "reference", "Reference"));
 
             // Lookups (child); the proxy lookup gets the distinct "proxy" role. TypeCode = looked-up source type.
             foreach (var f in childFields.Where(f => f.TypeCode == "Lookup"
@@ -84,7 +84,7 @@ public class RelationshipQueriesHandler
                 var srcType = ls?.SourceTypeCode ?? "Text";
                 var srcField = ls?.SourceFid is int sfid ? parentFields.FirstOrDefault(pf => pf.Fid == sfid) : null;
                 var srcLabel = srcField is not null ? (srcField.Label ?? srcField.Name) : null;
-                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, role, srcType)
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Label ?? f.Name, role, srcType)
                 {
                     SourceFieldLabel = srcLabel is not null ? $"{parent.Name}: {srcLabel}" : null,
                 });
@@ -98,7 +98,7 @@ public class RelationshipQueriesHandler
                 var fn = ss?.Function ?? "Count";
                 var tField = ss?.TargetFid is int tfid ? childFields.FirstOrDefault(cf => cf.Fid == tfid) : null;
                 var tLabel = tField is not null ? (tField.Label ?? tField.Name) : null;
-                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "summary", fn)
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Label ?? f.Name, "summary", fn)
                 {
                     TargetFieldLabel = tLabel is not null ? $"{child.Name}: {tLabel}" : null,
                 });
@@ -134,7 +134,7 @@ public class RelationshipQueriesHandler
                     var tF = childFields.FirstOrDefault(cf => cf.Fid == tFid);
                     tFLabel = $"{child.Name}: {(tF is not null ? (tF.Label ?? tF.Name) : $"Field {tFid}")}";
                 }
-                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Name, "reportlink", "ReportLink")
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Label ?? f.Name, "reportlink", "ReportLink")
                 {
                     SourceFieldLabel = srcFLabel,
                     TargetFieldLabel = tFLabel,

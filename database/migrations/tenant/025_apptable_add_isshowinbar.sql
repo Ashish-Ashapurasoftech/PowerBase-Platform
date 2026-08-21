@@ -1,0 +1,3 @@
+ALTER TABLE meta.AppTable
+    ADD IsShowInBar BIT NOT NULL DEFAULT 1;
+GO

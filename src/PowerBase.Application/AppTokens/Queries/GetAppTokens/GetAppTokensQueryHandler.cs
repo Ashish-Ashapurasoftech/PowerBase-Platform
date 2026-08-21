@@ -10,6 +10,8 @@ public class GetAppTokensQuery
     public bool? IsActive { get; set; }
     public int Page { get; set; } = 1;
     public int PageSize { get; set; } = 20;
+    public string SortBy { get; set; } = "tokenName";
+    public bool SortDesc { get; set; } = false;
 }
 
 public class GetAppTokensResult
@@ -34,7 +36,7 @@ public class GetAppTokensQueryHandler
     public async Task<GetAppTokensResult> HandleAsync(GetAppTokensQuery query, CancellationToken cancellationToken = default)
     {
         var (items, totalCount) = await _appTokenRepository.GetPagedAsync(
-            _queryContext.TenantId, query.AppPublicId, query.Search, query.IsActive, query.Page, query.PageSize, cancellationToken);
+            _queryContext.TenantId, query.AppPublicId, query.Search, query.IsActive, query.Page, query.PageSize, query.SortBy, query.SortDesc, cancellationToken);
 
         var dtos = items.Select(t => new AppTokenDto
         {

@@ -14,6 +14,8 @@ public class CreateRecordCommandHandler
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
     private readonly IFormulaDefaultResolver _formulaDefaults;
+    private readonly IPipelineTriggerInterceptor _triggerInterceptor;
+    private readonly ITenantUnitOfWork _uow;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -21,7 +23,9 @@ public class CreateRecordCommandHandler
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
         IAuditRepository auditRepo,
-        IFormulaDefaultResolver formulaDefaults)
+        IFormulaDefaultResolver formulaDefaults,
+        IPipelineTriggerInterceptor triggerInterceptor,
+        ITenantUnitOfWork uow)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -29,6 +33,8 @@ public class CreateRecordCommandHandler
         _enforcer = enforcer;
         _auditRepo = auditRepo;
         _formulaDefaults = formulaDefaults;
+        _triggerInterceptor = triggerInterceptor;
+        _uow = uow;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -77,12 +83,33 @@ public class CreateRecordCommandHandler
                 effectiveValues[(long)field.Fid.Value] = _formulaDefaults.Resolve(field.DefaultValue, field, fields, effectiveValues, table);
         }
 
-        var publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, ct);
+        // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
+        // values about to be persisted, after defaults and reference-override resolution.
+        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: true, excludeRecordId: null, ct);
 
-        await _auditRepo.LogActivityAsync(
-            AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), $"Record added in {table.Name} with ID {publicId}", appId: table.AppId, ct: ct);
+        Guid publicId;
+        await _uow.BeginAsync(ct);
+        try
+        {
+            publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, _uow.Transaction, ct);
 
-        await _tableRepo.IncrementRecordCountAsync(table.Id, ct);
+            var recordId = await _recordRepo.GetRecordIdByPublicIdAsync(table, publicId, _uow.Transaction, ct);
+            effectiveValues[3] = recordId;
+
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), $"Record added in {table.Name} with ID {publicId}", appId: table.AppId, ct: ct);
+
+            await _tableRepo.IncrementRecordCountAsync(table.Id, ct);
+
+            await _triggerInterceptor.InterceptAsync(table, fields, publicId, effectiveValues, "record-added", ct);
+
+            await _uow.CommitAsync(ct);
+        }
+        catch
+        {
+            await _uow.RollbackAsync(ct);
+            throw;
+        }
 
         var fieldData = new Dictionary<string, object?>();
         foreach (var field in fields.Where(f => f.Fid.HasValue && effectiveValues.ContainsKey((long)f.Fid.Value)))

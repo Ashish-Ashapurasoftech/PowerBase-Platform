@@ -1,22 +1,26 @@
 using FluentValidation;
 using PowerBase.Application.Fields.Settings;
-using PowerBase.Domain.Enums;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Fields.Commands.CreateField;
 
 public class CreateFieldCommandValidator : AbstractValidator<CreateFieldCommand>
 {
-    private static readonly string[] ValidTypeCodes = Enum.GetNames<FieldTypeCode>();
-
     public CreateFieldCommandValidator()
     {
-        RuleFor(x => x.Name).NotEmpty().MaximumLength(200);
-        RuleFor(x => x.TypeCode)
-            .NotEmpty()
-            .Must(c => ValidTypeCodes.Contains(c))
-            .WithMessage($"TypeCode must be one of: {string.Join(", ", ValidTypeCodes)}");
-        RuleFor(x => x.Label).MaximumLength(200).When(x => x.Label is not null);
+        RuleFor(x => x.Label).NotEmpty().MaximumLength(200);
+        // TypeCode's real whitelist is this tenant's own core.FieldType table, not a fixed set —
+        // different tenant databases can (and do) carry different rows there (see
+        // PhysicalNaming.IsActionButtonTypeCode's comment for why). A prior version of this rule
+        // checked TypeCode against the static PowerBase.Domain.Enums.FieldTypeCode enum instead,
+        // which rejected perfectly valid tenant-DB codes (e.g. 'ActionButton_Signature') before
+        // the request ever reached the actual, tenant-DB-backed check —
+        // CreateFieldCommandHandler/BulkCreateFieldsCommandHandler's own
+        // `_fieldTypeRepo.GetByCodeAsync(command.TypeCode, ct) ?? throw NotFoundException(...)`
+        // a few lines later, which is the authoritative, already-correct source of truth for
+        // "does this TypeCode exist." Only check non-emptiness here; let that DB lookup do the
+        // real validation.
+        RuleFor(x => x.TypeCode).NotEmpty();
         RuleFor(x => x.Description).MaximumLength(500).When(x => x.Description is not null);
     }
 
