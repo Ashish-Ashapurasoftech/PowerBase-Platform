@@ -28,8 +28,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     private Task<Services.FieldEncryptionContext> GetEncryptionContextAsync(
-        System.Data.IDbConnection connection, long appId, CancellationToken ct)
-        => Services.FieldEncryptionContext.ResolveAsync(connection, appId, QueryContext.TenantId, _encryptionService, ct);
+        System.Data.IDbConnection connection, long appId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
+        => Services.FieldEncryptionContext.ResolveAsync(connection, appId, QueryContext.TenantId, _encryptionService, transaction, ct);
 
     public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default)
     {
@@ -58,7 +58,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var rowDict = (IDictionary<string, object?>)rawRow;
         var result = new Dictionary<long, object?>();
 
-        var enc = await GetEncryptionContextAsync(connection, (long)tableInfo.AppId, ct);
+        var enc = await GetEncryptionContextAsync(connection, (long)tableInfo.AppId, null, ct);
 
         foreach (var f in searchableFields)
         {
@@ -122,7 +122,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // Use mutable Dictionary so DecryptRowsAsync can mutate values in-place
         var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
 
-        var enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         await enc.DecryptRowsAsync(mutableRows, fields, ct);
 
         return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
@@ -234,7 +234,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, new { ids }, cancellationToken: ct));
 
-        var enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
 
         foreach (var row in rows)
         {
@@ -368,7 +368,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (row is null) throw new NotFoundException("Record", publicId);
 
         var dict = ToDictionary(row);
-        var enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         await enc.DecryptRowAsync((System.Collections.Generic.IDictionary<string, object?>)dict, fields, ct);
 
         return dict;
@@ -446,7 +446,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         IReadOnlyDictionary<long, object?> encryptedValues;
         if (transaction is not null)
         {
-            enc = await GetEncryptionContextAsync(transaction.Connection!, table.AppId, ct);
+            enc = await GetEncryptionContextAsync(transaction.Connection!, table.AppId, transaction, ct);
             if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
             {
                 await enc.EnsureDekAsync(transaction.Connection!, transaction, ct);
@@ -456,7 +456,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         else
         {
             await using var connection = await ConnectionFactory.CreateAsync(ct);
-            enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
+            enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
             if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
             {
                 await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
@@ -534,7 +534,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         
         if (transaction is not null)
         {
-            enc = await GetEncryptionContextAsync(transaction.Connection!, table.AppId, ct);
+            enc = await GetEncryptionContextAsync(transaction.Connection!, table.AppId, transaction, ct);
             if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
             {
                 await enc.EnsureDekAsync(transaction.Connection!, transaction, ct);
@@ -544,7 +544,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         else
         {
             await using var connection = await ConnectionFactory.CreateAsync(ct);
-            enc = await GetEncryptionContextAsync(connection, table.AppId, ct);
+            enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
             if (!enc.IsActive && relevantFields.Any(f => f.IsEncrypted))
             {
                 await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
@@ -1036,7 +1036,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var encContext = await GetEncryptionContextAsync(connection, table.AppId, ct);
+        var encContext = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         bool requiresClientSideDistinct = encContext.IsActive && !field.IsSystem && field.IsEncrypted;
 
         var sql = requiresClientSideDistinct 

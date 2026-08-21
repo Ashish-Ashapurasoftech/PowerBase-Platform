@@ -199,9 +199,8 @@ public class AzureSearchService : IAzureSearchService
             Filter = filter,
             Size = 50 // Global search limits results across tables
         };
-        options.Select.Add("id");
-        options.Select.Add("appId");
-        options.Select.Add("tableId");
+        // We select * (by not adding specific selects) to get all dynamic f_X fields
+        // which we need to determine the primary display text of each record.
 
         try
         {
@@ -213,7 +212,17 @@ public class AzureSearchService : IAzureSearchService
                 {
                     var docAppId = Convert.ToInt64(result.Document["appId"]);
                     var docTableId = Convert.ToInt64(result.Document["tableId"]);
-                    results.Add(new GlobalSearchResult(id, docAppId, docTableId));
+                    
+                    var fields = new Dictionary<string, string>();
+                    foreach (var kvp in result.Document)
+                    {
+                        if (kvp.Key.StartsWith("f_") && kvp.Value != null)
+                        {
+                            fields[kvp.Key] = kvp.Value.ToString() ?? string.Empty;
+                        }
+                    }
+                    
+                    results.Add(new GlobalSearchResult(id, docAppId, docTableId, fields));
                 }
             }
             return results;

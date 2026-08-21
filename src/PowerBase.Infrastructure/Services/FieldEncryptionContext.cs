@@ -54,6 +54,7 @@ public sealed class FieldEncryptionContext
         long appId,
         long tenantId,
         IEncryptionService encryptionService,
+        IDbTransaction? transaction = null,
         CancellationToken ct = default)
     {
         const string sql = """
@@ -67,7 +68,7 @@ public sealed class FieldEncryptionContext
         try
         {
             var row = await tenantConnection.QuerySingleOrDefaultAsync(
-                new CommandDefinition(sql, new { appId }, cancellationToken: ct));
+                new CommandDefinition(sql, new { appId }, transaction, cancellationToken: ct));
 
             if (row != null)
             {
@@ -174,7 +175,11 @@ public sealed class FieldEncryptionContext
             if (row.TryGetValue(col, out var val) && val is string cipher && !string.IsNullOrEmpty(cipher))
             {
                 try { row[col] = await _encryptionService.DecryptDataAsync(cipher, _wrappedDek!, _tenantId, _appId, ct); }
-                catch { /* leave value as-is — may be a legacy plaintext row */ }
+                catch (Exception ex) 
+                { 
+                    Console.WriteLine($"[DECRYPT ERROR] Col {col}: {ex.Message}");
+                    /* leave value as-is — may be a legacy plaintext row */ 
+                }
             }
         }
     }

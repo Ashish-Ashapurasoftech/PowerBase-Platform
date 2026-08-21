@@ -12,6 +12,6 @@ public interface IAzureSearchService
     bool IsGridSearchEnabled { get; }
 }
 
-public record GlobalSearchResult(Guid PublicId, long AppId, long TableId);
+public record GlobalSearchResult(Guid PublicId, long AppId, long TableId, IReadOnlyDictionary<string, string> Fields);
 
 public record SearchIndexDocument(long TenantId, long AppId, long TableId, Guid PublicId, IReadOnlyDictionary<long, object?> Values);

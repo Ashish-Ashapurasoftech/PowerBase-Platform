@@ -6,4 +6,4 @@ public record SearchGlobalRecordsQuery(string SearchText, long? AppId = null);
 
 public record SearchGlobalRecordsResult(IReadOnlyList<SearchGlobalRecordsResultItem> Items);
 
-public record SearchGlobalRecordsResultItem(Guid RecordId, Guid AppId, string AppName, Guid TableId, string TableName, string? TableIcon);
+public record SearchGlobalRecordsResultItem(Guid RecordId, Guid AppId, string AppName, Guid TableId, string TableName, string? TableIcon, string PrimaryText);

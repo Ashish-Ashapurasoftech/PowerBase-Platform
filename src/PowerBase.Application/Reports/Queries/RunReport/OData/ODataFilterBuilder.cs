@@ -63,20 +63,44 @@ public static class ODataFilterBuilder
         {
             "isEmpty"       => $"{fieldName} eq null or {fieldName} eq '' or {fieldName} eq '[]'",
             "isNotEmpty"    => $"{fieldName} ne null and {fieldName} ne '' and {fieldName} ne '[]'",
-            "eq"            => isMulti ? $"search.ismatch('/.*\"{EscapeRegex(c.Value ?? "")}\".*/', '{fieldName}')" : $"{fieldName} eq {val}",
-            "ne"            => isMulti ? $"not search.ismatch('/.*\"{EscapeRegex(c.Value ?? "")}\".*/', '{fieldName}')" : $"{fieldName} ne {val}",
+            "eq"            => isMulti ? BuildPhraseQuery(c.Value, fieldName, false) : $"{fieldName} eq {val}",
+            "ne"            => isMulti ? BuildPhraseQuery(c.Value, fieldName, true) : $"{fieldName} ne {val}",
             "gt"            => $"{fieldName} gt {val}",
             "gte"           => $"{fieldName} ge {val}",
             "lt"            => $"{fieldName} lt {val}",
             "lte"           => $"{fieldName} le {val}",
-            "contains"      => $"search.ismatch('/.*{EscapeRegex(c.Value ?? "")}.*/', '{fieldName}')",
-            "notContains"   => $"not search.ismatch('/.*{EscapeRegex(c.Value ?? "")}.*/', '{fieldName}')",
-            "startsWith"    => $"search.ismatch('/{EscapeRegex(c.Value ?? "")}.*/', '{fieldName}')",
-            "notStartsWith" => $"not search.ismatch('/{EscapeRegex(c.Value ?? "")}.*/', '{fieldName}')",
+            "contains"      => BuildRegexQuery(c.Value, fieldName, false, false),
+            "notContains"   => BuildRegexQuery(c.Value, fieldName, false, true),
+            "startsWith"    => BuildRegexQuery(c.Value, fieldName, true, false),
+            "notStartsWith" => BuildRegexQuery(c.Value, fieldName, true, true),
             "in"            => BuildInClause(fieldName, c.Value, field, true),
             "notIn"         => BuildInClause(fieldName, c.Value, field, false),
             _               => null
         };
+    }
+
+    private static string BuildRegexQuery(string? value, string fieldName, bool isStart, bool isNot)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return isNot ? "1 eq 1" : "1 eq 0";
+        var words = value.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var parts = new List<string>();
+        foreach (var w in words)
+        {
+            var escaped = EscapeRegex(w);
+            var regex = isStart ? $"/{escaped}.*/" : $"/.*{escaped}.*/";
+            parts.Add($"+{regex}");
+        }
+        var query = string.Join(" ", parts);
+        var ismatch = $"search.ismatch('{query}', '{fieldName}')";
+        return isNot ? $"not {ismatch}" : ismatch;
+    }
+
+    private static string BuildPhraseQuery(string? value, string fieldName, bool isNot)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return isNot ? "1 eq 1" : "1 eq 0";
+        var escaped = EscapeRegex(value.ToLowerInvariant());
+        var ismatch = $"search.ismatch('\"{escaped}\"', '{fieldName}')";
+        return isNot ? $"not {ismatch}" : ismatch;
     }
 
     private static string BuildInClause(string fieldName, string? value, AppField field, bool isIn)
@@ -90,9 +114,7 @@ public static class ODataFilterBuilder
         {
             if (isMulti)
             {
-                // MultiSelect/MultiUser store as JSON arrays e.g. ["val1", "val2"].
-                // We use search.ismatch to find the exact token inside the JSON array.
-                return $"search.ismatch('/.*\"{EscapeRegex(v)}\".*/', '{fieldName}')";
+                return BuildPhraseQuery(v, fieldName, false);
             }
             return $"{fieldName} eq {FormatValue(v, field)}";
         });
