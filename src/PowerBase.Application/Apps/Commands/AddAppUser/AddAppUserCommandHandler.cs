@@ -44,18 +44,66 @@ public class AddAppUserCommandHandler
         if (existing is not null)
             throw new DuplicateException("AppUser", $"User '{user.Email}' is already added to this application.");
 
-        long roleId;
+        AppRole targetRole;
         if (command.RolePublicId.HasValue)
         {
-            var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId.Value, ct)
+            targetRole = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId.Value, ct)
                 ?? throw new NotFoundException("AppRole", command.RolePublicId.Value);
-            roleId = role.Id;
         }
         else
         {
-            roleId = await _appRepo.GetDefaultRoleIdAsync(appId, ct)
+            var defaultRoleId = await _appRepo.GetDefaultRoleIdAsync(appId, ct)
                 ?? throw new NotFoundException("DefaultAppRole", appId);
+            var roles = await _appRoleRepo.ListDetailsByAppIdAsync(appId, ct);
+            var defaultRoleDetail = roles.FirstOrDefault(r => r.Id == defaultRoleId)
+                ?? throw new InvalidOperationException("Default app role not found.");
+            targetRole = new AppRole 
+            { 
+                Id = defaultRoleDetail.Id, 
+                PublicId = defaultRoleDetail.PublicId, 
+                Rank = defaultRoleDetail.Rank,
+                ManageableRolesType = defaultRoleDetail.ManageableRolesType
+            };
         }
+
+        if (!_queryContext.IsSuperAdmin)
+        {
+            var actorRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(appId, _queryContext.UserId, ct);
+            if (!actorRolePublicId.HasValue)
+            {
+                throw new UnauthorizedActionException("Your role in this application was not found.");
+            }
+
+            var actorRole = await _appRoleRepo.GetByPublicIdAsync(actorRolePublicId.Value, ct);
+            if (actorRole == null)
+            {
+                throw new UnauthorizedActionException("Your role in this application was not found.");
+            }
+
+            // Hard Rule: Target role's rank must be strictly greater than actor's rank
+            int actorRank = actorRole.Rank ?? int.MaxValue;
+            int targetRank = targetRole.Rank ?? int.MaxValue;
+            if (targetRank <= actorRank)
+            {
+                throw new UnauthorizedActionException("You cannot assign a role equal to or above your own.");
+            }
+
+            // Configured setting check
+            if (actorRole.ManageableRolesType == "None")
+            {
+                throw new UnauthorizedActionException("Your role is not allowed to manage or assign any roles.");
+            }
+            else if (actorRole.ManageableRolesType == "Manual")
+            {
+                var manageableIds = await _appRoleRepo.GetManageableRolePublicIdsAsync(actorRole.Id, ct);
+                if (!manageableIds.Contains(targetRole.PublicId))
+                {
+                    throw new UnauthorizedActionException("Your role is not allowed to assign this role.");
+                }
+            }
+        }
+
+        long roleId = targetRole.Id;
 
         await _appUserRepo.CreateAsync(new AppUser
         {

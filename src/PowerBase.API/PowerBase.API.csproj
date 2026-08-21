@@ -9,6 +9,7 @@
   <ItemGroup>
     <PackageReference Include="ClosedXML" Version="0.104.2" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.17" />
+    <PackageReference Include="NJsonSchema" Version="11.6.1" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="7.3.1" />
     <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
     <PackageReference Include="Serilog.Sinks.ApplicationInsights" Version="5.0.1" />
@@ -28,13 +29,13 @@
   </ItemGroup>
 
   <!-- Automatically run migrations after building in Debug mode -->
-  <Target Name="RunMigrations" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+ <Target Name="RunMigrations" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
     <Message Importance="High" Text="Running PowerBase Migrator for Control Plane..." />
     <Exec Command="dotnet run --project ..\PowerBase.Migrator\PowerBase.Migrator.csproj -- migrate control" IgnoreExitCode="true" />
     
     <Message Importance="High" Text="Running PowerBase Migrator for All Tenants..." />
     <Exec Command="dotnet run --project ..\PowerBase.Migrator\PowerBase.Migrator.csproj -- migrate tenants" IgnoreExitCode="true" />
-  </Target>
+  </Target>  
 
 </Project>
       

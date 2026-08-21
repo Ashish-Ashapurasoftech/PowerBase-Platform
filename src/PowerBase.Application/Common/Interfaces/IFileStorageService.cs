@@ -10,7 +10,7 @@ public interface IFileStorageService
 {
     /// <summary>Saves a stream under a caller-supplied file name and returns the stored
     /// reference (name, relative path, size, content type).</summary>
-    Task<StoredFile> SaveAsync(Stream content, string fileName, string? contentType, CancellationToken ct = default);
+    Task<StoredFile> SaveAsync(Stream content, string fileName, string? contentType, CancellationToken ct = default, string? uniqueKey = null);
 
     /// <summary>Deletes a previously stored file, identified by the relative path returned
     /// from <see cref="SaveAsync"/>. No-op if it does not exist.</summary>

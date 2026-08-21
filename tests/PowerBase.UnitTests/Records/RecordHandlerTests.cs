@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text.Json;
 using FluentAssertions;
 using NSubstitute;
@@ -29,6 +30,8 @@ public class RecordHandlerTests
     private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
     private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
     private readonly PowerBase.Application.Relationships.IRelationalProjector _relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
+    private readonly IPipelineTriggerInterceptor _triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
+    private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
 
     public RecordHandlerTests()
     {
@@ -62,7 +65,7 @@ public class RecordHandlerTests
         PhysicalTableName = PhysicalNaming.TableName(id),
     };
 
-    private static AppField MakeField(long id = 1) => new() { Id = id, Name = "Field" };
+    private static AppField MakeField(long id = 1) => new() { Id = id, Fid = (int)id, Name = "Field" };
 
     private static IReadOnlyDictionary<string, object?> MakeRow(Guid publicId) =>
         new Dictionary<string, object?>
@@ -81,9 +84,9 @@ public class RecordHandlerTests
         var publicId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(publicId);
-        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _queryContext, _userRepo);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo);
 
         var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId,
             new Dictionary<long, object?> { [1L] = "Alice" }));
@@ -98,7 +101,7 @@ public class RecordHandlerTests
         var table = MakeTable();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
-        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _queryContext, _userRepo);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreateRecordCommand(table.PublicId,
                 new Dictionary<long, object?> { [999L] = "X" })))
@@ -115,7 +118,7 @@ public class RecordHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
         _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>())
             .Returns(publicId);
-        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _queryContext, _userRepo);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo);
 
         var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
 
@@ -132,7 +135,7 @@ public class RecordHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
         _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>())
             .Returns(publicId);
-        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _queryContext, _userRepo);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo);
 
         var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
 
@@ -154,7 +157,7 @@ public class RecordHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
         _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>())
             .Returns(publicId);
-        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _queryContext, _userRepo);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo);
 
         var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
 
@@ -171,30 +174,30 @@ public class RecordHandlerTests
         var recordId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
-        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo);
-        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService);
+        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo, _triggerInterceptor);
+        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow);
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, recordId,
             new Dictionary<long, object?> { [1L] = "Updated" }));
 
         await _recordRepo.Received(1).UpdateAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), recordId,
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task UpdateRecord_EmptyFieldValues_SkipsUpdate()
     {
         var table = MakeTable();
-        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo);
-        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService);
+        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo, _triggerInterceptor);
+        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow);
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, Guid.NewGuid(),
             new Dictionary<long, object?>()));
 
         await _recordRepo.DidNotReceive().UpdateAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
     // --- DeleteRecordCommandHandler ---
@@ -205,11 +208,11 @@ public class RecordHandlerTests
         var table = MakeTable();
         var recordId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
-        var sut = new DeleteRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _relRepo);
+        var sut = new DeleteRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _relRepo, _triggerInterceptor, _uow);
 
         await sut.HandleAsync(new DeleteRecordCommand(table.PublicId, recordId));
 
-        await _recordRepo.Received(1).DeleteAsync(table, recordId, Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).DeleteAsync(table, recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
     // --- GetRecordQueryHandler ---
@@ -271,5 +274,77 @@ public class RecordHandlerTests
         var result = await sut.HandleAsync(new ListRecordsQuery(table.PublicId, inputPage, 20));
 
         result.Page.Should().Be(expectedPage);
+    }
+
+    // ── Builder Data Isolation Tests ──────────────────────────────────────────
+    // These tests verify that a user who has builder-level permissions (e.g. Schema Builder
+    // has tables:create/update) but ViewScope = None on a table is FULLY blocked from
+    // accessing any record data. Builder permissions and data access are always separate.
+
+    [Fact]
+    public async Task GetRecord_SchemaBuilderWithViewScopeNone_ThrowsNotFoundException()
+    {
+        // Arrange: Schema Builder role — can create/update tables but ViewScope = None.
+        // The enforcer resolves ViewScope = None → CanView = false.
+        var table = MakeTable();
+        var recordId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+
+        // Enforcer returns no record access for this table
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext
+            {
+                Unrestricted = false,
+                ViewScope = RecordScopes.None,
+                ModifyScope = RecordScopes.None,
+                VisibleFields = [],
+                EditableFieldIds = new HashSet<long>(),
+            });
+
+        var sut = new GetRecordQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+
+        // Act & Assert: Record must not be accessible — returned as NotFoundException
+        // so the client cannot infer whether the record exists.
+        await sut.Invoking(s => s.HandleAsync(new GetRecordQuery(table.PublicId, recordId)))
+            .Should().ThrowAsync<NotFoundException>();
+
+        // Repository must never be called — no DB hit for a blocked user
+        await _recordRepo.DidNotReceive().GetByPublicIdAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ListRecords_SchemaBuilderWithViewScopeNone_ReturnsEmptyResult()
+    {
+        // Arrange: Schema Builder role — can create/update tables but ViewScope = None.
+        var table = MakeTable();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
+
+        // Enforcer returns no record access for this table
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new TableAccessContext
+            {
+                Unrestricted = false,
+                ViewScope = RecordScopes.None,
+                ModifyScope = RecordScopes.None,
+                VisibleFields = [],
+                EditableFieldIds = new HashSet<long>(),
+            });
+
+        var sut = new ListRecordsQueryHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector);
+
+        var result = await sut.HandleAsync(new ListRecordsQuery(table.PublicId, 1, 20));
+
+        // Must return empty — no items, no count, no data leakage
+        result.Items.Should().BeEmpty();
+        result.TotalCount.Should().Be(0);
+
+        // Repository must never be queried — short-circuits before any DB call
+        await _recordRepo.DidNotReceive().ListAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(),
+            Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>(),
+            Arg.Any<long?>(), Arg.Any<CancellationToken>());
     }
 }

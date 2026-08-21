@@ -13,6 +13,7 @@ public class AppAccessService : IAppAccessService
     private readonly IPageRepository _pageRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IPipelineRepository _pipelineRepo;
 
     public AppAccessService(
         IAppRepository appRepo,
@@ -22,7 +23,8 @@ public class AppAccessService : IAppAccessService
         IFormRuleRepository formRuleRepo,
         IPageRepository pageRepo,
         IAppUserRepository appUserRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IPipelineRepository pipelineRepo)
     {
         _appRepo = appRepo;
         _tableRepo = tableRepo;
@@ -32,6 +34,7 @@ public class AppAccessService : IAppAccessService
         _pageRepo = pageRepo;
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
+        _pipelineRepo = pipelineRepo;
     }
 
     public async Task RequirePermissionByAppPublicIdAsync(Guid appPublicId, string permissionCode, CancellationToken ct = default)
@@ -70,8 +73,21 @@ public class AppAccessService : IAppAccessService
         await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
     }
 
+    public async Task RequirePermissionByPipelinePublicIdAsync(Guid pipelinePublicId, string permissionCode, CancellationToken ct = default)
+    {
+        var pipeline = await _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, ct);
+        
+        if (pipeline.CreatedBy != _queryContext.UserId)
+        {
+            throw new UnauthorizedActionException("You do not own this pipeline.");
+        }
+        
+        await RequirePermissionByAppIdAsync(pipeline.AppId, permissionCode, ct);
+    }
+
     public async Task RequirePermissionByAppIdAsync(long appId, string permissionCode, CancellationToken ct = default)
     {
+        EnsureTokenAppAccess(appId);
         var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
         if (!permissions.Contains(permissionCode))
         {
@@ -82,6 +98,7 @@ public class AppAccessService : IAppAccessService
     public async Task RequireAppRoleAsync(Guid appPublicId, string roleName, CancellationToken ct = default)
     {
         var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        EnsureTokenAppAccess(appId);
         var actualRoleName = await _appUserRepo.GetUserRoleNameAsync(appId, _queryContext.UserId, ct);
 
         if (actualRoleName != roleName)
@@ -92,29 +109,41 @@ public class AppAccessService : IAppAccessService
 
     public async Task RequireMembershipByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default)
     {
-        if (_queryContext.IsSuperAdmin) return;
         var appId = await _tableRepo.GetAppIdByPublicIdAsync(tablePublicId, ct);
+        EnsureTokenAppAccess(appId);
+        if (_queryContext.IsSuperAdmin) return;
         await RequireMembershipByAppIdAsync(appId, ct);
     }
 
     public async Task RequireMembershipByReportPublicIdAsync(Guid reportPublicId, CancellationToken ct = default)
     {
-        if (_queryContext.IsSuperAdmin) return;
         var appId = await _reportRepo.GetAppIdByPublicIdAsync(reportPublicId, ct);
+        EnsureTokenAppAccess(appId);
+        if (_queryContext.IsSuperAdmin) return;
         await RequireMembershipByAppIdAsync(appId, ct);
     }
 
     public async Task RequireMembershipByPagePublicIdAsync(Guid pagePublicId, CancellationToken ct = default)
     {
-        if (_queryContext.IsSuperAdmin) return;
         var appId = await _pageRepo.GetAppIdByPublicIdAsync(pagePublicId, ct);
+        EnsureTokenAppAccess(appId);
+        if (_queryContext.IsSuperAdmin) return;
         await RequireMembershipByAppIdAsync(appId, ct);
     }
 
     private async Task RequireMembershipByAppIdAsync(long appId, CancellationToken ct)
     {
+        EnsureTokenAppAccess(appId);
         var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
         if (permissions.Count == 0)
             throw new UnauthorizedActionException("You are not a member of this app.");
+    }
+
+    private void EnsureTokenAppAccess(long appId)
+    {
+        if (!_queryContext.TokenAccessAllApps && !_queryContext.AllowedAppIds.Contains(appId))
+        {
+            throw new UnauthorizedActionException("This user token does not have access to this application.");
+        }
     }
 }

@@ -51,6 +51,65 @@ public class ChangeAppUserRoleCommandHandler
         var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId, ct)
             ?? throw new NotFoundException("AppRole", command.RolePublicId);
 
+        if (!_queryContext.IsSuperAdmin)
+        {
+            var actorRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(appId, _queryContext.UserId, ct);
+            if (!actorRolePublicId.HasValue)
+            {
+                throw new UnauthorizedActionException("Your role in this application was not found.");
+            }
+
+            var actorRole = await _appRoleRepo.GetByPublicIdAsync(actorRolePublicId.Value, ct);
+            if (actorRole == null)
+            {
+                throw new UnauthorizedActionException("Your role in this application was not found.");
+            }
+
+            int actorRank = actorRole.Rank ?? int.MaxValue;
+
+            // Load the target user's current role
+            var allAppRoles = await _appRoleRepo.ListDetailsByAppIdAsync(appId, ct);
+            var currentRoleDetail = allAppRoles.FirstOrDefault(r => r.Id == appUser.AppRoleId)
+                ?? throw new InvalidOperationException("Current app role of the target user was not found.");
+
+            int currentRank = currentRoleDetail.Rank ?? int.MaxValue;
+
+            // 1. Validate permissions on current role
+            if (currentRank <= actorRank)
+            {
+                throw new UnauthorizedActionException("You cannot manage a user with a role equal to or above your own.");
+            }
+
+            if (actorRole.ManageableRolesType == "None")
+            {
+                throw new UnauthorizedActionException("Your role is not allowed to manage any roles.");
+            }
+            else if (actorRole.ManageableRolesType == "Manual")
+            {
+                var manageableIds = await _appRoleRepo.GetManageableRolePublicIdsAsync(actorRole.Id, ct);
+                if (!manageableIds.Contains(currentRoleDetail.PublicId))
+                {
+                    throw new UnauthorizedActionException("Your role is not allowed to manage users in this role.");
+                }
+            }
+
+            // 2. Validate permissions on new role
+            int newRank = role.Rank ?? int.MaxValue;
+            if (newRank <= actorRank)
+            {
+                throw new UnauthorizedActionException("You cannot assign a role equal to or above your own.");
+            }
+
+            if (actorRole.ManageableRolesType == "Manual")
+            {
+                var manageableIds = await _appRoleRepo.GetManageableRolePublicIdsAsync(actorRole.Id, ct);
+                if (!manageableIds.Contains(role.PublicId))
+                {
+                    throw new UnauthorizedActionException("Your role is not allowed to assign the selected role.");
+                }
+            }
+        }
+
         await _appUserRepo.UpdateRoleAsync(appId, user.Id, role.Id, ct);
 
         await _auditRepo.LogActivityAsync(
