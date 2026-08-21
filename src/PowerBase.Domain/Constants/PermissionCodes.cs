@@ -49,6 +49,11 @@ public static class PermissionCodes
     /// <summary>Code Page Builder capability — additionally required (on top of PagesCreate/
     /// PagesUpdate) to create or edit a page whose PageType is "Code".</summary>
     public const string PagesCode    = "pages:code";
+    public const string PowerFlowsCreate = "PowerFlows:create";
+    public const string PowerFlowsRead   = "PowerFlows:read";
+    public const string PowerFlowsUpdate = "PowerFlows:update";
+    public const string PowerFlowsDelete = "PowerFlows:delete";
+    public const string PowerFlowsCopy   = "PowerFlows:copy";
 
     public const string TokenCreate      = "token:create";
 
@@ -65,6 +70,7 @@ public static class PermissionCodes
         ReportsRead, ReportsRun,
         FormsRead,
         PagesRead,
+        PowerFlowsRead,
         TokenCreate,
     };
 }

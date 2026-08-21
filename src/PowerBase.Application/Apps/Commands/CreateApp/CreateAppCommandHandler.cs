@@ -115,7 +115,8 @@ public class CreateAppCommandHandler
                 PermissionCodes.FormsCreate, PermissionCodes.FormsRead, PermissionCodes.FormsUpdate, PermissionCodes.FormsDelete, PermissionCodes.FormsRulesManage,
                 PermissionCodes.PagesCreate, PermissionCodes.PagesRead, PermissionCodes.PagesUpdate, PermissionCodes.PagesDelete, PermissionCodes.PagesPublish, PermissionCodes.PagesCode,
                 PermissionCodes.UsersInvite, PermissionCodes.UsersManage, PermissionCodes.RolesManage,
-                PermissionCodes.AuditLogsRead,PermissionCodes.AuditLogsReadOfStream,
+                PermissionCodes.AuditLogsRead, PermissionCodes.AuditLogsReadOfStream,
+                PermissionCodes.PowerFlowsCreate, PermissionCodes.PowerFlowsRead, PermissionCodes.PowerFlowsUpdate, PermissionCodes.PowerFlowsDelete, PermissionCodes.PowerFlowsCopy,
             }, _uow.Transaction, ct);
 
             var (participantRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
@@ -135,6 +136,7 @@ public class CreateAppCommandHandler
                 PermissionCodes.ReportsCreate, PermissionCodes.ReportsRead, PermissionCodes.ReportsRun,
                 PermissionCodes.FormsRead,
                 PermissionCodes.PagesRead,
+                PermissionCodes.PowerFlowsRead
             }, _uow.Transaction, ct);
 
             var (viewerRoleId, _) = await _appRoleRepo.CreateAsync(new AppRole
@@ -153,6 +155,7 @@ public class CreateAppCommandHandler
                 PermissionCodes.ReportsRead, PermissionCodes.ReportsRun,
                 PermissionCodes.FormsRead,
                 PermissionCodes.PagesRead,
+                PermissionCodes.PowerFlowsRead
             }, _uow.Transaction, ct);
 
             await _appRepo.SetDefaultRoleAsync(appId, viewerRoleId, _uow.Transaction, ct);

@@ -13,6 +13,7 @@ public class AppAccessService : IAppAccessService
     private readonly IPageRepository _pageRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IPipelineRepository _pipelineRepo;
 
     public AppAccessService(
         IAppRepository appRepo,
@@ -22,7 +23,8 @@ public class AppAccessService : IAppAccessService
         IFormRuleRepository formRuleRepo,
         IPageRepository pageRepo,
         IAppUserRepository appUserRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IPipelineRepository pipelineRepo)
     {
         _appRepo = appRepo;
         _tableRepo = tableRepo;
@@ -32,6 +34,7 @@ public class AppAccessService : IAppAccessService
         _pageRepo = pageRepo;
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
+        _pipelineRepo = pipelineRepo;
     }
 
     public async Task RequirePermissionByAppPublicIdAsync(Guid appPublicId, string permissionCode, CancellationToken ct = default)
@@ -68,6 +71,18 @@ public class AppAccessService : IAppAccessService
     {
         var appId = await _pageRepo.GetAppIdByPublicIdAsync(pagePublicId, ct);
         await RequirePermissionByAppIdAsync(appId, permissionCode, ct);
+    }
+
+    public async Task RequirePermissionByPipelinePublicIdAsync(Guid pipelinePublicId, string permissionCode, CancellationToken ct = default)
+    {
+        var pipeline = await _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, ct);
+        
+        if (pipeline.CreatedBy != _queryContext.UserId)
+        {
+            throw new UnauthorizedActionException("You do not own this pipeline.");
+        }
+        
+        await RequirePermissionByAppIdAsync(pipeline.AppId, permissionCode, ct);
     }
 
     public async Task RequirePermissionByAppIdAsync(long appId, string permissionCode, CancellationToken ct = default)
