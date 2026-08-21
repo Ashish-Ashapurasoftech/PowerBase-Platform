@@ -1,4 +1,5 @@
 using System.Data;
+using System.Text.Json;
 using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
@@ -25,8 +26,8 @@ public class RecordHandlerTests
     private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
     private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
+    private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
-    private readonly IFormulaDefaultResolver _formulaDefaults = Substitute.For<IFormulaDefaultResolver>();
     private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
     private readonly PowerBase.Application.Relationships.IRelationalProjector _relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
     private readonly IPipelineTriggerInterceptor _triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
@@ -85,7 +86,7 @@ public class RecordHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
         _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(publicId);
-        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _formulaDefaults, _triggerInterceptor, _uow, Substitute.For<IMessagePublisher>());
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo, Substitute.For<IMessagePublisher>());
 
         var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId,
             new Dictionary<long, object?> { [1L] = "Alice" }));
@@ -100,11 +101,67 @@ public class RecordHandlerTests
         var table = MakeTable();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
-        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _formulaDefaults, _triggerInterceptor, _uow, Substitute.For<IMessagePublisher>());
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo, Substitute.For<IMessagePublisher>());
 
         await sut.Invoking(s => s.HandleAsync(new CreateRecordCommand(table.PublicId,
                 new Dictionary<long, object?> { [999L] = "X" })))
             .Should().ThrowAsync<ValidationException>();
+    }
+
+    [Fact]
+    public async Task CreateRecord_BooleanDefaultValue_CoercesToBool()
+    {
+        var table = MakeTable();
+        var field = new AppField { Id = 1, Fid = 1, Name = "Active", TypeCode = "Boolean", DefaultValue = "true" };
+        var publicId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>())
+            .Returns(publicId);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo);
+
+        var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
+
+        result.Fields["1"].Should().Be(true);
+    }
+
+    [Fact]
+    public async Task CreateRecord_NumericRangeDefaultValue_ParsesToJsonElementWithStartEnd()
+    {
+        var table = MakeTable();
+        var field = new AppField { Id = 1, Fid = 1, Name = "Range", TypeCode = "NumericRange", DefaultValue = "{\"start\":\"1\",\"end\":\"10\"}" };
+        var publicId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>())
+            .Returns(publicId);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo);
+
+        var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
+
+        var element = (JsonElement)result.Fields["1"]!;
+        element.GetProperty("start").GetString().Should().Be("1");
+        element.GetProperty("end").GetString().Should().Be("10");
+    }
+
+    [Fact]
+    public async Task CreateRecord_UserDefaultValue_CurrentUser_ResolvesToRequestingUserPublicId()
+    {
+        var table = MakeTable();
+        var field = new AppField { Id = 1, Fid = 1, Name = "Owner", TypeCode = "User", DefaultValue = "{\"mode\":\"CurrentUser\"}" };
+        var publicId = Guid.NewGuid();
+        var currentUserPublicId = Guid.NewGuid();
+        _queryContext.UserId.Returns(42L);
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(new User { Id = 42, PublicId = currentUserPublicId });
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>())
+            .Returns(publicId);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo);
+
+        var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
+
+        result.Fields["1"].Should().Be(currentUserPublicId.ToString());
     }
 
     // --- UpdateRecordCommandHandler ---

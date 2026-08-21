@@ -71,6 +71,14 @@ public class BulkCreateFieldsCommandHandler
             var settingsErrors = _settingsRegistry.Validate(item.TypeCode, item.Settings);
             if (settingsErrors.Count > 0)
                 allErrors[$"Fields[{i}].Settings"] = settingsErrors.Values.SelectMany(x => x).ToArray();
+
+            // Reject Required/DefaultValue values the field's type doesn't support (IsUnique isn't
+            // settable at creation time).
+            var capErrors = FieldGeneralSettingsCapability.Validate(
+                item.TypeCode, item.Settings, item.Label, item.IsRequired, null, item.DefaultValue);
+            if (capErrors.Count > 0)
+                foreach (var (key, msgs) in capErrors)
+                    allErrors[$"Fields[{i}].{key}"] = msgs;
         }
 
         if (allErrors.Count > 0)
