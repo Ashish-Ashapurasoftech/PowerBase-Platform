@@ -15,4 +15,5 @@ public class SearchIndexMessage
     public long AppId { get; set; }
     public long TableId { get; set; }
     public Guid RecordPublicId { get; set; }
+    public System.Collections.Generic.Dictionary<string, object?>? Payload { get; set; }
 }

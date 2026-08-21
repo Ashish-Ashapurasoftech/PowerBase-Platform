@@ -161,7 +161,8 @@ public class AzureSearchService : IAzureSearchService
         var options = new SearchOptions
         {
             Filter = $"tableId eq {tableId} and ({odataFilter})",
-            Size = 50000 // Large limit to return all possible matches for filtering
+            Size = 50000, // Large limit to return all possible matches for filtering
+            QueryType = SearchQueryType.Full
         };
         options.Select.Add("id");
 

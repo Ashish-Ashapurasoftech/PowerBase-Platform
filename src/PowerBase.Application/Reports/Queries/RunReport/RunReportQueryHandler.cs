@@ -217,6 +217,13 @@ public class RunReportQueryHandler
         // Merge runtime filters (dynamic/quick-search) into the filter tree
         filterTree = MergeRuntimeFilters(filterTree, allFields, runtimeFilters);
 
+        var columns = selectedFields.Select(f => new ReportColumnInfo
+        {
+            FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id,
+            Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label,
+            TypeCode = f.TypeCode,
+        }).ToList();
+
         // Apply Quick Search across searchable text fields (OR) — restricted to
         // quickSearchFieldIds when given (a caller-specified subset, e.g. a dashboard Search
         // widget scoped to "Selected fields"), otherwise every IsSearchable text-ish field.
@@ -231,13 +238,13 @@ public class RunReportQueryHandler
                 
                 if (aiMatches.Count == 0)
                 {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize }; // Nothing found
+                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
                 }
                 
                 var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
                 if (matchedIds.Count == 0)
                 {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize }; // Nothing found
+                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
                 }
 
                 var aiSearchGroup = new FilterGroup
@@ -287,13 +294,13 @@ public class RunReportQueryHandler
                 var aiMatches = await _searchService.SearchRecordsByFilterAsync(table.Id, odata, ct);
                 if (aiMatches.Count == 0)
                 {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize }; // Nothing found
+                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
                 }
 
                 var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
                 if (matchedIds.Count == 0)
                 {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize }; // Nothing found
+                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
                 }
 
                 var aiSearchGroup = new FilterGroup
@@ -380,13 +387,7 @@ public class RunReportQueryHandler
             items = [];
         }
 
-        var columns = selectedFields.Select(f => new ReportColumnInfo
-        {
-            FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id,
-            Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label,
-            TypeCode = f.TypeCode,
-        }).ToList();
-
+        // columns variable is now defined at the top of RunTableAsync
         return new PagedReportRunResult
         {
             Items = items,

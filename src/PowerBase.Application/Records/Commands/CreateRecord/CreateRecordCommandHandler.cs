@@ -16,6 +16,7 @@ public class CreateRecordCommandHandler
     private readonly IFormulaDefaultResolver _formulaDefaults;
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly ITenantUnitOfWork _uow;
+    private readonly IMessagePublisher _messagePublisher;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -25,7 +26,8 @@ public class CreateRecordCommandHandler
         IAuditRepository auditRepo,
         IFormulaDefaultResolver formulaDefaults,
         IPipelineTriggerInterceptor triggerInterceptor,
-        ITenantUnitOfWork uow)
+        ITenantUnitOfWork uow,
+        IMessagePublisher messagePublisher)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -35,6 +37,7 @@ public class CreateRecordCommandHandler
         _formulaDefaults = formulaDefaults;
         _triggerInterceptor = triggerInterceptor;
         _uow = uow;
+        _messagePublisher = messagePublisher;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -88,10 +91,12 @@ public class CreateRecordCommandHandler
         await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: true, excludeRecordId: null, ct);
 
         Guid publicId;
+        PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;
+
         await _uow.BeginAsync(ct);
         try
         {
-            publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, _uow.Transaction, ct);
+            publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, _uow.Transaction, ct, msg => indexMessage = msg);
 
             var recordId = await _recordRepo.GetRecordIdByPublicIdAsync(table, publicId, _uow.Transaction, ct);
             effectiveValues[3] = recordId;
@@ -109,6 +114,11 @@ public class CreateRecordCommandHandler
         {
             await _uow.RollbackAsync(ct);
             throw;
+        }
+
+        if (indexMessage != null)
+        {
+            _ = _messagePublisher.PublishAsync(indexMessage, default);
         }
 
         var fieldData = new Dictionary<string, object?>();

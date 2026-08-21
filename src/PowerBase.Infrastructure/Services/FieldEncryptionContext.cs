@@ -83,9 +83,10 @@ public sealed class FieldEncryptionContext
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
             // Any failure → treat app as non-encrypted; no crash
+            Console.WriteLine($"Error in ResolveAsync: {ex}");
         }
 
         var ctx = new FieldEncryptionContext(encryptionService, tenantId, appId, wrappedDek);
@@ -97,7 +98,7 @@ public sealed class FieldEncryptionContext
     /// Lazily generates and persists a Master Encryption Key (DEK) for the App if it doesn't have one.
     /// Used when a user enables field-level encryption on an unencrypted app.
     /// </summary>
-    public async Task EnsureDekAsync(IDbConnection tenantConnection, CancellationToken ct = default)
+    public async Task EnsureDekAsync(IDbConnection tenantConnection, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         if (IsActive) return;
 
@@ -107,7 +108,7 @@ public sealed class FieldEncryptionContext
         var json = System.Text.Json.JsonSerializer.Serialize(settings);
         
         const string sql = "UPDATE meta.App SET SecurityOptions = @json WHERE Id = @appId";
-        await tenantConnection.ExecuteAsync(new CommandDefinition(sql, new { json, appId = _appId }, cancellationToken: ct));
+        await tenantConnection.ExecuteAsync(new CommandDefinition(sql, new { json, appId = _appId }, transaction, cancellationToken: ct));
     }
 
     // ------------------------------------------------------------------

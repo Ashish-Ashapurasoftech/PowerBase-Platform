@@ -15,6 +15,7 @@ public class DeleteRecordCommandHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly ITenantUnitOfWork _uow;
+    private readonly IMessagePublisher _messagePublisher;
 
     public DeleteRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -24,7 +25,8 @@ public class DeleteRecordCommandHandler
         IAuditRepository auditRepo,
         IRelationshipRepository relRepo,
         IPipelineTriggerInterceptor triggerInterceptor,
-        ITenantUnitOfWork uow)
+        ITenantUnitOfWork uow,
+        IMessagePublisher messagePublisher)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -34,6 +36,7 @@ public class DeleteRecordCommandHandler
         _relRepo = relRepo;
         _triggerInterceptor = triggerInterceptor;
         _uow = uow;
+        _messagePublisher = messagePublisher;
     }
 
     public async Task HandleAsync(DeleteRecordCommand command, CancellationToken ct = default)
@@ -72,12 +75,14 @@ public class DeleteRecordCommandHandler
             }
         }
 
+        PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;
+
         await _uow.BeginAsync(ct);
         try
         {
             await _triggerInterceptor.InterceptAsync(table, fields, command.RecordPublicId, oldValuesDict, "record-deleted", ct);
 
-            await _recordRepo.DeleteAsync(table, command.RecordPublicId, _uow.Transaction, ct);
+            await _recordRepo.DeleteAsync(table, command.RecordPublicId, _uow.Transaction, ct, msg => indexMessage = msg);
             await _tableRepo.DecrementRecordCountAsync(table.Id, ct);
             await _auditRepo.LogActivityAsync(
                 AuditActions.Deleted, AuditEntityTypes.Record, command.RecordPublicId.ToString(), $"Record deleted from {table.Name} with ID {command.RecordPublicId}", appId: table.AppId, ct: ct);
@@ -88,6 +93,11 @@ public class DeleteRecordCommandHandler
         {
             await _uow.RollbackAsync(ct);
             throw;
+        }
+
+        if (indexMessage != null)
+        {
+            _ = _messagePublisher.PublishAsync(indexMessage, default);
         }
     }
 }

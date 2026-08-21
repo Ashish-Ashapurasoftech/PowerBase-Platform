@@ -91,7 +91,35 @@ public class SearchIndexerWorker : BackgroundService
 
                 if (message.Action == IndexAction.Upsert)
                 {
-                    var recordData = await recordRepo.GetSearchableFieldsAsync(message.RecordPublicId, stoppingToken);
+                    IReadOnlyDictionary<long, object?>? recordData = null;
+
+                    if (message.Payload != null && message.Payload.Count > 0)
+                    {
+                        recordData = message.Payload.ToDictionary(
+                            kvp => long.Parse(kvp.Key), 
+                            kvp => 
+                            {
+                                if (kvp.Value is System.Text.Json.JsonElement el)
+                                {
+                                    return el.ValueKind switch
+                                    {
+                                        System.Text.Json.JsonValueKind.String => el.GetString(),
+                                        System.Text.Json.JsonValueKind.Number => el.TryGetInt64(out var l) ? l : el.TryGetDouble(out var d) ? (object)d : el.GetRawText(),
+                                        System.Text.Json.JsonValueKind.True => true,
+                                        System.Text.Json.JsonValueKind.False => false,
+                                        System.Text.Json.JsonValueKind.Null => null,
+                                        _ => el.GetRawText()
+                                    };
+                                }
+                                return kvp.Value;
+                            }
+                        );
+                    }
+                    else
+                    {
+                        recordData = await recordRepo.GetSearchableFieldsAsync(message.RecordPublicId, stoppingToken);
+                    }
+
                     if (recordData != null && recordData.Count > 0)
                     {
                         documentsToIndex.Add(new SearchIndexDocument(
