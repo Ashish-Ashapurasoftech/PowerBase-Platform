@@ -1162,7 +1162,7 @@ public class PipelineTriggersAndExternalActionsTests
         queryContext.UserId.Returns(101L);
 
         var handler = new BulkDeleteRecordsCommandHandler(
-            tableRepo, fieldRepo, recordRepo, enforcer, Substitute.For<IAuditRepository>(), Substitute.For<IRelationshipRepository>(), triggerInterceptor, uow, queryContext
+            tableRepo, fieldRepo, recordRepo, enforcer, Substitute.For<IAuditRepository>(), Substitute.For<IRelationshipRepository>(), triggerInterceptor, uow, queryContext, Substitute.For<IMessagePublisher>()
         );
 
         var recordId = Guid.NewGuid();
