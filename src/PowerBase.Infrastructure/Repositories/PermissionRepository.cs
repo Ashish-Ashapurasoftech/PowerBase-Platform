@@ -8,7 +8,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class PermissionRepository : ControlRepositoryBase, IPermissionRepository
 {
-    private const string GetAllSql = """
+    private const string    GetAllSql = """
         SELECT Id, Code, DisplayName, Description
         FROM meta.Permission
         ORDER BY Id
@@ -31,11 +31,28 @@ public class PermissionRepository : ControlRepositoryBase, IPermissionRepository
         DELETE FROM meta.RolePermission WHERE TenantRoleId = @roleId
         """;
 
-    public PermissionRepository(IControlConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly ITenantConnectionFactory _tenantConnectionFactory;
+
+    public PermissionRepository(
+        IControlConnectionFactory connectionFactory,
+        ITenantConnectionFactory tenantConnectionFactory,
+        IQueryContext queryContext)
+        : base(connectionFactory, queryContext)
+    {
+        _tenantConnectionFactory = tenantConnectionFactory;
+    }
 
     public async Task<IReadOnlyList<Permission>> GetAllAsync(CancellationToken ct = default)
     {
+        if (QueryContext.TenantId > 0)
+        {
+            await using var tenantConn = await _tenantConnectionFactory.CreateAsync(ct);
+            await tenantConn.OpenAsync(ct);
+            var tenantResults = await tenantConn.QueryAsync<Permission>(
+                new CommandDefinition(GetAllSql, cancellationToken: ct));
+            return tenantResults.ToList();
+        }
+
         await using var connection = await OpenNewConnectionAsync(ct);
         var results = await connection.QueryAsync<Permission>(
             new CommandDefinition(GetAllSql, cancellationToken: ct));
