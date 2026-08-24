@@ -70,6 +70,13 @@ public class CreateFieldCommandHandler
         // Validate per-type Settings JSON before touching the database.
         CreateFieldCommandValidator.ValidateSettings(command.TypeCode, command.Settings, _settingsRegistry);
 
+        // Reject Required/DefaultValue values the field's type doesn't support. IsUnique isn't settable
+        // at creation time, so it's not part of this check here.
+        var capErrors = FieldGeneralSettingsCapability.Validate(
+            command.TypeCode, command.Settings, command.Label, command.IsRequired, null, command.DefaultValue);
+        if (capErrors.Count > 0)
+            throw new ValidationException(capErrors.AsReadOnly());
+
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
         if (await _fieldRepo.LabelExistsInTableAsync(table.Id, command.Label, ct: ct))

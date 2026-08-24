@@ -173,8 +173,13 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE PublicId IN @publicIds AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
         """;
 
-    public AppFieldRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
-        : base(connectionFactory, queryContext) { }
+    private readonly IAzureSearchService _searchService;
+
+    public AppFieldRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IAzureSearchService searchService)
+        : base(connectionFactory, queryContext)
+    {
+        _searchService = searchService;
+    }
 
     public async Task<AppField> GetByIdInTableAsync(long fieldId, long tableId, CancellationToken ct = default)
     {
@@ -360,7 +365,11 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 displayOrder = field.DisplayOrder,
                 createdBy = QueryContext.UserId,
             }, cancellationToken: ct));
-        return ((long)row.Id, (Guid)row.PublicId);
+        var result = ((long)row.Id, (Guid)row.PublicId);
+        
+        _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(field.AppTableId, new[] { (field.Fid!.Value, field.IsSearchable, field.IsFilterable) }, default));
+        
+        return result;
     }
 
     public async Task UpdatePhysicalColumnNameAsync(long id, string physicalColumnName, CancellationToken ct = default)
@@ -425,7 +434,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, string? settings, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteAsync(
+        var affected = await connection.ExecuteAsync(
             new CommandDefinition(UpdateFieldSql, new
             {
                 publicId, tableId, label, description,
@@ -433,6 +442,15 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 isFilterable, isReportable, isAuditable, isUnique, isEncrypted, settings,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
+
+        if (affected > 0)
+        {
+            var fid = await connection.ExecuteScalarAsync<int>(
+                new CommandDefinition("SELECT Fid FROM meta.AppField WHERE PublicId = @publicId AND AppTableId = @tableId", new { publicId, tableId }, cancellationToken: ct));
+            _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tableId, new[] { (fid, isSearchable, isFilterable) }, default));
+        }
+
+        return affected;
     }
 
     public async Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null)

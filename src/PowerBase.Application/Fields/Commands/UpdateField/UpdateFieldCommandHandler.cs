@@ -61,6 +61,14 @@ public class UpdateFieldCommandHandler
         if (settingsErrors.Count > 0)
             throw new ValidationException(settingsErrors.AsReadOnly());
 
+        // Reject Required/Unique/DefaultValue combinations the field's type doesn't support (only when
+        // something is being turned ON — leaving a flag off/blank is always allowed).
+        var capErrors = FieldGeneralSettingsCapability.Validate(
+            existing.TypeCode, command.Settings ?? existing.Settings, command.Label,
+            command.IsRequired, command.IsUnique, command.DefaultValue);
+        if (capErrors.Count > 0)
+            throw new ValidationException(capErrors.AsReadOnly());
+
         // Invariant: a required field with no default value cannot be made required while some role has
         // it set to None — those users would never be able to create a record.
         if (command.IsRequired && string.IsNullOrWhiteSpace(command.DefaultValue))
