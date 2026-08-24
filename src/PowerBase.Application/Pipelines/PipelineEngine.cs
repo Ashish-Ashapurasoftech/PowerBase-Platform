@@ -301,13 +301,41 @@ public class PipelineEngine : IPipelineEngine
             var pipelineMeta = await _pipelineRepo.GetByIdAsync(task.PipelineId, ct);
             var triggerStep = activeSteps.FirstOrDefault(s => s.Type == "trigger" && s.Subtype == "new-event");
 
-            bool isSkipped = pipelineMeta == null || !pipelineMeta.IsActive || pipelineMeta.IsDeleted || triggerStep == null;
+            bool isSkipped = false;
+            string? skipReason = null;
+
+            if (pipelineMeta == null)
+            {
+                isSkipped = true;
+                skipReason = "Missing Pipeline metadata";
+            }
+            else if (pipelineMeta.IsDeleted)
+            {
+                isSkipped = true;
+                skipReason = "Pipeline is deleted";
+            }
+            else if (!pipelineMeta.IsActive)
+            {
+                isSkipped = true;
+                skipReason = "Pipeline is inactive";
+            }
+            else
+            {
+                bool isEventTrigger = task.TriggerEvent is "new-event" or "new-bulk-event" or "record-added" or "record-updated" or "record-deleted";
+                if (isEventTrigger && triggerStep == null)
+                {
+                    isSkipped = true;
+                    skipReason = "Event execution missing required trigger step on canvas";
+                }
+            }
+
             if (isSkipped)
             {
+                _logger.LogWarning("Pipeline run {PipelineId} attempt skipped. Reason: {SkipReason}", task.PipelineId, skipReason);
                 using (var suppressScope = new TransactionScope(TransactionScopeOption.Suppress, TransactionScopeAsyncFlowOption.Enabled))
                 {
                     run.Status = "Skipped";
-                    run.ErrorMessage = "Skipped: Trigger configuration is inactive or deleted.";
+                    run.ErrorMessage = $"Skipped: {skipReason}";
                     run.LockedBy = null;
                     run.LockedUntil = null;
                     run.CompletedOn = DateTime.UtcNow;
@@ -319,14 +347,14 @@ public class PipelineEngine : IPipelineEngine
                         PipelineRunId = run.Id,
                         AttemptNumber = run.AttemptCount,
                         Status = "Success",
-                        LastError = "Skipped: Trigger configuration is inactive or deleted."
+                        LastError = $"Skipped: {skipReason}"
                     }, ct);
                     suppressScope.Complete();
                 }
                 return;
             }
 
-            _logger.LogInformation("Pipeline {PipelineId} (Attempt {Attempt}) executing active steps.", task.PipelineId, run.AttemptCount);
+            _logger.LogInformation("Pipeline {PipelineId} (Attempt {Attempt}) executing active steps. TriggerEvent: {TriggerEvent}", task.PipelineId, run.AttemptCount, task.TriggerEvent);
 
             var snapshots = new List<RawStepAuditSnapshot>();
             bool txSuccess = false;
@@ -1010,13 +1038,37 @@ public class PipelineEngine : IPipelineEngine
             if (config == null || string.IsNullOrWhiteSpace(config.TableId))
                 throw new InvalidOperationException("Search records step configuration is invalid or missing tableId.");
 
+            _logger.LogInformation("Search Records step {StepId} started for Table {TableId}.", step.Id, config.TableId);
+
             var tableGuid = Guid.Parse(config.TableId);
             var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
             var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
 
             FilterGroup? filterTree = null;
             string? evaluatedFilterVal = null;
-            if (!string.IsNullOrWhiteSpace(config.FilterField))
+
+            if (config.FilterGroups != null && config.FilterGroups.Any(g => !PipelineFilterEvaluator.IsGroupCompletelyBlank(g)))
+            {
+                var outerGroup = new FilterGroup { Logic = "or", Nodes = new List<FilterNode>() };
+                foreach (var g in config.FilterGroups)
+                {
+                    var mapped = MapTriggerFilterGroupToDbFilterGroup(g, fields, payloadJson, executionPath, allSteps);
+                    if (mapped != null)
+                    {
+                        outerGroup.Nodes.Add(new FilterNode { Group = mapped });
+                    }
+                }
+                if (outerGroup.Nodes.Any())
+                {
+                    filterTree = outerGroup.Nodes.Count == 1 ? outerGroup.Nodes[0].Group : outerGroup;
+                }
+            }
+            else if (config.Filters != null && config.Filters.Any(r => !PipelineFilterEvaluator.IsRuleCompletelyBlank(r)))
+            {
+                var mockGroup = new TriggerFilterGroup { LogicalOp = "AND", Rules = config.Filters };
+                filterTree = MapTriggerFilterGroupToDbFilterGroup(mockGroup, fields, payloadJson, executionPath, allSteps);
+            }
+            else if (!string.IsNullOrWhiteSpace(config.FilterField))
             {
                 var field = fields.FirstOrDefault(f => 
                     f.Name.Equals(config.FilterField, StringComparison.OrdinalIgnoreCase) || 
@@ -1025,7 +1077,7 @@ public class PipelineEngine : IPipelineEngine
 
                 if (field != null && field.Fid.HasValue)
                 {
-                    evaluatedFilterVal = EvaluateTokens(config.FilterValue, payloadJson);
+                    evaluatedFilterVal = EvaluateTokens(config.FilterValue, payloadJson, executionPath, allSteps);
                     var filterCondition = new FilterCondition
                     {
                         FieldId = field.Id,
@@ -1046,13 +1098,45 @@ public class PipelineEngine : IPipelineEngine
                 TableId = config.TableId,
                 FilterField = config.FilterField,
                 FilterValue = evaluatedFilterVal,
+                FilterGroupsCount = config.FilterGroups?.Count ?? 0,
+                FiltersCount = config.Filters?.Count ?? 0,
                 MaxResults = limit
             });
 
             var records = await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit, filterTree: filterTree, ct: ct);
             var resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+            _logger.LogInformation("Search Records step {StepId} matched {Count} records.", step.Id, resultsList.Count);
 
-            var stepOutput = new { records = resultsList };
+            var normalizedResults = new List<Dictionary<string, object?>>();
+            foreach (var record in resultsList)
+            {
+                var norm = new Dictionary<string, object?>();
+                if (record.TryGetValue("Id", out var searchIdVal)) norm["Id"] = searchIdVal;
+                if (record.TryGetValue("PublicId", out var searchPubIdVal)) norm["PublicId"] = searchPubIdVal;
+                if (record.TryGetValue("CreatedOn", out var searchCoVal)) norm["CreatedOn"] = searchCoVal;
+                if (record.TryGetValue("CreatedBy", out var searchCbVal)) norm["CreatedBy"] = searchCbVal;
+                if (record.TryGetValue("ModifiedOn", out var searchMoVal)) norm["ModifiedOn"] = searchMoVal;
+                if (record.TryGetValue("ModifiedBy", out var searchMbVal)) norm["ModifiedBy"] = searchMbVal;
+
+                foreach (var f in fields)
+                {
+                    if (f.Fid.HasValue)
+                    {
+                        var colName = PhysicalNaming.ColumnName(f.Fid.Value);
+                        if (record.TryGetValue(colName, out var val))
+                        {
+                            norm[$"fid_{f.Fid.Value}"] = val;
+                        }
+                        else if (record.TryGetValue(f.Name, out var valByName))
+                        {
+                            norm[$"fid_{f.Fid.Value}"] = valByName;
+                        }
+                    }
+                }
+                normalizedResults.Add(norm);
+            }
+
+            var stepOutput = new { records = normalizedResults };
             return JsonSerializer.Serialize(stepOutput);
         }
         else if (subtype == "create-record")
@@ -1060,6 +1144,8 @@ public class PipelineEngine : IPipelineEngine
             var config = JsonSerializer.Deserialize<CreateRecordStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             if (config == null || string.IsNullOrWhiteSpace(config.TableId))
                 throw new InvalidOperationException("Create record step configuration is invalid or missing tableId.");
+
+            _logger.LogInformation("Create Record step {StepId} started for Table {TableId}.", step.Id, config.TableId);
 
             var tableGuid = Guid.Parse(config.TableId);
             var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
@@ -1080,7 +1166,7 @@ public class PipelineEngine : IPipelineEngine
 
                     if (field != null && field.Fid.HasValue)
                     {
-                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson);
+                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
                         var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
@@ -1105,6 +1191,7 @@ public class PipelineEngine : IPipelineEngine
                 }
 
                 recordPublicId = await recordRepo.CreateAsync(table, fields, values, uow.Transaction, ct);
+                _logger.LogInformation("Create Record step {StepId} succeeded. Created record: {RecordPublicId}.", step.Id, recordPublicId);
                 var recordId = await recordRepo.GetRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
                 values[3] = recordId;
                 await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, values, "record-added", ct);
@@ -1125,13 +1212,15 @@ public class PipelineEngine : IPipelineEngine
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
+                _logger.LogWarning(ex, "Create Record step {StepId} encountered unique constraint violation. Handling idempotency replay.", step.Id);
                 await uow.RollbackAsync(ct);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
                 throw;
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "Create Record step {StepId} failed.", step.Id);
                 await uow.RollbackAsync(ct);
                 throw;
             }
@@ -1142,7 +1231,7 @@ public class PipelineEngine : IPipelineEngine
             if (config == null || string.IsNullOrWhiteSpace(config.TableId))
                 throw new InvalidOperationException("Update record step configuration is invalid or missing tableId.");
 
-            var resolvedRecordIdStr = EvaluateTokens(config.TargetRecordId, payloadJson);
+            var resolvedRecordIdStr = EvaluateTokens(config.TargetRecordId, payloadJson, executionPath, allSteps);
             if (!Guid.TryParse(resolvedRecordIdStr, out var recordPublicId))
                 throw new InvalidOperationException($"Failed to resolve target record public ID from: '{config.TargetRecordId}'");
 
@@ -1165,7 +1254,7 @@ public class PipelineEngine : IPipelineEngine
 
                     if (field != null && field.Fid.HasValue)
                     {
-                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson);
+                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
                         var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
@@ -1224,7 +1313,7 @@ public class PipelineEngine : IPipelineEngine
             if (config == null || string.IsNullOrWhiteSpace(config.TableId) || string.IsNullOrWhiteSpace(config.TargetRecordId))
                 throw new InvalidOperationException("Delete record step configuration is invalid or missing tableId/targetRecordId.");
 
-            var resolvedRecordIdStr = EvaluateTokens(config.TargetRecordId, payloadJson);
+            var resolvedRecordIdStr = EvaluateTokens(config.TargetRecordId, payloadJson, executionPath, allSteps);
             if (!Guid.TryParse(resolvedRecordIdStr, out var recordPublicId))
                 throw new InvalidOperationException($"Failed to resolve target record public ID from: '{config.TargetRecordId}'");
 
@@ -1294,7 +1383,7 @@ public class PipelineEngine : IPipelineEngine
         else if (subtype == "stop")
         {
             var config = JsonSerializer.Deserialize<StopStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            var reason = EvaluateTokens(config?.Reason, payloadJson);
+            var reason = EvaluateTokens(config?.Reason, payloadJson, executionPath, allSteps);
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 Reason = reason
@@ -1309,7 +1398,7 @@ public class PipelineEngine : IPipelineEngine
             bool isMatched = false;
             if (config?.RuleGroups != null && config.RuleGroups.Any())
             {
-                isMatched = config.RuleGroups.All(g => EvaluateConditionGroup(g, payloadJson));
+                isMatched = config.RuleGroups.All(g => EvaluateConditionGroup(g, payloadJson, executionPath, allSteps));
                 _logger.LogInformation("Condition step {StepId} resolved via recursive ruleGroups evaluation. Result: {Result}", step.Id, isMatched);
 
                 stepRun.InputContext = SerializeAndSanitizeAudit(new {
@@ -1317,17 +1406,17 @@ public class PipelineEngine : IPipelineEngine
                         g.LogicalOp,
                         Rules = g.Rules?.Select(r => new {
                             r.Type,
-                            Left = EvaluateTokens(r.Left, payloadJson),
+                            Left = EvaluateTokens(r.Left, payloadJson, executionPath, allSteps),
                             Op = r.Op,
-                            Right = EvaluateTokens(r.Right, payloadJson)
+                            Right = EvaluateTokens(r.Right, payloadJson, executionPath, allSteps)
                         })
                     })
                 });
             }
             else
             {
-                var left = EvaluateTokens(config?.LeftOperand, payloadJson);
-                var right = EvaluateTokens(config?.RightOperand, payloadJson);
+                var left = EvaluateTokens(config?.LeftOperand, payloadJson, executionPath, allSteps);
+                var right = EvaluateTokens(config?.RightOperand, payloadJson, executionPath, allSteps);
                 var op = config?.Operator ?? "equals";
                 isMatched = EvaluateConditionOperator(left, op, right);
                 _logger.LogInformation("Condition step {StepId} resolved Left: '{Left}', Operator: '{Op}', Right: '{Right}'. Result: {Result}", step.Id, left, op, right, isMatched);
@@ -1344,7 +1433,7 @@ public class PipelineEngine : IPipelineEngine
 
             return JsonSerializer.Serialize(new { Matched = isMatched, EvaluatedBranch = branch });
         }
-        else if (subtype == "loop")
+        else if (subtype == "loop" || subtype == "for-each")
         {
             var config = JsonSerializer.Deserialize<LoopStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             if (config == null || string.IsNullOrWhiteSpace(config.LoopOverStepId))
@@ -1359,7 +1448,7 @@ public class PipelineEngine : IPipelineEngine
                 ItemCount = itemsList.Count
             });
 
-            _logger.LogInformation("Loop step {StepId} iterating over step '{LoopOverStepId}' containing {Count} items.", step.Id, config.LoopOverStepId, itemsList.Count);
+            _logger.LogInformation("Loop step {StepId} starting iteration. Total items to loop: {Count}.", step.Id, itemsList.Count);
 
             int index = 0;
             int count = itemsList.Count;
@@ -1368,6 +1457,7 @@ public class PipelineEngine : IPipelineEngine
 
             foreach (var item in itemsList)
             {
+                _logger.LogInformation("Loop step {StepId} iteration {Index} started.", step.Id, index);
                 var loopScope = new Dictionary<string, object>
                 {
                     { "item", item },
@@ -1380,6 +1470,7 @@ public class PipelineEngine : IPipelineEngine
 
                 await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{index}", ct);
 
+                _logger.LogInformation("Loop step {StepId} iteration {Index} completed.", step.Id, index);
                 index++;
             }
 
@@ -1400,12 +1491,12 @@ public class PipelineEngine : IPipelineEngine
             if (config == null || string.IsNullOrWhiteSpace(config.ToAddresses))
                 throw new InvalidOperationException("Send email step configuration is invalid or missing ToAddresses.");
 
-            var resolvedTo = EvaluateTokens(config.ToAddresses, payloadJson);
-            var resolvedSubject = EvaluateTokens(config.Subject, payloadJson);
-            var resolvedBody = EvaluateTokens(config.Body, payloadJson);
-            var resolvedCc = EvaluateTokens(config.CcAddresses, payloadJson);
-            var resolvedBcc = EvaluateTokens(config.BccAddresses, payloadJson);
-            var resolvedFrom = EvaluateTokens(config.FromAddress, payloadJson);
+            var resolvedTo = EvaluateTokens(config.ToAddresses, payloadJson, executionPath, allSteps);
+            var resolvedSubject = EvaluateTokens(config.Subject, payloadJson, executionPath, allSteps);
+            var resolvedBody = EvaluateTokens(config.Body, payloadJson, executionPath, allSteps);
+            var resolvedCc = EvaluateTokens(config.CcAddresses, payloadJson, executionPath, allSteps);
+            var resolvedBcc = EvaluateTokens(config.BccAddresses, payloadJson, executionPath, allSteps);
+            var resolvedFrom = EvaluateTokens(config.FromAddress, payloadJson, executionPath, allSteps);
 
             List<string>? resolvedAttachments = null;
             if (config.Attachments != null && config.Attachments.Count > 0)
@@ -1413,7 +1504,7 @@ public class PipelineEngine : IPipelineEngine
                 resolvedAttachments = new List<string>();
                 foreach (var path in config.Attachments)
                 {
-                    var resolvedPath = EvaluateTokens(path, payloadJson);
+                    var resolvedPath = EvaluateTokens(path, payloadJson, executionPath, allSteps);
                     if (!string.IsNullOrWhiteSpace(resolvedPath))
                     {
                         resolvedAttachments.Add(resolvedPath);
@@ -1441,7 +1532,7 @@ public class PipelineEngine : IPipelineEngine
             if (config == null || string.IsNullOrWhiteSpace(config.Url))
                 throw new InvalidOperationException("Make request step configuration is invalid or missing URL.");
 
-            var resolvedUrl = EvaluateTokens(config.Url, payloadJson);
+            var resolvedUrl = EvaluateTokens(config.Url, payloadJson, executionPath, allSteps);
             var method = string.IsNullOrWhiteSpace(config.Method) ? "GET" : config.Method.ToUpperInvariant();
 
             var client = _httpClientFactory.CreateClient();
@@ -1462,7 +1553,7 @@ public class PipelineEngine : IPipelineEngine
                 foreach (var header in config.HeadersList)
                 {
                     if (string.IsNullOrWhiteSpace(header.Name)) continue;
-                    var resolvedVal = EvaluateTokens(header.Value, payloadJson);
+                    var resolvedVal = EvaluateTokens(header.Value, payloadJson, executionPath, allSteps);
                     request.Headers.TryAddWithoutValidation(header.Name, resolvedVal);
                     resolvedHeaders.Add(new HttpHeader { Name = header.Name, Value = resolvedVal });
                 }
@@ -1471,7 +1562,7 @@ public class PipelineEngine : IPipelineEngine
             string? resolvedBody = null;
             if (method == "POST" || method == "PUT" || method == "PATCH")
             {
-                resolvedBody = EvaluateTokens(config.Body, payloadJson);
+                resolvedBody = EvaluateTokens(config.Body, payloadJson, executionPath, allSteps);
                 var contentType = string.IsNullOrWhiteSpace(config.ContentType) ? "application/json" : config.ContentType;
                 request.Content = new StringContent(resolvedBody, System.Text.Encoding.UTF8, contentType);
             }
@@ -1547,7 +1638,7 @@ public class PipelineEngine : IPipelineEngine
 
                     if (field != null && field.Fid.HasValue)
                     {
-                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson);
+                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
                         var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
                         rowValues[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
@@ -1810,8 +1901,8 @@ public class PipelineEngine : IPipelineEngine
             if (string.IsNullOrWhiteSpace(fileUrl))
                 throw new InvalidOperationException("Upload file step configuration is missing FileUrl.");
 
-            var resolvedUrl = EvaluateTokens(fileUrl, payloadJson);
-            var resolvedFileName = EvaluateTokens(config.FileName, payloadJson);
+            var resolvedUrl = EvaluateTokens(fileUrl, payloadJson, executionPath, allSteps);
+            var resolvedFileName = EvaluateTokens(config.FileName, payloadJson, executionPath, allSteps);
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 FileUrl = resolvedUrl,
@@ -2034,8 +2125,8 @@ public class PipelineEngine : IPipelineEngine
         }
         else
         {
-            _logger.LogInformation("Step type '{Type}' / subtype '{Subtype}' is not handled inside execution engine. Skipping executing step.", step.Type, step.Subtype);
-            return JsonSerializer.Serialize(new { Status = "Skipped", Type = step.Type, Subtype = step.Subtype });
+            _logger.LogError("Step type '{Type}' / subtype '{Subtype}' is not supported by the execution engine.", step.Type, step.Subtype);
+            throw new NotSupportedException($"Step type '{step.Type}' / subtype '{step.Subtype}' is not supported by the execution engine.");
         }
     }
 
@@ -2116,7 +2207,7 @@ public class PipelineEngine : IPipelineEngine
         return PipelineFilterEvaluator.EvaluateConditionOperator(leftVal, op, rightVal, logger: _logger);
     }
 
-    private bool EvaluateConditionGroup(ConditionRuleGroup group, string payloadJson)
+    private bool EvaluateConditionGroup(ConditionRuleGroup group, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
     {
         if (group.Rules == null || !group.Rules.Any()) return true;
 
@@ -2127,13 +2218,13 @@ public class PipelineEngine : IPipelineEngine
             bool ruleResult = false;
             if (rule.Type == "rule")
             {
-                var left = EvaluateTokens(rule.Left, payloadJson);
-                var right = EvaluateTokens(rule.Right, payloadJson);
+                var left = EvaluateTokens(rule.Left, payloadJson, executionPath, allSteps);
+                var right = EvaluateTokens(rule.Right, payloadJson, executionPath, allSteps);
                 ruleResult = EvaluateConditionOperator(left, rule.Op ?? "equals", right);
             }
             else if (rule.Type == "nested" && rule.Groups != null)
             {
-                ruleResult = rule.Groups.All(g => EvaluateConditionGroup(g, payloadJson));
+                ruleResult = rule.Groups.All(g => EvaluateConditionGroup(g, payloadJson, executionPath, allSteps));
             }
 
             if (isAnd && !ruleResult) return false;
@@ -2143,10 +2234,41 @@ public class PipelineEngine : IPipelineEngine
         return isAnd;
     }
 
-    private string EvaluateTokens(string? input, string payloadJson)
+    private string EvaluateTokens(string? input, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
         if (string.IsNullOrEmpty(payloadJson)) return input;
+
+        // Structured fallback for legacy compatibility
+        if (!string.IsNullOrEmpty(executionPath) && allSteps != null)
+        {
+            var pathParts = executionPath.Split('/');
+            foreach (var part in pathParts)
+            {
+                var loopStep = allSteps.FirstOrDefault(s => s.RefId == part && (s.Type == "loop" || s.Subtype == "for-each"));
+                if (loopStep != null && !string.IsNullOrEmpty(loopStep.ConfigJson))
+                {
+                    try
+                    {
+                        using var loopDoc = JsonDocument.Parse(loopStep.ConfigJson);
+                        var loopRoot = loopDoc.RootElement;
+                        if ((loopRoot.TryGetProperty("loopOverStepId", out var loopOverProp) || loopRoot.TryGetProperty("LoopOverStepId", out loopOverProp)) && loopOverProp.ValueKind == JsonValueKind.String)
+                        {
+                            var loopOverStepId = loopOverProp.GetString();
+                            if (!string.IsNullOrEmpty(loopOverStepId))
+                            {
+                                var targetPattern = $@"(?<=\b(?:steps\.)?)({Regex.Escape(loopOverStepId)})(?=\.(?!records\b)[a-zA-Z0-9_]+)";
+                                input = Regex.Replace(input, targetPattern, $"{loopStep.RefId}.item", RegexOptions.IgnoreCase);
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore config parsing errors
+                    }
+                }
+            }
+        }
 
         try
         {
@@ -2578,7 +2700,9 @@ public class PipelineEngine : IPipelineEngine
         {
             if (target is JsonElement el && el.ValueKind == JsonValueKind.Object)
             {
-                return el.TryGetProperty(member, out _);
+                if (el.TryGetProperty(member, out _)) return true;
+                if (member.StartsWith("fid_") && el.TryGetProperty(member.Replace("fid_", "f_"), out _)) return true;
+                if (member.StartsWith("f_") && el.TryGetProperty(member.Replace("f_", "fid_"), out _)) return true;
             }
             return false;
         }
@@ -2586,10 +2710,31 @@ public class PipelineEngine : IPipelineEngine
         public bool TryGetValue(Scriban.TemplateContext context, Scriban.Parsing.SourceSpan span, object target, string member, out object value)
         {
             value = null!;
-            if (target is JsonElement el && el.ValueKind == JsonValueKind.Object && el.TryGetProperty(member, out var prop))
+            if (target is JsonElement el && el.ValueKind == JsonValueKind.Object)
             {
-                value = ConvertJsonElement(prop)!;
-                return true;
+                if (el.TryGetProperty(member, out var prop))
+                {
+                    value = ConvertJsonElement(prop)!;
+                    return true;
+                }
+                if (member.StartsWith("fid_"))
+                {
+                    var physKey = member.Replace("fid_", "f_");
+                    if (el.TryGetProperty(physKey, out var physProp))
+                    {
+                        value = ConvertJsonElement(physProp)!;
+                        return true;
+                    }
+                }
+                if (member.StartsWith("f_"))
+                {
+                    var stableKey = member.Replace("f_", "fid_");
+                    if (el.TryGetProperty(stableKey, out var stableProp))
+                    {
+                        value = ConvertJsonElement(stableProp)!;
+                        return true;
+                    }
+                }
             }
             return false;
         }
@@ -2622,6 +2767,24 @@ public class PipelineEngine : IPipelineEngine
                     {
                         value = ConvertJsonElement(prop)!;
                         return true;
+                    }
+                    if (member.StartsWith("fid_"))
+                    {
+                        var physKey = member.Replace("fid_", "f_");
+                        if (el.TryGetProperty(physKey, out var physProp))
+                        {
+                            value = ConvertJsonElement(physProp)!;
+                            return true;
+                        }
+                    }
+                    if (member.StartsWith("f_"))
+                    {
+                        var stableKey = member.Replace("f_", "fid_");
+                        if (el.TryGetProperty(stableKey, out var stableProp))
+                        {
+                            value = ConvertJsonElement(stableProp)!;
+                            return true;
+                        }
                     }
                 }
             }
@@ -2815,6 +2978,107 @@ public class PipelineEngine : IPipelineEngine
         public string? Value { get; set; }
     }
 
+    private static string MapUiOperatorToDbOperator(string? op)
+    {
+        if (string.IsNullOrWhiteSpace(op)) return "eq";
+        var normalized = op.Trim().ToLowerInvariant().Replace('_', '-');
+        return normalized switch
+        {
+            "is" => "eq",
+            "is-not" => "ne",
+            "greater-than" => "gt",
+            "greater-than-or-equals" => "gte",
+            "less-than" => "lt",
+            "less-than-or-equals" => "lte",
+            "is-after" => "gt",
+            "is-on-or-after" => "gte",
+            "is-before" => "lt",
+            "is-on-or-before" => "lte",
+            "contains" => "contains",
+            "not-contains" => "notContains",
+            "starts-with" => "startsWith",
+            "is-empty" => "isEmpty",
+            "is-not-empty" => "isNotEmpty",
+            "is-true" => "eq",
+            "is-false" => "eq",
+            _ => normalized
+        };
+    }
+
+    private FilterGroup? MapTriggerFilterGroupToDbFilterGroup(
+        TriggerFilterGroup group,
+        IReadOnlyList<AppField> fields,
+        string payloadJson,
+        string? executionPath = null,
+        List<PipelineStep>? allSteps = null)
+    {
+        if (group?.Rules == null || !group.Rules.Any()) return null;
+
+        var dbGroup = new FilterGroup
+        {
+            Logic = group.LogicalOp?.ToLowerInvariant() == "or" ? "or" : "and",
+            Nodes = new List<FilterNode>()
+        };
+
+        foreach (var rule in group.Rules)
+        {
+            if (rule == null || PipelineFilterEvaluator.IsRuleCompletelyBlank(rule)) continue;
+
+            if (rule.Type == "nested")
+            {
+                if (rule.Groups != null)
+                {
+                    foreach (var subGroup in rule.Groups)
+                    {
+                        var mappedSub = MapTriggerFilterGroupToDbFilterGroup(subGroup, fields, payloadJson, executionPath, allSteps);
+                        if (mappedSub != null)
+                        {
+                            dbGroup.Nodes.Add(new FilterNode { Group = mappedSub });
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(rule.Field)) continue;
+
+                var field = fields.FirstOrDefault(f =>
+                    f.Name.Equals(rule.Field, StringComparison.OrdinalIgnoreCase) ||
+                    $"fid_{f.Id}".Equals(rule.Field, StringComparison.OrdinalIgnoreCase) ||
+                    $"fid_{f.Fid}".Equals(rule.Field, StringComparison.OrdinalIgnoreCase));
+
+                if (field != null && field.Fid.HasValue)
+                {
+                    var rawValue = rule.Value;
+                    var dbOp = MapUiOperatorToDbOperator(rule.Operator);
+
+                    if (rule.Operator == "is_true" || rule.Operator == "is-true")
+                    {
+                        rawValue = "true";
+                    }
+                    else if (rule.Operator == "is_false" || rule.Operator == "is-false")
+                    {
+                        rawValue = "false";
+                    }
+
+                    var evaluatedValue = EvaluateTokens(rawValue, payloadJson, executionPath, allSteps);
+
+                    dbGroup.Nodes.Add(new FilterNode
+                    {
+                        Condition = new FilterCondition
+                        {
+                            FieldId = field.Id,
+                            Operator = dbOp,
+                            Value = evaluatedValue
+                        }
+                    });
+                }
+            }
+        }
+
+        return dbGroup.Nodes.Any() ? dbGroup : null;
+    }
+
     private class SearchRecordsStepConfig
     {
         public string? TableId { get; set; }
@@ -2822,6 +3086,8 @@ public class PipelineEngine : IPipelineEngine
         [System.Text.Json.Serialization.JsonConverter(typeof(StringOrPrimitiveJsonConverter))]
         public string? FilterValue { get; set; }
         public int? MaxResults { get; set; }
+        public List<TriggerFilterRule>? Filters { get; set; }
+        public List<TriggerFilterGroup>? FilterGroups { get; set; }
     }
 
     private bool IsSqlDeadlock(Exception ex)
