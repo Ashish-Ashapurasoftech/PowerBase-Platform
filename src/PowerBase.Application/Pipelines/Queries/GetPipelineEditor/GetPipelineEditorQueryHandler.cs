@@ -18,6 +18,8 @@ namespace PowerBase.Application.Pipelines.Queries.GetPipelineEditor;
 ///  - No connection / empty: current-tenant repositories (direct injection)
 ///  - connectionPublicId == tenantPublicId (CurrentUser cross-tenant):
 ///    IServiceScopeFactory + IQueryContext.SetTenantId — same pattern as PipelineEngine
+///  - connectionPublicId == PipelineAccount.PublicId (saved "Connect new account"):
+///    resolved server-side inside the account's realm, as the account's token owner
 ///  - connectionPublicId == PipelineConnection.PublicId (SavedConnection):
 ///    Cannot resolve via PowerBase DB — returned as ClientResolveRef(SavedConnection)
 ///  - connectionPublicId in SystemConnectionIds:
@@ -34,6 +36,13 @@ public class GetPipelineEditorQueryHandler
     private readonly IQueryContext _queryContext;
     private readonly Microsoft.Extensions.DependencyInjection.IServiceScopeFactory _scopeFactory;
 
+    /// <summary>
+    /// Optional so the handler can still be constructed without saved-account support.
+    /// When null, a saved account degrades to the "unknown GUID" branch instead of being
+    /// resolved against the owner tenant.
+    /// </summary>
+    private readonly Connections.Common.ConnectionScopeResolver? _connectionScopeResolver;
+
     public GetPipelineEditorQueryHandler(
         IPipelineRepository pipelineRepo,
         IAppRepository appRepo,
@@ -42,7 +51,8 @@ public class GetPipelineEditorQueryHandler
         IAdminRepository adminRepo,
         ITenantRepository tenantRepo,
         IQueryContext queryContext,
-        Microsoft.Extensions.DependencyInjection.IServiceScopeFactory scopeFactory)
+        Microsoft.Extensions.DependencyInjection.IServiceScopeFactory scopeFactory,
+        Connections.Common.ConnectionScopeResolver? connectionScopeResolver = null)
     {
         _pipelineRepo = pipelineRepo;
         _appRepo = appRepo;
@@ -52,6 +62,7 @@ public class GetPipelineEditorQueryHandler
         _tenantRepo = tenantRepo;
         _queryContext = queryContext;
         _scopeFactory = scopeFactory;
+        _connectionScopeResolver = connectionScopeResolver;
     }
 
     public async Task<PipelineEditorResult> HandleAsync(GetPipelineEditorQuery query, CancellationToken ct = default)
@@ -269,7 +280,43 @@ public class GetPipelineEditorQueryHandler
                 return;
             }
 
-            // Step 2: Check if it is a SavedConnection (PipelineConnection entity)
+            // Step 2: A saved PowerFlows account ("Connect new account"). Resolve it server-side
+            // inside the account's own realm, as the account's token owner — the editor must show
+            // the schema the step will actually run against, never the owner tenant's.
+            if (_connectionScopeResolver != null)
+            {
+                Connections.Common.ConnectionScope? accountScope = null;
+                bool accountUnavailable = false;
+                try
+                {
+                    accountScope = await _connectionScopeResolver.TryResolveAsync(connGuid, ct);
+                }
+                catch (UnauthorizedActionException)
+                {
+                    // It IS a saved account, but its credential can no longer be honoured.
+                    accountUnavailable = true;
+                }
+
+                if (accountUnavailable)
+                {
+                    clientRefs.Add(new PipelineEditorClientRef
+                    {
+                        ConnectionPublicId = connStr,
+                        AppPublicId = tableRef.AppPublicId,
+                        TablePublicId = tableRef.TablePublicId,
+                        Reason = PipelineEditorRefReason.ConnectionUnavailable
+                    });
+                    return;
+                }
+
+                if (accountScope != null)
+                {
+                    await ResolveSavedAccountTableAsync(connStr, accountScope, tableRef, editorTables, clientRefs, ct);
+                    return;
+                }
+            }
+
+            // Step 3: Check if it is a SavedConnection (PipelineConnection entity)
             var savedConn = await _pipelineRepo.GetConnectionByPublicIdAsync(connGuid, ct);
             if (savedConn != null)
             {
@@ -415,6 +462,82 @@ public class GetPipelineEditorQueryHandler
                 AppPublicId = tableRef.AppPublicId,
                 TablePublicId = tableRef.TablePublicId,
                 Reason = PipelineEditorRefReason.AccessDenied
+            });
+        }
+        catch
+        {
+            clientRefs.Add(new PipelineEditorClientRef
+            {
+                ConnectionPublicId = connectionPublicId,
+                AppPublicId = tableRef.AppPublicId,
+                TablePublicId = tableRef.TablePublicId,
+                Reason = PipelineEditorRefReason.ResolutionError
+            });
+        }
+    }
+
+    /// <summary>
+    /// Resolves a table through a saved PowerFlows account. Runs inside the account's realm with
+    /// the token owner's identity and the token's app restrictions, so what the editor shows is
+    /// exactly what the step will be able to touch at runtime.
+    /// </summary>
+    private async Task ResolveSavedAccountTableAsync(
+        string connectionPublicId,
+        Connections.Common.ConnectionScope accountScope,
+        TableRefInfo tableRef,
+        List<PipelineEditorTableMetadata> editorTables,
+        List<PipelineEditorClientRef> clientRefs,
+        CancellationToken ct)
+    {
+        try
+        {
+            await using var targetScope = await Connections.Common.TargetTenantScopeHelper.OpenAsync(_scopeFactory, accountScope, ct);
+
+            var scopedTableRepo = targetScope.GetRequiredService<IAppTableRepository>();
+            var scopedFieldRepo = targetScope.GetRequiredService<IAppFieldRepository>();
+            var scopedAppRepo = targetScope.GetRequiredService<IAppRepository>();
+
+            var table = await scopedTableRepo.GetByPublicIdAsync(tableRef.TablePublicId, ct);
+
+            // Honour the token's app restrictions — a restricted token must not reveal
+            // schema for an app it cannot reach.
+            if (!accountScope.TokenAccessAllApps && !accountScope.AllowedAppIds.Contains(table.AppId))
+            {
+                clientRefs.Add(new PipelineEditorClientRef
+                {
+                    ConnectionPublicId = connectionPublicId,
+                    AppPublicId = tableRef.AppPublicId,
+                    TablePublicId = tableRef.TablePublicId,
+                    Reason = PipelineEditorRefReason.AccessDenied
+                });
+                return;
+            }
+
+            var appPublicId = await scopedAppRepo.GetPublicIdByIdAsync(table.AppId, ct);
+            var fields = await scopedFieldRepo.ListByTableAsync(table.Id, ct);
+
+            editorTables.Add(BuildTableMetadata(connectionPublicId, appPublicId, table, fields));
+        }
+        catch (NotFoundException)
+        {
+            clientRefs.Add(new PipelineEditorClientRef
+            {
+                ConnectionPublicId = connectionPublicId,
+                AppPublicId = tableRef.AppPublicId,
+                TablePublicId = tableRef.TablePublicId,
+                Reason = PipelineEditorRefReason.TableNotFound
+            });
+        }
+        catch (UnauthorizedActionException)
+        {
+            // Raised by TargetTenantScopeHelper when the token owner is no longer usable
+            // in the account's realm — surfaced as "reconnect", not as owner-tenant data.
+            clientRefs.Add(new PipelineEditorClientRef
+            {
+                ConnectionPublicId = connectionPublicId,
+                AppPublicId = tableRef.AppPublicId,
+                TablePublicId = tableRef.TablePublicId,
+                Reason = PipelineEditorRefReason.ConnectionUnavailable
             });
         }
         catch

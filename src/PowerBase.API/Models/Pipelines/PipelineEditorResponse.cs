@@ -77,7 +77,8 @@ public class PipelineEditorClientRefDto
 
     /// <summary>
     /// One of: "saved_connection", "system_connection", "table_not_found",
-    /// "app_not_found", "access_denied", "tenant_not_found", "resolution_error"
+    /// "app_not_found", "access_denied", "tenant_not_found", "connection_unavailable",
+    /// "resolution_error"
     /// </summary>
     public string Reason { get; set; } = string.Empty;
 }

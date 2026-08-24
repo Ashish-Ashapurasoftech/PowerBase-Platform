@@ -314,6 +314,7 @@ public class PipelinesController : ControllerBase
                 PipelineEditorRefReason.AppNotFound => "app_not_found",
                 PipelineEditorRefReason.AccessDenied => "access_denied",
                 PipelineEditorRefReason.TenantNotFound => "tenant_not_found",
+                PipelineEditorRefReason.ConnectionUnavailable => "connection_unavailable",
                 _ => "resolution_error"
             }
         }).ToList()

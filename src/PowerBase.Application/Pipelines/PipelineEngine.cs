@@ -843,6 +843,7 @@ public class PipelineEngine : IPipelineEngine
         var ownerTenantId = _queryContext.TenantId;
         var targetTenantId = ownerTenantId;
         bool isCrossTenant = false;
+        Connections.Common.ConnectionScope? accountScope = null;
 
         if (Guid.TryParse(connectionPublicId, out var connectionGuid) && !PipelineStepValidator.SystemConnectionIds.Contains(connectionGuid))
         {
@@ -852,6 +853,50 @@ public class PipelineEngine : IPipelineEngine
                 targetTenantId = resolvedTenantId.Value;
                 isCrossTenant = targetTenantId != ownerTenantId;
             }
+            else
+            {
+                // Not one of the platform's tenants — it may be a saved PowerFlows account
+                // ("Connect new account"). Such a step must run in the account's own realm as the
+                // account's token owner; running it here would silently write the owner's realm.
+                // Resolution happens in THIS scope on purpose: meta.PipelineAccount lives in the
+                // owner tenant's database, and _queryContext still points at it.
+                var connectionScopeResolver = _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>();
+                if (connectionScopeResolver != null)
+                {
+                    // The execution authority (_CreatedBy) owns the account row, not the caller.
+                    // A stale credential throws UnauthorizedActionException — the step fails, it
+                    // never degrades to the owner tenant.
+                    accountScope = await connectionScopeResolver.TryResolveForUserAsync(connectionGuid, createdBy, ct);
+                    if (accountScope != null)
+                    {
+                        targetTenantId = accountScope.TargetTenantId;
+                    }
+                }
+            }
+        }
+
+        if (accountScope != null)
+        {
+            // TargetTenantScopeHelper pins the realm, adopts the token owner's identity and
+            // permissions, and carries the token's app restrictions into the scope.
+            await using var accountScopeHandle = await Connections.Common.TargetTenantScopeHelper.OpenAsync(_serviceScopeFactory, accountScope, ct);
+
+            var scopedQueryContext = accountScopeHandle.GetRequiredService<IQueryContext>();
+            scopedQueryContext.IsPipelineExecution = _queryContext.IsPipelineExecution;
+            scopedQueryContext.PipelineDepth = _queryContext.PipelineDepth;
+            scopedQueryContext.PipelineChainJson = _queryContext.PipelineChainJson;
+
+            var accountRecordRepo = accountScopeHandle.GetRequiredService<IRecordRepository>();
+            var accountTableRepo = accountScopeHandle.GetRequiredService<IAppTableRepository>();
+            var accountFieldRepo = accountScopeHandle.GetRequiredService<IAppFieldRepository>();
+            var accountWriteService = accountScopeHandle.GetRequiredService<IRecordWriteService>();
+            var accountTriggerInterceptor = accountScopeHandle.GetRequiredService<IPipelineTriggerInterceptor>();
+            var accountUow = accountScopeHandle.GetRequiredService<ITenantUnitOfWork>();
+            var accountIdempotencyRepo = accountScopeHandle.GetRequiredService<IPipelineStepIdempotencyRepository>();
+            var accountFileStorage = accountScopeHandle.GetRequiredService<IFileStorageService>();
+
+            return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
+                accountRecordRepo, accountTableRepo, accountFieldRepo, accountWriteService, accountTriggerInterceptor, accountUow, accountIdempotencyRepo, accountFileStorage, ct);
         }
 
         if (isCrossTenant)
@@ -863,6 +908,13 @@ public class PipelineEngine : IPipelineEngine
                 scopedQueryContext.IsPipelineExecution = _queryContext.IsPipelineExecution;
                 scopedQueryContext.PipelineDepth = _queryContext.PipelineDepth;
                 scopedQueryContext.PipelineChainJson = _queryContext.PipelineChainJson;
+                scopedQueryContext.SetUserIdentity(
+                    _queryContext.UserId,
+                    _queryContext.IsSuperAdmin,
+                    _queryContext.UserName,
+                    _queryContext.UserEmail,
+                    _queryContext.Permissions,
+                    _queryContext.TenantRole);
 
                 var scopedTenantRepo = scope.ServiceProvider.GetRequiredService<ITenantRepository>();
                 var isMember = await scopedTenantRepo.IsActiveMemberAsync(createdBy, ct);

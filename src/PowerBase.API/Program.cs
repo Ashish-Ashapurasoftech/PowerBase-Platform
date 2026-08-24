@@ -282,6 +282,7 @@ builder.Services.AddScoped<IPipelineRepository, PipelineRepository>();
 builder.Services.AddScoped<IPipelineStepIdempotencyRepository, PipelineStepIdempotencyRepository>();
 builder.Services.AddScoped<IUserTokenRepository, UserTokenRepository>();
 builder.Services.AddScoped<IAppTokenRepository, AppTokenRepository>();
+builder.Services.AddScoped<IPipelineAccountRepository, PipelineAccountRepository>();
 builder.Services.AddScoped<IGroupRepository, GroupRepository>();
 
 
@@ -300,6 +301,14 @@ builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineRu
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineSchedule.GetPipelineScheduleQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.UpdatePipelineSchedule.UpdatePipelineScheduleCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.DeletePipelineSchedule.DeletePipelineScheduleCommandHandler>();
+
+// Saved PowerFlows accounts ("Connect new account")
+builder.Services.AddScoped<PowerBase.Application.Connections.Common.ConnectionScopeResolver>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Queries.GetConnections.GetConnectionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Commands.CreateConnection.CreateConnectionCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Queries.GetConnectionApps.GetConnectionAppsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Queries.GetConnectionTables.GetConnectionTablesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Queries.GetConnectionFields.GetConnectionFieldsQueryHandler>();
 
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.CreateUserToken.CreateUserTokenCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetMyUserTokens.GetMyUserTokensQueryHandler>();

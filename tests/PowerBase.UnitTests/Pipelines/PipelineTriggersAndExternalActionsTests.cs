@@ -1179,5 +1179,128 @@ public class PipelineTriggersAndExternalActionsTests
         await triggerInterceptor.Received(1).InterceptBulkAsync(
             table, fields, Arg.Is<IReadOnlyList<PowerBase.Application.Common.Models.PipelineRecordChange>>(list => list.Count == 1 && list[0].BeforeValues[10] as string == "New"), Arg.Any<Guid>(), Arg.Any<Guid>(), 101L, Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task Interceptor_CrossTenantTenantConnection_KeepsTenantPublicId()
+    {
+        var table = new AppTable { Id = 1, PublicId = Guid.NewGuid(), Name = "Leads" };
+        var fields = new List<AppField> { new AppField { Id = 10, Fid = 101, Name = "Status", TypeCode = "Text" } };
+
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(dbTx);
+
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        
+        // Sequence return: 1st and 2nd for mockSubs setup (OwnerTenantId = 6, TargetTenantId = 6),
+        // 3rd for isSameTenant comparison (returns 7, so OwnerTenantId (6) != CurrentTenant (7) -> cross-tenant)
+        queryContext.TenantId.Returns(6L, 6L, 7L);
+
+        var mainQueueRepo = Substitute.For<IMainPipelineQueueRepository>();
+        var logger = Substitute.For<ILogger<PipelineTriggerInterceptor>>();
+
+        var connectionPublicId = Guid.NewGuid(); // represents TenantPublicId
+
+        var pipeline = new Pipeline { Id = 101, IsActive = true, IsDeleted = false, PublicId = Guid.NewGuid() };
+        var step = new PipelineStep
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "step_1",
+            Type = "trigger",
+            Subtype = "new-event",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ConnectionPublicId = connectionPublicId.ToString(),
+                AppPublicId = Guid.NewGuid().ToString(),
+                TablePublicId = table.PublicId.ToString(),
+                TriggerOnAdded = true,
+                TriggerOnAnyField = true
+            })
+        };
+
+        pipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { pipeline });
+        pipelineRepo.GetStepsByPipelineIdAsync(101, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep> { step });
+
+        var interceptor = new PipelineTriggerInterceptor(pipelineRepo, recordRepo, queryContext, uow, null!, mainQueueRepo, logger);
+
+        var changes = new List<PowerBase.Application.Common.Models.PipelineRecordChange>
+        {
+            new(Guid.NewGuid(), new Dictionary<long, object?>(), new Dictionary<long, object?> { [10] = "Alice" }, new List<long>(), PipelineRecordEventType.Added)
+        };
+
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
+
+        await mainQueueRepo.Received(1).EnqueueAsync(Arg.Is<PipelineQueue>(job => 
+            HasMatchingConnectionId(job.TriggerPayloadJson, connectionPublicId.ToString())
+        ), null, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Interceptor_CrossTenantSavedAccountConnection_KeepsPipelineAccountPublicId()
+    {
+        var table = new AppTable { Id = 1, PublicId = Guid.NewGuid(), Name = "Leads" };
+        var fields = new List<AppField> { new AppField { Id = 10, Fid = 101, Name = "Status", TypeCode = "Text" } };
+
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(dbTx);
+
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        
+        // Sequence return for cross-tenant
+        queryContext.TenantId.Returns(6L, 6L, 8L);
+
+        var mainQueueRepo = Substitute.For<IMainPipelineQueueRepository>();
+        var logger = Substitute.For<ILogger<PipelineTriggerInterceptor>>();
+
+        var pipelineAccountPublicId = Guid.NewGuid(); // represents saved PipelineAccount.PublicId
+
+        var pipeline = new Pipeline { Id = 101, IsActive = true, IsDeleted = false, PublicId = Guid.NewGuid() };
+        var step = new PipelineStep
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "step_1",
+            Type = "trigger",
+            Subtype = "new-event",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ConnectionPublicId = pipelineAccountPublicId.ToString(),
+                AppPublicId = Guid.NewGuid().ToString(),
+                TablePublicId = table.PublicId.ToString(),
+                TriggerOnAdded = true,
+                TriggerOnAnyField = true
+            })
+        };
+
+        pipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { pipeline });
+        pipelineRepo.GetStepsByPipelineIdAsync(101, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep> { step });
+
+        var interceptor = new PipelineTriggerInterceptor(pipelineRepo, recordRepo, queryContext, uow, null!, mainQueueRepo, logger);
+
+        var changes = new List<PowerBase.Application.Common.Models.PipelineRecordChange>
+        {
+            new(Guid.NewGuid(), new Dictionary<long, object?>(), new Dictionary<long, object?> { [10] = "Alice" }, new List<long>(), PipelineRecordEventType.Added)
+        };
+
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
+
+        await mainQueueRepo.Received(1).EnqueueAsync(Arg.Is<PipelineQueue>(job => 
+            HasMatchingConnectionId(job.TriggerPayloadJson, pipelineAccountPublicId.ToString())
+        ), null, Arg.Any<CancellationToken>());
+    }
+
+    private static bool HasMatchingConnectionId(string payloadJson, string expectedGuidStr)
+    {
+        using var doc = JsonDocument.Parse(payloadJson);
+        if (doc.RootElement.TryGetProperty("ConnectionPublicId", out var prop))
+        {
+            return prop.GetString() == expectedGuidStr;
+        }
+        return false;
+    }
 }
 

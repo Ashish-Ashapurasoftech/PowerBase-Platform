@@ -76,5 +76,6 @@ public interface IPipelineRepository
     Task<IReadOnlyList<PipelineOutboxItem>> ClaimOutboxItemsAsync(string workerId, CancellationToken ct = default);
     Task UpdateOutboxItemStatusAsync(long id, string workerId, byte status, DateTime? publishedOn = null, DateTime? failedOn = null, string? error = null, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task PruneOutboxItemsAsync(DateTime olderThan, CancellationToken ct = default);
+    Task SyncTriggerSubscriptionsAsync(long pipelineId, IDbTransaction? tenantTransaction = null, CancellationToken ct = default);
 }
 

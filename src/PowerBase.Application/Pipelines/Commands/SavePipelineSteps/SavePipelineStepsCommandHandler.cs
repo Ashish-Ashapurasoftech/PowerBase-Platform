@@ -95,7 +95,11 @@ public class SavePipelineStepsCommandHandler
         var stepValidator = new PipelineStepValidator(
             _pipelineRepo, _appRepo, _tableRepo, _fieldRepo,
             _appAccessService, _tenantRepo, _queryContext,
-            targetScopeFactory);
+            targetScopeFactory,
+            // Optional (GetService, not GetRequiredService): when absent the validator simply has
+            // no saved-account support, which is what test doubles for IServiceProvider give us.
+            _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>(),
+            _serviceProvider.GetService<IServiceScopeFactory>());
         await ValidateStepsConfigAsync(command.Steps, stepValidator, ct);
 
         var pipelineId = await _pipelineRepo.GetIdByPublicIdAsync(command.PipelinePublicId, ct);

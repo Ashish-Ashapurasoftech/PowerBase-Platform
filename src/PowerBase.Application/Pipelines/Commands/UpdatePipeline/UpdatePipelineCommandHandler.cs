@@ -100,7 +100,10 @@ public class UpdatePipelineCommandHandler
             var stepValidator = new PipelineStepValidator(
                 _pipelineRepo, _appRepo, _tableRepo, _fieldRepo,
                 _appAccessService, _tenantRepo, _queryContext,
-                targetScopeFactory);
+                targetScopeFactory,
+                // Optional: absent means no saved-account support (see SavePipelineStepsCommandHandler).
+                _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>(),
+                _serviceProvider.GetService<IServiceScopeFactory>());
 
             foreach (var step in steps.Where(s => !s.IsDeleted && s.Type == "trigger" && s.Subtype == "new-event"))
             {

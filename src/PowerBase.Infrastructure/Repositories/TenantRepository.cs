@@ -17,6 +17,13 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
+    private const string GetTenantBySlugSql = """
+        SELECT t.Id, t.PublicId, t.Name, t.Slug, t.PlanCode, t.Status, t.IsDeleted,
+               t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy
+        FROM meta.Tenant t
+        WHERE t.Slug = @slug AND t.IsDeleted = 0 AND t.Status = 'Active'
+        """;
+
     private const string GetTenantNameByIdSql = """
         SELECT Name FROM meta.Tenant WHERE Id = @tenantId AND IsDeleted = 0
         """;
@@ -231,6 +238,13 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
         await using var connection = ConnectionFactory.Create();
         return await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(SlugExistsSql, new { slug }, cancellationToken: ct));
+    }
+
+    public async Task<Tenant?> GetTenantBySlugAsync(string slug, CancellationToken ct = default)
+    {
+        await using var connection = ConnectionFactory.Create();
+        return await connection.QuerySingleOrDefaultAsync<Tenant>(
+            new CommandDefinition(GetTenantBySlugSql, new { slug }, cancellationToken: ct));
     }
 
     public async Task<long> GetActiveTenantIdByUserIdAsync(long userId, CancellationToken ct = default)
