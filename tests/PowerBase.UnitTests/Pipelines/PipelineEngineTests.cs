@@ -29,6 +29,7 @@ public class PipelineEngineTests
     private readonly PipelineExecutionOptions _execOptions;
     private readonly ILogger<PipelineEngine> _logger;
     private readonly IPipelineAuditFormatter _auditFormatter;
+    private readonly IPipelineRecordSearchService _pipelineRecordSearchService;
 
     public PipelineEngineTests()
     {
@@ -40,6 +41,9 @@ public class PipelineEngineTests
         _execOptions = new PipelineExecutionOptions();
         _logger = Substitute.For<ILogger<PipelineEngine>>();
         _auditFormatter = Substitute.For<IPipelineAuditFormatter>();
+        _pipelineRecordSearchService = Substitute.For<IPipelineRecordSearchService>();
+        var serviceProvider = Substitute.For<IServiceProvider>();
+        serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(_pipelineRecordSearchService);
 
         _engine = new PipelineEngine(
             _pipelineRepo,
@@ -57,7 +61,7 @@ public class PipelineEngineTests
             _auditFormatter,
             Substitute.For<IQueryContext>(),
             Substitute.For<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
-            Substitute.For<IServiceProvider>(),
+            serviceProvider,
             Substitute.For<IAdminRepository>(),
             Substitute.For<ITenantRepository>(),
             Substitute.For<IPipelineStepIdempotencyRepository>()
@@ -844,7 +848,7 @@ public class PipelineEngineTests
             new Dictionary<string, object?> { { "f_1", "Value2" } },
             new Dictionary<string, object?> { { "f_1", "Value3" } }
         };
-        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup>(), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(matchedRecords);
 
         // Act
@@ -919,7 +923,7 @@ public class PipelineEngineTests
             new Dictionary<string, object?> { { "f_1", "Value2" } },
             new Dictionary<string, object?> { { "f_1", "Value3" } }
         };
-        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup>(), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(matchedRecords);
 
         // Act
@@ -975,7 +979,7 @@ public class PipelineEngineTests
         {
             new Dictionary<string, object?> { { "f_1", "Value1" } }
         };
-        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup>(), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(matchedRecords);
 
         // Act
@@ -1040,7 +1044,7 @@ public class PipelineEngineTests
             new Dictionary<string, object?> { { "f_1", "Value1" } },
             new Dictionary<string, object?> { { "f_1", "Value2" } }
         };
-        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup>(), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(matchedRecords);
 
         // Act
@@ -1054,5 +1058,118 @@ public class PipelineEngineTests
             Arg.Any<System.Data.IDbTransaction?>(),
             Arg.Any<CancellationToken>()
         );
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SearchRecordsUnlimited_CallsSearchServiceWithNullMaxResults()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "new-event", RefId = "ref_trigger", IsDeleted = false },
+            new() 
+            { 
+                Id = 11, 
+                RefId = "ref_search", 
+                Type = "query", 
+                Subtype = "search-records", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FilterField = "f_1", FilterValue = "test", MaxResults = (int?)null }) 
+            }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+
+        var fields = new List<AppField> { new() { Id = 1, Fid = 1, Name = "Name", TypeCode = "text" } };
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: should query with null MaxResults
+        await _pipelineRecordSearchService.Received(1).SearchAsync(
+            table,
+            Arg.Any<IReadOnlyList<AppField>>(),
+            null,
+            Arg.Any<FilterGroup>(),
+            Arg.Any<CancellationToken>()
+        );
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SearchRecordsFinite_CallsSearchServiceWithFiniteMaxResults()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "new-event", RefId = "ref_trigger", IsDeleted = false },
+            new() 
+            { 
+                Id = 11, 
+                RefId = "ref_search", 
+                Type = "query", 
+                Subtype = "search-records", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FilterField = "f_1", FilterValue = "test", MaxResults = 5 }) 
+            }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+
+        var fields = new List<AppField> { new() { Id = 1, Fid = 1, Name = "Name", TypeCode = "text" } };
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: should query with MaxResults = 5
+        await _pipelineRecordSearchService.Received(1).SearchAsync(
+            table,
+            Arg.Any<IReadOnlyList<AppField>>(),
+            5,
+            Arg.Any<FilterGroup>(),
+            Arg.Any<CancellationToken>()
+        );
+    }
+
+    [Fact]
+    public void SearchRecordsStepConfig_NullableIntJsonConverter_DeserializesCorrectly()
+    {
+        var configType = typeof(PipelineEngine).GetNestedType("SearchRecordsStepConfig", BindingFlags.NonPublic);
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+        // 1. Unlimited with ""
+        var config1 = JsonSerializer.Deserialize("{\"maxResults\": \"\"}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config1).Should().BeNull();
+
+        // 2. Unlimited with "unlimited"
+        var config2 = JsonSerializer.Deserialize("{\"maxResults\": \"unlimited\"}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config2).Should().BeNull();
+
+        // 3. Unlimited with null
+        var config3 = JsonSerializer.Deserialize("{\"maxResults\": null}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config3).Should().BeNull();
+
+        // 4. Unlimited with negative/zero
+        var config4 = JsonSerializer.Deserialize("{\"maxResults\": -1}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config4).Should().BeNull();
+
+        // 5. Finite with number
+        var config5 = JsonSerializer.Deserialize("{\"maxResults\": 5}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config5).Should().Be(5);
+
+        // 6. Finite with numeric string
+        var config6 = JsonSerializer.Deserialize("{\"maxResults\": \"3\"}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config6).Should().Be(3);
     }
 }

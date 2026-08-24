@@ -481,7 +481,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 var tableGuidStr = inputDict.TryGetValue("TableId", out var tIdObj) ? tIdObj?.ToString() : null;
                 var filterField = inputDict.TryGetValue("FilterField", out var ffObj) ? ffObj?.ToString() : null;
                 var filterValue = inputDict.TryGetValue("FilterValue", out var fvObj) ? fvObj?.ToString() : null;
-                var maxResults = inputDict.TryGetValue("MaxResults", out var mrObj) ? mrObj?.ToString() : "10";
+                var maxResults = inputDict.TryGetValue("MaxResults", out var mrObj) && mrObj != null && !string.IsNullOrWhiteSpace(mrObj.ToString())
+                    ? mrObj.ToString()
+                    : "Unlimited";
 
                 string tableName = "Table";
                 List<AppField> fields = new();

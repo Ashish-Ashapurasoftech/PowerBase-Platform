@@ -45,6 +45,7 @@ public class PipelineEngine : IPipelineEngine
     private readonly IAdminRepository _adminRepo;
     private readonly ITenantRepository _tenantRepo;
     private readonly IPipelineStepIdempotencyRepository _idempotencyRepo;
+    private readonly IPipelineRecordSearchService _pipelineRecordSearchService;
 
     public PipelineEngine(
         IPipelineRepository pipelineRepo,
@@ -86,6 +87,7 @@ public class PipelineEngine : IPipelineEngine
         _adminRepo = adminRepo;
         _tenantRepo = tenantRepo;
         _idempotencyRepo = idempotencyRepo;
+        _pipelineRecordSearchService = (IPipelineRecordSearchService)serviceProvider.GetService(typeof(IPipelineRecordSearchService))!;
     }
     public async Task ExecuteAsync(PipelineExecutionTask task, CancellationToken ct)
     {
@@ -1092,7 +1094,9 @@ public class PipelineEngine : IPipelineEngine
                 }
             }
 
-            var limit = config.MaxResults ?? 10;
+            int? limit = config.MaxResults;
+            var limitModeStr = limit.HasValue ? $"MaxResults={limit.Value}" : "LimitMode=Unlimited";
+            _logger.LogInformation("Search Records step {StepId} started. {LimitMode}", step.Id, limitModeStr);
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 TableId = config.TableId,
@@ -1103,7 +1107,9 @@ public class PipelineEngine : IPipelineEngine
                 MaxResults = limit
             });
 
-            var records = await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit, filterTree: filterTree, ct: ct);
+            var records = _pipelineRecordSearchService != null
+                ? await _pipelineRecordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
+                : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit ?? 100000, filterTree: filterTree, ct: ct);
             var resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
             _logger.LogInformation("Search Records step {StepId} matched {Count} records.", step.Id, resultsList.Count);
 
@@ -3085,6 +3091,7 @@ public class PipelineEngine : IPipelineEngine
         public string? FilterField { get; set; }
         [System.Text.Json.Serialization.JsonConverter(typeof(StringOrPrimitiveJsonConverter))]
         public string? FilterValue { get; set; }
+        [System.Text.Json.Serialization.JsonConverter(typeof(NullableIntJsonConverter))]
         public int? MaxResults { get; set; }
         public List<TriggerFilterRule>? Filters { get; set; }
         public List<TriggerFilterGroup>? FilterGroups { get; set; }
@@ -3143,6 +3150,49 @@ public class PipelineEngine : IPipelineEngine
             else
             {
                 writer.WriteStringValue(value);
+            }
+        }
+    }
+
+    private class NullableIntJsonConverter : System.Text.Json.Serialization.JsonConverter<int?>
+    {
+        public override int? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            switch (reader.TokenType)
+            {
+                case JsonTokenType.Number:
+                    if (reader.TryGetInt32(out var val))
+                    {
+                        if (val <= 0) return null;
+                        return val;
+                    }
+                    return null;
+                case JsonTokenType.String:
+                    var str = reader.GetString();
+                    if (string.IsNullOrWhiteSpace(str)) return null;
+                    if (str.Equals("unlimited", StringComparison.OrdinalIgnoreCase)) return null;
+                    if (int.TryParse(str, out var intVal))
+                    {
+                        if (intVal <= 0) return null;
+                        return intVal;
+                    }
+                    return null;
+                case JsonTokenType.Null:
+                    return null;
+                default:
+                    return null;
+            }
+        }
+
+        public override void Write(Utf8JsonWriter writer, int? value, JsonSerializerOptions options)
+        {
+            if (value.HasValue)
+            {
+                writer.WriteNumberValue(value.Value);
+            }
+            else
+            {
+                writer.WriteNullValue();
             }
         }
     }
