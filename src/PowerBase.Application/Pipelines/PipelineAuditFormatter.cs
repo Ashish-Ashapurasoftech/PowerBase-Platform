@@ -298,7 +298,108 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             var inputDict = DeserializeJsonToDict(rawInputJson);
             var outputDict = DeserializeJsonToDict(rawOutputJson);
 
-            if (type == "trigger" && subtype == "new-event")
+            if (type == "trigger" && subtype == "new-bulk-event")
+            {
+                var count = inputDict.TryGetValue("Count", out var cVal) ? Convert.ToInt32(cVal) : 0;
+                var tableGuidStr = inputDict.TryGetValue("TablePublicId", out var tIdObj) ? tIdObj?.ToString() : null;
+                var connectionGuidStr = inputDict.TryGetValue("ConnectionPublicId", out var cIdObj) ? cIdObj?.ToString() : null;
+
+                string tableName = "Table";
+                string connectionName = "Default Connection";
+
+                List<AppField> fields = new();
+                AppTable? tableMeta = null;
+                if (!string.IsNullOrEmpty(tableGuidStr) && Guid.TryParse(tableGuidStr, out var tGuid))
+                {
+                    var meta = GetOrFetchTableMetadataAsync(tGuid, ct).GetAwaiter().GetResult();
+                    if (meta != null)
+                    {
+                        tableMeta = meta.Value.Table;
+                        tableName = tableMeta.Name;
+                        fields = meta.Value.Fields;
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(connectionGuidStr) && Guid.TryParse(connectionGuidStr, out var cGuid))
+                {
+                    connectionName = GetOrFetchConnectionNameAsync(cGuid, ct).GetAwaiter().GetResult();
+                }
+
+                bool triggerOnAdded = false;
+                bool triggerOnModified = false;
+                bool triggerOnDeleted = false;
+                var exportFields = new List<string>();
+                if (!string.IsNullOrWhiteSpace(step.ConfigJson))
+                {
+                    try
+                    {
+                        var config = JsonSerializer.Deserialize<NewEventStepConfig>(step.ConfigJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        if (config != null)
+                        {
+                            triggerOnAdded = config.TriggerOnAdded;
+                            triggerOnModified = config.TriggerOnModified;
+                            triggerOnDeleted = config.TriggerOnDeleted;
+                            if (config.SubsequentFields != null)
+                            {
+                                foreach (var fStr in config.SubsequentFields)
+                                {
+                                    if (!string.IsNullOrEmpty(fStr))
+                                    {
+                                        var matched = fields.FirstOrDefault(f => f.Name.Equals(fStr, StringComparison.OrdinalIgnoreCase) || $"fid_{f.Fid}".Equals(fStr, StringComparison.OrdinalIgnoreCase));
+                                        exportFields.Add(matched != null ? (!string.IsNullOrWhiteSpace(matched.Label) ? matched.Label : matched.Name) : fStr);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch {}
+                }
+
+                friendlyInput["app"] = _appName;
+                friendlyInput["table"] = tableName;
+                friendlyInput["on_add_record"] = triggerOnAdded;
+                friendlyInput["on_modify_record"] = triggerOnModified;
+                friendlyInput["on_delete_record"] = triggerOnDeleted;
+                friendlyInput["export_fields"] = exportFields;
+                friendlyInput["matching_records_count"] = count;
+
+                friendlyOutput["Status"] = "Fired";
+                friendlyOutput["Message"] = $"Bulk event matched and staging table loaded with {count} records.";
+                friendlyOutput["BulkEventId"] = inputDict.TryGetValue("MessageId", out var msgIdVal) ? msgIdVal?.ToString() : null;
+
+                var metadataContext = new Dictionary<string, object?>();
+                metadataContext["app_name"] = _appName;
+                metadataContext["app_id"] = _pipelinePublicId.ToString();
+                metadataContext["table_name"] = tableName;
+                metadataContext["table_id"] = tableGuidStr;
+                metadata["context"] = metadataContext;
+
+                technicalDetails["TableName"] = tableName;
+                technicalDetails["TableId"] = tableGuidStr;
+                technicalDetails["ConnectionName"] = connectionName;
+                technicalDetails["ConnectionId"] = connectionGuidStr;
+                technicalDetails["TotalRecordsMatched"] = count;
+
+                var summaryLabel = $"Bulk event triggered with {count} records on table {tableName}";
+                technicalDetails["Summary"] = summaryLabel;
+
+                var bulkInputContext = new Dictionary<string, object?>
+                {
+                    { "Header", header },
+                    { "Input", friendlyInput },
+                    { "Metadata", metadata },
+                    { "TechnicalDetails", technicalDetails }
+                };
+
+                var bulkOutputContext = new Dictionary<string, object?>
+                {
+                    { "Output", friendlyOutput },
+                    { "TechnicalDetails", technicalDetails }
+                };
+
+                return (SerializeAndTruncate(bulkInputContext), SerializeAndTruncate(bulkOutputContext), summaryLabel);
+            }
+            else if (type == "trigger" && subtype == "new-event")
             {
                 var eventTypeStr = inputDict.TryGetValue("EventType", out var et) ? et?.ToString() : "Added";
                 var eventLabel = eventTypeStr switch

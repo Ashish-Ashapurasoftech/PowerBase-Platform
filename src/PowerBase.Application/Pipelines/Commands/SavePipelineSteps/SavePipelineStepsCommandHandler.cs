@@ -156,7 +156,7 @@ public class SavePipelineStepsCommandHandler
                 await stepValidator.ValidateStepConnectionAndTenantAccessAsync(dto.ConfigJson, ct);
             }
 
-            if (dto.Type == "trigger" && dto.Subtype == "new-event")
+            if (dto.Type == "trigger" && (dto.Subtype == "new-event" || dto.Subtype == "new-bulk-event"))
             {
                 await stepValidator.ValidateNewEventStepAsync(dto.ConfigJson ?? string.Empty, ct);
             }

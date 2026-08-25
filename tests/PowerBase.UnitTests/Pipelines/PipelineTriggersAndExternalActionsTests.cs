@@ -1234,7 +1234,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         await mainQueueRepo.Received(1).EnqueueAsync(Arg.Is<PipelineQueue>(job => 
             HasMatchingConnectionId(job.TriggerPayloadJson, connectionPublicId.ToString())
-        ), null, Arg.Any<CancellationToken>());
+        ), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -1290,7 +1290,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         await mainQueueRepo.Received(1).EnqueueAsync(Arg.Is<PipelineQueue>(job => 
             HasMatchingConnectionId(job.TriggerPayloadJson, pipelineAccountPublicId.ToString())
-        ), null, Arg.Any<CancellationToken>());
+        ), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
     private static bool HasMatchingConnectionId(string payloadJson, string expectedGuidStr)

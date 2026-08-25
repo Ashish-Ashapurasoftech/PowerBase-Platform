@@ -51,9 +51,18 @@ public interface IPipelineRepository
     Task<long> CreateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default);
     Task UpdateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, CancellationToken ct = default);
+    Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, int page, int pageSize, CancellationToken ct = default);
+    Task<int> CountStepRunsByRunIdAsync(long runId, CancellationToken ct = default);
     Task<PipelineRun?> GetRunByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineRun>> GetRunsByPipelineIdAsync(long pipelineId, int page, int pageSize, CancellationToken ct = default);
     Task<int> CountRunsByPipelineIdAsync(long pipelineId, CancellationToken ct = default);
+
+    // Staging table operations for On New Bulk Event
+    Task InsertBulkEventRecordsAsync(List<PipelineBulkEventRecord> records, IDbTransaction? transaction = null, CancellationToken ct = default);
+    Task<IReadOnlyList<PipelineBulkEventRecord>> GetBulkEventRecordsPreviewAsync(Guid bulkEventId, int limit, CancellationToken ct = default);
+    Task<IReadOnlyList<PipelineBulkEventRecord>> GetPendingBulkEventRecordsPageAsync(Guid bulkEventId, int page, int pageSize, CancellationToken ct = default);
+    Task MarkBulkEventRecordsProcessedAsync(List<long> ids, byte processedStatus, IDbTransaction? transaction = null, CancellationToken ct = default);
+    Task DeleteExpiredBulkEventRecordsAsync(DateTime createdBefore, CancellationToken ct = default);
     Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineReferencesForFieldAsync(int fid, CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> GetActivePipelinesReferencingFieldAsync(int fid, CancellationToken ct = default);
     Task<IReadOnlyList<string>> GetPipelineNamesForUserAsync(long userId, CancellationToken ct = default);

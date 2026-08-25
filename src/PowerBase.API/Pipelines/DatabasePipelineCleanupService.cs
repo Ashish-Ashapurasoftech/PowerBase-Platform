@@ -1,12 +1,16 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Dapper;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.API.Pipelines;
 
@@ -76,5 +80,43 @@ public class DatabasePipelineCleanupService : BackgroundService
         } while (batchesRun < maxBatches && !ct.IsCancellationRequested);
 
         _logger.LogInformation("Completed queue pruning. Deleted {Count} total terminal queue rows across {Batches} batches.", rowsDeleted, batchesRun);
+
+        // 2. Prune tenant bulk event staging tables
+        _logger.LogInformation("Starting bulk event staging record pruning across all active tenants...");
+        List<(long Id, Guid PublicId)> tenants = [];
+        try
+        {
+            var controlConnFactory = scope.ServiceProvider.GetRequiredService<IControlConnectionFactory>();
+            await using var conn = controlConnFactory.Create();
+            await conn.OpenAsync(ct);
+            var query = await conn.QueryAsync<(long Id, Guid PublicId)>(
+                new CommandDefinition("SELECT Id, PublicId FROM meta.Tenant WHERE IsDeleted = 0 AND ProvisioningState = 'Ready'", cancellationToken: ct));
+            tenants = query.ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Pruning service failed to query active tenants from Control DB.");
+            return;
+        }
+
+        var olderThan = DateTime.UtcNow.AddDays(-retentionDays);
+        foreach (var tenant in tenants)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            try
+            {
+                using var tenantScope = _serviceProvider.CreateScope();
+                var queryContext = tenantScope.ServiceProvider.GetRequiredService<IQueryContext>();
+                queryContext.SetTenantId(tenant.Id);
+
+                var pipelineRepo = tenantScope.ServiceProvider.GetRequiredService<IPipelineRepository>();
+                await pipelineRepo.DeleteExpiredBulkEventRecordsAsync(olderThan, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to prune bulk event records for tenant {TenantId}.", tenant.Id);
+            }
+        }
     }
 }

@@ -109,7 +109,7 @@ public class UpdatePipelineCommandHandler
                 _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>(),
                 _serviceProvider.GetService<IServiceScopeFactory>());
 
-            foreach (var step in steps.Where(s => !s.IsDeleted && s.Type == "trigger" && s.Subtype == "new-event"))
+            foreach (var step in steps.Where(s => !s.IsDeleted && s.Type == "trigger" && (s.Subtype == "new-event" || s.Subtype == "new-bulk-event")))
             {
                 await stepValidator.ValidateNewEventStepAsync(step.ConfigJson ?? string.Empty, ct);
             }

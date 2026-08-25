@@ -4,7 +4,16 @@ using System.Collections.Generic;
 namespace PowerBase.Application.Pipelines.Queries.GetPipelineRunSteps;
 
 public record GetPipelineRunStepsQuery(
-    Guid RunPublicId
+    Guid RunPublicId,
+    int Page = 1,
+    int PageSize = 50
+);
+
+public record PipelineStepRunsResultDto(
+    IReadOnlyList<PipelineStepRunDto> Items,
+    int TotalCount,
+    int Page,
+    int PageSize
 );
 
 public record PipelineStepRunDto(

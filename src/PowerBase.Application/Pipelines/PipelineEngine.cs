@@ -301,7 +301,7 @@ public class PipelineEngine : IPipelineEngine
             await _auditFormatter.InitializeAsync(task.PipelineId, task.TriggeredBy, ct);
 
             var pipelineMeta = await _pipelineRepo.GetByIdAsync(task.PipelineId, ct);
-            var triggerStep = activeSteps.FirstOrDefault(s => s.Type == "trigger" && s.Subtype == "new-event");
+            var triggerStep = activeSteps.FirstOrDefault(s => s.Type == "trigger" && (s.Subtype == "new-event" || s.Subtype == "new-bulk-event"));
 
             bool isSkipped = false;
             string? skipReason = null;
@@ -397,6 +397,59 @@ public class PipelineEngine : IPipelineEngine
                                         {
                                             stepsDict[refId] = selectedDict;
                                         }
+                                    }
+                                }
+                            }
+
+                            if (task.TriggerEvent == "new-bulk-event" && messageGuid.HasValue)
+                            {
+                                var bulkEventPreview = await _pipelineRepo.GetBulkEventRecordsPreviewAsync(messageGuid.Value, 100, ct);
+                                var count = 0;
+                                if (triggerData.TryGetValue("Count", out var countObj) && countObj != null && int.TryParse(countObj.ToString(), out var parsedCount))
+                                {
+                                    count = parsedCount;
+                                }
+
+                                var recordsList = new List<Dictionary<string, object?>>();
+                                foreach (var r in bulkEventPreview)
+                                {
+                                    var recordObj = new Dictionary<string, object?>();
+                                    recordObj["id"] = r.RecordPublicId.ToString();
+                                    recordObj["event_type"] = r.EventType;
+                                    var valuesJson = r.EventType == "Deleted" ? r.BeforeValuesJson : r.AfterValuesJson;
+                                    if (!string.IsNullOrEmpty(valuesJson))
+                                    {
+                                        var valuesDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(valuesJson);
+                                        if (valuesDict != null)
+                                        {
+                                            foreach (var kvp in valuesDict)
+                                            {
+                                                recordObj[kvp.Key] = kvp.Value;
+                                            }
+                                        }
+                                    }
+                                    recordsList.Add(recordObj);
+                                }
+
+                                var bulkTriggerObj = new Dictionary<string, object>();
+                                bulkTriggerObj["records"] = recordsList;
+                                bulkTriggerObj["count"] = count;
+                                bulkTriggerObj["MessageId"] = messageGuid.Value.ToString();
+                                bulkTriggerObj["Status"] = "Fired";
+                                bulkTriggerObj["TriggerType"] = "On New Bulk Event";
+                                if (triggerData.TryGetValue("TriggerStepRefId", out var refIdObj2) && refIdObj2 != null)
+                                {
+                                    bulkTriggerObj["TriggerStepRefId"] = refIdObj2.ToString()!;
+                                }
+
+                                contextDict["trigger"] = bulkTriggerObj;
+                                stepsDict["trigger"] = bulkTriggerObj;
+                                if (triggerData.TryGetValue("TriggerStepRefId", out var refIdObj3) && refIdObj3 != null)
+                                {
+                                    var refId = refIdObj3.ToString();
+                                    if (!string.IsNullOrEmpty(refId))
+                                    {
+                                        stepsDict[refId] = bulkTriggerObj;
                                     }
                                 }
                             }
@@ -1516,51 +1569,145 @@ public class PipelineEngine : IPipelineEngine
             if (config == null || string.IsNullOrWhiteSpace(config.LoopOverStepId))
                 throw new InvalidOperationException("Loop step configuration is invalid or missing LoopOverStepId.");
 
-            stepsDict.TryGetValue(config.LoopOverStepId, out var listObj);
-            var items = GetLoopCollection(listObj);
-            var itemsList = items?.ToList() ?? new List<object>();
-
-            stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                LoopOverStepId = config.LoopOverStepId,
-                ItemCount = itemsList.Count
-            });
-
-            _logger.LogInformation("Loop step {StepId} starting iteration. Total items to loop: {Count}.", step.Id, itemsList.Count);
-
-            int index = 0;
-            int count = itemsList.Count;
-
-            stepsDict.TryGetValue(step.RefId, out var previousLoopScope);
-
-            foreach (var item in itemsList)
+            var loopOverStep = allSteps.FirstOrDefault(s => s.RefId == config.LoopOverStepId && s.Type == "trigger" && s.Subtype == "new-bulk-event");
+            if (loopOverStep != null)
             {
-                _logger.LogInformation("Loop step {StepId} iteration {Index} started.", step.Id, index);
-                var loopScope = new Dictionary<string, object>
+                if (messageGuid == Guid.Empty)
+                    throw new InvalidOperationException("BulkEventId (MessageId) is missing from the execution context.");
+
+                int pageSize = _options.BulkEventPageSize > 0 ? _options.BulkEventPageSize : 500;
+                int totalCount = 0;
+                if (contextDict.TryGetValue("trigger", out var triggerObj) && triggerObj is Dictionary<string, object> triggerDict && triggerDict.TryGetValue("count", out var countVal))
                 {
-                    { "item", item },
-                    { "index", index },
-                    { "is_first", index == 0 },
-                    { "is_last", index == count - 1 }
-                };
+                    totalCount = Convert.ToInt32(countVal);
+                }
 
-                stepsDict[step.RefId] = loopScope;
+                stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                    LoopOverStepId = config.LoopOverStepId,
+                    IsBulkEvent = true,
+                    TotalCount = totalCount
+                });
 
-                await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{index}", ct);
+                _logger.LogInformation("Loop step {StepId} starting bulk event iteration. MessageId: {MessageId}, Total: {TotalCount}.", step.Id, messageGuid, totalCount);
 
-                _logger.LogInformation("Loop step {StepId} iteration {Index} completed.", step.Id, index);
-                index++;
-            }
+                stepsDict.TryGetValue(step.RefId, out var previousLoopScope);
+                int processedCount = 0;
 
-            if (previousLoopScope != null)
-            {
-                stepsDict[step.RefId] = previousLoopScope;
+                while (true)
+                {
+                    var pageRecords = await _pipelineRepo.GetPendingBulkEventRecordsPageAsync(messageGuid, 1, pageSize, ct);
+                    if (pageRecords.Count == 0) break;
+
+                    foreach (var r in pageRecords)
+                    {
+                        var recordObj = new Dictionary<string, object?>();
+                        recordObj["id"] = r.RecordPublicId.ToString();
+                        recordObj["event_type"] = r.EventType;
+                        var valuesJson = r.EventType == "Deleted" ? r.BeforeValuesJson : r.AfterValuesJson;
+                        if (!string.IsNullOrEmpty(valuesJson))
+                        {
+                            var valuesDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(valuesJson);
+                            if (valuesDict != null)
+                            {
+                                foreach (var kvp in valuesDict)
+                                {
+                                    recordObj[kvp.Key] = kvp.Value;
+                                }
+                            }
+                        }
+
+                        var loopScope = new Dictionary<string, object>
+                        {
+                            { "item", recordObj },
+                            { "index", r.Ordinal - 1 },
+                            { "is_first", r.Ordinal == 1 },
+                            { "is_last", r.Ordinal == totalCount }
+                        };
+
+                        stepsDict[step.RefId] = loopScope;
+
+                        // Create transaction for item-level checkpoint
+                        await _uow.BeginAsync(ct);
+                        try
+                        {
+                            await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{r.Ordinal}", ct);
+                            
+                            // Mark item Processed = 1 (Success) in database
+                            await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 1, _uow.Transaction, ct);
+                            await _uow.CommitAsync(ct);
+                            processedCount++;
+                        }
+                        catch (Exception ex)
+                        {
+                            await _uow.RollbackAsync(ct);
+                            
+                            // Mark item Processed = 2 (Failed) in database
+                            await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 2, null, ct);
+                            _logger.LogError(ex, "Iteration failed for Ordinal {Ordinal} in bulk event Loop step {StepId}", r.Ordinal, step.Id);
+                            throw; // Re-throw to cause pipeline execution to enter crash retry state, resuming from failure item
+                        }
+                    }
+                }
+
+                if (previousLoopScope != null)
+                {
+                    stepsDict[step.RefId] = previousLoopScope;
+                }
+                else
+                {
+                    stepsDict.Remove(step.RefId);
+                }
+
+                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = processedCount, BulkLoop = true });
             }
             else
             {
-                stepsDict.Remove(step.RefId);
-            }
+                stepsDict.TryGetValue(config.LoopOverStepId, out var listObj);
+                var items = GetLoopCollection(listObj);
+                var itemsList = items?.ToList() ?? new List<object>();
 
-            return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count });
+                stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                    LoopOverStepId = config.LoopOverStepId,
+                    ItemCount = itemsList.Count
+                });
+
+                _logger.LogInformation("Loop step {StepId} starting iteration. Total items to loop: {Count}.", step.Id, itemsList.Count);
+
+                int index = 0;
+                int count = itemsList.Count;
+
+                stepsDict.TryGetValue(step.RefId, out var previousLoopScope);
+
+                foreach (var item in itemsList)
+                {
+                    _logger.LogInformation("Loop step {StepId} iteration {Index} started.", step.Id, index);
+                    var loopScope = new Dictionary<string, object>
+                    {
+                        { "item", item },
+                        { "index", index },
+                        { "is_first", index == 0 },
+                        { "is_last", index == count - 1 }
+                    };
+
+                    stepsDict[step.RefId] = loopScope;
+
+                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{index}", ct);
+
+                    _logger.LogInformation("Loop step {StepId} iteration {Index} completed.", step.Id, index);
+                    index++;
+                }
+
+                if (previousLoopScope != null)
+                {
+                    stepsDict[step.RefId] = previousLoopScope;
+                }
+                else
+                {
+                    stepsDict.Remove(step.RefId);
+                }
+
+                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count });
+            }
         }
         else if (subtype == "send-email" || subtype == "send-email-outlook")
         {
@@ -2167,11 +2314,11 @@ public class PipelineEngine : IPipelineEngine
                 ContentType = storedFile.ContentType
             });
         }
-        else if (step.Type == "trigger" && subtype == "new-event")
+        else if (step.Type == "trigger" && (subtype == "new-event" || subtype == "new-bulk-event"))
         {
             var triggerInfo = new Dictionary<string, object?>();
             triggerInfo["Status"] = "Fired";
-            triggerInfo["TriggerType"] = "On New Event";
+            triggerInfo["TriggerType"] = subtype == "new-bulk-event" ? "On New Bulk Event" : "On New Event";
 
             if (contextDict.TryGetValue("trigger", out var triggerObj) && triggerObj != null)
             {
