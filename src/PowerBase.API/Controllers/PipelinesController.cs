@@ -171,7 +171,7 @@ public class PipelinesController : ControllerBase
         var command = new SavePipelineStepsCommand(publicId, request.Steps, rowVersion);
         await _saveStepsHandler.HandleAsync(command, ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { rowVersion = Convert.ToBase64String(pipeline.RowVersion) });
+        return Ok(new { rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Soft-delete a pipeline workflow.</summary>
@@ -385,20 +385,22 @@ public class PipelinesController : ControllerBase
             request.CronExpression);
 
         await handler.HandleAsync(command, ct);
-        return Ok(new { message = "Schedule updated successfully." });
+        var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
+        return Ok(new { message = "Schedule updated successfully.", rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Delete a pipeline's schedule.</summary>
     [HttpDelete("pipelines/{publicId:guid}/schedule")]
     [RequireAppPermission(PermissionCodes.PowerFlowsUpdate, AppAccessResolver.ByPipelinePublicId)]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<IActionResult> DeleteSchedule(
         Guid publicId,
         [FromServices] DeletePipelineScheduleCommandHandler handler,
         CancellationToken ct)
     {
         await handler.HandleAsync(new DeletePipelineScheduleCommand(publicId), ct);
-        return NoContent();
+        var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
+        return Ok(new { message = "Schedule deleted successfully.", rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Run a pipeline manually on demand.</summary>

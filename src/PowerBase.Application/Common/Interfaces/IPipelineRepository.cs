@@ -32,7 +32,7 @@ public interface IPipelineRepository
     Task SoftDeleteManyAsync(IEnumerable<Guid> publicIds, CancellationToken ct = default);
 
     Task<IReadOnlyList<PipelineStep>> GetStepsByPipelineIdAsync(long pipelineId, CancellationToken ct = default);
-    Task SaveStepsAsync(long pipelineId, IEnumerable<PipelineStep> steps, byte[] rowVersion, IDbTransaction? transaction = null, CancellationToken ct = default);
+    Task SaveStepsAsync(long pipelineId, IEnumerable<PipelineStep> steps, byte[] rowVersion, bool deactivate = false, IDbTransaction? transaction = null, CancellationToken ct = default);
 
     Task<PipelineConnection?> GetConnectionByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineConnection>> GetConnectionsByPipelineIdAsync(long pipelineId, CancellationToken ct = default);

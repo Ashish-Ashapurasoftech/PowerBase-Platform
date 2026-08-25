@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -104,7 +105,19 @@ public class SavePipelineStepsCommandHandler
 
         var pipelineId = await _pipelineRepo.GetIdByPublicIdAsync(command.PipelinePublicId, ct);
         var pipeline = await _pipelineRepo.GetByPublicIdAsync(command.PipelinePublicId, ct);
-        if (pipeline.IsActive)
+
+        // Load existing active steps to check for modifications
+        var dbSteps = await _pipelineRepo.GetStepsByPipelineIdAsync(pipelineId, ct);
+
+        // Flatten the hierarchy tree
+        var flatList = new List<PipelineStep>();
+        var rootOrder = 0;
+        FlattenSteps(command.Steps, null, null, ref rootOrder, flatList);
+
+        bool stepsChanged = StepsConfigChanged(dbSteps.ToList(), flatList);
+        bool shouldDeactivate = pipeline.IsActive && stepsChanged;
+
+        if (pipeline.IsActive && !shouldDeactivate)
         {
             bool HasInvalidStep(List<SavePipelineStepDto> dtoSteps)
             {
@@ -128,15 +141,10 @@ public class SavePipelineStepsCommandHandler
             }
         }
 
-        // Flatten the hierarchy tree
-        var flatList = new List<PipelineStep>();
-        var rootOrder = 0;
-        FlattenSteps(command.Steps, null, null, ref rootOrder, flatList);
-
         await _uow.BeginAsync(ct);
         try
         {
-            await _pipelineRepo.SaveStepsAsync(pipelineId, flatList, command.RowVersion, _uow.Transaction, ct);
+            await _pipelineRepo.SaveStepsAsync(pipelineId, flatList, command.RowVersion, shouldDeactivate, _uow.Transaction, ct);
             await _uow.CommitAsync(ct);
         }
         catch
@@ -208,6 +216,48 @@ public class SavePipelineStepsCommandHandler
                 var errorOrder = 0;
                 FlattenSteps(dto.ErrorChildren, stepPublicId, "errorChildren", ref errorOrder, flatList);
             }
+        }
+    }
+
+    private bool StepsConfigChanged(List<PipelineStep> oldSteps, List<PipelineStep> newSteps)
+    {
+        var activeOld = oldSteps.Where(s => !s.IsDeleted).ToList();
+        if (activeOld.Count != newSteps.Count)
+            return true;
+
+        var oldDict = activeOld.ToDictionary(s => s.PublicId);
+        foreach (var newStep in newSteps)
+        {
+            if (!oldDict.TryGetValue(newStep.PublicId, out var oldStep))
+                return true;
+
+            if (oldStep.RefId != newStep.RefId ||
+                oldStep.Type != newStep.Type ||
+                oldStep.Subtype != newStep.Subtype ||
+                oldStep.DisplayOrder != newStep.DisplayOrder ||
+                oldStep.ParentPublicId != newStep.ParentPublicId ||
+                oldStep.ParentBranch != newStep.ParentBranch ||
+                !JsonConfigNodeEquals(oldStep.ConfigJson, newStep.ConfigJson))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool JsonConfigNodeEquals(string? json1, string? json2)
+    {
+        if (string.IsNullOrEmpty(json1) && string.IsNullOrEmpty(json2)) return true;
+        if (string.IsNullOrEmpty(json1) || string.IsNullOrEmpty(json2)) return false;
+        try
+        {
+            var node1 = JsonNode.Parse(json1);
+            var node2 = JsonNode.Parse(json2);
+            return JsonNode.DeepEquals(node1, node2);
+        }
+        catch
+        {
+            return json1 == json2;
         }
     }
 }

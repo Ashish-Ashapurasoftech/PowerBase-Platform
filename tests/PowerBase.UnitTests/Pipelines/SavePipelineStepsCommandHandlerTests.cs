@@ -80,6 +80,7 @@ public class SavePipelineStepsCommandHandlerTests
             pipelineId,
             Arg.Do<IEnumerable<PipelineStep>>(steps => capturedSteps = steps),
             rowVersion,
+            Arg.Any<bool>(),
             _uow.Transaction,
             Arg.Any<CancellationToken>()
         );
@@ -162,5 +163,127 @@ public class SavePipelineStepsCommandHandlerTests
         var exception = await act.Should().ThrowAsync<PowerBase.Domain.Exceptions.ValidationException>();
         exception.Which.Errors.Should().ContainKey("Steps");
         exception.Which.Errors["Steps"].Should().Contain("Cannot save incomplete steps to an Active PowerFlow.");
+    }
+
+    [Fact]
+    public async Task HandleAsync_StepsChangedOnActivePipeline_ShouldDeactivatePipeline()
+    {
+        // Arrange
+        var pipelineId = 123L;
+        var pipelinePublicId = Guid.NewGuid();
+        var rowVersion = new byte[] { 1, 2, 3, 4 };
+
+        _pipelineRepo.GetIdByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>())
+            .Returns(pipelineId);
+
+        _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>())
+            .Returns(new Pipeline { Id = pipelineId, PublicId = pipelinePublicId, IsActive = true });
+
+        // Database steps (original setup)
+        var dbSteps = new List<PipelineStep>
+        {
+            new() { Id = 1, PublicId = Guid.NewGuid(), RefId = "trigger_1", Type = "trigger", Subtype = "record-added", IsValidated = true, IsDeleted = false }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(pipelineId, Arg.Any<CancellationToken>())
+            .Returns(dbSteps);
+
+        // Incoming steps (modified) - new action step added
+        var triggerStepDto = new SavePipelineStepDto
+        {
+            PublicId = dbSteps[0].PublicId,
+            RefId = "trigger_1",
+            Type = "trigger",
+            Subtype = "record-added",
+            IsValidated = true
+        };
+
+        var actionStepDto = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "action_1",
+            Type = "action",
+            Subtype = "send-email",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(
+            pipelinePublicId,
+            new List<SavePipelineStepDto> { triggerStepDto, actionStepDto },
+            rowVersion
+        );
+
+        bool capturedDeactivateValue = false;
+        await _pipelineRepo.SaveStepsAsync(
+            pipelineId,
+            Arg.Any<IEnumerable<PipelineStep>>(),
+            rowVersion,
+            Arg.Do<bool>(val => capturedDeactivateValue = val),
+            _uow.Transaction,
+            Arg.Any<CancellationToken>()
+        );
+
+        // Act
+        await _handler.HandleAsync(command, CancellationToken.None);
+
+        // Assert
+        capturedDeactivateValue.Should().BeTrue();
+        await _uow.Received(1).BeginAsync(Arg.Any<CancellationToken>());
+        await _uow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleAsync_NoOpStepsSaveOnActivePipeline_ShouldNotDeactivatePipeline()
+    {
+        // Arrange
+        var pipelineId = 123L;
+        var pipelinePublicId = Guid.NewGuid();
+        var rowVersion = new byte[] { 1, 2, 3, 4 };
+
+        _pipelineRepo.GetIdByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>())
+            .Returns(pipelineId);
+
+        _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>())
+            .Returns(new Pipeline { Id = pipelineId, PublicId = pipelinePublicId, IsActive = true });
+
+        // Database steps
+        var dbSteps = new List<PipelineStep>
+        {
+            new() { Id = 1, PublicId = Guid.NewGuid(), RefId = "trigger_1", Type = "trigger", Subtype = "record-added", ConfigJson = "{}", IsValidated = true, IsDeleted = false }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(pipelineId, Arg.Any<CancellationToken>())
+            .Returns(dbSteps);
+
+        // Incoming steps (identical)
+        var triggerStepDto = new SavePipelineStepDto
+        {
+            PublicId = dbSteps[0].PublicId,
+            RefId = "trigger_1",
+            Type = "trigger",
+            Subtype = "record-added",
+            ConfigJson = "{}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(
+            pipelinePublicId,
+            new List<SavePipelineStepDto> { triggerStepDto },
+            rowVersion
+        );
+
+        bool capturedDeactivateValue = true;
+        await _pipelineRepo.SaveStepsAsync(
+            pipelineId,
+            Arg.Any<IEnumerable<PipelineStep>>(),
+            rowVersion,
+            Arg.Do<bool>(val => capturedDeactivateValue = val),
+            _uow.Transaction,
+            Arg.Any<CancellationToken>()
+        );
+
+        // Act
+        await _handler.HandleAsync(command, CancellationToken.None);
+
+        // Assert
+        capturedDeactivateValue.Should().BeFalse();
     }
 }

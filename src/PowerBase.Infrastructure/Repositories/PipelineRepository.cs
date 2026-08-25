@@ -446,13 +446,17 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         return results.AsList();
     }
 
-    public async Task SaveStepsAsync(long pipelineId, IEnumerable<PipelineStep> steps, byte[] rowVersion, IDbTransaction? transaction = null, CancellationToken ct = default)
+    public async Task SaveStepsAsync(long pipelineId, IEnumerable<PipelineStep> steps, byte[] rowVersion, bool deactivate = false, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         // Internal helper to perform step saves
         async Task DoSaveAsync(IDbConnection connection, IDbTransaction? trans)
         {
             // 0. Concurrency check on meta.Pipeline using rowVersion
-            var updatePipelineSql = """
+            var updatePipelineSql = deactivate ? """
+                UPDATE meta.Pipeline
+                SET IsActive = 0, ModifiedOn = SYSUTCDATETIME()
+                WHERE Id = @pipelineId AND RowVersion = @rowVersion
+                """ : """
                 UPDATE meta.Pipeline
                 SET ModifiedOn = SYSUTCDATETIME()
                 WHERE Id = @pipelineId AND RowVersion = @rowVersion
