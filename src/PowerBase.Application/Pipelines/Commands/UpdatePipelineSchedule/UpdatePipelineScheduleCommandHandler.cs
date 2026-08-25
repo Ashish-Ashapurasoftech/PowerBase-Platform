@@ -33,11 +33,11 @@ public class UpdatePipelineScheduleCommandHandler
 
         var steps = await _pipelineRepo.GetStepsByPipelineIdAsync(pipelineId, ct);
         var firstStep = steps.Where(s => s.ParentStepId == null).OrderBy(s => s.DisplayOrder).FirstOrDefault();
-        if (firstStep == null || firstStep.Type != "query" || firstStep.Subtype != "search-records")
+        if (firstStep == null || firstStep.Type != "query" || (firstStep.Subtype != "search-records" && firstStep.Subtype != "look-up-record"))
         {
             throw new ValidationException(new Dictionary<string, string[]>
             {
-                { "Pipeline", new[] { "PowerFlow schedule is only allowed when the first step is a Search Records (Query) step." } }
+                { "Pipeline", new[] { "PowerFlow schedule is only allowed when the first step is a Search Records or Look Up a Record (Query) step." } }
             });
         }
 

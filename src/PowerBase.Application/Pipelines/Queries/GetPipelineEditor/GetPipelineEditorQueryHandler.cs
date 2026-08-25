@@ -192,7 +192,7 @@ public class GetPipelineEditorQueryHandler
             if (Guid.TryParse(appStr, out var ag)) appGuid = ag;
 
             // Single-table steps
-            if (subtype is "search-records" or "create-record" or "bulk-trigger"
+            if (subtype is "search-records" or "look-up-record" or "create-record" or "bulk-trigger"
                 or "new-event" or "new-bulk-event" or "prepare-bulk-upsert"
                 or "import-with-csv" or "import-to-quickbase" or "export-records-csv"
                 or "update-record" or "delete-record" or "upload-file"

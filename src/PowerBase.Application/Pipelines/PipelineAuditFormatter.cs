@@ -536,6 +536,33 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 logMessage = $"Found {recordsCount} records in {tableName} matching criteria.";
             }
+            else if (subtype == "look-up-record")
+            {
+                var tableGuidStr = inputDict.TryGetValue("TablePublicId", out var tIdObj) ? tIdObj?.ToString() : null;
+                var recordId = inputDict.TryGetValue("RecordId", out var ridObj) ? ridObj?.ToString() : "—";
+                var compareLocalTime = inputDict.TryGetValue("CompareLocalTime", out var cltObj) ? cltObj?.ToString() : "No";
+
+                string tableName = "Table";
+                List<AppField> fields = new();
+                if (!string.IsNullOrEmpty(tableGuidStr) && Guid.TryParse(tableGuidStr, out var tGuid))
+                {
+                    var meta = GetOrFetchTableMetadataAsync(tGuid, ct).GetAwaiter().GetResult();
+                    if (meta != null)
+                    {
+                        tableName = meta.Value.Table.Name;
+                        fields = meta.Value.Fields;
+                    }
+                }
+
+                friendlyInput["Table"] = tableName;
+                friendlyInput["Lookup Value"] = $"Record ID equals {recordId}";
+                friendlyInput["Compare with app local time"] = compareLocalTime;
+
+                friendlyOutput["Record"] = MapFieldValuesToUserFriendly(fields, outputDict);
+
+                technicalDetails["TablePublicId"] = tableGuidStr;
+                logMessage = $"Looked up record ID {recordId} in {tableName}.";
+            }
             else if (subtype == "create-record")
             {
                 var tableGuidStr = inputDict.TryGetValue("TableId", out var tIdObj) ? tIdObj?.ToString() : null;

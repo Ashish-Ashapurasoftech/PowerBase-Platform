@@ -147,7 +147,7 @@ public class UpdatePipelineCommandHandler
                 .OrderBy(s => s.DisplayOrder)
                 .FirstOrDefault();
 
-            bool isSearchRecordsFirst = firstStep != null && firstStep.Subtype == "search-records";
+            bool isSearchRecordsFirst = firstStep != null && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record");
 
             if (isSearchRecordsFirst)
             {

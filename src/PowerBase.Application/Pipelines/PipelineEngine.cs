@@ -1034,6 +1034,77 @@ public class PipelineEngine : IPipelineEngine
             }
         }
 
+        if (subtype == "look-up-record")
+        {
+            var config = JsonSerializer.Deserialize<LookUpRecordStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (config == null || string.IsNullOrWhiteSpace(config.TablePublicId))
+                throw new InvalidOperationException("Look up record step configuration is invalid or missing tablePublicId.");
+
+            _logger.LogInformation("Look Up a Record step {StepId} started for Table {TableId}.", step.Id, config.TablePublicId);
+
+            var tableGuid = Guid.Parse(config.TablePublicId);
+            var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
+            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+
+            var evaluatedRecordIdVal = EvaluateTokens(config.RecordIdValue, payloadJson, executionPath, allSteps);
+            if (string.IsNullOrWhiteSpace(evaluatedRecordIdVal))
+            {
+                throw new InvalidOperationException("Evaluated Record ID lookup value is empty.");
+            }
+
+            if (!long.TryParse(evaluatedRecordIdVal, out var recordId))
+            {
+                throw new InvalidOperationException($"Evaluated Record ID value '{evaluatedRecordIdVal}' is not a valid numeric identifier.");
+            }
+
+            stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                TablePublicId = config.TablePublicId,
+                RecordId = recordId,
+                SubsequentFields = config.SubsequentFields,
+                CompareLocalTime = config.CompareLocalTime
+            });
+
+            var queryFields = fields.ToList();
+
+            var recordsDict = await recordRepo.GetRowsByIdsAsync(table, queryFields, new[] { recordId }, ct);
+            if (recordsDict == null || !recordsDict.TryGetValue(recordId, out var record))
+            {
+                throw new InvalidOperationException($"Record with ID {recordId} was not found in Table '{table.Name}'.");
+            }
+
+            _logger.LogInformation("Look Up a Record step {StepId} found record ID {RecordId}.", step.Id, recordId);
+
+            var norm = new Dictionary<string, object?>();
+            if (record.TryGetValue("Id", out var lookupIdVal)) norm["Id"] = lookupIdVal;
+            if (record.TryGetValue("PublicId", out var lookupPubIdVal))
+            {
+                norm["PublicId"] = lookupPubIdVal;
+                norm["RecordPublicId"] = lookupPubIdVal;
+            }
+            if (record.TryGetValue("CreatedOn", out var lookupCoVal)) norm["CreatedOn"] = lookupCoVal;
+            if (record.TryGetValue("CreatedBy", out var lookupCbVal)) norm["CreatedBy"] = lookupCbVal;
+            if (record.TryGetValue("ModifiedOn", out var lookupMoVal)) norm["ModifiedOn"] = lookupMoVal;
+            if (record.TryGetValue("ModifiedBy", out var lookupMbVal)) norm["ModifiedBy"] = lookupMbVal;
+
+            foreach (var f in fields)
+            {
+                if (f.Fid.HasValue)
+                {
+                    var colName = PhysicalNaming.ColumnName(f.Fid.Value);
+                    if (record.TryGetValue(colName, out var val))
+                    {
+                        norm[$"fid_{f.Fid.Value}"] = val;
+                    }
+                    else if (record.TryGetValue(f.Name, out var valByName))
+                    {
+                        norm[$"fid_{f.Fid.Value}"] = valByName;
+                    }
+                }
+            }
+
+            return JsonSerializer.Serialize(norm);
+        }
+
         if (subtype == "search-records")
         {
             var config = JsonSerializer.Deserialize<SearchRecordsStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -3083,6 +3154,17 @@ public class PipelineEngine : IPipelineEngine
         }
 
         return dbGroup.Nodes.Any() ? dbGroup : null;
+    }
+
+    private class LookUpRecordStepConfig
+    {
+        public string? ConnectionPublicId { get; set; }
+        public string? AppPublicId { get; set; }
+        public string? TablePublicId { get; set; }
+        public List<string>? SubsequentFields { get; set; }
+        public string? CompareLocalTime { get; set; }
+        [System.Text.Json.Serialization.JsonConverter(typeof(StringOrPrimitiveJsonConverter))]
+        public string? RecordIdValue { get; set; }
     }
 
     private class SearchRecordsStepConfig
