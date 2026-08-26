@@ -1406,7 +1406,7 @@ public class PipelineEngine : IPipelineEngine
 
                 recordPublicId = await recordRepo.CreateAsync(table, fields, values, uow.Transaction, ct);
                 _logger.LogInformation("Create Record step {StepId} succeeded. Created record: {RecordPublicId}.", step.Id, recordPublicId);
-                var recordId = await recordRepo.GetRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
+                var recordId = await recordRepo.GetActiveRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
                 values[3] = recordId;
                 await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, values, "record-added", ct);
 
@@ -2120,7 +2120,7 @@ public class PipelineEngine : IPipelineEngine
                 if (addedRecords.Any())
                 {
                     var publicIds = addedRecords.Select(r => r.PublicId).ToList();
-                    var publicIdToIdMap = await recordRepo.GetRecordIdsByPublicIdsAsync(table, publicIds, uow.Transaction, ct);
+                    var publicIdToIdMap = await recordRepo.GetActiveRecordIdsByPublicIdsAsync(table, publicIds, uow.Transaction, ct);
 
                     var recordIdField = fields.FirstOrDefault(f => f.Fid == 3);
 

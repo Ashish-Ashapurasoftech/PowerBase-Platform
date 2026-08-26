@@ -68,6 +68,8 @@ public interface IRecordRepository
     Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default);
     Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+    Task<long> GetActiveRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+    Task<IReadOnlyDictionary<Guid, long>> GetActiveRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
     Task<Guid> CreateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
