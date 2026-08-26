@@ -121,7 +121,9 @@ public class CreateConnectionCommandHandler
                 : scopedContext.UserEmail;
         }
 
-        var name = BuildName(command.Name, ownerDisplay, subdomain);
+        var name = !string.IsNullOrWhiteSpace(userToken.TokenName)
+            ? (userToken.TokenName.Trim().Length > MaxNameLength ? userToken.TokenName.Trim()[..MaxNameLength] : userToken.TokenName.Trim())
+            : BuildName(command.Name, ownerDisplay, subdomain);
 
         // Re-supplying the same token reconnects the caller's own existing account rather than
         // adding a duplicate entry to the dropdown.

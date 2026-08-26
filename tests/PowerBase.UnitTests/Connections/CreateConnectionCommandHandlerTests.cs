@@ -160,4 +160,123 @@ public class CreateConnectionCommandHandlerTests
 
         await _tenantRepo.Received(1).GetTenantBySlugAsync("acme", Arg.Any<CancellationToken>());
     }
+
+    private void MockTargetTenantScope(string userEmail, string userName)
+    {
+        var scope = Substitute.For<IServiceScope>();
+        var serviceProvider = Substitute.For<IServiceProvider>();
+        
+        var queryContext = Substitute.For<IQueryContext>();
+        queryContext.UserEmail.Returns(userEmail);
+        queryContext.UserName.Returns(userName);
+        
+        var userRepo = Substitute.For<IUserRepository>();
+        userRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new User { Id = TokenOwnerUserId, Name = userName, Email = userEmail, IsActive = true });
+            
+        var tenantRepo = Substitute.For<ITenantRepository>();
+        tenantRepo.GetUserRoleNameInTenantAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns("Admin");
+        tenantRepo.IsActiveMemberAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(true);
+            
+        var permissionRepo = Substitute.For<IUserPermissionRepository>();
+        permissionRepo.GetPermissionsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string>());
+
+        serviceProvider.GetService(typeof(IQueryContext)).Returns(queryContext);
+        serviceProvider.GetService(typeof(IUserRepository)).Returns(userRepo);
+        serviceProvider.GetService(typeof(ITenantRepository)).Returns(tenantRepo);
+        serviceProvider.GetService(typeof(IUserPermissionRepository)).Returns(permissionRepo);
+
+        scope.ServiceProvider.Returns(serviceProvider);
+        _scopeFactory.CreateScope().Returns(scope);
+    }
+
+    [Fact]
+    public async Task UserTokenConnection_UsesTokenNameAsConnectionName()
+    {
+        var token = LiveToken(tenantId: 42);
+        token.TokenName = "My Token Name";
+        _userTokenRepo.GetByHashAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(token);
+        _tenantRepo.GetTenantBySlugAsync("acme", Arg.Any<CancellationToken>())
+            .Returns(new Tenant { Id = 42, Slug = "acme", Name = "Acme", Status = "Active" });
+
+        MockTargetTenantScope("owner@acme.com", "Owner");
+
+        _accountRepo.CreateAsync(Arg.Any<PipelineAccount>(), Arg.Any<CancellationToken>())
+            .Returns(x => x.Arg<PipelineAccount>());
+
+        var result = await _handler.HandleAsync(Command("acme"));
+
+        result.Name.Should().Be("My Token Name");
+        await _accountRepo.Received(1).CreateAsync(Arg.Is<PipelineAccount>(a => a.Name == "My Token Name"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task UserTokenConnection_BlankTokenName_UsesExistingFallback()
+    {
+        var token = LiveToken(tenantId: 42);
+        token.TokenName = "   ";
+        _userTokenRepo.GetByHashAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(token);
+        _tenantRepo.GetTenantBySlugAsync("acme", Arg.Any<CancellationToken>())
+            .Returns(new Tenant { Id = 42, Slug = "acme", Name = "Acme", Status = "Active" });
+
+        MockTargetTenantScope("owner@acme.com", "Owner");
+
+        _accountRepo.CreateAsync(Arg.Any<PipelineAccount>(), Arg.Any<CancellationToken>())
+            .Returns(x => x.Arg<PipelineAccount>());
+
+        var result = await _handler.HandleAsync(new CreateConnectionCommand(PipelineAccountAuthModes.UserToken, "acme", RawToken, "Custom Subdomain"));
+
+        result.Name.Should().Be("Custom Subdomain");
+        await _accountRepo.Received(1).CreateAsync(Arg.Is<PipelineAccount>(a => a.Name == "Custom Subdomain"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Reconnect_PreservesOrRefreshesTokenNameCorrectly()
+    {
+        var token = LiveToken(tenantId: 42);
+        token.TokenName = "Updated Token Name";
+        _userTokenRepo.GetByHashAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(token);
+        _tenantRepo.GetTenantBySlugAsync("acme", Arg.Any<CancellationToken>())
+            .Returns(new Tenant { Id = 42, Slug = "acme", Name = "Acme", Status = "Active" });
+
+        MockTargetTenantScope("owner@acme.com", "Owner");
+
+        var existing = new PipelineAccount { Id = 101, PublicId = Guid.NewGuid(), Name = "Old Name" };
+        _accountRepo.GetByTokenHashAsync(Arg.Any<string>(), LoggedInUserId, Arg.Any<CancellationToken>())
+            .Returns(existing);
+
+        _accountRepo.RefreshCredentialAsync(Arg.Any<PipelineAccount>(), Arg.Any<CancellationToken>())
+            .Returns(x => x.Arg<PipelineAccount>());
+
+        var result = await _handler.HandleAsync(Command("acme"));
+
+        result.Name.Should().Be("Updated Token Name");
+        await _accountRepo.Received(1).RefreshCredentialAsync(Arg.Is<PipelineAccount>(a => a.Name == "Updated Token Name"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task RawTokenSecret_IsNeverReturnedInDto()
+    {
+        var token = LiveToken(tenantId: 42);
+        token.TokenName = "Secret Test Token";
+        _userTokenRepo.GetByHashAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(token);
+        _tenantRepo.GetTenantBySlugAsync("acme", Arg.Any<CancellationToken>())
+            .Returns(new Tenant { Id = 42, Slug = "acme", Name = "Acme", Status = "Active" });
+
+        MockTargetTenantScope("owner@acme.com", "Owner");
+
+        _accountRepo.CreateAsync(Arg.Any<PipelineAccount>(), Arg.Any<CancellationToken>())
+            .Returns(x => x.Arg<PipelineAccount>());
+
+        var result = await _handler.HandleAsync(Command("acme"));
+
+        result.TokenPrefix.Should().Be("pb_ut_abcd…");
+        // Verify no raw token or hash properties are on the DTO class.
+        typeof(PipelineAccountDto).GetProperties()
+            .Select(p => p.Name)
+            .Should().NotContain(new[] { "Id", "TokenHash", "UserToken", "TargetTenantId", "TargetUserId" });
+    }
 }
