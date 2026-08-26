@@ -119,6 +119,11 @@ public class CopyPipelineCommandHandler
             var newSteps = new List<PipelineStep>();
             foreach (var step in sourceSteps)
             {
+                if (step.Type == "trigger" && step.Subtype == "schedule")
+                {
+                    continue; // Route 1: Discard the legacy Route 1 schedule trigger step during duplication
+                }
+
                 var newStep = new PipelineStep
                 {
                     PublicId = publicIdMap[step.PublicId],
@@ -178,6 +183,29 @@ public class CopyPipelineCommandHandler
 
             // Save steps
             await _pipelineRepo.SaveStepsAsync(newId, newSteps, rowVersion, deactivate: false, _uow.Transaction, ct);
+
+            // Duplicate schedule if present (Route 2)
+            var sourceSchedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(source.Id, ct);
+            if (sourceSchedule != null)
+            {
+                var newSchedule = new PipelineSchedule
+                {
+                    PipelineId = newId,
+                    ScheduleType = sourceSchedule.ScheduleType,
+                    Interval = sourceSchedule.Interval,
+                    TimeOfDay = sourceSchedule.TimeOfDay,
+                    Weekdays = sourceSchedule.Weekdays,
+                    MonthDay = sourceSchedule.MonthDay,
+                    MonthOfYear = sourceSchedule.MonthOfYear,
+                    RelativeWeek = sourceSchedule.RelativeWeek,
+                    RelativeDay = sourceSchedule.RelativeDay,
+                    TimeZone = sourceSchedule.TimeZone,
+                    CronExpression = sourceSchedule.CronExpression,
+                    NextRunOn = null, // Set NextRunOn to null; recalculated on manual ON
+                    LastRunOn = null
+                };
+                await _pipelineRepo.CreateScheduleAsync(newSchedule, _uow.Transaction, ct);
+            }
 
             await _uow.CommitAsync(ct);
 

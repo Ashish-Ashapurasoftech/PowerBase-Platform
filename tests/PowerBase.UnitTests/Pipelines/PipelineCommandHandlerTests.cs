@@ -87,7 +87,7 @@ public class PipelineCommandHandlerTests
         _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>()).Returns(existingPipeline);
         _pipelineRepo.NameExistsForUserAsync(100L, "DuplicatePipelineName", Arg.Any<CancellationToken>()).Returns(true);
 
-        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), Substitute.For<IServiceProvider>());
+        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), Substitute.For<IMainPipelineQueueRepository>(), Substitute.For<IServiceProvider>());
 
         // Act & Assert
         await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
@@ -111,7 +111,7 @@ public class PipelineCommandHandlerTests
         _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>()).Returns(existingPipeline);
         _pipelineRepo.UpdateAsync(Arg.Any<Pipeline>(), null, Arg.Any<CancellationToken>()).Returns(1);
 
-        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), Substitute.For<IServiceProvider>());
+        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), Substitute.For<IMainPipelineQueueRepository>(), Substitute.For<IServiceProvider>());
 
         // Act
         await handler.HandleAsync(command, CancellationToken.None);
@@ -139,7 +139,7 @@ public class PipelineCommandHandlerTests
         _pipelineRepo.NameExistsForUserAsync(100L, "BrandNewPipeline", Arg.Any<CancellationToken>()).Returns(false);
         _pipelineRepo.UpdateAsync(Arg.Any<Pipeline>(), null, Arg.Any<CancellationToken>()).Returns(1);
 
-        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), Substitute.For<IServiceProvider>());
+        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), Substitute.For<IMainPipelineQueueRepository>(), Substitute.For<IServiceProvider>());
 
         // Act
         await handler.HandleAsync(command, CancellationToken.None);
@@ -170,7 +170,7 @@ public class PipelineCommandHandlerTests
         };
         _pipelineRepo.GetStepsByPipelineIdAsync(existingPipeline.Id, Arg.Any<CancellationToken>()).Returns(incompleteSteps);
 
-        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), Substitute.For<IServiceProvider>());
+        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), Substitute.For<IMainPipelineQueueRepository>(), Substitute.For<IServiceProvider>());
 
         // Act & Assert
         var exception = await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
@@ -180,7 +180,7 @@ public class PipelineCommandHandlerTests
     }
 
     [Fact]
-    public async Task UpdatePipeline_TransitionToActive_SearchRecordsFirst_EnqueuesTask()
+    public async Task UpdatePipeline_TransitionToActive_ResumesSentinelPausedJobs()
     {
         // Arrange
         var pipelinePublicId = Guid.NewGuid();
@@ -197,27 +197,19 @@ public class PipelineCommandHandlerTests
         _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>()).Returns(existingPipeline);
         _pipelineRepo.UpdateAsync(Arg.Any<Pipeline>(), null, Arg.Any<CancellationToken>()).Returns(1);
 
-        var steps = new List<PipelineStep>
-        {
-            new() { PublicId = Guid.NewGuid(), RefId = "ref_search", Type = "query", Subtype = "search-records", IsValidated = true }
-        };
-        _pipelineRepo.GetStepsByPipelineIdAsync(existingPipeline.Id, Arg.Any<CancellationToken>()).Returns(steps);
+        var queueRepo = Substitute.For<IMainPipelineQueueRepository>();
 
-        var queue = Substitute.For<IPipelineExecutionQueue>();
-        var serviceProvider = Substitute.For<IServiceProvider>();
-        serviceProvider.GetService(typeof(IPipelineExecutionQueue)).Returns(queue);
-
-        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), serviceProvider);
+        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), queueRepo, Substitute.For<IServiceProvider>());
 
         // Act
         await handler.HandleAsync(command, CancellationToken.None);
 
         // Assert
-        queue.Received(1).QueueTask(Arg.Is<PipelineExecutionTask>(t => t.PipelineId == existingPipeline.Id && t.TriggerEvent == "activation"));
+        await queueRepo.Received(1).ResumePendingJobsAsync(Arg.Any<long>(), existingPipeline.Id, Arg.Any<DateTime>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task UpdatePipeline_ActiveToActive_SearchRecordsFirst_DoesNotEnqueueTask()
+    public async Task UpdatePipeline_ActiveToActive_DoesNotCallResumeOrPause()
     {
         // Arrange
         var pipelinePublicId = Guid.NewGuid();
@@ -234,22 +226,15 @@ public class PipelineCommandHandlerTests
         _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>()).Returns(existingPipeline);
         _pipelineRepo.UpdateAsync(Arg.Any<Pipeline>(), null, Arg.Any<CancellationToken>()).Returns(1);
 
-        var steps = new List<PipelineStep>
-        {
-            new() { PublicId = Guid.NewGuid(), RefId = "ref_search", Type = "query", Subtype = "search-records", IsValidated = true }
-        };
-        _pipelineRepo.GetStepsByPipelineIdAsync(existingPipeline.Id, Arg.Any<CancellationToken>()).Returns(steps);
+        var queueRepo = Substitute.For<IMainPipelineQueueRepository>();
 
-        var queue = Substitute.For<IPipelineExecutionQueue>();
-        var serviceProvider = Substitute.For<IServiceProvider>();
-        serviceProvider.GetService(typeof(IPipelineExecutionQueue)).Returns(queue);
-
-        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), serviceProvider);
+        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), queueRepo, Substitute.For<IServiceProvider>());
 
         // Act
         await handler.HandleAsync(command, CancellationToken.None);
 
         // Assert
-        queue.DidNotReceive().QueueTask(Arg.Any<PipelineExecutionTask>());
+        await queueRepo.DidNotReceive().ResumePendingJobsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<DateTime>(), Arg.Any<CancellationToken>());
+        await queueRepo.DidNotReceive().PausePendingJobsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<DateTime>(), Arg.Any<CancellationToken>());
     }
 }

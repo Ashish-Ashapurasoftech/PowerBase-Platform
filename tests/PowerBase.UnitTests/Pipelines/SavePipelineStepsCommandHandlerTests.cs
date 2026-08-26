@@ -26,7 +26,7 @@ public class SavePipelineStepsCommandHandlerTests
 
     public SavePipelineStepsCommandHandlerTests()
     {
-        _handler = new SavePipelineStepsCommandHandler(_pipelineRepo, _appRepo, _tableRepo, _fieldRepo, _appAccessService, _uow, _tenantRepo, _queryContext, Substitute.For<IServiceProvider>());
+        _handler = new SavePipelineStepsCommandHandler(_pipelineRepo, _appRepo, _tableRepo, _fieldRepo, _appAccessService, _uow, _tenantRepo, _queryContext, Substitute.For<IMainPipelineQueueRepository>(), Substitute.For<IServiceProvider>());
     }
 
     [Fact]

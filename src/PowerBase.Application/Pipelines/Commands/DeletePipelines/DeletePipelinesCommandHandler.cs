@@ -15,15 +15,21 @@ public class DeletePipelinesCommandHandler
     private readonly IAppRepository _appRepo;
     private readonly IPipelineRepository _pipelineRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IMainPipelineQueueRepository _queueRepo;
+    private readonly IQueryContext _queryContext;
 
     public DeletePipelinesCommandHandler(
         IAppRepository appRepo,
         IPipelineRepository pipelineRepo,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IMainPipelineQueueRepository queueRepo,
+        IQueryContext queryContext)
     {
         _appRepo = appRepo;
         _pipelineRepo = pipelineRepo;
         _auditRepo = auditRepo;
+        _queueRepo = queueRepo;
+        _queryContext = queryContext;
     }
 
     public async Task HandleAsync(DeletePipelinesCommand command, CancellationToken ct = default)
@@ -60,6 +66,17 @@ public class DeletePipelinesCommandHandler
         }
 
         await _pipelineRepo.SoftDeleteManyAsync(distinctIds, ct);
+
+        // Immediate best-effort queue terminalization (failure does not block response)
+        try
+        {
+            var pipelineIds = pipelines.Select(p => p.Id).ToList();
+            await _queueRepo.CancelPendingJobsForPipelinesAsync(_queryContext.TenantId, pipelineIds, "Pipeline deleted", ct);
+        }
+        catch (System.Exception ex)
+        {
+            // Suppress to guarantee Tenant DB delete API success
+        }
 
         foreach (var pipeline in pipelines)
         {
