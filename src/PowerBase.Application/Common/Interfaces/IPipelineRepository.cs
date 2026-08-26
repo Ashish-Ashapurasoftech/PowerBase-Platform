@@ -80,7 +80,7 @@ public interface IPipelineRepository
     Task<byte[]> GetRowVersionAsync(long pipelineId, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task InvalidateStepsReferencingFieldAsync(int fid, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<PipelineStep?> GetStepByPublicIdAsync(Guid publicId, CancellationToken ct = default);
-    Task<bool> UpdateStepLastTriggeredOnAsync(long stepId, DateTime? oldTime, DateTime newTime, CancellationToken ct = default);
+    Task<bool> UpdateStepLastTriggeredOnAsync(long stepId, DateTime? oldTime, DateTime newTime, byte[] rowVersion, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineStep>> GetActiveScheduleStepsAsync(CancellationToken ct = default);
 
     Task<PipelineSchedule?> GetScheduleByPipelineIdAsync(long pipelineId, CancellationToken ct = default);
@@ -89,7 +89,7 @@ public interface IPipelineRepository
     Task<int> UpdateScheduleAsync(PipelineSchedule schedule, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task DeleteScheduleAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineSchedule>> GetActivePipelineSchedulesAsync(CancellationToken ct = default);
-    Task<bool> UpdateScheduleLastAndNextRunOnAsync(long scheduleId, DateTime? oldLastRun, DateTime newLastRun, DateTime? newNextRun, CancellationToken ct = default);
+    Task<bool> UpdateScheduleLastAndNextRunOnAsync(long scheduleId, DateTime? oldLastRun, DateTime newLastRun, DateTime? newNextRun, byte[] rowVersion, CancellationToken ct = default);
     
     Task<long> CreateOutboxItemAsync(PipelineOutboxItem item, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineOutboxItem>> ClaimOutboxItemsAsync(string workerId, CancellationToken ct = default);

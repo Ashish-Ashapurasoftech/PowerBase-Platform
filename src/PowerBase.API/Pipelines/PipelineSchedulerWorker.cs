@@ -216,7 +216,7 @@ public class PipelineSchedulerWorker : BackgroundService
                             if (occurrences.Count > 0)
                             {
                                 var latestOccurrenceLocal = occurrences.Last();
-                                var latestOccurrenceUtc = TimeZoneInfo.ConvertTimeToUtc(latestOccurrenceLocal, timeZoneInfo);
+                                var latestOccurrenceUtc = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(latestOccurrenceLocal, timeZoneInfo));
 
                                 var pipeline = await pipelineRepo.GetByIdAsync(step.PipelineId, ct);
                                 if (pipeline == null || !pipeline.IsActive || pipeline.IsDeleted)
@@ -269,7 +269,7 @@ public class PipelineSchedulerWorker : BackgroundService
                                         TriggerStepId = step.Id,
                                         TriggerStepRefId = step.RefId
                                     }),
-                                    TriggeredBy = 0,
+                                    TriggeredBy = pipeline.CreatedBy,
                                     VariablesJson = null,
                                     CorrelationId = Guid.NewGuid().ToString(),
                                     Depth = 1,
@@ -294,7 +294,7 @@ public class PipelineSchedulerWorker : BackgroundService
 
                                 if (enqueueSuccess)
                                 {
-                                    await pipelineRepo.UpdateStepLastTriggeredOnAsync(step.Id, step.LastTriggeredOn, latestOccurrenceUtc, ct);
+                                    await pipelineRepo.UpdateStepLastTriggeredOnAsync(step.Id, step.LastTriggeredOn, latestOccurrenceUtc, step.RowVersion, ct);
                                     _logger.LogInformation("Enqueued scheduled pipeline execution for Step {StepId} (Tenant {TenantId}) at scheduled local time {ScheduledTime}.", step.Id, tenantId, latestOccurrenceLocal);
                                 }
                             }
@@ -333,7 +333,7 @@ public class PipelineSchedulerWorker : BackgroundService
                                         ? TimeZoneInfo.ConvertTimeFromUtc(sched.LastRunOn.Value, timeZoneInfo)
                                         : nowLocal.AddMinutes(-1);
                                     var nextOccurrenceLocal = scheduleInstance.GetNextOccurrence(startForNext);
-                                    sched.NextRunOn = TimeZoneInfo.ConvertTimeToUtc(nextOccurrenceLocal, timeZoneInfo);
+                                    sched.NextRunOn = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextOccurrenceLocal, timeZoneInfo));
                                 }
                                 catch (ArgumentException)
                                 {
@@ -344,10 +344,11 @@ public class PipelineSchedulerWorker : BackgroundService
                                         : nowLocal.AddHours(1);
                                     var scheduleInstance = CrontabSchedule.Parse(sched.CronExpression);
                                     var nextOccurrenceLocal = scheduleInstance.GetNextOccurrence(startForNext);
-                                    sched.NextRunOn = TimeZoneInfo.ConvertTimeToUtc(nextOccurrenceLocal, timeZoneInfo);
+                                    sched.NextRunOn = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextOccurrenceLocal, timeZoneInfo));
                                     _logger.LogWarning("DST Spring Forward: skipped invalid local time for schedule {ScheduleId}, advanced next occurrence.", sched.Id);
                                 }
                                 await pipelineRepo.UpdateScheduleAsync(sched, transaction: null, ct);
+                                continue;
                             }
 
                             // If NextRunOn is in the future, skip
@@ -357,7 +358,7 @@ public class PipelineSchedulerWorker : BackgroundService
                             }
 
                             // We are due! Trigger enqueuing
-                            var latestOccurrenceUtc = sched.NextRunOn.Value;
+                            var latestOccurrenceUtc = TrimToMilliseconds(sched.NextRunOn.Value);
                             var latestOccurrenceLocal = TimeZoneInfo.ConvertTimeFromUtc(latestOccurrenceUtc, timeZoneInfo);
 
                             // Compute NextRunOn strictly starting from nowLocal to prevent backlog/stampede
@@ -366,7 +367,7 @@ public class PipelineSchedulerWorker : BackgroundService
                             {
                                 var scheduleInstance2 = CrontabSchedule.Parse(sched.CronExpression);
                                 var nextRunLocal = scheduleInstance2.GetNextOccurrence(nowLocal);
-                                nextRunUtc = TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo);
+                                nextRunUtc = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo));
                             }
                             catch (ArgumentException)
                             {
@@ -374,7 +375,7 @@ public class PipelineSchedulerWorker : BackgroundService
                                 // Defer nonexistent local hour (Spring Forward gap)
                                 var scheduleInstance2 = CrontabSchedule.Parse(sched.CronExpression);
                                 var nextRunLocal = scheduleInstance2.GetNextOccurrence(nowLocal.AddHours(1));
-                                nextRunUtc = TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo);
+                                nextRunUtc = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo));
                                 _logger.LogWarning("DST Spring Forward: skipped invalid local time for schedule {ScheduleId}, advanced next run time.", sched.Id);
                             }
 
@@ -420,7 +421,7 @@ public class PipelineSchedulerWorker : BackgroundService
                                     ScheduledTime = latestOccurrenceLocal,
                                     CronExpression = sched.CronExpression
                                 }),
-                                TriggeredBy = 0,
+                                TriggeredBy = pipeline.CreatedBy,
                                 VariablesJson = null,
                                 CorrelationId = Guid.NewGuid().ToString(),
                                 Depth = 1,
@@ -445,7 +446,7 @@ public class PipelineSchedulerWorker : BackgroundService
 
                             if (enqueueSuccess)
                             {
-                                await pipelineRepo.UpdateScheduleLastAndNextRunOnAsync(sched.Id, sched.LastRunOn, latestOccurrenceUtc, nextRunUtc, ct);
+                                await pipelineRepo.UpdateScheduleLastAndNextRunOnAsync(sched.Id, sched.LastRunOn, latestOccurrenceUtc, nextRunUtc, sched.RowVersion, ct);
                                 _logger.LogInformation("Enqueued Pipeline-Level scheduled execution for Schedule {ScheduleId} (Tenant {TenantId}) at scheduled local time {ScheduledTime}.", sched.Id, tenantId, latestOccurrenceLocal);
                             }
                         }
@@ -476,6 +477,17 @@ public class PipelineSchedulerWorker : BackgroundService
         }
     }
 
+
+    private static DateTime TrimToMilliseconds(DateTime dt)
+    {
+        return new DateTime(dt.Ticks - (dt.Ticks % TimeSpan.TicksPerMillisecond), dt.Kind);
+    }
+
+    private static DateTime? TrimToMilliseconds(DateTime? dt)
+    {
+        if (!dt.HasValue) return null;
+        return TrimToMilliseconds(dt.Value);
+    }
 
     private class SchedulerStepConfig
     {

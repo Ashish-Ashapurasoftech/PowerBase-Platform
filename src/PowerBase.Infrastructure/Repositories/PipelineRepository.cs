@@ -1090,16 +1090,22 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             new CommandDefinition(sql, new { publicId }, cancellationToken: ct));
     }
 
-    public async Task<bool> UpdateStepLastTriggeredOnAsync(long stepId, DateTime? oldTime, DateTime newTime, CancellationToken ct = default)
+    public async Task<bool> UpdateStepLastTriggeredOnAsync(long stepId, DateTime? oldTime, DateTime newTime, byte[] rowVersion, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         const string sql = """
             UPDATE meta.PipelineStep
             SET LastTriggeredOn = @newTime, ModifiedOn = SYSUTCDATETIME()
-            WHERE Id = @stepId AND (LastTriggeredOn = @oldTime OR (LastTriggeredOn IS NULL AND @oldTime IS NULL))
+            WHERE Id = @stepId AND (LastTriggeredOn = @oldTime OR (LastTriggeredOn IS NULL AND @oldTime IS NULL)) AND RowVersion = @rowVersion
             """;
+        var parameters = new DynamicParameters();
+        parameters.Add("stepId", stepId, DbType.Int64);
+        parameters.Add("oldTime", oldTime, DbType.DateTime2);
+        parameters.Add("newTime", newTime, DbType.DateTime2);
+        parameters.Add("rowVersion", rowVersion, DbType.Binary, size: 8);
+
         var affected = await connection.ExecuteAsync(
-            new CommandDefinition(sql, new { stepId, oldTime, newTime }, cancellationToken: ct));
+            new CommandDefinition(sql, parameters, cancellationToken: ct));
         return affected > 0;
     }
 
@@ -1141,23 +1147,21 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             VALUES (@pipelineId, @scheduleType, @interval, @timeOfDay, @weekdays, @monthDay, @monthOfYear, @relativeWeek, @relativeDay, @timeZone, @cronExpression, @nextRunOn, @lastRunOn, 0, SYSUTCDATETIME(), @createdBy)
             """;
 
-        var parameters = new
-        {
-            pipelineId = schedule.PipelineId,
-            scheduleType = schedule.ScheduleType,
-            interval = schedule.Interval,
-            timeOfDay = schedule.TimeOfDay,
-            weekdays = schedule.Weekdays,
-            monthDay = schedule.MonthDay,
-            monthOfYear = schedule.MonthOfYear,
-            relativeWeek = schedule.RelativeWeek,
-            relativeDay = schedule.RelativeDay,
-            timeZone = schedule.TimeZone,
-            cronExpression = schedule.CronExpression,
-            nextRunOn = schedule.NextRunOn,
-            lastRunOn = schedule.LastRunOn,
-            createdBy = QueryContext.UserId
-        };
+        var parameters = new DynamicParameters();
+        parameters.Add("pipelineId", schedule.PipelineId, DbType.Int64);
+        parameters.Add("scheduleType", schedule.ScheduleType, DbType.String);
+        parameters.Add("interval", schedule.Interval, DbType.Int32);
+        parameters.Add("timeOfDay", schedule.TimeOfDay, DbType.Time);
+        parameters.Add("weekdays", schedule.Weekdays, DbType.String);
+        parameters.Add("monthDay", schedule.MonthDay, DbType.String);
+        parameters.Add("monthOfYear", schedule.MonthOfYear, DbType.Int32);
+        parameters.Add("relativeWeek", schedule.RelativeWeek, DbType.Int32);
+        parameters.Add("relativeDay", schedule.RelativeDay, DbType.Int32);
+        parameters.Add("timeZone", schedule.TimeZone, DbType.String);
+        parameters.Add("cronExpression", schedule.CronExpression, DbType.String);
+        parameters.Add("nextRunOn", schedule.NextRunOn, DbType.DateTime2);
+        parameters.Add("lastRunOn", schedule.LastRunOn, DbType.DateTime2);
+        parameters.Add("createdBy", QueryContext.UserId, DbType.Int64);
 
         if (transaction is not null)
         {
@@ -1191,23 +1195,21 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             WHERE Id = @id AND IsDeleted = 0
             """;
 
-        var parameters = new
-        {
-            id = schedule.Id,
-            scheduleType = schedule.ScheduleType,
-            interval = schedule.Interval,
-            timeOfDay = schedule.TimeOfDay,
-            weekdays = schedule.Weekdays,
-            monthDay = schedule.MonthDay,
-            monthOfYear = schedule.MonthOfYear,
-            relativeWeek = schedule.RelativeWeek,
-            relativeDay = schedule.RelativeDay,
-            timeZone = schedule.TimeZone,
-            cronExpression = schedule.CronExpression,
-            nextRunOn = schedule.NextRunOn,
-            lastRunOn = schedule.LastRunOn,
-            modifiedBy = QueryContext.UserId
-        };
+        var parameters = new DynamicParameters();
+        parameters.Add("id", schedule.Id, DbType.Int64);
+        parameters.Add("scheduleType", schedule.ScheduleType, DbType.String);
+        parameters.Add("interval", schedule.Interval, DbType.Int32);
+        parameters.Add("timeOfDay", schedule.TimeOfDay, DbType.Time);
+        parameters.Add("weekdays", schedule.Weekdays, DbType.String);
+        parameters.Add("monthDay", schedule.MonthDay, DbType.String);
+        parameters.Add("monthOfYear", schedule.MonthOfYear, DbType.Int32);
+        parameters.Add("relativeWeek", schedule.RelativeWeek, DbType.Int32);
+        parameters.Add("relativeDay", schedule.RelativeDay, DbType.Int32);
+        parameters.Add("timeZone", schedule.TimeZone, DbType.String);
+        parameters.Add("cronExpression", schedule.CronExpression, DbType.String);
+        parameters.Add("nextRunOn", schedule.NextRunOn, DbType.DateTime2);
+        parameters.Add("lastRunOn", schedule.LastRunOn, DbType.DateTime2);
+        parameters.Add("modifiedBy", QueryContext.UserId, DbType.Int64);
 
         if (transaction is not null)
         {
@@ -1250,7 +1252,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         return schedules.ToList();
     }
 
-    public async Task<bool> UpdateScheduleLastAndNextRunOnAsync(long scheduleId, DateTime? oldLastRun, DateTime newLastRun, DateTime? newNextRun, CancellationToken ct = default)
+    public async Task<bool> UpdateScheduleLastAndNextRunOnAsync(long scheduleId, DateTime? oldLastRun, DateTime newLastRun, DateTime? newNextRun, byte[] rowVersion, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         const string sql = """
@@ -1258,10 +1260,19 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             SET LastRunOn = @newLastRun,
                 NextRunOn = @newNextRun,
                 ModifiedOn = SYSUTCDATETIME()
-            WHERE Id = @scheduleId AND (LastRunOn = @oldLastRun OR (LastRunOn IS NULL AND @oldLastRun IS NULL))
+            WHERE Id = @scheduleId 
+              AND (LastRunOn = @oldLastRun OR (LastRunOn IS NULL AND @oldLastRun IS NULL))
+              AND RowVersion = @rowVersion
             """;
+        var parameters = new DynamicParameters();
+        parameters.Add("scheduleId", scheduleId, DbType.Int64);
+        parameters.Add("oldLastRun", oldLastRun, DbType.DateTime2);
+        parameters.Add("newLastRun", newLastRun, DbType.DateTime2);
+        parameters.Add("newNextRun", newNextRun, DbType.DateTime2);
+        parameters.Add("rowVersion", rowVersion, DbType.Binary, size: 8);
+
         var affected = await connection.ExecuteAsync(
-            new CommandDefinition(sql, new { scheduleId, oldLastRun, newLastRun, newNextRun }, cancellationToken: ct));
+            new CommandDefinition(sql, parameters, cancellationToken: ct));
         return affected > 0;
     }
 
