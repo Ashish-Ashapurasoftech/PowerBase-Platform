@@ -132,9 +132,19 @@ public class SavePipelineStepsCommandHandlerTests
         _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>())
             .Returns(new Pipeline { Id = pipelineId, PublicId = pipelinePublicId, IsActive = true });
 
+        var triggerStepId = Guid.NewGuid();
+        var incompleteStepId = Guid.NewGuid();
+
+        _pipelineRepo.GetStepsByPipelineIdAsync(pipelineId, Arg.Any<CancellationToken>())
+            .Returns(new List<PipelineStep>
+            {
+                new() { Id = 1, PublicId = triggerStepId, RefId = "trigger_1", Type = "trigger", Subtype = "record-added", IsValidated = true, IsDeleted = false, DisplayOrder = 0 },
+                new() { Id = 2, PublicId = incompleteStepId, RefId = "search_1", Type = "query", Subtype = "search-records", IsValidated = false, IsDeleted = false, DisplayOrder = 1 }
+            });
+
         var triggerStep = new SavePipelineStepDto
         {
-            PublicId = Guid.NewGuid(),
+            PublicId = triggerStepId,
             RefId = "trigger_1",
             Type = "trigger",
             Subtype = "record-added",
@@ -143,7 +153,7 @@ public class SavePipelineStepsCommandHandlerTests
 
         var incompleteStep = new SavePipelineStepDto
         {
-            PublicId = Guid.NewGuid(),
+            PublicId = incompleteStepId,
             RefId = "search_1",
             Type = "query",
             Subtype = "search-records",

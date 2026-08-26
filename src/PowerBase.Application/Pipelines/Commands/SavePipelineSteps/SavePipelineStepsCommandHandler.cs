@@ -152,6 +152,23 @@ public class SavePipelineStepsCommandHandler
             await _uow.RollbackAsync(ct);
             throw;
         }
+
+        var firstStep = flatList.Where(s => s.ParentPublicId == null).OrderBy(s => s.DisplayOrder).FirstOrDefault();
+        if (firstStep == null || firstStep.Type != "query" || (firstStep.Subtype != "search-records" && firstStep.Subtype != "look-up-record"))
+        {
+            try
+            {
+                var schedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(pipelineId, ct);
+                if (schedule != null)
+                {
+                    await _pipelineRepo.DeleteScheduleAsync(schedule.PublicId, ct);
+                }
+            }
+            catch (NotFoundException)
+            {
+                // Already deleted or not found, safe to ignore
+            }
+        }
     }
 
     private async Task ValidateStepsConfigAsync(List<SavePipelineStepDto> list, PipelineStepValidator stepValidator, CancellationToken ct)

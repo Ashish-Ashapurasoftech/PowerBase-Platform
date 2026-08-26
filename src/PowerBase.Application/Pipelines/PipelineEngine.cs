@@ -301,8 +301,6 @@ public class PipelineEngine : IPipelineEngine
             await _auditFormatter.InitializeAsync(task.PipelineId, task.TriggeredBy, ct);
 
             var pipelineMeta = await _pipelineRepo.GetByIdAsync(task.PipelineId, ct);
-            var triggerStep = activeSteps.FirstOrDefault(s => s.Type == "trigger" && (s.Subtype == "new-event" || s.Subtype == "new-bulk-event"));
-
             bool isSkipped = false;
             string? skipReason = null;
 
@@ -316,18 +314,93 @@ public class PipelineEngine : IPipelineEngine
                 isSkipped = true;
                 skipReason = "Pipeline is deleted";
             }
-            else if (!pipelineMeta.IsActive)
+
+            // Mismatch validation before execution starts
+            var rootStep = activeSteps.FirstOrDefault(s => s.ParentStepId == null);
+            var eventName = task.TriggerEvent?.ToLowerInvariant() ?? "manual";
+            var normalizedEventName = eventName.Replace("-", "").Replace("_", "");
+            if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent" or "webhook")
             {
-                isSkipped = true;
-                skipReason = "Pipeline is inactive";
+                normalizedEventName = "new-event";
             }
-            else
+            else if (normalizedEventName == "newbulkevent")
             {
-                bool isEventTrigger = task.TriggerEvent is "new-event" or "new-bulk-event" or "record-added" or "record-updated" or "record-deleted";
-                if (isEventTrigger && triggerStep == null)
+                normalizedEventName = "new-bulk-event";
+            }
+            else if (normalizedEventName == "pipelineschedule")
+            {
+                normalizedEventName = "pipeline_schedule";
+            }
+
+            if (!isSkipped && normalizedEventName != "manual")
+            {
+                if (normalizedEventName == "activation")
+                {
+                    if (rootStep == null || rootStep.Type != "query" || (rootStep.Subtype != "search-records" && rootStep.Subtype != "look-up-record"))
+                    {
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a query-first pipeline structure.");
+                    }
+                }
+                else if (normalizedEventName == "pipeline_schedule")
+                {
+                    if (rootStep == null || rootStep.Type != "query" || (rootStep.Subtype != "search-records" && rootStep.Subtype != "look-up-record"))
+                    {
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a query-first pipeline structure.");
+                    }
+                    if (activeSteps.Any(s => s.Type == "trigger"))
+                    {
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event is incompatible with trigger steps on the canvas.");
+                    }
+                }
+                else if (normalizedEventName == "schedule")
+                {
+                    if (rootStep == null || rootStep.Type != "trigger" || rootStep.Subtype != "schedule")
+                    {
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Schedule trigger event requires an active root-level schedule trigger step.");
+                    }
+                }
+                else if (normalizedEventName == "new-bulk-event")
+                {
+                    if (rootStep == null || rootStep.Type != "trigger" || rootStep.Subtype != "new-bulk-event")
+                    {
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("New bulk event trigger event requires an active root-level new-bulk-event trigger step.");
+                    }
+                }
+                else if (normalizedEventName == "new-event")
+                {
+                    if (rootStep == null || rootStep.Type != "trigger" || 
+                        (rootStep.Subtype != "new-event" && rootStep.Subtype != "record-added" && rootStep.Subtype != "record-updated" && rootStep.Subtype != "record-deleted" && rootStep.Subtype != "webhook"))
+                    {
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("New event trigger event requires an active root-level event trigger step.");
+                    }
+                }
+                else
+                {
+                    if (rootStep == null || rootStep.Type != "trigger" || !string.Equals(rootStep.Subtype, eventName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Trigger event '{task.TriggerEvent}' mismatch with root step.");
+                    }
+                }
+            }
+
+            var triggerStep = activeSteps.FirstOrDefault(s => s.Type == "trigger" && 
+                (s.Subtype == "new-event" || s.Subtype == "new-bulk-event" || s.Subtype == "record-added" || s.Subtype == "record-updated" || s.Subtype == "record-deleted" || s.Subtype == "webhook"));
+
+            if (!isSkipped)
+            {
+                if (!pipelineMeta.IsActive)
                 {
                     isSkipped = true;
-                    skipReason = "Event execution missing required trigger step on canvas";
+                    skipReason = "Pipeline is inactive";
+                }
+                else
+                {
+                    bool isEventTrigger = normalizedEventName is "new-event" or "new-bulk-event";
+                    if (isEventTrigger && triggerStep == null)
+                    {
+                        isSkipped = true;
+                        skipReason = "Event execution missing required trigger step on canvas";
+                    }
                 }
             }
 
@@ -2314,11 +2387,20 @@ public class PipelineEngine : IPipelineEngine
                 ContentType = storedFile.ContentType
             });
         }
-        else if (step.Type == "trigger" && (subtype == "new-event" || subtype == "new-bulk-event"))
+        else if (step.Type == "trigger" && (subtype == "new-event" || subtype == "new-bulk-event" || subtype == "record-added" || subtype == "record-updated" || subtype == "record-deleted" || subtype == "schedule" || subtype == "webhook"))
         {
             var triggerInfo = new Dictionary<string, object?>();
             triggerInfo["Status"] = "Fired";
-            triggerInfo["TriggerType"] = subtype == "new-bulk-event" ? "On New Bulk Event" : "On New Event";
+            triggerInfo["TriggerType"] = subtype switch
+            {
+                "new-bulk-event" => "On New Bulk Event",
+                "record-added" => "On Record Added",
+                "record-updated" => "On Record Updated",
+                "record-deleted" => "On Record Deleted",
+                "schedule" => "On Schedule",
+                "webhook" => "On Webhook",
+                _ => "On New Event"
+            };
 
             if (contextDict.TryGetValue("trigger", out var triggerObj) && triggerObj != null)
             {

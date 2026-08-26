@@ -1172,4 +1172,68 @@ public class PipelineEngineTests
         var config6 = JsonSerializer.Deserialize("{\"maxResults\": \"3\"}", configType!, options);
         configType!.GetProperty("MaxResults")!.GetValue(config6).Should().Be(3);
     }
+
+    [Fact]
+    public async Task ExecuteAsync_MismatchTriggerEvent_ThrowsPipelineNonRetryableException()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "schedule", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "record-added", RefId = "ref_trigger", IsDeleted = false }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        // Act & Assert
+        var act = () => _engine.ExecuteAsync(task, CancellationToken.None);
+        await act.Should().ThrowAsync<PowerBase.Domain.Exceptions.PipelineNonRetryableException>()
+            .WithMessage("Schedule trigger event requires an active root-level schedule trigger step.");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SupportedSubtypesInEngine_ExecutesSuccessfully()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{\"trigger\":{\"fid_1\":\"val1\"}}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "record-added", RefId = "ref_trigger", IsDeleted = false }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: It should execute without throwing NotSupportedException
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 10 && sr.Status == "Success"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PipelineScheduleTriggerEvent_ValidStructure_Succeeds()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "pipeline_schedule", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "query", Subtype = "search-records", RefId = "ref_search", IsDeleted = false, ConfigJson = $"{{\"TableId\":\"{Guid.NewGuid()}\"}}" }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+        
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
+
+        // Act & Assert
+        var act = () => _engine.ExecuteAsync(task, CancellationToken.None);
+        await act.Should().NotThrowAsync();
+    }
 }

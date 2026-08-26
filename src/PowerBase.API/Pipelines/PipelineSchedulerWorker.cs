@@ -152,6 +152,29 @@ public class PipelineSchedulerWorker : BackgroundService
                                 var latestOccurrenceUtc = TimeZoneInfo.ConvertTimeToUtc(latestOccurrenceLocal, timeZoneInfo);
 
                                 var pipeline = await pipelineRepo.GetByIdAsync(step.PipelineId, ct);
+                                if (pipeline == null || !pipeline.IsActive || pipeline.IsDeleted)
+                                {
+                                    continue;
+                                }
+
+                                // Authoritative current-state check
+                                var currentSteps = await pipelineRepo.GetStepsByPipelineIdAsync(step.PipelineId, ct);
+                                var activeSteps = currentSteps.Where(s => !s.IsDeleted).ToList();
+                                var rootSteps = activeSteps.Where(s => s.ParentStepId == null).ToList();
+
+                                if (rootSteps.Count != 1)
+                                {
+                                    _logger.LogWarning("Skipping scheduled enqueue for Step {StepId} of Pipeline {PipelineId}: Multiple active root steps found.", step.Id, step.PipelineId);
+                                    continue;
+                                }
+
+                                var rootStep = rootSteps[0];
+                                if (rootStep == null || rootStep.Type != "trigger" || rootStep.Subtype != "schedule" || rootStep.Id != step.Id)
+                                {
+                                    _logger.LogWarning("Skipping scheduled enqueue for Step {StepId} of Pipeline {PipelineId}: root step trigger mismatch or invalid configuration.", step.Id, step.PipelineId);
+                                    continue;
+                                }
+
                                 Guid messageId;
                                 if (pipeline != null)
                                 {
@@ -263,6 +286,34 @@ public class PipelineSchedulerWorker : BackgroundService
 
                             // Distributed CAS lock on schedule metadata
                             var pipeline = await pipelineRepo.GetByIdAsync(sched.PipelineId, ct);
+                            if (pipeline == null || !pipeline.IsActive || pipeline.IsDeleted)
+                            {
+                                continue;
+                            }
+
+                            // Authoritative current-state check
+                            var currentSteps = await pipelineRepo.GetStepsByPipelineIdAsync(sched.PipelineId, ct);
+                            var activeSteps = currentSteps.Where(s => !s.IsDeleted).ToList();
+                            var rootSteps = activeSteps.Where(s => s.ParentStepId == null).ToList();
+
+                            if (rootSteps.Count != 1)
+                            {
+                                _logger.LogWarning("Skipping scheduled enqueue for Schedule {ScheduleId} of Pipeline {PipelineId}: Multiple active root steps found.", sched.Id, sched.PipelineId);
+                                continue;
+                            }
+
+                            var rootStep = rootSteps[0];
+                            if (rootStep == null || rootStep.Type != "query" || (rootStep.Subtype != "search-records" && rootStep.Subtype != "look-up-record"))
+                            {
+                                _logger.LogWarning("Skipping scheduled enqueue for Schedule {ScheduleId} of Pipeline {PipelineId}: root step is not a query or invalid structure.", sched.Id, sched.PipelineId);
+                                continue;
+                            }
+                            if (activeSteps.Any(s => s.Type == "trigger"))
+                            {
+                                _logger.LogWarning("Skipping scheduled enqueue for Schedule {ScheduleId} of Pipeline {PipelineId}: pipeline contains trigger steps.", sched.Id, sched.PipelineId);
+                                continue;
+                            }
+
                             Guid messageId;
                             if (pipeline != null)
                             {
