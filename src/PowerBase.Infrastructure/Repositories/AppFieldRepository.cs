@@ -366,8 +366,8 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 createdBy = QueryContext.UserId,
             }, cancellationToken: ct));
         var result = ((long)row.Id, (Guid)row.PublicId);
-        
-        _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(field.AppTableId, new[] { (field.Fid!.Value, field.IsSearchable, field.IsFilterable) }, default));
+        var tenantId = QueryContext.TenantId;
+        _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tenantId, field.AppTableId, new[] { (field.Fid!.Value, field.IsSearchable, field.IsFilterable) }, default));
         
         return result;
     }
@@ -447,7 +447,8 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         {
             var fid = await connection.ExecuteScalarAsync<int>(
                 new CommandDefinition("SELECT Fid FROM meta.AppField WHERE PublicId = @publicId AND AppTableId = @tableId", new { publicId, tableId }, cancellationToken: ct));
-            _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tableId, new[] { (fid, isSearchable, isFilterable) }, default));
+            var tenantId = QueryContext.TenantId;
+            _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tenantId, tableId, new[] { (fid, isSearchable, isFilterable) }, default));
         }
 
         return affected;

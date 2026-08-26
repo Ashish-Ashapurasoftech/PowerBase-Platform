@@ -12,6 +12,7 @@ using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
+using Microsoft.Extensions.Logging;
 namespace PowerBase.UnitTests.Reports;
 
 public class ReportHandlerTests
@@ -128,7 +129,7 @@ public class ReportHandlerTests
     {
         var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo);
 
-        await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), reportType: "Chart")))
+        await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), reportType: "InvalidType")))
             .Should().ThrowAsync<ValidationException>();
     }
 
@@ -139,7 +140,7 @@ public class ReportHandlerTests
     {
         var table = MakeTable();
         var report = MakeReport(table.Id, [1L, 2L]);
-        _reportRepo.GetByPublicIdAsync(report.PublicId).Returns(report);
+        _reportRepo.GetVisibleReportAsync(report.PublicId, Arg.Any<CancellationToken>()).Returns(report);
         var sut = new GetReportQueryHandler(_reportRepo);
 
         var result = await sut.HandleAsync(new GetReportQuery(report.PublicId));
@@ -157,7 +158,7 @@ public class ReportHandlerTests
         var app = new App { Id = 1, PublicId = Guid.NewGuid(), Name = "App" };
         var table = MakeTable();
         var reports = new List<Report> { MakeReport(table.Id), MakeReport(table.Id) };
-        _appRepo.GetByPublicIdAsync(app.PublicId).Returns(app);
+        _appRepo.GetIdByPublicIdAsync(app.PublicId).Returns(app.Id);
         _reportRepo.ListByAppAsync(app.Id).Returns(reports);
         var sut = new ListReportsQueryHandler(_reportRepo, _appRepo, _tableRepo);
 
@@ -196,7 +197,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -232,7 +233,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = ci.Arg<IReadOnlyList<AppField>>().Where(f => !f.IsSystem).Select(f => f.Id).ToHashSet(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -261,7 +262,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = new HashSet<long>(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
 
         await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20, QuickSearch: "abc", QuickSearchFieldIds: [1]));
 
@@ -291,7 +292,7 @@ public class ReportHandlerTests
                 VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
                 EditableFieldIds = new HashSet<long>(),
             }));
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
 
         await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20, QuickSearch: "abc", QuickSearchExact: true));
 
@@ -337,7 +338,7 @@ public class ReportHandlerTests
         _appUserRepo.GetUserAppPermissionsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
             .Returns(new HashSet<string> { PermissionCodes.ReportsCreate });
 
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -377,7 +378,7 @@ public class ReportHandlerTests
         _appUserRepo.GetUserAppPermissionsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
             .Returns(new HashSet<string> { PermissionCodes.ReportsRead });
 
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 
@@ -424,7 +425,7 @@ public class ReportHandlerTests
         _appUserRepo.GetUserAppPermissionsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
             .Returns(new HashSet<string> { PermissionCodes.ReportsCreate });
 
-        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
 
         var result = await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20));
 

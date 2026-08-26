@@ -22,7 +22,7 @@ public class SearchController : ControllerBase
     [RequireAuth]
     [ProducesResponseType(typeof(ApiResponse<SearchGlobalRecordsResult>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> SearchGlobal([FromQuery] string query, [FromServices] IAppRepository appRepo, [FromQuery] Guid? appId = null, CancellationToken ct = default)
+    public async Task<IActionResult> SearchGlobal([FromQuery] string query, [FromServices] IAppRepository appRepo, [FromQuery] Guid? appId = null, [FromQuery] int page = 1, [FromQuery] int pageSize = 50, CancellationToken ct = default)
     {
         long? internalAppId = null;
         if (appId.HasValue)
@@ -30,7 +30,8 @@ public class SearchController : ControllerBase
             var app = await appRepo.GetByPublicIdAsync(appId.Value, ct);
             internalAppId = app.Id;
         }
-        var result = await _searchHandler.HandleAsync(new SearchGlobalRecordsQuery(query, internalAppId), ct);
-        return Ok(new ApiResponse<SearchGlobalRecordsResult>(result));
+        var result = await _searchHandler.HandleAsync(new SearchGlobalRecordsQuery(query, internalAppId, page, pageSize), ct);
+        // GAP #6: Return ApiListResponse so frontend receives standard paginated data shape
+        return Ok(new ApiListResponse<SearchGlobalRecordsResultItem>(result.Items.ToList(), (int)result.TotalCount, result.Page, result.PageSize));
     }
 }

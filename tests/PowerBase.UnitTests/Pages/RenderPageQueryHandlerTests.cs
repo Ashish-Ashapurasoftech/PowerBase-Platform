@@ -9,6 +9,7 @@ using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using Microsoft.Extensions.Logging;
 
 namespace PowerBase.UnitTests.Pages;
 
@@ -30,7 +31,7 @@ public class RenderPageQueryHandlerTests
     private RenderPageQueryHandler MakeSut()
     {
         var runReportHandler = new RunReportQueryHandler(
-            _reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+            _reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
         return new RenderPageQueryHandler(_pageRepo, _reportRepo, _tableRepo, runReportHandler);
     }
 

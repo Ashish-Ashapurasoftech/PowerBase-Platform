@@ -21,6 +21,7 @@ public class ExportReportQueryHandler
     private readonly IFormulaProjector _formulaProjector;
     private readonly Relationships.IRelationalProjector _relationalProjector;
     private readonly IAzureSearchService _searchService;
+    private readonly IQueryContext _queryContext;
 
     public ExportReportQueryHandler(
         IReportRepository reportRepo,
@@ -31,7 +32,8 @@ public class ExportReportQueryHandler
         IUserRepository userRepo,
         IFormulaProjector formulaProjector,
         Relationships.IRelationalProjector relationalProjector,
-        IAzureSearchService searchService)
+        IAzureSearchService searchService,
+        IQueryContext queryContext)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -42,6 +44,7 @@ public class ExportReportQueryHandler
         _formulaProjector = formulaProjector;
         _relationalProjector = relationalProjector;
         _searchService = searchService;
+        _queryContext = queryContext;
     }
 
     public async Task<ExportResult> HandleAsync(ExportReportQuery query, CancellationToken ct = default)
@@ -142,7 +145,7 @@ public class ExportReportQueryHandler
             var odata = RunReport.OData.ODataFilterBuilder.Build(filterTree, allFields);
             if (!string.IsNullOrWhiteSpace(odata))
             {
-                var aiMatches = await _searchService.SearchRecordsByFilterAsync(table.Id, odata, ct);
+                var aiMatches = await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
                 if (aiMatches.Count == 0)
                 {
                     return BuildExport([], [], "export", format);

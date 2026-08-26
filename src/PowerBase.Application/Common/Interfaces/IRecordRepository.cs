@@ -131,4 +131,7 @@ public interface IRecordRepository
 
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
         AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default);
+
+    Task<int> SanitizeTableEncryptedDataAsync(AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
+    Task<IReadOnlyList<SearchIndexDocument>> GetFieldBackfillBatchAsync(long tenantId, long appId, long tableId, long fieldId, bool isNullify, int page, int pageSize, CancellationToken ct = default);
 }

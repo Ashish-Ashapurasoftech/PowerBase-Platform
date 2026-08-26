@@ -5,7 +5,9 @@ namespace PowerBase.Application.Common.Models;
 public enum IndexAction
 {
     Upsert,
-    Delete
+    Delete,
+    BackfillField,
+    NullifyField
 }
 
 public class SearchIndexMessage
@@ -15,5 +17,7 @@ public class SearchIndexMessage
     public long AppId { get; set; }
     public long TableId { get; set; }
     public Guid RecordPublicId { get; set; }
+    public long? FieldId { get; set; }
+    public int Page { get; set; } = 1;
     public System.Collections.Generic.Dictionary<string, object?>? Payload { get; set; }
 }

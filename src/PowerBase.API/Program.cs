@@ -117,11 +117,22 @@ var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get
 
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("Frontend", policy => policy
-        .WithOrigins(allowedOrigins)
-        .AllowAnyHeader()
-        .AllowAnyMethod()
-        .AllowCredentials());
+    options.AddPolicy("Frontend", policy =>
+    {
+        if (allowedOrigins.Length > 0)
+        {
+            policy.WithOrigins(allowedOrigins);
+        }
+        else
+        {
+            policy.SetIsOriginAllowed(origin =>
+                new Uri(origin).Host.EndsWith(".azurestaticapps.net") ||
+                new Uri(origin).Host == "localhost");
+        }
+        policy.AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials();
+    });
 });
 
 builder.Services.AddControllers();
@@ -273,6 +284,7 @@ builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
 builder.Services.AddScoped<IReportRepository, ReportRepository>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
 builder.Services.AddScoped<IPermissionRepository, PermissionRepository>();
 builder.Services.AddScoped<IUserPermissionRepository, UserPermissionRepository>();
 builder.Services.AddScoped<IFormRepository, FormRepository>();
@@ -391,6 +403,7 @@ builder.Services.AddScoped<ListRecordsQueryHandler>();
 builder.Services.AddScoped<GetRecordQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.SearchGlobalRecords.SearchGlobalRecordsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetDistinctFieldValues.GetDistinctFieldValuesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.CreateRelationship.CreateRelationshipCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.DeleteRelationship.DeleteRelationshipCommandHandler>();
