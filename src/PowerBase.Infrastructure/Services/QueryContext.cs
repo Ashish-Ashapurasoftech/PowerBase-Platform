@@ -23,6 +23,13 @@ public class QueryContext : IQueryContext
 
     public void SetTenantId(long tenantId) => TenantId = tenantId;
 
+    public void SetTokenScope(bool isUserToken, bool accessAllApps, IReadOnlySet<long> allowedAppIds)
+    {
+        IsUserToken        = isUserToken;
+        TokenAccessAllApps = accessAllApps;
+        AllowedAppIds      = allowedAppIds;
+    }
+
     public void SetUserIdentity(long userId, bool isSuperAdmin, string userName, string userEmail, IReadOnlySet<string> permissions, string tenantRole)
     {
         UserId      = userId;

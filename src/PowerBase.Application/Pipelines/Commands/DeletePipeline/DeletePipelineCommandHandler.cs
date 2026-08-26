@@ -33,6 +33,19 @@ public class DeletePipelineCommandHandler
         // Soft delete the pipeline metadata
         await _pipelineRepo.DeleteAsync(command.PublicId, ct);
 
+        try
+        {
+            var schedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(pipeline.Id, ct);
+            if (schedule != null)
+            {
+                await _pipelineRepo.DeleteScheduleAsync(schedule.PublicId, ct);
+            }
+        }
+        catch (NotFoundException)
+        {
+            // No schedule to delete, safe to ignore
+        }
+
         await _auditRepo.LogActivityAsync(
             AuditActions.Deleted,
             AuditEntityTypes.Pipeline,

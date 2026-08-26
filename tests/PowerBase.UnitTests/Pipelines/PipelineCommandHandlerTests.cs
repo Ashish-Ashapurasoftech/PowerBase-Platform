@@ -178,4 +178,78 @@ public class PipelineCommandHandlerTests
         exception.Which.Errors.Should().ContainKey("Steps");
         exception.Which.Errors["Steps"].Should().Contain("Cannot activate PowerFlow with incomplete step configurations.");
     }
+
+    [Fact]
+    public async Task UpdatePipeline_TransitionToActive_SearchRecordsFirst_EnqueuesTask()
+    {
+        // Arrange
+        var pipelinePublicId = Guid.NewGuid();
+        var existingPipeline = new Pipeline
+        {
+            Id = 2L,
+            PublicId = pipelinePublicId,
+            AppId = 1L,
+            Name = "OriginalPipeline",
+            IsActive = false
+        };
+        var command = new UpdatePipelineCommand(pipelinePublicId, "OriginalPipeline", "New desc", true, new byte[] { 1 });
+
+        _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>()).Returns(existingPipeline);
+        _pipelineRepo.UpdateAsync(Arg.Any<Pipeline>(), null, Arg.Any<CancellationToken>()).Returns(1);
+
+        var steps = new List<PipelineStep>
+        {
+            new() { PublicId = Guid.NewGuid(), RefId = "ref_search", Type = "query", Subtype = "search-records", IsValidated = true }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(existingPipeline.Id, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var queue = Substitute.For<IPipelineExecutionQueue>();
+        var serviceProvider = Substitute.For<IServiceProvider>();
+        serviceProvider.GetService(typeof(IPipelineExecutionQueue)).Returns(queue);
+
+        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), serviceProvider);
+
+        // Act
+        await handler.HandleAsync(command, CancellationToken.None);
+
+        // Assert
+        queue.Received(1).QueueTask(Arg.Is<PipelineExecutionTask>(t => t.PipelineId == existingPipeline.Id && t.TriggerEvent == "activation"));
+    }
+
+    [Fact]
+    public async Task UpdatePipeline_ActiveToActive_SearchRecordsFirst_DoesNotEnqueueTask()
+    {
+        // Arrange
+        var pipelinePublicId = Guid.NewGuid();
+        var existingPipeline = new Pipeline
+        {
+            Id = 2L,
+            PublicId = pipelinePublicId,
+            AppId = 1L,
+            Name = "OriginalPipeline",
+            IsActive = true
+        };
+        var command = new UpdatePipelineCommand(pipelinePublicId, "OriginalPipeline", "New desc", true, new byte[] { 1 });
+
+        _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>()).Returns(existingPipeline);
+        _pipelineRepo.UpdateAsync(Arg.Any<Pipeline>(), null, Arg.Any<CancellationToken>()).Returns(1);
+
+        var steps = new List<PipelineStep>
+        {
+            new() { PublicId = Guid.NewGuid(), RefId = "ref_search", Type = "query", Subtype = "search-records", IsValidated = true }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(existingPipeline.Id, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var queue = Substitute.For<IPipelineExecutionQueue>();
+        var serviceProvider = Substitute.For<IServiceProvider>();
+        serviceProvider.GetService(typeof(IPipelineExecutionQueue)).Returns(queue);
+
+        var handler = new UpdatePipelineCommandHandler(_pipelineRepo, _auditRepo, _queryContext, _appRepo, _tableRepo, _fieldRepo, _appAccessService, Substitute.For<ITenantRepository>(), serviceProvider);
+
+        // Act
+        await handler.HandleAsync(command, CancellationToken.None);
+
+        // Assert
+        queue.DidNotReceive().QueueTask(Arg.Any<PipelineExecutionTask>());
+    }
 }

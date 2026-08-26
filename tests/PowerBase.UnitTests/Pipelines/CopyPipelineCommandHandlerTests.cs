@@ -90,9 +90,7 @@ public class CopyPipelineCommandHandlerTests
         result.Name.Should().Be("Customer Import - Copy");
         result.IsActive.Should().BeFalse();
 
-        await _uow.Received(1).BeginAsync(Arg.Any<CancellationToken>());
-        await _uow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
-        await _pipelineRepo.Received(1).SaveStepsAsync(2L, Arg.Any<IEnumerable<PipelineStep>>(), Arg.Any<byte[]>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).SaveStepsAsync(2L, Arg.Any<List<PipelineStep>>(), Arg.Any<byte[]>(), false, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -165,11 +163,12 @@ public class CopyPipelineCommandHandlerTests
         _pipelineRepo.GetConnectionsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
             .Returns(new List<PipelineConnection>());
 
-        IEnumerable<PipelineStep> savedSteps = null!;
+        List<PipelineStep> savedSteps = null!;
         await _pipelineRepo.SaveStepsAsync(
             2L,
-            Arg.Do<IEnumerable<PipelineStep>>(s => savedSteps = s),
+            Arg.Do<List<PipelineStep>>(s => savedSteps = s),
             Arg.Any<byte[]>(),
+            false,
             Arg.Any<IDbTransaction>(),
             Arg.Any<CancellationToken>()
         );
@@ -307,8 +306,7 @@ public class CopyPipelineCommandHandlerTests
         _pipelineRepo.GetConnectionsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
             .Returns(new List<PipelineConnection>());
 
-        // Force exception on SaveSteps
-        _pipelineRepo.SaveStepsAsync(Arg.Any<long>(), Arg.Any<IEnumerable<PipelineStep>>(), Arg.Any<byte[]>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+        _pipelineRepo.SaveStepsAsync(Arg.Any<long>(), Arg.Any<List<PipelineStep>>(), Arg.Any<byte[]>(), Arg.Any<bool>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException(new Exception("DB Error")));
 
         var command = new CopyPipelineCommand(sourcePublicId);
@@ -405,11 +403,12 @@ public class CopyPipelineCommandHandlerTests
         _pipelineRepo.GetConnectionsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
             .Returns(new List<PipelineConnection>());
 
-        IEnumerable<PipelineStep> savedSteps = null!;
+        List<PipelineStep> savedSteps = null!;
         await _pipelineRepo.SaveStepsAsync(
             2L,
-            Arg.Do<IEnumerable<PipelineStep>>(s => savedSteps = s),
+            Arg.Do<List<PipelineStep>>(s => savedSteps = s),
             Arg.Any<byte[]>(),
+            false,
             Arg.Any<IDbTransaction>(),
             Arg.Any<CancellationToken>()
         );

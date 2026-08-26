@@ -233,9 +233,12 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
-    public PipelineRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
+    private readonly IControlConnectionFactory _controlConnectionFactory;
+
+    public PipelineRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext, IControlConnectionFactory controlConnectionFactory)
         : base(connectionFactory, queryContext)
     {
+        _controlConnectionFactory = controlConnectionFactory;
     }
 
     public async Task<Pipeline> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
@@ -369,22 +372,34 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
 
         if (transaction is not null)
         {
-            return await transaction.Connection!.ExecuteAsync(
+            var affected1 = await transaction.Connection!.ExecuteAsync(
                 new CommandDefinition(UpdatePipelineSql, parameters, transaction, cancellationToken: ct));
+            if (affected1 > 0)
+            {
+                await SyncTriggerSubscriptionsAsync(pipeline.Id, transaction, ct);
+            }
+            return affected1;
         }
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteAsync(
+        var affected = await connection.ExecuteAsync(
             new CommandDefinition(UpdatePipelineSql, parameters, cancellationToken: ct));
+        if (affected > 0)
+        {
+            await SyncTriggerSubscriptionsAsync(pipeline.Id, null, ct);
+        }
+        return affected;
     }
 
     public async Task DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var pipelineId = await GetIdByPublicIdAsync(publicId, ct);
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(SoftDeletePipelineSql, new { publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
         if (affected == 0)
             throw new NotFoundException("PowerFlow", publicId);
+        await SyncTriggerSubscriptionsAsync(pipelineId, null, ct);
     }
 
     public async Task SoftDeleteManyAsync(IEnumerable<Guid> publicIds, CancellationToken ct = default)
@@ -398,12 +413,28 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var pipelineIds = new List<long>();
+        foreach (var publicId in publicIds)
+        {
+            try
+            {
+                var id = await GetIdByPublicIdAsync(publicId, ct);
+                pipelineIds.Add(id);
+            }
+            catch {}
+        }
+
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             sql, new { publicIds, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
 
         if (affected < publicIds.Count())
         {
             throw new ConcurrencyException("One or more PowerFlows were modified or deleted by another process.");
+        }
+
+        foreach (var id in pipelineIds)
+        {
+            await SyncTriggerSubscriptionsAsync(id, null, ct);
         }
     }
 
@@ -415,13 +446,17 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         return results.AsList();
     }
 
-    public async Task SaveStepsAsync(long pipelineId, IEnumerable<PipelineStep> steps, byte[] rowVersion, IDbTransaction? transaction = null, CancellationToken ct = default)
+    public async Task SaveStepsAsync(long pipelineId, IEnumerable<PipelineStep> steps, byte[] rowVersion, bool deactivate = false, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         // Internal helper to perform step saves
         async Task DoSaveAsync(IDbConnection connection, IDbTransaction? trans)
         {
             // 0. Concurrency check on meta.Pipeline using rowVersion
-            var updatePipelineSql = """
+            var updatePipelineSql = deactivate ? """
+                UPDATE meta.Pipeline
+                SET IsActive = 0, ModifiedOn = SYSUTCDATETIME()
+                WHERE Id = @pipelineId AND RowVersion = @rowVersion
+                """ : """
                 UPDATE meta.Pipeline
                 SET ModifiedOn = SYSUTCDATETIME()
                 WHERE Id = @pipelineId AND RowVersion = @rowVersion
@@ -624,6 +659,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         if (transaction is not null)
         {
             await DoSaveAsync(transaction.Connection!, transaction);
+            await SyncTriggerSubscriptionsAsync(pipelineId, transaction, ct);
             return;
         }
 
@@ -633,6 +669,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         try
         {
             await DoSaveAsync(connection, localTx);
+            await SyncTriggerSubscriptionsAsync(pipelineId, localTx, ct);
             await localTx.CommitAsync(ct);
         }
         catch
@@ -863,7 +900,12 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             }, cancellationToken: ct));
     }
 
-    public async Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, CancellationToken ct = default)
+    public Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, CancellationToken ct = default)
+    {
+        return GetStepRunsByRunIdAsync(runId, 1, 2000, ct);
+    }
+
+    public async Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, int page, int pageSize, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         const string sql = """
@@ -871,10 +913,20 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             FROM audit.PipelineStepRun
             WHERE PipelineRunId = @runId
             ORDER BY StartedOn ASC, Id ASC
+            OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;
+        var offset = (page - 1) * pageSize;
         var results = await connection.QueryAsync<PipelineStepRun>(
-            new CommandDefinition(sql, new { runId }, cancellationToken: ct));
+            new CommandDefinition(sql, new { runId, offset, pageSize }, cancellationToken: ct));
         return results.AsList();
+    }
+
+    public async Task<int> CountStepRunsByRunIdAsync(long runId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        const string sql = "SELECT COUNT(*) FROM audit.PipelineStepRun WHERE PipelineRunId = @runId";
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(sql, new { runId }, cancellationToken: ct));
     }
 
     public async Task<PipelineRun?> GetRunByPublicIdAsync(Guid publicId, CancellationToken ct = default)
@@ -1234,6 +1286,268 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         const string sql = "DELETE FROM meta.PipelineOutbox WHERE Published = 1 AND PublishedOn <= @olderThan";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(sql, new { olderThan }, cancellationToken: ct));
+    }
+
+    public async Task SyncTriggerSubscriptionsAsync(long pipelineId, IDbTransaction? tenantTransaction = null, CancellationToken ct = default)
+    {
+        Pipeline? pipeline;
+        if (tenantTransaction != null)
+        {
+            const string sql = "SELECT * FROM meta.Pipeline WHERE Id = @pipelineId";
+            pipeline = await tenantTransaction.Connection!.QuerySingleOrDefaultAsync<Pipeline>(
+                new CommandDefinition(sql, new { pipelineId }, tenantTransaction, cancellationToken: ct));
+        }
+        else
+        {
+            pipeline = await GetByIdAsync(pipelineId, ct);
+        }
+
+        IReadOnlyList<PipelineStep> steps;
+        if (tenantTransaction != null)
+        {
+            steps = (await tenantTransaction.Connection!.QueryAsync<PipelineStep>(
+                new CommandDefinition(GetStepsByPipelineIdSql, new { pipelineId }, tenantTransaction, cancellationToken: ct))).ToList();
+        }
+        else
+        {
+            steps = await GetStepsByPipelineIdAsync(pipelineId, ct);
+        }
+
+        var triggerStep = (pipeline == null || pipeline.IsDeleted) 
+            ? null 
+            : steps.FirstOrDefault(s => !s.IsDeleted && s.Type == "trigger" && (s.Subtype == "new-event" || s.Subtype == "new-bulk-event"));
+
+        if (pipeline == null || pipeline.IsDeleted || !pipeline.IsActive || triggerStep == null || string.IsNullOrEmpty(triggerStep.ConfigJson))
+        {
+            var deleteSql = "DELETE FROM meta.PipelineTriggerSubscription WHERE OwnerTenantId = @ownerTenantId AND PipelinePublicId = @pipelinePublicId";
+            await using var controlConn = _controlConnectionFactory.Create();
+            await controlConn.OpenAsync(ct);
+            var pipelinePublicId = pipeline?.PublicId ?? await GetPublicIdFromIdHelperAsync(pipelineId, tenantTransaction, ct);
+            if (pipelinePublicId != Guid.Empty)
+            {
+                await controlConn.ExecuteAsync(new CommandDefinition(deleteSql, new { ownerTenantId = QueryContext.TenantId, pipelinePublicId }, cancellationToken: ct));
+            }
+            return;
+        }
+
+        NewEventStepConfig config;
+        try
+        {
+            config = System.Text.Json.JsonSerializer.Deserialize<NewEventStepConfig>(triggerStep.ConfigJson, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? throw new InvalidOperationException();
+        }
+        catch
+        {
+            var deleteSql = "DELETE FROM meta.PipelineTriggerSubscription WHERE OwnerTenantId = @ownerTenantId AND PipelinePublicId = @pipelinePublicId";
+            await using var controlConn = _controlConnectionFactory.Create();
+            await controlConn.OpenAsync(ct);
+            await controlConn.ExecuteAsync(new CommandDefinition(deleteSql, new { ownerTenantId = QueryContext.TenantId, pipelinePublicId = pipeline.PublicId }, cancellationToken: ct));
+            return;
+        }
+
+        long targetTenantId = QueryContext.TenantId;
+        if (Guid.TryParse(config.ConnectionPublicId, out var connectionGuid) && !PowerBase.Application.Pipelines.PipelineStepValidator.SystemConnectionIds.Contains(connectionGuid))
+        {
+            PipelineAccount? account;
+            if (tenantTransaction != null)
+            {
+                const string sql = "SELECT * FROM meta.PipelineAccount WHERE PublicId = @connectionGuid AND IsDeleted = 0";
+                account = await tenantTransaction.Connection!.QuerySingleOrDefaultAsync<PipelineAccount>(
+                    new CommandDefinition(sql, new { connectionGuid }, tenantTransaction, cancellationToken: ct));
+            }
+            else
+            {
+                const string sql = "SELECT * FROM meta.PipelineAccount WHERE PublicId = @connectionGuid AND IsDeleted = 0";
+                await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
+                account = await tenantConn.QuerySingleOrDefaultAsync<PipelineAccount>(
+                    new CommandDefinition(sql, new { connectionGuid }, cancellationToken: ct));
+            }
+
+            if (account != null)
+            {
+                targetTenantId = account.TargetTenantId;
+            }
+            else
+            {
+                const string sql = "SELECT Id FROM meta.Tenant WHERE PublicId = @connectionGuid AND IsDeleted = 0";
+                await using var controlConnForTenant = _controlConnectionFactory.Create();
+                await controlConnForTenant.OpenAsync(ct);
+                var resolvedId = await controlConnForTenant.QuerySingleOrDefaultAsync<long?>(
+                    new CommandDefinition(sql, new { connectionGuid }, cancellationToken: ct));
+                if (resolvedId.HasValue)
+                {
+                    targetTenantId = resolvedId.Value;
+                }
+            }
+        }
+
+        if (string.IsNullOrEmpty(config.AppPublicId) || !Guid.TryParse(config.AppPublicId, out var targetAppPublicId) ||
+            string.IsNullOrEmpty(config.TablePublicId) || !Guid.TryParse(config.TablePublicId, out var targetTablePublicId))
+        {
+            return;
+        }
+
+        var upsertSql = """
+            MERGE meta.PipelineTriggerSubscription AS target
+            USING (SELECT @OwnerTenantId AS OwnerTenantId, @PipelinePublicId AS PipelinePublicId, @TriggerStepRefId AS TriggerStepRefId) AS source
+            ON target.OwnerTenantId = source.OwnerTenantId 
+               AND target.PipelinePublicId = source.PipelinePublicId 
+               AND target.TriggerStepRefId = source.TriggerStepRefId
+            WHEN MATCHED THEN
+                UPDATE SET 
+                    OwnerPipelineId = @OwnerPipelineId,
+                    TriggerStepPublicId = @TriggerStepPublicId,
+                    TargetTenantId = @TargetTenantId,
+                    TargetAppPublicId = @TargetAppPublicId,
+                    TargetTablePublicId = @TargetTablePublicId,
+                    TargetConnectionPublicId = @TargetConnectionPublicId,
+                    TriggerOnAdded = @TriggerOnAdded,
+                    TriggerOnModified = @TriggerOnModified,
+                    TriggerOnDeleted = @TriggerOnDeleted,
+                    TriggerOnAnyField = @TriggerOnAnyField,
+                    TriggerFieldsJson = @TriggerFieldsJson,
+                    FiltersJson = @FiltersJson,
+                    FilterGroupsJson = @FilterGroupsJson,
+                    LimitRecords = @LimitRecords,
+                    MaxRecords = @MaxRecords,
+                    TriggerSubtype = @TriggerSubtype,
+                    IsActive = @IsActive,
+                    LastModifiedOn = SYSUTCDATETIME()
+            WHEN NOT MATCHED THEN
+                INSERT (OwnerTenantId, OwnerPipelineId, PipelinePublicId, TriggerStepPublicId, TriggerStepRefId, TargetTenantId, TargetAppPublicId, TargetTablePublicId, TargetConnectionPublicId, TriggerOnAdded, TriggerOnModified, TriggerOnDeleted, TriggerOnAnyField, TriggerFieldsJson, FiltersJson, FilterGroupsJson, LimitRecords, MaxRecords, TriggerSubtype, IsActive, CreatedOn, LastModifiedOn)
+                VALUES (@OwnerTenantId, @OwnerPipelineId, @PipelinePublicId, @TriggerStepPublicId, @TriggerStepRefId, @TargetTenantId, @TargetAppPublicId, @TargetTablePublicId, @TargetConnectionPublicId, @TriggerOnAdded, @TriggerOnModified, @TriggerOnDeleted, @TriggerOnAnyField, @TriggerFieldsJson, @FiltersJson, @FilterGroupsJson, @LimitRecords, @MaxRecords, @TriggerSubtype, @IsActive, SYSUTCDATETIME(), SYSUTCDATETIME());
+            """;
+
+        var parameters = new
+        {
+            OwnerTenantId = QueryContext.TenantId,
+            OwnerPipelineId = pipelineId,
+            PipelinePublicId = pipeline.PublicId,
+            TriggerStepPublicId = triggerStep.PublicId,
+            TriggerStepRefId = triggerStep.RefId,
+            TargetTenantId = targetTenantId,
+            TargetAppPublicId = targetAppPublicId,
+            TargetTablePublicId = targetTablePublicId,
+            TargetConnectionPublicId = connectionGuid,
+            TriggerOnAdded = config.TriggerOnAdded,
+            TriggerOnModified = config.TriggerOnModified,
+            TriggerOnDeleted = config.TriggerOnDeleted,
+            TriggerOnAnyField = config.TriggerOnAnyField,
+            TriggerFieldsJson = config.TriggerFields != null ? System.Text.Json.JsonSerializer.Serialize(config.TriggerFields) : null,
+            FiltersJson = config.Filters != null ? System.Text.Json.JsonSerializer.Serialize(config.Filters) : null,
+            FilterGroupsJson = config.FilterGroups != null ? System.Text.Json.JsonSerializer.Serialize(config.FilterGroups) : null,
+            LimitRecords = config.LimitRecords,
+            MaxRecords = config.MaxRecords,
+            TriggerSubtype = triggerStep.Subtype,
+            IsActive = pipeline.IsActive
+        };
+
+        await using var controlConn2 = _controlConnectionFactory.Create();
+        await controlConn2.OpenAsync(ct);
+        await controlConn2.ExecuteAsync(new CommandDefinition(upsertSql, parameters, cancellationToken: ct));
+    }
+
+    private async Task<Guid> GetPublicIdFromIdHelperAsync(long pipelineId, IDbTransaction? transaction, CancellationToken ct)
+    {
+        const string sql = "SELECT PublicId FROM meta.Pipeline WHERE Id = @pipelineId";
+        if (transaction != null)
+        {
+            return await transaction.Connection!.QuerySingleOrDefaultAsync<Guid>(
+                new CommandDefinition(sql, new { pipelineId }, transaction, cancellationToken: ct));
+        }
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<Guid>(new CommandDefinition(sql, new { pipelineId }, cancellationToken: ct));
+    }
+
+    private class NewEventStepConfig
+    {
+        public string? ConnectionPublicId { get; set; }
+        public string? AppPublicId { get; set; }
+        public string? TablePublicId { get; set; }
+        public bool TriggerOnAdded { get; set; }
+        public bool TriggerOnModified { get; set; }
+        public bool TriggerOnDeleted { get; set; }
+        public bool TriggerOnAnyField { get; set; }
+        public List<string>? TriggerFields { get; set; }
+        public List<string>? SubsequentFields { get; set; }
+        public bool LimitRecords { get; set; }
+        public int? MaxRecords { get; set; }
+        public List<PowerBase.Application.Pipelines.TriggerFilterRule>? Filters { get; set; }
+        public List<PowerBase.Application.Pipelines.TriggerFilterGroup>? FilterGroups { get; set; }
+    }
+
+    public async Task InsertBulkEventRecordsAsync(List<PipelineBulkEventRecord> records, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        if (records == null || !records.Any()) return;
+        const string sql = """
+            INSERT INTO meta.PipelineBulkEventRecord (BulkEventId, Ordinal, RecordPublicId, EventType, BeforeValuesJson, AfterValuesJson, ChangedFieldsJson, Processed, CreatedOn)
+            VALUES (@BulkEventId, @Ordinal, @RecordPublicId, @EventType, @BeforeValuesJson, @AfterValuesJson, @ChangedFieldsJson, @Processed, @CreatedOn)
+            """;
+
+        if (transaction != null)
+        {
+            await transaction.Connection!.ExecuteAsync(new CommandDefinition(sql, records, transaction, cancellationToken: ct));
+            return;
+        }
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(sql, records, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<PipelineBulkEventRecord>> GetBulkEventRecordsPreviewAsync(Guid bulkEventId, int limit, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        const string sql = """
+            SELECT TOP (@limit) Id, BulkEventId, Ordinal, RecordPublicId, EventType, BeforeValuesJson, AfterValuesJson, ChangedFieldsJson, Processed, CreatedOn
+            FROM meta.PipelineBulkEventRecord
+            WHERE BulkEventId = @bulkEventId
+            ORDER BY Ordinal ASC
+            """;
+        var results = await connection.QueryAsync<PipelineBulkEventRecord>(new CommandDefinition(sql, new { bulkEventId, limit }, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task<IReadOnlyList<PipelineBulkEventRecord>> GetPendingBulkEventRecordsPageAsync(Guid bulkEventId, int page, int pageSize, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        const string sql = """
+            SELECT Id, BulkEventId, Ordinal, RecordPublicId, EventType, BeforeValuesJson, AfterValuesJson, ChangedFieldsJson, Processed, CreatedOn
+            FROM meta.PipelineBulkEventRecord
+            WHERE BulkEventId = @bulkEventId AND Processed = 0
+            ORDER BY Ordinal ASC
+            OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+            """;
+        var offset = (page - 1) * pageSize;
+        var results = await connection.QueryAsync<PipelineBulkEventRecord>(new CommandDefinition(sql, new { bulkEventId, offset, pageSize }, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task MarkBulkEventRecordsProcessedAsync(List<long> ids, byte processedStatus, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        if (ids == null || !ids.Any()) return;
+        const string sql = "UPDATE meta.PipelineBulkEventRecord SET Processed = @processedStatus WHERE Id IN @ids";
+
+        if (transaction != null)
+        {
+            await transaction.Connection!.ExecuteAsync(new CommandDefinition(sql, new { ids, processedStatus }, transaction, cancellationToken: ct));
+            return;
+        }
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { ids, processedStatus }, cancellationToken: ct));
+    }
+
+    public async Task DeleteExpiredBulkEventRecordsAsync(DateTime createdBefore, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        const string sql = """
+            DELETE r
+            FROM meta.PipelineBulkEventRecord r
+            INNER JOIN audit.PipelineRun run ON run.MessageId = r.BulkEventId
+            WHERE run.Status IN ('Success', 'Failed', 'Skipped', 'Stopped')
+              AND r.CreatedOn <= @createdBefore
+            """;
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { createdBefore }, cancellationToken: ct));
     }
 }
 

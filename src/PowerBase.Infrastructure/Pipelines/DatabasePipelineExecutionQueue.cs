@@ -69,7 +69,7 @@ public class DatabasePipelineExecutionQueue : IPipelineExecutionQueue
             {
                 queueSource = "Schedule";
             }
-            else if (task.TriggerEvent == "new-event")
+            else if (task.TriggerEvent == "new-event" || task.TriggerEvent == "new-bulk-event")
             {
                 queueSource = "Event";
             }

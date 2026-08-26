@@ -14,6 +14,7 @@ public class PipelineExecutionOptions
 
     // Final Database-only options
     public int PerInstanceTenantConcurrencyLimit { get; set; } = 5;
+    public int BulkEventPageSize { get; set; } = 500;
     public DatabaseQueueOptions DatabaseQueue { get; set; } = new();
 }
 

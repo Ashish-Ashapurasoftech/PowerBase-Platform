@@ -369,12 +369,24 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                 }
                 else if (finalRun != null && finalRun.Status == "Failed")
                 {
-                    await HandleJobFailureAsync(queueRepo, job, claimToken, finalRun.LastError ?? "Execution failed.", ct);
+                    if (finalRun.LastError != null && finalRun.LastError.Contains("PIPELINE_NON_RETRYABLE_ERROR"))
+                    {
+                        await queueRepo.MarkFailedAsync(job.Id, _workerId, claimToken, finalRun.LastError, ct);
+                    }
+                    else
+                    {
+                        await HandleJobFailureAsync(queueRepo, job, claimToken, finalRun.LastError ?? "Execution failed.", ct);
+                    }
                 }
                 else
                 {
                     await queueRepo.MarkSucceededAsync(job.Id, _workerId, claimToken, ct);
                 }
+            }
+            catch (Exception ex) when (ex is PowerBase.Domain.Exceptions.PipelineNonRetryableException || ex.InnerException is PowerBase.Domain.Exceptions.PipelineNonRetryableException)
+            {
+                _logger.LogError(ex, "Non-retryable pipeline execution error for Job {Id}.", job.Id);
+                await queueRepo.MarkFailedAsync(job.Id, _workerId, claimToken, ex.Message, ct);
             }
             catch (Exception ex)
             {

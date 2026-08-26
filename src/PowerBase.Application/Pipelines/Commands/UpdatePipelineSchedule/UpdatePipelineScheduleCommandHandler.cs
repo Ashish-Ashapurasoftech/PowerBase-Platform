@@ -13,10 +13,12 @@ namespace PowerBase.Application.Pipelines.Commands.UpdatePipelineSchedule;
 public class UpdatePipelineScheduleCommandHandler
 {
     private readonly IPipelineRepository _pipelineRepo;
+    private readonly IQueryContext _queryContext;
 
-    public UpdatePipelineScheduleCommandHandler(IPipelineRepository pipelineRepo)
+    public UpdatePipelineScheduleCommandHandler(IPipelineRepository pipelineRepo, IQueryContext queryContext)
     {
         _pipelineRepo = pipelineRepo;
+        _queryContext = queryContext;
     }
 
     public async Task HandleAsync(UpdatePipelineScheduleCommand command, CancellationToken ct)
@@ -33,11 +35,11 @@ public class UpdatePipelineScheduleCommandHandler
 
         var steps = await _pipelineRepo.GetStepsByPipelineIdAsync(pipelineId, ct);
         var firstStep = steps.Where(s => s.ParentStepId == null).OrderBy(s => s.DisplayOrder).FirstOrDefault();
-        if (firstStep == null || firstStep.Type != "query" || firstStep.Subtype != "search-records")
+        if (firstStep == null || firstStep.Type != "query" || (firstStep.Subtype != "search-records" && firstStep.Subtype != "look-up-record"))
         {
             throw new ValidationException(new Dictionary<string, string[]>
             {
-                { "Pipeline", new[] { "PowerFlow schedule is only allowed when the first step is a Search Records (Query) step." } }
+                { "Pipeline", new[] { "PowerFlow schedule is only allowed when the first step is a Search Records or Look Up a Record (Query) step." } }
             });
         }
 
@@ -77,6 +79,21 @@ public class UpdatePipelineScheduleCommandHandler
         var nextRunLocal = cron.GetNextOccurrence(nowLocal);
         var nextRunUtc = TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo);
 
+        var pipeline = await _pipelineRepo.GetByPublicIdAsync(command.PipelinePublicId, ct);
+        bool scheduleChanged = schedule == null ||
+                               schedule.ScheduleType != command.ScheduleType ||
+                               schedule.Interval != command.Interval ||
+                               schedule.TimeOfDay != command.TimeOfDay ||
+                               schedule.Weekdays != command.Weekdays ||
+                               schedule.MonthDay != command.MonthDay ||
+                               schedule.MonthOfYear != command.MonthOfYear ||
+                               schedule.RelativeWeek != command.RelativeWeek ||
+                               schedule.RelativeDay != command.RelativeDay ||
+                               schedule.TimeZone != command.TimeZone ||
+                               schedule.CronExpression != command.CronExpression;
+
+        bool shouldDeactivate = pipeline.IsActive && scheduleChanged;
+
         if (schedule == null)
         {
             schedule = new PipelineSchedule
@@ -111,6 +128,14 @@ public class UpdatePipelineScheduleCommandHandler
             schedule.CronExpression = command.CronExpression;
             schedule.NextRunOn = nextRunUtc;
             await _pipelineRepo.UpdateScheduleAsync(schedule, transaction: null, ct);
+        }
+
+        if (shouldDeactivate)
+        {
+            pipeline.IsActive = false;
+            pipeline.ModifiedOn = DateTime.UtcNow;
+            pipeline.ModifiedBy = _queryContext.UserId;
+            await _pipelineRepo.UpdateAsync(pipeline, null, ct);
         }
     }
 }

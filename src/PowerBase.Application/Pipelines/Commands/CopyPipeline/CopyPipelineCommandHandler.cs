@@ -177,7 +177,7 @@ public class CopyPipelineCommandHandler
             var rowVersion = await _pipelineRepo.GetRowVersionAsync(newId, _uow.Transaction, ct);
 
             // Save steps
-            await _pipelineRepo.SaveStepsAsync(newId, newSteps, rowVersion, _uow.Transaction, ct);
+            await _pipelineRepo.SaveStepsAsync(newId, newSteps, rowVersion, deactivate: false, _uow.Transaction, ct);
 
             await _uow.CommitAsync(ct);
 

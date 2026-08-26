@@ -14,6 +14,7 @@ using PowerBase.Domain.Entities;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PowerBase.Application.Records;
+using PowerBase.Application.Reports;
 
 namespace PowerBase.UnitTests.Pipelines;
 
@@ -28,6 +29,7 @@ public class PipelineEngineTests
     private readonly PipelineExecutionOptions _execOptions;
     private readonly ILogger<PipelineEngine> _logger;
     private readonly IPipelineAuditFormatter _auditFormatter;
+    private readonly IPipelineRecordSearchService _pipelineRecordSearchService;
 
     public PipelineEngineTests()
     {
@@ -39,6 +41,9 @@ public class PipelineEngineTests
         _execOptions = new PipelineExecutionOptions();
         _logger = Substitute.For<ILogger<PipelineEngine>>();
         _auditFormatter = Substitute.For<IPipelineAuditFormatter>();
+        _pipelineRecordSearchService = Substitute.For<IPipelineRecordSearchService>();
+        var serviceProvider = Substitute.For<IServiceProvider>();
+        serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(_pipelineRecordSearchService);
 
         _engine = new PipelineEngine(
             _pipelineRepo,
@@ -56,7 +61,7 @@ public class PipelineEngineTests
             _auditFormatter,
             Substitute.For<IQueryContext>(),
             Substitute.For<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
-            Substitute.For<IServiceProvider>(),
+            serviceProvider,
             Substitute.For<IAdminRepository>(),
             Substitute.For<ITenantRepository>(),
             Substitute.For<IPipelineStepIdempotencyRepository>()
@@ -66,7 +71,7 @@ public class PipelineEngineTests
     private string InvokeEvaluateTokens(string? input, string payloadJson)
     {
         var method = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.NonPublic | BindingFlags.Instance);
-        return (string)method!.Invoke(_engine, new object?[] { input, payloadJson })!;
+        return (string)method!.Invoke(_engine, new object?[] { input, payloadJson, null, null })!;
     }
 
     private object? InvokeParseValueType(string valueStr, string typeCode)
@@ -546,7 +551,7 @@ public class PipelineEngineTests
         groupType.GetProperty("Rules")!.SetValue(groupInstance, rulesList);
 
         var method = typeof(PipelineEngine).GetMethod("EvaluateConditionGroup", BindingFlags.NonPublic | BindingFlags.Instance);
-        var result = (bool)method!.Invoke(_engine, new[] { groupInstance, payload })!;
+        var result = (bool)method!.Invoke(_engine, new[] { groupInstance, payload, null, null })!;
 
         result.Should().BeTrue();
     }
@@ -737,6 +742,497 @@ public class PipelineEngineTests
 
         // Act & Assert
         // Executing the pipeline must not throw, despite the formatting failure
+        var act = () => _engine.ExecuteAsync(task, CancellationToken.None);
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public void EvaluateTokens_JsonElementAccessor_TranslatesPhysicalToStableKeys()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            steps = new
+            {
+                ref_search = new
+                {
+                    records = new[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            { "f_101", "Apple" },
+                            { "fid_102", "Orange" }
+                        }
+                    }
+                }
+            }
+        });
+
+        InvokeEvaluateTokens("{{steps.ref_search.records[0].fid_101}} - {{steps.ref_search.records[0].f_102}}", payload)
+            .Should().Be("Apple - Orange");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_UnsupportedStepType_ThrowsNotSupportedException()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 999, Type = "trigger", Subtype = "new-event", IsDeleted = false },
+            new() { Id = 1, PublicId = Guid.NewGuid(), RefId = "unsupported_step", Type = "unknown", Subtype = "unsupported-subtype" }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        // Act & Assert
+        var act = () => _engine.ExecuteAsync(task, CancellationToken.None);
+        await act.Should().ThrowAsync<NotSupportedException>();
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SearchRecordsAndLoopForEach_ExecutesCreateRecordForEachMatchedItem()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "new-event", RefId = "ref_trigger", IsDeleted = false },
+            new() 
+            { 
+                Id = 11, 
+                RefId = "ref_search", 
+                Type = "query", 
+                Subtype = "search-records", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FilterField = "f_1", FilterValue = "test" }) 
+            },
+            new() 
+            { 
+                Id = 12, 
+                RefId = "ref_loop", 
+                Type = "loop", 
+                Subtype = "for-each", 
+                ConfigJson = JsonSerializer.Serialize(new { LoopOverStepId = "ref_search" }) 
+            },
+            new() 
+            { 
+                Id = 13, 
+                ParentStepId = 12, 
+                ParentBranch = "children", 
+                RefId = "ref_create", 
+                Type = "action", 
+                Subtype = "create-record", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FieldMappings = new List<object> { new { Field = "fid_2", Value = "{{steps.ref_loop.item.fid_1}}" } } }) 
+            }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 1, Name = "Name", TypeCode = "text" },
+            new() { Id = 2, Fid = 2, Name = "Target", TypeCode = "text" }
+        };
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        // We mock ListAsync to return 3 records
+        var matchedRecords = new List<IReadOnlyDictionary<string, object?>>
+        {
+            new Dictionary<string, object?> { { "f_1", "Value1" } },
+            new Dictionary<string, object?> { { "f_1", "Value2" } },
+            new Dictionary<string, object?> { { "f_1", "Value3" } }
+        };
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(matchedRecords);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: CreateAsync should have been called exactly 3 times
+        await _recordRepo.Received(3).CreateAsync(
+            table,
+            Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Any<IReadOnlyDictionary<long, object?>>(),
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>()
+        );
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value1"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value2"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value3"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_LegacyDirectSourceExpressionInsideLoop_ResolvesCurrentIterationValuesViaFallback()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "new-event", RefId = "ref_trigger", IsDeleted = false },
+            new() 
+            { 
+                Id = 11, 
+                RefId = "ref_search", 
+                Type = "query", 
+                Subtype = "search-records", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FilterField = "f_1", FilterValue = "test" }) 
+            },
+            new() 
+            { 
+                Id = 12, 
+                RefId = "ref_loop", 
+                Type = "loop", 
+                Subtype = "for-each", 
+                ConfigJson = JsonSerializer.Serialize(new { LoopOverStepId = "ref_search" }) 
+            },
+            new() 
+            { 
+                Id = 13, 
+                ParentStepId = 12, 
+                ParentBranch = "children", 
+                RefId = "ref_create", 
+                Type = "action", 
+                Subtype = "create-record", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FieldMappings = new List<object> { new { Field = "fid_2", Value = "{{steps.ref_search.fid_1}}" } } }) 
+            }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 1, Name = "Name", TypeCode = "text" },
+            new() { Id = 2, Fid = 2, Name = "Target", TypeCode = "text" }
+        };
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        var matchedRecords = new List<IReadOnlyDictionary<string, object?>>
+        {
+            new Dictionary<string, object?> { { "f_1", "Value1" } },
+            new Dictionary<string, object?> { { "f_1", "Value2" } },
+            new Dictionary<string, object?> { { "f_1", "Value3" } }
+        };
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(matchedRecords);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: Legacy fallback maps steps.ref_search.fid_1 to steps.ref_loop.item.fid_1
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value1"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value2"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value3"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_LegacyDirectSourceExpressionOutsideLoop_DoesNotResolveViaFallback()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "new-event", RefId = "ref_trigger", IsDeleted = false },
+            new() 
+            { 
+                Id = 11, 
+                RefId = "ref_search", 
+                Type = "query", 
+                Subtype = "search-records", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FilterField = "f_1", FilterValue = "test" }) 
+            },
+            new() 
+            { 
+                Id = 13, 
+                RefId = "ref_create", 
+                Type = "action", 
+                Subtype = "create-record", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FieldMappings = new List<object> { new { Field = "fid_2", Value = "{{steps.ref_search.fid_1}}" } } }) 
+            }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 1, Name = "Name", TypeCode = "text" },
+            new() { Id = 2, Fid = 2, Name = "Target", TypeCode = "text" }
+        };
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        var matchedRecords = new List<IReadOnlyDictionary<string, object?>>
+        {
+            new Dictionary<string, object?> { { "f_1", "Value1" } }
+        };
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(matchedRecords);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: Outside a loop, steps.ref_search.fid_1 remains unresolved (blank/null)
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => !d.ContainsKey(2) || d[2] == null || d[2] as string == ""), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ExplicitCollectionAccessInsideLoop_RemainsUntouched()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "new-event", RefId = "ref_trigger", IsDeleted = false },
+            new() 
+            { 
+                Id = 11, 
+                RefId = "ref_search", 
+                Type = "query", 
+                Subtype = "search-records", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FilterField = "f_1", FilterValue = "test" }) 
+            },
+            new() 
+            { 
+                Id = 12, 
+                RefId = "ref_loop", 
+                Type = "loop", 
+                Subtype = "for-each", 
+                ConfigJson = JsonSerializer.Serialize(new { LoopOverStepId = "ref_search" }) 
+            },
+            new() 
+            { 
+                Id = 13, 
+                ParentStepId = 12, 
+                ParentBranch = "children", 
+                RefId = "ref_create", 
+                Type = "action", 
+                Subtype = "create-record", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FieldMappings = new List<object> { new { Field = "fid_2", Value = "{{steps.ref_search.records[0].fid_1}}" } } }) 
+            }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 1, Name = "Name", TypeCode = "text" },
+            new() { Id = 2, Fid = 2, Name = "Target", TypeCode = "text" }
+        };
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        var matchedRecords = new List<IReadOnlyDictionary<string, object?>>
+        {
+            new Dictionary<string, object?> { { "f_1", "Value1" } },
+            new Dictionary<string, object?> { { "f_1", "Value2" } }
+        };
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(matchedRecords);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: Explicit array lookups map to record 0's value ("Value1") for all iterations
+        await _recordRepo.Received(2).CreateAsync(
+            table,
+            Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value1"),
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>()
+        );
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SearchRecordsUnlimited_CallsSearchServiceWithNullMaxResults()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "new-event", RefId = "ref_trigger", IsDeleted = false },
+            new() 
+            { 
+                Id = 11, 
+                RefId = "ref_search", 
+                Type = "query", 
+                Subtype = "search-records", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FilterField = "f_1", FilterValue = "test", MaxResults = (int?)null }) 
+            }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+
+        var fields = new List<AppField> { new() { Id = 1, Fid = 1, Name = "Name", TypeCode = "text" } };
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: should query with null MaxResults
+        await _pipelineRecordSearchService.Received(1).SearchAsync(
+            table,
+            Arg.Any<IReadOnlyList<AppField>>(),
+            null,
+            Arg.Any<FilterGroup>(),
+            Arg.Any<CancellationToken>()
+        );
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SearchRecordsFinite_CallsSearchServiceWithFiniteMaxResults()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "new-event", RefId = "ref_trigger", IsDeleted = false },
+            new() 
+            { 
+                Id = 11, 
+                RefId = "ref_search", 
+                Type = "query", 
+                Subtype = "search-records", 
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FilterField = "f_1", FilterValue = "test", MaxResults = 5 }) 
+            }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+
+        var fields = new List<AppField> { new() { Id = 1, Fid = 1, Name = "Name", TypeCode = "text" } };
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: should query with MaxResults = 5
+        await _pipelineRecordSearchService.Received(1).SearchAsync(
+            table,
+            Arg.Any<IReadOnlyList<AppField>>(),
+            5,
+            Arg.Any<FilterGroup>(),
+            Arg.Any<CancellationToken>()
+        );
+    }
+
+    [Fact]
+    public void SearchRecordsStepConfig_NullableIntJsonConverter_DeserializesCorrectly()
+    {
+        var configType = typeof(PipelineEngine).GetNestedType("SearchRecordsStepConfig", BindingFlags.NonPublic);
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+        // 1. Unlimited with ""
+        var config1 = JsonSerializer.Deserialize("{\"maxResults\": \"\"}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config1).Should().BeNull();
+
+        // 2. Unlimited with "unlimited"
+        var config2 = JsonSerializer.Deserialize("{\"maxResults\": \"unlimited\"}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config2).Should().BeNull();
+
+        // 3. Unlimited with null
+        var config3 = JsonSerializer.Deserialize("{\"maxResults\": null}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config3).Should().BeNull();
+
+        // 4. Unlimited with negative/zero
+        var config4 = JsonSerializer.Deserialize("{\"maxResults\": -1}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config4).Should().BeNull();
+
+        // 5. Finite with number
+        var config5 = JsonSerializer.Deserialize("{\"maxResults\": 5}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config5).Should().Be(5);
+
+        // 6. Finite with numeric string
+        var config6 = JsonSerializer.Deserialize("{\"maxResults\": \"3\"}", configType!, options);
+        configType!.GetProperty("MaxResults")!.GetValue(config6).Should().Be(3);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_MismatchTriggerEvent_ThrowsPipelineNonRetryableException()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "schedule", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "record-added", RefId = "ref_trigger", IsDeleted = false }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        // Act & Assert
+        var act = () => _engine.ExecuteAsync(task, CancellationToken.None);
+        await act.Should().ThrowAsync<PowerBase.Domain.Exceptions.PipelineNonRetryableException>()
+            .WithMessage("Schedule trigger event requires an active root-level schedule trigger step.");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SupportedSubtypesInEngine_ExecutesSuccessfully()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{\"trigger\":{\"fid_1\":\"val1\"}}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "trigger", Subtype = "record-added", RefId = "ref_trigger", IsDeleted = false }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: It should execute without throwing NotSupportedException
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 10 && sr.Status == "Success"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PipelineScheduleTriggerEvent_ValidStructure_Succeeds()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "pipeline_schedule", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 10, Type = "query", Subtype = "search-records", RefId = "ref_search", IsDeleted = false, ConfigJson = $"{{\"TableId\":\"{Guid.NewGuid()}\"}}" }
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+        
+        var table = new AppTable { Id = 100 };
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
+
+        // Act & Assert
         var act = () => _engine.ExecuteAsync(task, CancellationToken.None);
         await act.Should().NotThrowAsync();
     }

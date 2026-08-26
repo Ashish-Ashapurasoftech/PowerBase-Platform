@@ -19,7 +19,9 @@ public class PipelineScheduleTests
     public PipelineScheduleTests()
     {
         _pipelineRepo = Substitute.For<IPipelineRepository>();
-        _handler = new UpdatePipelineScheduleCommandHandler(_pipelineRepo);
+        _pipelineRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(new Pipeline { Id = 1, IsActive = true });
+        _handler = new UpdatePipelineScheduleCommandHandler(_pipelineRepo, Substitute.For<IQueryContext>());
     }
 
     [Fact]

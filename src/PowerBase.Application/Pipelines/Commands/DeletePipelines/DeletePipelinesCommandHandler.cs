@@ -63,6 +63,22 @@ public class DeletePipelinesCommandHandler
 
         foreach (var pipeline in pipelines)
         {
+            try
+            {
+                var schedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(pipeline.Id, ct);
+                if (schedule != null)
+                {
+                    await _pipelineRepo.DeleteScheduleAsync(schedule.PublicId, ct);
+                }
+            }
+            catch (NotFoundException)
+            {
+                // Safe to ignore
+            }
+        }
+
+        foreach (var pipeline in pipelines)
+        {
             await _auditRepo.LogActivityAsync(
                 AuditActions.Deleted,
                 AuditEntityTypes.Pipeline,
