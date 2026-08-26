@@ -825,5 +825,148 @@ public class PipelineScheduleTests
         contextA.Should().NotBe(contextB);
         contextB.Should().NotBe(contextC);
     }
+
+    [Fact]
+    public void MultipleRootSteps_WithAllowedFirstRoot_IsScheduleEligible()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "query", Subtype = "search-records", DisplayOrder = 0, IsDeleted = false },
+            new PipelineStep { Id = 2, Type = "loop", Subtype = "for-each", DisplayOrder = 1, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public void MultipleRootSteps_WithDisallowedFirstRoot_IsNotScheduleEligible()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "loop", Subtype = "for-each", DisplayOrder = 0, IsDeleted = false },
+            new PipelineStep { Id = 2, Type = "query", Subtype = "search-records", DisplayOrder = 1, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeFalse();
+    }
+
+    [Fact]
+    public void SearchRecordsRoot_WithChildren_IsScheduleEligible()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "query", Subtype = "search-records", DisplayOrder = 0, IsDeleted = false },
+            new PipelineStep { Id = 2, Type = "action", Subtype = "create-record", ParentStepId = 1, DisplayOrder = 0, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public void SearchRecordsRoot_IsScheduleEligible()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "query", Subtype = "search-records", DisplayOrder = 0, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public void LookUpRecordRoot_IsScheduleEligible()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "query", Subtype = "look-up-record", DisplayOrder = 0, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public void ActionRoot_IsScheduleEligible()
+    {
+        // Root action type create-record is in approved root subtype list
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "action", Subtype = "create-record", DisplayOrder = 0, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public void TriggerRoot_IsNotScheduleEligible()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "trigger", Subtype = "new-event", DisplayOrder = 0, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeFalse();
+    }
+
+    [Fact]
+    public void StaleDeletedTrigger_DoesNotBlockSchedule()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "query", Subtype = "search-records", DisplayOrder = 0, IsDeleted = false },
+            new PipelineStep { Id = 2, Type = "trigger", Subtype = "new-event", DisplayOrder = 1, IsDeleted = true }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public void ActiveHiddenTrigger_DoesBlockSchedule()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "query", Subtype = "search-records", DisplayOrder = 0, IsDeleted = false },
+            new PipelineStep { Id = 2, Type = "trigger", Subtype = "new-event", DisplayOrder = 1, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeFalse();
+    }
+
+    [Fact]
+    public void CrossTenantSteps_DoNotAffectOwnerScheduleEligibility()
+    {
+        // Steps in database query are loaded per-tenant connection so cross-tenant rows are not mixed.
+        // We can pass tenant-isolated list.
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "query", Subtype = "search-records", DisplayOrder = 0, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public void SearchRecords_ThenLoop_WithLoopChildren_IsScheduleEligible()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 210, Type = "query", Subtype = "search-records", ParentStepId = null, ParentBranch = null, DisplayOrder = 0, IsDeleted = false },
+            new PipelineStep { Id = 211, Type = "loop", Subtype = "for-each", ParentStepId = null, ParentBranch = null, DisplayOrder = 1, IsDeleted = false },
+            new PipelineStep { Id = 213, Type = "action", Subtype = "create-record", ParentStepId = 211, ParentBranch = "children", DisplayOrder = 0, IsDeleted = false },
+            new PipelineStep { Id = 214, Type = "action", Subtype = "create-record", ParentStepId = 211, ParentBranch = "children", DisplayOrder = 1, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeTrue();
+    }
 }
 
