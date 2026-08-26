@@ -291,7 +291,8 @@ public class PipelineEngine : IPipelineEngine
         {
             if (task.Depth > 10)
             {
-                throw new PipelineRecursionException($"Pipeline recursion limit exceeded. Depth is {task.Depth}. CorrelationId: {task.CorrelationId}");
+                //throw new PipelineRecursionException($"Pipeline recursion limit exceeded. Depth is {task.Depth}. CorrelationId: {task.CorrelationId}");
+                _logger.LogInformation("Pipeline recursion limit exceeded 10 (Depth is {Depth}). Continuing recursion indefinitely as configured.", task.Depth);
             }
 
             // Fetch steps

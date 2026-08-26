@@ -164,8 +164,9 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
             if (currentDepth > 10)
             {
-                _logger.LogWarning("Recursion check: Depth threshold exceeded ({Depth}). Skipping outbox queue.", currentDepth);
-                return;
+                //_logger.LogWarning("Recursion check: Depth threshold exceeded ({Depth}). Skipping outbox queue.", currentDepth);
+                //return;
+                _logger.LogInformation("Recursion check: Depth threshold exceeded 10 ({Depth}). Continuing recursion indefinitely as configured.", currentDepth);
             }
         }
 
@@ -254,8 +255,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                 // Prevent cyclic dependency loops
                 if (currentChain.Contains(sub.OwnerPipelineId))
                 {
-                    _logger.LogWarning("Cyclic dependency detected: Pipeline {PipelineId} already executed in the call chain. Skipping execution trigger.", sub.OwnerPipelineId);
-                    continue;
+                    _logger.LogInformation("Cyclic/recursive path detected: Pipeline {PipelineId} already executed in the call chain. Processing trigger recursion normally.", sub.OwnerPipelineId);
+                    //continue;
                 }
 
                 // Limit safety threshold check for single-record triggers
