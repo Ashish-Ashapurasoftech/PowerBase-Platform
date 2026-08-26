@@ -400,6 +400,32 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return resRows.ToDictionary(x => x.PublicId, x => x.Id);
     }
 
+    public async Task<long> GetActiveRecordIdByPublicIdAsync(AppTable table, Guid publicId, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var sql = $"SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId = @publicId AND IsDeleted = 0";
+        if (transaction is not null)
+        {
+            return await transaction.Connection!.QuerySingleAsync<long>(new CommandDefinition(sql, new { publicId }, transaction, cancellationToken: ct));
+        }
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleAsync<long>(new CommandDefinition(sql, new { publicId }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, long>> GetActiveRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var sql = $"SELECT PublicId, Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @publicIds AND IsDeleted = 0";
+        if (transaction is not null)
+        {
+            var rows = await transaction.Connection!.QueryAsync<(Guid PublicId, long Id)>(new CommandDefinition(sql, new { publicIds }, transaction, cancellationToken: ct));
+            return rows.ToDictionary(x => x.PublicId, x => x.Id);
+        }
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var resRows = await connection.QueryAsync<(Guid PublicId, long Id)>(new CommandDefinition(sql, new { publicIds }, cancellationToken: ct));
+        return resRows.ToDictionary(x => x.PublicId, x => x.Id);
+    }
+
     public async Task<Guid> CreateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
     {

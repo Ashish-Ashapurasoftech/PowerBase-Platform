@@ -19,6 +19,8 @@ public class DeletePipelinesCommandHandlerTests
     private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
     private readonly IPipelineRepository _pipelineRepo = Substitute.For<IPipelineRepository>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
+    private readonly IMainPipelineQueueRepository _queueRepo = Substitute.For<IMainPipelineQueueRepository>();
+    private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
 
     private readonly Guid _appPublicId = Guid.NewGuid();
     private readonly long _appId = 1L;
@@ -26,6 +28,7 @@ public class DeletePipelinesCommandHandlerTests
     public DeletePipelinesCommandHandlerTests()
     {
         _appRepo.GetIdByPublicIdAsync(_appPublicId, Arg.Any<CancellationToken>()).Returns(_appId);
+        _queryContext.TenantId.Returns(1L);
     }
 
     [Fact]
@@ -33,7 +36,7 @@ public class DeletePipelinesCommandHandlerTests
     {
         // Arrange
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid>());
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo);
+        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act & Assert
         await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
@@ -46,7 +49,7 @@ public class DeletePipelinesCommandHandlerTests
     {
         // Arrange
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { Guid.NewGuid(), Guid.Empty });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo);
+        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act & Assert
         await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
@@ -68,7 +71,7 @@ public class DeletePipelinesCommandHandlerTests
         _pipelineRepo.GetByPublicIdAsync(pipelineId2, Arg.Any<CancellationToken>()).Returns(pipeline2);
 
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { pipelineId1, pipelineId2 });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo);
+        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act & Assert
         await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
@@ -92,7 +95,7 @@ public class DeletePipelinesCommandHandlerTests
             .Returns(Task.FromException<Pipeline>(new NotFoundException("PowerFlow", nonexistentId)));
 
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { pipelineId1, nonexistentId });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo);
+        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act & Assert
         await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
@@ -113,7 +116,7 @@ public class DeletePipelinesCommandHandlerTests
 
         // Pass duplicate IDs
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { pipelineId1, pipelineId1 });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo);
+        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act
         await handler.HandleAsync(command, CancellationToken.None);
@@ -147,7 +150,7 @@ public class DeletePipelinesCommandHandlerTests
         _pipelineRepo.GetByPublicIdAsync(draftId, Arg.Any<CancellationToken>()).Returns(draftPipeline);
 
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { activeId, draftId });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo);
+        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act
         await handler.HandleAsync(command, CancellationToken.None);

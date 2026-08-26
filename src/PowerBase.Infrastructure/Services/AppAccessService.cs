@@ -141,7 +141,7 @@ public class AppAccessService : IAppAccessService
 
     private void EnsureTokenAppAccess(long appId)
     {
-        if (!_queryContext.TokenAccessAllApps && !_queryContext.AllowedAppIds.Contains(appId))
+        if (_queryContext.IsUserToken && !_queryContext.TokenAccessAllApps && !_queryContext.AllowedAppIds.Contains(appId))
         {
             throw new UnauthorizedActionException("This user token does not have access to this application.");
         }

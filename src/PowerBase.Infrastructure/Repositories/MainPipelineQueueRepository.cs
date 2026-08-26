@@ -364,4 +364,108 @@ public class MainPipelineQueueRepository : ControlRepositoryBase, IMainPipelineQ
         await using var conn = await OpenNewConnectionAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<PipelineQueue>(new CommandDefinition(sql, new { messageId }, cancellationToken: ct));
     }
+
+    public async Task<int> PausePendingJobsAsync(long tenantId, long pipelineId, DateTime sentinelDate, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineQueue
+            SET PausedNextAttemptOn = NextAttemptOn,
+                NextAttemptOn = @sentinelDate,
+                LastModifiedOn = SYSUTCDATETIME()
+            WHERE TenantId = @tenantId AND PipelineId = @pipelineId AND Status = 'Pending'
+              AND (NextAttemptOn IS NULL OR NextAttemptOn <> @sentinelDate);
+            """;
+        await using var conn = await OpenNewConnectionAsync(ct);
+        return await conn.ExecuteAsync(new CommandDefinition(sql, new { tenantId, pipelineId, sentinelDate }, cancellationToken: ct));
+    }
+
+    public async Task<int> ResumePendingJobsAsync(long tenantId, long pipelineId, DateTime sentinelDate, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineQueue
+            SET NextAttemptOn = PausedNextAttemptOn,
+                PausedNextAttemptOn = NULL,
+                LastModifiedOn = SYSUTCDATETIME()
+            WHERE TenantId = @tenantId AND PipelineId = @pipelineId AND Status = 'Pending' AND NextAttemptOn = @sentinelDate;
+            """;
+        await using var conn = await OpenNewConnectionAsync(ct);
+        return await conn.ExecuteAsync(new CommandDefinition(sql, new { tenantId, pipelineId, sentinelDate }, cancellationToken: ct));
+    }
+
+    public async Task<bool> DeferPendingJobAsync(long id, string workerId, Guid claimToken, int backoffSeconds, DateTime sentinelDate, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineQueue
+            SET Status = 'Pending',
+                PausedNextAttemptOn = NULL,
+                NextAttemptOn = @sentinelDate,
+                LockedBy = NULL,
+                LockedUntil = NULL,
+                ClaimToken = NULL,
+                LastModifiedOn = SYSUTCDATETIME()
+            WHERE Id = @id AND Status = 'Processing' AND LockedBy = @workerId AND ClaimToken = @claimToken;
+            """;
+        await using var conn = await OpenNewConnectionAsync(ct);
+        var affected = await conn.ExecuteAsync(new CommandDefinition(sql, new { id, workerId, claimToken, sentinelDate }, cancellationToken: ct));
+        return affected > 0;
+    }
+
+    public async Task<int> CancelPendingJobsForPipelinesAsync(long tenantId, IEnumerable<long> pipelineIds, string reason, CancellationToken ct = default)
+    {
+        if (pipelineIds == null) return 0;
+        var list = pipelineIds.ToList();
+        if (list.Count == 0) return 0;
+
+        int totalAffected = 0;
+        const string sql = """
+            UPDATE meta.PipelineQueue
+            SET Status = 'Skipped',
+                SkippedOn = SYSUTCDATETIME(),
+                SkipReason = @reason,
+                PausedNextAttemptOn = NULL,
+                NextAttemptOn = NULL,
+                LockedBy = NULL,
+                LockedUntil = NULL,
+                ClaimToken = NULL,
+                LastModifiedOn = SYSUTCDATETIME()
+            WHERE TenantId = @tenantId AND PipelineId IN @batchIds AND Status = 'Pending';
+            """;
+
+        await using var conn = await OpenNewConnectionAsync(ct);
+        // Chunk to 500 to stay well below SQL Server parameter limits
+        for (int i = 0; i < list.Count; i += 500)
+        {
+            var batch = list.Skip(i).Take(500).ToList();
+            totalAffected += await conn.ExecuteAsync(new CommandDefinition(
+                sql, new { tenantId, batchIds = batch, reason }, cancellationToken: ct));
+        }
+        return totalAffected;
+    }
+
+    public async Task<int> ResumePendingJobsForPipelinesAsync(long tenantId, IEnumerable<long> pipelineIds, DateTime sentinelDate, CancellationToken ct = default)
+    {
+        if (pipelineIds == null) return 0;
+        var list = pipelineIds.ToList();
+        if (list.Count == 0) return 0;
+
+        int totalAffected = 0;
+        const string sql = """
+            UPDATE meta.PipelineQueue
+            SET NextAttemptOn = PausedNextAttemptOn,
+                PausedNextAttemptOn = NULL,
+                LastModifiedOn = SYSUTCDATETIME()
+            WHERE TenantId = @tenantId AND PipelineId IN @batchIds AND Status = 'Pending' AND NextAttemptOn = @sentinelDate;
+            """;
+
+        await using var conn = await OpenNewConnectionAsync(ct);
+        // Chunk to 500 to stay well below SQL Server parameter limits
+        for (int i = 0; i < list.Count; i += 500)
+        {
+            var batch = list.Skip(i).Take(500).ToList();
+            totalAffected += await conn.ExecuteAsync(new CommandDefinition(
+                sql, new { tenantId, batchIds = batch, sentinelDate }, cancellationToken: ct));
+        }
+        return totalAffected;
+    }
 }
+
