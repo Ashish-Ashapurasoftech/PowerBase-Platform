@@ -21,6 +21,7 @@ using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Application.Reports.Commands.UpdateReportFormOverrides;
 using PowerBase.Application.Forms.Queries.ListForms;
 using PowerBase.API.Models.Forms;
+using PowerBase.Application.Reports.Queries.GetReportPreviewMetadata;
 using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
@@ -43,6 +44,7 @@ public class ReportsController : ControllerBase
     private readonly ResolveDefaultReportQueryHandler _resolveDefaultReportHandler;
     private readonly UpdateReportFormOverridesCommandHandler _updateReportFormOverridesHandler;
     private readonly ListFormsQueryHandler _listFormsHandler;
+    private readonly GetReportPreviewMetadataQueryHandler _previewMetadataHandler;
 
     public ReportsController(
         CreateReportCommandHandler createHandler,
@@ -59,7 +61,8 @@ public class ReportsController : ControllerBase
         UpdateDefaultReportSettingsCommandHandler updateDefaultSettingsHandler,
         ResolveDefaultReportQueryHandler resolveDefaultReportHandler,
         UpdateReportFormOverridesCommandHandler updateReportFormOverridesHandler,
-        ListFormsQueryHandler listFormsHandler)
+        ListFormsQueryHandler listFormsHandler,
+        GetReportPreviewMetadataQueryHandler previewMetadataHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -76,6 +79,7 @@ public class ReportsController : ControllerBase
         _resolveDefaultReportHandler = resolveDefaultReportHandler;
         _updateReportFormOverridesHandler = updateReportFormOverridesHandler;
         _listFormsHandler = listFormsHandler;
+        _previewMetadataHandler = previewMetadataHandler;
     }
 
     /// <summary>Save a report definition for a table.</summary>
@@ -296,6 +300,19 @@ public class ReportsController : ControllerBase
     {
         var result = await _getHandler.HandleAsync(new GetReportQuery(publicId), ct);
         return Ok(new ApiResponse<ReportResponse>(MapToResponse(result)));
+    }
+
+    /// <summary>API 1.4: Report Preview (Aggregate Only) — Return only row counts and summary totals for report builders, never raw record data.</summary>
+    [HttpGet("reports/{publicId:guid}/preview-metadata")]
+    [HttpGet("api/v1/reports/{publicId:guid}/preview-metadata")]
+    [RequireAppMember(AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(typeof(ApiResponse<ReportPreviewMetadataDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetPreviewMetadata(Guid publicId, CancellationToken ct)
+    {
+        var result = await _previewMetadataHandler.HandleAsync(new GetReportPreviewMetadataQuery(publicId), ct);
+        return Ok(new ApiResponse<ReportPreviewMetadataDto>(result));
     }
 
     /// <summary>Execute a report and return paged results. Pass dynamic filter values as dynamicFilters=fieldId:value (repeatable).</summary>

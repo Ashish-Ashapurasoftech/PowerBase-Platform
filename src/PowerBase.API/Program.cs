@@ -283,6 +283,7 @@ builder.Services.AddScoped<IPipelineStepIdempotencyRepository, PipelineStepIdemp
 builder.Services.AddScoped<IUserTokenRepository, UserTokenRepository>();
 builder.Services.AddScoped<IAppTokenRepository, AppTokenRepository>();
 builder.Services.AddScoped<IGroupRepository, GroupRepository>();
+builder.Services.AddScoped<ICapabilityRepository, CapabilityRepository>();
 
 
 // Handlers
@@ -426,6 +427,11 @@ builder.Services.AddScoped<DeleteRoleCommandHandler>();
 builder.Services.AddScoped<GetRolePermissionsQueryHandler>();
 builder.Services.AddScoped<UpdateRolePermissionsCommandHandler>();
 builder.Services.AddScoped<ListPermissionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Capabilities.Queries.ListCapabilities.ListCapabilitiesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Capabilities.Queries.GetRoleCapabilities.GetRoleCapabilitiesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Capabilities.Commands.SaveRoleCapabilities.SaveRoleCapabilitiesCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Capabilities.Commands.UpdateRoleCapability.UpdateRoleCapabilityCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetReportPreviewMetadata.GetReportPreviewMetadataQueryHandler>();
 builder.Services.AddScoped<ListAuditLogsQueryHandler>();
 builder.Services.AddScoped<ExportAuditLogsCsvQueryHandler>();
 builder.Services.AddScoped<CreateFormCommandHandler>();
