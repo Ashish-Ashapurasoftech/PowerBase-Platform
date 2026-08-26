@@ -7,6 +7,7 @@ using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Application.Reports.Queries.GetReport;
 using PowerBase.Application.Reports.Queries.ListReports;
 using PowerBase.Application.Reports.Queries.RunReport;
+using PowerBase.Application.Reports.Validation;
 using PowerBase.Application.Formulas;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -55,6 +56,11 @@ public class ReportHandlerTests
         CreatedOn = DateTime.UtcNow,
     };
 
+    // Real (non-mocked) validator registry — exercises the actual per-type validation rules
+    // instead of stubbing them out, same as production DI wiring in Program.cs.
+    private static ReportConfigValidatorRegistry MakeConfigValidatorRegistry() =>
+        new([new TableReportConfigValidator(), new SummaryReportConfigValidator(), new ChartReportConfigValidator()]);
+
     // Helper to build a CreateReportCommand with all required new fields defaulted
     private static CreateReportCommand MakeCreateCommand(
         Guid tableId, string name = "My Report", string visibility = "Personal",
@@ -84,7 +90,7 @@ public class ReportHandlerTests
         var table = MakeTable();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _reportRepo.CreateAsync(Arg.Any<Report>()).Returns((1L, Guid.NewGuid()));
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo, MakeConfigValidatorRegistry());
 
         var result = await sut.HandleAsync(MakeCreateCommand(table.PublicId));
 
@@ -99,7 +105,7 @@ public class ReportHandlerTests
         var table = MakeTable();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo, MakeConfigValidatorRegistry());
 
         await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(table.PublicId, columns: [999L])))
             .Should().ThrowAsync<ValidationException>();
@@ -108,7 +114,7 @@ public class ReportHandlerTests
     [Fact]
     public async Task CreateReport_InvalidVisibility_ThrowsValidationException()
     {
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo, MakeConfigValidatorRegistry());
 
         await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), visibility: "Invalid")))
             .Should().ThrowAsync<ValidationException>();
@@ -117,7 +123,7 @@ public class ReportHandlerTests
     [Fact]
     public async Task CreateReport_EmptyName_ThrowsValidationException()
     {
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo, MakeConfigValidatorRegistry());
 
         await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), name: "")))
             .Should().ThrowAsync<ValidationException>();
@@ -126,9 +132,11 @@ public class ReportHandlerTests
     [Fact]
     public async Task CreateReport_InvalidReportType_ThrowsValidationException()
     {
-        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo);
+        var sut = new CreateReportCommandHandler(_tableRepo, _fieldRepo, _reportRepo, Substitute.For<IAppUserRepository>(), Substitute.For<IAppRoleRepository>(), _queryContext, _auditRepo, MakeConfigValidatorRegistry());
 
-        await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), reportType: "Chart")))
+        // "GridEdit" was removed as a report type (now a session-only client-side toggle on Table
+        // reports, not a persisted type) — no validator is registered for it, so it's rejected.
+        await sut.Invoking(s => s.HandleAsync(MakeCreateCommand(Guid.NewGuid(), reportType: "GridEdit")))
             .Should().ThrowAsync<ValidationException>();
     }
 

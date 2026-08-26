@@ -65,6 +65,7 @@ using PowerBase.Application.Reports.Queries.ListReportsByTable;
 using PowerBase.Application.Reports.Queries.ExportReport;
 using PowerBase.Application.Reports.Queries.ResolveDefaultReport;
 using PowerBase.Application.Reports.Queries.RunReport;
+using PowerBase.Application.Reports.Validation;
 using PowerBase.Application.Roles.Commands.CreateRole;
 using PowerBase.Application.Roles.Commands.DeleteRole;
 using PowerBase.Application.Roles.Commands.UpdateRole;
@@ -215,19 +216,41 @@ builder.Services.AddScoped<IFieldNameResolver, PowerBase.Application.Common.Serv
 
 // Field Settings Validators
 builder.Services.AddScoped<IFieldSettingsValidator, TextSettingsValidator>();
-builder.Services.AddScoped<IFieldSettingsValidator, NumberSettingsValidator>();
-builder.Services.AddScoped<IFieldSettingsValidator, CurrencySettingsValidator>();
-builder.Services.AddScoped<IFieldSettingsValidator, PercentSettingsValidator>();
-builder.Services.AddScoped<IFieldSettingsValidator, RatingSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, RichTextSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, EmailSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, PhoneSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, SelectSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, NumericSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, DateSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, TimeSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, DurationSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, UrlSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaUrlSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, DateRangeSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, NumericRangeSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, BooleanSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FileSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, AddressSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, UserFieldSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, MultiUserFieldSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, FormulaSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaTextSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaNumericSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaDateSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaTimeSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaDurationSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaBooleanSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaPhoneSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaEmailSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaUserSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaRichTextSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, ReportLinkSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, ActionButtonSettingsValidator>();
 builder.Services.AddScoped<FieldSettingsValidatorRegistry>();
+builder.Services.AddScoped<IReportConfigValidator, TableReportConfigValidator>();
+builder.Services.AddScoped<IReportConfigValidator, SummaryReportConfigValidator>();
+builder.Services.AddScoped<IReportConfigValidator, ChartReportConfigValidator>();
+builder.Services.AddScoped<ReportConfigValidatorRegistry>();
 
 // Formula engine (stateless, shared) + compute-on-read projector + authoring query handlers
 builder.Services.AddHttpContextAccessor();

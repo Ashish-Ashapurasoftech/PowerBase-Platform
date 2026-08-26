@@ -1197,6 +1197,18 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
     }
 
+        public async Task<bool> HasAnyRecordsAsync(AppTable table, CancellationToken ct = default)
+    {
+        var sql = $"""
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1 FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0
+            ) THEN 1 ELSE 0 END AS BIT)
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
     public async Task<bool> HasAnyDataAsync(AppTable table, AppField field, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(field.Fid!.Value);

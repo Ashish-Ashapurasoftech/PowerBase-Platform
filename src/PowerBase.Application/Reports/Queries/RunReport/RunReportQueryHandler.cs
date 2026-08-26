@@ -23,6 +23,9 @@ public class PagedReportRunResult
     public int Page { get; init; }
     public int PageSize { get; init; }
     public bool IsDataMasked { get; init; }
+    /// <summary>Gauge charts only, and only when Chart.GaugeGoalType is "DataValue" — see
+    /// ReportRunResponse.ResolvedGaugeGoalValue for the full contract.</summary>
+    public decimal? ResolvedGaugeGoalValue { get; init; }
 }
 
 public class RunReportQueryHandler
@@ -106,6 +109,15 @@ public class RunReportQueryHandler
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
+        // Enforce the report's Dynamic Filter configuration server-side: when DynamicFilterType
+        // is "Custom", only the fields the report designer picked may be used as a runtime
+        // dynamic filter — previously this was a UI-only hint (any filterable field worked
+        // regardless of the saved config). Silently drop disallowed params (same "silent
+        // intersection" behavior the Columns restriction already uses below) rather than 400ing,
+        // since a stale client could otherwise break entirely on a report whose Custom field set
+        // was narrowed after the client loaded it.
+        var effectiveRuntimeFilters = FilterRuntimeFiltersByDynamicFilterConfig(definition, query.RuntimeFilters);
+
         // Resolve filter tree — support legacy flat Filters list
         var filterTree = definition.FilterTree;
         if (filterTree == null && definition.Filters.Count > 0)
@@ -120,21 +132,32 @@ public class RunReportQueryHandler
             };
         }
 
+        // Table reports: TableSortGroup (Phase 1's unified Sort+Group list) supersedes the legacy
+        // single-field GroupByFieldId + SortFields when non-empty — derive both the sort order
+        // and the effective group field from it. Reports saved before this existed have an empty
+        // TableSortGroup and fall through to the legacy fields below unchanged.
+        var tableSortGroupLevel = report.ReportType == "Table"
+            ? definition.TableSortGroup.FirstOrDefault(l => l.IsGroup)
+            : null;
+
         // Resolve sort fields — support legacy SortFieldId/SortDesc. A runtime sort (ad-hoc,
         // not persisted — the reference design's header-click sort) replaces the saved sort
         // outright rather than combining with it, matching single-column sort UX.
         IReadOnlyList<SortSpec> sortFields = query.RuntimeSortFieldId.HasValue
             ? [new SortSpec { FieldId = query.RuntimeSortFieldId.Value, Desc = query.RuntimeSortDesc }]
-            : (definition.SortFields.Count > 0
-                ? definition.SortFields
-                : (definition.SortFieldId.HasValue
-                    ? [new SortSpec { FieldId = definition.SortFieldId.Value, Desc = definition.SortDesc }]
-                    : []));
+            : (report.ReportType == "Table" && definition.TableSortGroup.Count > 0
+                ? definition.TableSortGroup.Select(l => new SortSpec { FieldId = l.FieldId, Desc = l.Desc }).ToList()
+                : (definition.SortFields.Count > 0
+                    ? definition.SortFields
+                    : (definition.SortFieldId.HasValue
+                        ? [new SortSpec { FieldId = definition.SortFieldId.Value, Desc = definition.SortDesc }]
+                        : [])));
 
-        // Runtime grouping (ad-hoc, not persisted — the per-column kebab menu) overrides the
-        // saved GroupByFieldId; ClearGrouping explicitly drops it even if the report has one saved.
-        var effectiveGroupByFieldId = query.ClearGrouping ? null : (query.RuntimeGroupByFieldId ?? definition.GroupByFieldId);
-        var effectiveGroupByDesc = query.RuntimeGroupByFieldId.HasValue ? query.RuntimeGroupByDesc : definition.GroupByDescending;
+        // Runtime grouping (ad-hoc, not persisted — the per-column kebab menu) overrides both the
+        // TableSortGroup-derived group level and the legacy saved GroupByFieldId; ClearGrouping
+        // explicitly drops it even if the report has one saved.
+        var effectiveGroupByFieldId = query.ClearGrouping ? null : (query.RuntimeGroupByFieldId ?? tableSortGroupLevel?.FieldId ?? definition.GroupByFieldId);
+        var effectiveGroupByDesc = query.RuntimeGroupByFieldId.HasValue ? query.RuntimeGroupByDesc : (tableSortGroupLevel?.Desc ?? definition.GroupByDescending);
 
         // For grouped Table reports: prepend group field as primary sort key so records
         // of the same group are contiguous — the frontend groups the flat result visually.
@@ -162,10 +185,10 @@ public class RunReportQueryHandler
         }
 
         if (report.ReportType is "Summary" or "Chart")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, query.RuntimeFilters, filterTree, isMaskedPreview, ct);
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
-            query.RuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, ct);
+            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, ct);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -197,8 +220,39 @@ public class RunReportQueryHandler
                 .Select(id => fieldMap[id])
                 .ToList();
         }
+        else if (definition.ColumnsMode == "Default")
+        {
+            // "Default columns" means the table's Default Report Settings columns, not literally
+            // every reportable field — resolve them from that table's actual default Report row.
+            // Falls back to all-reportable when the default report has no columns configured
+            // either (including when THIS report IS the default report and its own Columns is
+            // empty — GetDefaultByTableAsync then just returns itself, terminating in one hop).
+            var defaultReport = await _reportRepo.GetDefaultByTableAsync(table.PublicId, ct);
+            var defaultColumnIds = defaultReport is null
+                ? []
+                : (JsonSerializer.Deserialize<ReportDefinition>(defaultReport.Definition) ?? new ReportDefinition()).Columns;
+
+            if (defaultColumnIds.Count > 0)
+            {
+                var fieldMap = allFields
+                    .Where(f => f.Fid.HasValue)
+                    .GroupBy(f => (long)f.Fid!.Value)
+                    .ToDictionary(g => g.Key, g => g.First());
+                selectedFields = defaultColumnIds
+                    .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
+                    .Select(id => fieldMap[id])
+                    .ToList();
+            }
+            else
+            {
+                selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
+            }
+        }
         else
         {
+            // Columns empty but ColumnsMode isn't (or predates) "Default" — e.g. a report saved
+            // before Phase 1 whose empty Columns always meant "show all reportable fields" under
+            // the old implicit convention. Preserved unchanged for backward compatibility.
             selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
 
@@ -399,6 +453,36 @@ public class RunReportQueryHandler
         };
     }
 
+    /// <summary>When definition.DynamicFilterType is "Custom", restricts runtimeFilters to only
+    /// the FieldId (+ matching SubField, for Address sub-fields) combinations present in the
+    /// report's CustomDynamicFilterItems/CustomDynamicFilterFields — everything else is silently
+    /// dropped. For "Default"/"None" (or unrecognized) DynamicFilterType, runtimeFilters passes
+    /// through unchanged (this call site does not restrict "Default" mode's own field set, which
+    /// today is defined by the table's Default Report Settings, resolved elsewhere).</summary>
+    internal static IReadOnlyList<(long FieldId, string Value, string? SubField)>? FilterRuntimeFiltersByDynamicFilterConfig(
+        ReportDefinition definition,
+        IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters)
+    {
+        if (runtimeFilters is not { Count: > 0 })
+            return runtimeFilters;
+
+        if (!string.Equals(definition.DynamicFilterType, "Custom", StringComparison.OrdinalIgnoreCase))
+            return runtimeFilters;
+
+        var allowedFieldIds = definition.CustomDynamicFilterFields.ToHashSet();
+        // (FieldId, SubField) pairs — SubField normalized to "" so a plain-field allowance
+        // (SubField == null) also matches a runtime filter whose SubField happens to be "".
+        var allowedFieldSubFieldPairs = definition.CustomDynamicFilterItems
+            .Select(i => (i.FieldId, SubField: i.SubField ?? string.Empty))
+            .ToHashSet();
+
+        return runtimeFilters
+            .Where(rf =>
+                allowedFieldIds.Contains(rf.FieldId) ||
+                allowedFieldSubFieldPairs.Contains((rf.FieldId, rf.SubField ?? string.Empty)))
+            .ToList();
+    }
+
     internal static FilterGroup? MergeRuntimeFilters(
         FilterGroup? filterTree,
         IReadOnlyList<AppField> allFields,
@@ -530,10 +614,49 @@ public class RunReportQueryHandler
         }
         var summaryFilterTree = MergeRuntimeFilters(baseFilterTree, allFields, runtimeFilters);
 
+        // Gauge-only: when the goal is a live data value (not a fixed number), fold an extra
+        // aggregation into the same grouped query so it comes back alongside the gauge's own
+        // measure, then resolve one overall value from the per-group results below — summed
+        // straight across groups for Sum, or count-weighted for Avg (Σ(avg_i × count_i) /
+        // Σcount_i), since a plain average-of-per-group-averages would be wrong unless every
+        // group happened to have the same size.
+        SummaryAggregation? gaugeGoalAggregation = null;
+        if (definition.Chart?.ChartType == "Gauge" && definition.Chart.GaugeGoalType == "DataValue"
+            && definition.Chart.GaugeGoalFieldId is { } goalFieldId && visibleFieldIds.Contains(goalFieldId))
+        {
+            gaugeGoalAggregation = new SummaryAggregation { FieldId = goalFieldId, Function = definition.Chart.GaugeGoalFunction ?? "Sum" };
+        }
+        var aggregationsForQuery = gaugeGoalAggregation is null
+            ? visibleAggregations
+            : [.. visibleAggregations, gaugeGoalAggregation];
+
         var rows = await _recordRepo.SummarizeAsync(
-            table, groupByField, visibleAggregations, allFields, definition.GroupByMode,
+            table, groupByField, aggregationsForQuery, allFields, definition.GroupByMode,
             filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
             seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
+
+        decimal? resolvedGaugeGoalValue = null;
+        if (gaugeGoalAggregation is not null && fieldMap.TryGetValue(gaugeGoalAggregation.FieldId, out var goalField))
+        {
+            var goalAlias = $"{gaugeGoalAggregation.Function}_{goalField.Name.Replace(" ", "_")}";
+            if (string.Equals(gaugeGoalAggregation.Function, "Avg", StringComparison.OrdinalIgnoreCase))
+            {
+                decimal weightedSum = 0;
+                long totalCount = 0;
+                foreach (var row in rows)
+                {
+                    var count = row.TryGetValue("Count", out var c) && c is not null ? Convert.ToInt64(c) : 0;
+                    var val = row.TryGetValue(goalAlias, out var v) && v is not null ? Convert.ToDecimal(v) : 0m;
+                    weightedSum += val * count;
+                    totalCount += count;
+                }
+                resolvedGaugeGoalValue = totalCount > 0 ? weightedSum / totalCount : 0m;
+            }
+            else
+            {
+                resolvedGaugeGoalValue = rows.Sum(row => row.TryGetValue(goalAlias, out var v) && v is not null ? Convert.ToDecimal(v) : 0m);
+            }
+        }
 
         // Build alias→fieldId map. Identify columns displayed as percent-of-total and compute their totals.
         var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -604,6 +727,7 @@ public class RunReportQueryHandler
             Page = 1,
             PageSize = rows.Count > 0 ? rows.Count : pageSize,
             IsDataMasked = isMaskedPreview,
+            ResolvedGaugeGoalValue = resolvedGaugeGoalValue,
         };
     }
 

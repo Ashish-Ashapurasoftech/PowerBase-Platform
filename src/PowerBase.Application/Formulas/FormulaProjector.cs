@@ -59,23 +59,11 @@ public sealed class FormulaProjector : IFormulaProjector
         foreach (var f in formulaFields)
         {
             CompiledFormula? formula = null;
-            if (f.TypeCode == "Url")
+            var exprAndType = FormulaTypeMap.ExpressionAndType(f.TypeCode, f.Settings);
+            if (exprAndType is { } et)
             {
-                var tpl = FormulaTypeMap.UrlFormulaTemplate(f.Settings);
-                if (!string.IsNullOrWhiteSpace(tpl))
-                {
-                    var c = _engine.Compile(tpl!, schema, FormulaType.Text);
-                    formula = c.HasErrors ? null : c;
-                }
-            }
-            else
-            {
-                var settings = FormulaTypeMap.ParseSettings(f.Settings);
-                if (!string.IsNullOrWhiteSpace(settings?.Expression))
-                {
-                    var c = _engine.Compile(settings!.Expression!, schema, FormulaTypeMap.ResultType(settings.ResultType));
-                    formula = c.HasErrors ? null : c;
-                }
+                var c = _engine.Compile(et.Expression, schema, et.Type);
+                formula = c.HasErrors ? null : c;
             }
             compiled.Add(((long)f.Fid!.Value, formula));
         }

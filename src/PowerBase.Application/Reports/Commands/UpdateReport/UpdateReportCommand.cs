@@ -13,7 +13,7 @@ public record UpdateReportCommand(
     long? GroupByFieldId,
     string GroupByMode,
     bool HideTotals,
-    bool GroupDefaultCollapsed,
+    bool? GroupDefaultCollapsed,
     bool GroupByDescending,
     List<SummaryAggregationCommand> Aggregations,
     string DynamicFilterType,
@@ -21,4 +21,7 @@ public record UpdateReportCommand(
     List<CustomDynamicFilterItem>? CustomDynamicFilterItems,
     bool AllowQuickSearch,
     List<Guid>? VisibleToRoleIds,
-    ChartConfigCommand? Chart = null);
+    ChartConfigCommand? Chart = null,
+    string ColumnsMode = "Custom",
+    List<SortGroupLevelCommand>? TableSortGroup = null,
+    ReportOptionsCommand? Options = null);

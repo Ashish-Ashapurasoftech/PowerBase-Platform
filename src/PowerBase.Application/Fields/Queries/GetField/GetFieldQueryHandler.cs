@@ -4,18 +4,25 @@ using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Fields.Queries.GetField;
 
+/// <summary>The field plus whether its table has any records — the latter drives whether the
+/// field's encryption setting can still be changed (see FieldDetailResponse.HasRecords). An
+/// EXISTS check, not a COUNT, so it stays cheap on tables with millions of records.</summary>
+public sealed record GetFieldResult(AppField Field, bool HasRecords);
+
 public class GetFieldQueryHandler
 {
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
+    private readonly IRecordRepository _recordRepo;
 
-    public GetFieldQueryHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo)
+    public GetFieldQueryHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
+        _recordRepo = recordRepo;
     }
 
-    public async Task<AppField> HandleAsync(GetFieldQuery query, CancellationToken ct = default)
+    public async Task<GetFieldResult> HandleAsync(GetFieldQuery query, CancellationToken ct = default)
     {
         var table = await _tableRepo.GetByPublicIdAsync(query.TablePublicId, ct);
         var field = await _fieldRepo.GetByPublicIdAsync(query.FieldPublicId, ct)
@@ -26,6 +33,7 @@ public class GetFieldQueryHandler
         if (field.AppTableId != table.Id)
             throw new NotFoundException("Field", query.FieldPublicId);
 
-        return field;
+        var hasRecords = await _recordRepo.HasAnyRecordsAsync(table, ct);
+        return new GetFieldResult(field, hasRecords);
     }
 }

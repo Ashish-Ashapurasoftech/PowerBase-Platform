@@ -13,6 +13,7 @@ internal static class ValueConvert
 {
     private const string DateFormat = "yyyy-MM-dd";
     private const string DateTimeFormat = "yyyy-MM-dd HH:mm:ss";
+    private const string TimeFormat = "HH:mm:ss";
     private const string NumberFormat = "0.###############";
 
     /// <summary>Coerce a raw stored value (from the record context) into the field's declared type.</summary>
@@ -27,6 +28,7 @@ internal static class ValueConvert
             FormulaType.Bool => FormulaValue.Bool(RawToBool(raw)),
             FormulaType.Date => TryToDateOnly(raw, out var dt) ? FormulaValue.Date(dt) : FormulaValue.Null(FormulaType.Date),
             FormulaType.DateTime => TryToDateTime(raw, out var dtt) ? FormulaValue.DateTime(dtt) : FormulaValue.Null(FormulaType.DateTime),
+            FormulaType.Time => TryToTimeOnly(raw, out var tm) ? FormulaValue.Time(tm) : FormulaValue.Null(FormulaType.Time),
             FormulaType.Duration => TryToDecimal(raw, out var m) ? FormulaValue.Duration(TimeSpan.FromMinutes((double)m)) : FormulaValue.Null(FormulaType.Duration),
             FormulaType.User => FormulaValue.User(new UserRef(RawToString(raw))),
             FormulaType.UserList => FormulaValue.UserList(ParseUserList(raw)),
@@ -43,6 +45,7 @@ internal static class ValueConvert
         FormulaType.Bool => v.AsBool() ? "true" : "false",
         FormulaType.Date => v.AsDate().ToString(DateFormat, CultureInfo.InvariantCulture),
         FormulaType.DateTime => v.AsDateTime().ToString(DateTimeFormat, CultureInfo.InvariantCulture),
+        FormulaType.Time => v.AsTime().ToString(TimeFormat, CultureInfo.InvariantCulture),
         FormulaType.Duration => ((decimal)v.AsDuration().TotalMinutes).ToString(NumberFormat, CultureInfo.InvariantCulture),
         FormulaType.User => v.AsUser().Email ?? v.AsUser().UserId,
         FormulaType.UserList => string.Join(";", v.AsUserList().Select(u => u.Email ?? u.UserId)),
@@ -79,6 +82,21 @@ internal static class ValueConvert
                     ? FormulaValue.Date(dt)
                     : FormulaValue.Null(FormulaType.Date);
             default: return FormulaValue.Null(FormulaType.Date);
+        }
+    }
+
+    public static FormulaValue ToTimeValue(FormulaValue v)
+    {
+        if (v.IsNull) return FormulaValue.Null(FormulaType.Time);
+        switch (v.Type)
+        {
+            case FormulaType.Time: return v;
+            case FormulaType.DateTime: return FormulaValue.Time(TimeOnly.FromDateTime(v.AsDateTime()));
+            case FormulaType.Text:
+                return TimeOnly.TryParse(v.AsText(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var t)
+                    ? FormulaValue.Time(t)
+                    : FormulaValue.Null(FormulaType.Time);
+            default: return FormulaValue.Null(FormulaType.Time);
         }
     }
 
@@ -159,6 +177,19 @@ internal static class ValueConvert
                 value = p; return true;
             case string s when DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.None, out var pdt):
                 value = DateOnly.FromDateTime(pdt); return true;
+            default: value = default; return false;
+        }
+    }
+
+    private static bool TryToTimeOnly(object raw, out TimeOnly value)
+    {
+        switch (raw)
+        {
+            case TimeOnly t: value = t; return true;
+            case TimeSpan ts: value = TimeOnly.FromTimeSpan(ts); return true;
+            case DateTime dt: value = TimeOnly.FromDateTime(dt); return true;
+            case string s when TimeOnly.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.None, out var p):
+                value = p; return true;
             default: value = default; return false;
         }
     }

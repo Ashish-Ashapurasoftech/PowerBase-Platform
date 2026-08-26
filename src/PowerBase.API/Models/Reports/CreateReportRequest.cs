@@ -7,19 +7,25 @@ public class CreateReportRequest
     public string Visibility { get; set; } = "Personal";
     public string ReportType { get; set; } = "Table";
     public List<long> Columns { get; set; } = [];
+    /// <summary>Table-only. "Default" (Columns empty — all reportable fields) or "Custom".</summary>
+    public string ColumnsMode { get; set; } = "Custom";
     public List<Guid>? VisibleToRoleIds { get; set; }
 
-    // New multi-sort
+    // New multi-sort (Summary/Chart)
     public List<SortSpecRequest> SortFields { get; set; } = [];
+
+    /// <summary>Table-only unified Sort + Group list.</summary>
+    public List<SortGroupLevelRequest> TableSortGroup { get; set; } = [];
 
     // New filter tree
     public FilterGroupRequest? FilterTree { get; set; }
 
-    // Summary-only
+    // Table (Group panel) / Summary (Rows)
     public long? GroupByFieldId { get; set; }
     public string GroupByMode { get; set; } = "EqualValues";
     public bool HideTotals { get; set; }
-    public bool GroupDefaultCollapsed { get; set; }
+    /// <summary>null = "Default report setting", true = Collapsed by default, false = Expanded by default.</summary>
+    public bool? GroupDefaultCollapsed { get; set; }
     public bool GroupByDescending { get; set; }
     public List<SummaryAggregationRequest> Aggregations { get; set; } = [];
     public string DynamicFilterType { get; set; } = "Default";
@@ -29,6 +35,25 @@ public class CreateReportRequest
 
     // Chart-only
     public ChartConfigRequest? Chart { get; set; }
+
+    /// <summary>Table-only.</summary>
+    public ReportOptionsRequest? Options { get; set; }
+}
+
+public class SortGroupLevelRequest
+{
+    public long FieldId { get; set; }
+    public bool Desc { get; set; }
+    public bool IsGroup { get; set; }
+    public string GroupByMode { get; set; } = "EqualValues";
+}
+
+public class ReportOptionsRequest
+{
+    public string ColumnHeaderText { get; set; } = "Default";
+    public bool ShowEditIcon { get; set; } = true;
+    public bool ShowViewIcon { get; set; } = true;
+    public bool DisableBulkDelete { get; set; }
 }
 
 public class CustomDynamicFilterItemRequest
@@ -64,6 +89,10 @@ public class ChartConfigRequest
     public long? GaugeFieldId { get; set; }
     public decimal GaugeLowMaxPercent { get; set; } = 30;
     public decimal GaugeMediumMaxPercent { get; set; } = 70;
+    public string DataLabelDisplayAs { get; set; } = "Value";
+    public string GaugeGoalType { get; set; } = "Fixed";
+    public long? GaugeGoalFieldId { get; set; }
+    public string? GaugeGoalFunction { get; set; }
 }
 
 // ── Filter tree request models ────────────────────────────────────────────────
