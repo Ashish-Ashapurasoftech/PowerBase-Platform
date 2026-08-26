@@ -20,4 +20,8 @@ public interface IMainPipelineQueueRepository
     Task<int> SweepExhaustedPendingJobsAsync(CancellationToken ct = default);
     Task<int> PruneQueueBatchAsync(int olderThanDays, int batchSize, CancellationToken ct = default);
     Task<PipelineQueue?> GetByMessageIdAsync(Guid messageId, CancellationToken ct = default);
+    Task<int> PausePendingJobsAsync(long tenantId, long pipelineId, DateTime sentinelDate, CancellationToken ct = default);
+    Task<int> ResumePendingJobsAsync(long tenantId, long pipelineId, DateTime sentinelDate, CancellationToken ct = default);
+    Task<bool> DeferPendingJobAsync(long id, string workerId, Guid claimToken, int backoffSeconds, DateTime sentinelDate, CancellationToken ct = default);
 }
+

@@ -280,6 +280,15 @@ public class DatabasePipelineExecutionWorker : BackgroundService
             var pipelineRepo = scope.ServiceProvider.GetRequiredService<IPipelineRepository>();
             var queueRepo = scope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
 
+            var pipeline = await pipelineRepo.GetByIdAsync(job.PipelineId, ct);
+            if (pipeline == null || !pipeline.IsActive || pipeline.IsDeleted)
+            {
+                var sentinelDate = new DateTime(9999, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+                _logger.LogWarning("Worker-side Deferral Gate: Pipeline {PipelineId} (Tenant {TenantId}) is Inactive or Deleted. Deferring job {JobId} to sentinel.", job.PipelineId, job.TenantId, job.Id);
+                await queueRepo.DeferPendingJobAsync(job.Id, _workerId, claimToken, 30, sentinelDate, ct);
+                return;
+            }
+
             // 1. Tenant PipelineRun Reconciliation & Idempotency Check
             var run = await pipelineRepo.GetRunByMessageIdAsync(job.MessageId, ct);
             if (run != null)

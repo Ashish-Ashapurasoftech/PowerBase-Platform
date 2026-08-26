@@ -364,4 +364,50 @@ public class MainPipelineQueueRepository : ControlRepositoryBase, IMainPipelineQ
         await using var conn = await OpenNewConnectionAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<PipelineQueue>(new CommandDefinition(sql, new { messageId }, cancellationToken: ct));
     }
+
+    public async Task<int> PausePendingJobsAsync(long tenantId, long pipelineId, DateTime sentinelDate, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineQueue
+            SET PausedNextAttemptOn = NextAttemptOn,
+                NextAttemptOn = @sentinelDate,
+                LastModifiedOn = SYSUTCDATETIME()
+            WHERE TenantId = @tenantId AND PipelineId = @pipelineId AND Status = 'Pending'
+              AND (NextAttemptOn IS NULL OR NextAttemptOn <> @sentinelDate);
+            """;
+        await using var conn = await OpenNewConnectionAsync(ct);
+        return await conn.ExecuteAsync(new CommandDefinition(sql, new { tenantId, pipelineId, sentinelDate }, cancellationToken: ct));
+    }
+
+    public async Task<int> ResumePendingJobsAsync(long tenantId, long pipelineId, DateTime sentinelDate, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineQueue
+            SET NextAttemptOn = PausedNextAttemptOn,
+                PausedNextAttemptOn = NULL,
+                LastModifiedOn = SYSUTCDATETIME()
+            WHERE TenantId = @tenantId AND PipelineId = @pipelineId AND Status = 'Pending' AND NextAttemptOn = @sentinelDate;
+            """;
+        await using var conn = await OpenNewConnectionAsync(ct);
+        return await conn.ExecuteAsync(new CommandDefinition(sql, new { tenantId, pipelineId, sentinelDate }, cancellationToken: ct));
+    }
+
+    public async Task<bool> DeferPendingJobAsync(long id, string workerId, Guid claimToken, int backoffSeconds, DateTime sentinelDate, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineQueue
+            SET Status = 'Pending',
+                PausedNextAttemptOn = NULL,
+                NextAttemptOn = @sentinelDate,
+                LockedBy = NULL,
+                LockedUntil = NULL,
+                ClaimToken = NULL,
+                LastModifiedOn = SYSUTCDATETIME()
+            WHERE Id = @id AND Status = 'Processing' AND LockedBy = @workerId AND ClaimToken = @claimToken;
+            """;
+        await using var conn = await OpenNewConnectionAsync(ct);
+        var affected = await conn.ExecuteAsync(new CommandDefinition(sql, new { id, workerId, claimToken, sentinelDate }, cancellationToken: ct));
+        return affected > 0;
+    }
 }
+

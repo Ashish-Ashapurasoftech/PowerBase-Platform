@@ -802,6 +802,12 @@ public class PipelineEngine : IPipelineEngine
 
         foreach (var step in siblings)
         {
+            var pipeline = await _pipelineRepo.GetByIdAsync(step.PipelineId, ct);
+            if (pipeline != null && (!pipeline.IsActive || pipeline.IsDeleted))
+            {
+                throw new PipelineStopExecutionException("Execution halted: Pipeline was deactivated.");
+            }
+
             var stepRun = new PipelineStepRun
             {
                 PipelineRunId = runId,

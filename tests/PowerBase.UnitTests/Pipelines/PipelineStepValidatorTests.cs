@@ -325,7 +325,7 @@ public class PipelineStepValidatorTests
         var appAccessService = Substitute.For<IAppAccessService>();
         var tenantRepo = Substitute.For<ITenantRepository>();
 
-        var handler = new UpdatePipelineCommandHandler(pipelineRepo, auditRepo, queryContext, appRepo, tableRepo, fieldRepo, appAccessService, tenantRepo, Substitute.For<IServiceProvider>());
+        var handler = new UpdatePipelineCommandHandler(pipelineRepo, auditRepo, queryContext, appRepo, tableRepo, fieldRepo, appAccessService, tenantRepo, Substitute.For<IMainPipelineQueueRepository>(), Substitute.For<IServiceProvider>());
 
         var pipelinePublicId = Guid.NewGuid();
         var pipeline = new Pipeline { Id = 101, PublicId = pipelinePublicId, AppId = 1, Name = "Test" };
