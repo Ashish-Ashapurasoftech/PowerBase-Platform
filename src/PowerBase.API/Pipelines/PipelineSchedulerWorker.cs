@@ -78,6 +78,25 @@ public class PipelineSchedulerWorker : BackgroundService
             return;
         }
 
+        // Bounded Outstanding-Work Discovery (queries Control DB exactly once)
+        Dictionary<long, List<long>> outstandingWork = new();
+        try
+        {
+            await using var conn = _controlConnectionFactory.Create();
+            await conn.OpenAsync(ct);
+            var discoverySql = "SELECT DISTINCT TenantId, PipelineId FROM meta.PipelineQueue WHERE Status = 'Pending';";
+            var pendingJobs = await conn.QueryAsync<(long TenantId, long PipelineId)>(
+                new CommandDefinition(discoverySql, cancellationToken: ct));
+
+            outstandingWork = pendingJobs
+                .GroupBy(j => j.TenantId)
+                .ToDictionary(g => g.Key, g => g.Select(j => j.PipelineId).Distinct().ToList());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to discover outstanding queue work for reconciliation.");
+        }
+
         // 2. Evaluate schedules per tenant
         foreach (var tenantId in tenantIds)
         {
@@ -108,25 +127,60 @@ public class PipelineSchedulerWorker : BackgroundService
                 {
                     var pipelineRepo = scope.ServiceProvider.GetRequiredService<IPipelineRepository>();
                     var queue = scope.ServiceProvider.GetRequiredService<IPipelineExecutionQueue>();
+                    var queueRepo = scope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
 
                     var utcNow = DateTime.UtcNow;
 
-                    // Cross-DB Queue Reconciliation Sweep for active pipelines
-                    var activePipelines = await pipelineRepo.ListAllActiveAsync(ct);
-                    var queueRepo = scope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
-                    var sentinelDate = new DateTime(9999, 12, 31, 0, 0, 0, DateTimeKind.Utc);
-                    foreach (var activePipeline in activePipelines)
+                    // Combined metadata query (1 Tenant DB query instead of 3)
+                    var metadata = await pipelineRepo.GetSchedulerMetadataAsync(ct);
+
+                    // Bounded Queue Reconciliation Sweep (self-healing recovery)
+                    if (outstandingWork.TryGetValue(tenantId, out var pendingPipelineIds) && pendingPipelineIds.Count > 0)
                     {
-                        var resumedCount = await queueRepo.ResumePendingJobsAsync(tenantId, activePipeline.Id, sentinelDate, ct);
-                        if (resumedCount > 0)
+                        var pipelineStates = await pipelineRepo.GetPipelineStatesAsync(pendingPipelineIds, ct);
+                        var activePipelineIds = new List<long>();
+                        var deletedPipelineIds = new List<long>();
+
+                        var queriedIds = pipelineStates.Select(p => p.Id).ToHashSet();
+                        
+                        // Orphaned/missing pipelines that exist in Queue but not in Pipeline table
+                        var missingIds = pendingPipelineIds.Where(id => !queriedIds.Contains(id)).ToList();
+                        deletedPipelineIds.AddRange(missingIds);
+
+                        foreach (var state in pipelineStates)
                         {
-                            _logger.LogInformation("Recovery sweep: Resumed {ResumedCount} sentinel-paused pending jobs for active Pipeline {PipelineId} (Tenant {TenantId}).", resumedCount, activePipeline.Id, tenantId);
+                            if (state.IsDeleted)
+                            {
+                                deletedPipelineIds.Add(state.Id);
+                            }
+                            else if (state.IsActive)
+                            {
+                                activePipelineIds.Add(state.Id);
+                            }
+                        }
+
+                        var sentinelDate = new DateTime(9999, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+                        if (activePipelineIds.Count > 0)
+                        {
+                            var resumedCount = await queueRepo.ResumePendingJobsForPipelinesAsync(tenantId, activePipelineIds, sentinelDate, ct);
+                            if (resumedCount > 0)
+                            {
+                                _logger.LogInformation("Recovery sweep: Resumed {ResumedCount} sentinel-paused pending jobs for active pipelines in Tenant {TenantId}.", resumedCount, tenantId);
+                            }
+                        }
+
+                        if (deletedPipelineIds.Count > 0)
+                        {
+                            var cancelledCount = await queueRepo.CancelPendingJobsForPipelinesAsync(tenantId, deletedPipelineIds, "Pipeline deleted", ct);
+                            if (cancelledCount > 0)
+                            {
+                                _logger.LogInformation("Recovery sweep: Cancelled {CancelledCount} pending jobs for deleted/missing pipelines in Tenant {TenantId}.", cancelledCount, tenantId);
+                            }
                         }
                     }
 
                     // Route 1: Evaluate Existing Schedule Steps (Unchanged canvas-level trigger blocks)
-                    var activeScheduleSteps = await pipelineRepo.GetActiveScheduleStepsAsync(ct);
-                    foreach (var step in activeScheduleSteps)
+                    foreach (var step in metadata.ActiveScheduleSteps)
                     {
                         if (ct.IsCancellationRequested) break;
 
@@ -252,8 +306,7 @@ public class PipelineSchedulerWorker : BackgroundService
                     }
 
                     // Route 2: Evaluate New Pipeline-Level Schedules
-                    var activeSchedules = await pipelineRepo.GetActivePipelineSchedulesAsync(ct);
-                    foreach (var sched in activeSchedules)
+                    foreach (var sched in metadata.ActiveSchedules)
                     {
                         if (ct.IsCancellationRequested) break;
 

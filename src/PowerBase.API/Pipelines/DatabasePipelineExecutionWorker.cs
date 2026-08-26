@@ -281,10 +281,16 @@ public class DatabasePipelineExecutionWorker : BackgroundService
             var queueRepo = scope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
 
             var pipeline = await pipelineRepo.GetByIdAsync(job.PipelineId, ct);
-            if (pipeline == null || !pipeline.IsActive || pipeline.IsDeleted)
+            if (pipeline == null || pipeline.IsDeleted)
+            {
+                _logger.LogWarning("Worker-side Deferral Gate: Pipeline {PipelineId} (Tenant {TenantId}) is Deleted. Marking job {JobId} as Skipped.", job.PipelineId, job.TenantId, job.Id);
+                await queueRepo.MarkSkippedAsync(job.Id, _workerId, claimToken, "Pipeline deleted", ct);
+                return;
+            }
+            else if (!pipeline.IsActive)
             {
                 var sentinelDate = new DateTime(9999, 12, 31, 0, 0, 0, DateTimeKind.Utc);
-                _logger.LogWarning("Worker-side Deferral Gate: Pipeline {PipelineId} (Tenant {TenantId}) is Inactive or Deleted. Deferring job {JobId} to sentinel.", job.PipelineId, job.TenantId, job.Id);
+                _logger.LogWarning("Worker-side Deferral Gate: Pipeline {PipelineId} (Tenant {TenantId}) is Inactive. Deferring job {JobId} to sentinel.", job.PipelineId, job.TenantId, job.Id);
                 await queueRepo.DeferPendingJobAsync(job.Id, _workerId, claimToken, 30, sentinelDate, ct);
                 return;
             }

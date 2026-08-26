@@ -803,7 +803,11 @@ public class PipelineEngine : IPipelineEngine
         foreach (var step in siblings)
         {
             var pipeline = await _pipelineRepo.GetByIdAsync(step.PipelineId, ct);
-            if (pipeline != null && (!pipeline.IsActive || pipeline.IsDeleted))
+            if (pipeline != null && pipeline.IsDeleted)
+            {
+                throw new PipelineStopExecutionException("Execution halted: Pipeline was deleted.");
+            }
+            else if (pipeline != null && !pipeline.IsActive)
             {
                 throw new PipelineStopExecutionException("Execution halted: Pipeline was deactivated.");
             }

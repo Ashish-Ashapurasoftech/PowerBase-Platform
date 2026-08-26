@@ -334,6 +334,67 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         return results.AsList();
     }
 
+    public async Task<SchedulerMetadataDto> GetSchedulerMetadataAsync(CancellationToken ct = default)
+    {
+        var sql = $"""
+            -- Active pipelines
+            SELECT {PipelineColumns}
+            FROM meta.Pipeline
+            WHERE IsActive = 1 AND IsDeleted = 0;
+
+            -- Route 1 schedule steps
+            SELECT s.* 
+            FROM meta.PipelineStep s
+            INNER JOIN meta.Pipeline p ON p.Id = s.PipelineId
+            WHERE p.IsActive = 1 AND p.IsDeleted = 0 
+              AND s.IsDeleted = 0 AND s.Type = 'trigger' AND s.Subtype = 'schedule';
+
+            -- Route 2 schedules
+            SELECT s.*
+            FROM meta.PipelineSchedule s
+            INNER JOIN meta.Pipeline p ON p.Id = s.PipelineId
+            WHERE p.IsActive = 1 AND p.IsDeleted = 0;
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        using var multi = await connection.QueryMultipleAsync(new CommandDefinition(sql, cancellationToken: ct));
+        
+        return new SchedulerMetadataDto
+        {
+            ActivePipelines = (await multi.ReadAsync<Pipeline>()).AsList(),
+            ActiveScheduleSteps = (await multi.ReadAsync<PipelineStep>()).AsList(),
+            ActiveSchedules = (await multi.ReadAsync<PipelineSchedule>()).AsList()
+        };
+    }
+
+    public async Task<IReadOnlyList<long>> GetDeletedPipelineIdsAsync(CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var sql = "SELECT Id FROM meta.Pipeline WHERE IsDeleted = 1;";
+        var results = await connection.QueryAsync<long>(new CommandDefinition(sql, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task<IReadOnlyList<Pipeline>> GetPipelineStatesAsync(IEnumerable<long> ids, CancellationToken ct = default)
+    {
+        if (ids == null) return Array.Empty<Pipeline>();
+        var list = ids.ToList();
+        if (list.Count == 0) return Array.Empty<Pipeline>();
+
+        var results = new List<Pipeline>();
+        const string sql = "SELECT Id, IsActive, IsDeleted FROM meta.Pipeline WHERE Id IN @batchIds";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        // Chunk to 500 to stay well below SQL Server parameter limits
+        for (int i = 0; i < list.Count; i += 500)
+        {
+            var batch = list.Skip(i).Take(500).ToList();
+            var batchResults = await connection.QueryAsync<Pipeline>(
+                new CommandDefinition(sql, new { batchIds = batch }, cancellationToken: ct));
+            results.AddRange(batchResults);
+        }
+        return results;
+    }
+
     public async Task<(Guid PublicId, long Id)> CreateAsync(Pipeline pipeline, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var parameters = new

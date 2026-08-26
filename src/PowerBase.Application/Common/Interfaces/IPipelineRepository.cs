@@ -18,8 +18,18 @@ public class PipelineListItemDetail
     public string? FirstStepSubtype { get; set; }
 }
 
+public class SchedulerMetadataDto
+{
+    public IReadOnlyList<Pipeline> ActivePipelines { get; set; } = Array.Empty<Pipeline>();
+    public IReadOnlyList<PipelineStep> ActiveScheduleSteps { get; set; } = Array.Empty<PipelineStep>();
+    public IReadOnlyList<PipelineSchedule> ActiveSchedules { get; set; } = Array.Empty<PipelineSchedule>();
+}
+
 public interface IPipelineRepository
 {
+    Task<SchedulerMetadataDto> GetSchedulerMetadataAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<long>> GetDeletedPipelineIdsAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<Pipeline>> GetPipelineStatesAsync(IEnumerable<long> ids, CancellationToken ct = default);
     Task<Pipeline> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<Pipeline?> GetByIdAsync(long id, CancellationToken ct = default);
     Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default);

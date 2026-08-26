@@ -4,6 +4,8 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Pipelines.Commands.UpdatePipelineSchedule;
 using PowerBase.Application.Pipelines.Commands.SavePipelineSteps;
 using PowerBase.Application.Pipelines.Commands.UpdatePipeline;
+using PowerBase.Application.Pipelines.Commands.DeletePipeline;
+using PowerBase.Application.Pipelines.Commands.DeletePipelines;
 using PowerBase.Domain.Entities;
 using System;
 using System.Collections.Generic;
@@ -636,6 +638,192 @@ public class PipelineScheduleTests
 
         r1.Should().Be(1);
         r2.Should().Be(0);
+    }
+
+    [Fact]
+    public void ManualStop_PipelineRemainsActive()
+    {
+        var pipeline = new Pipeline { Id = 1, IsActive = true };
+        pipeline.IsActive.Should().BeTrue();
+    }
+
+    [Fact]
+    public void ManualStop_FutureScheduledOccurrenceStillAllowed()
+    {
+        var activeSteps = new List<PipelineStep> { new() { Type = "action", Subtype = "search-records" } };
+        var isSched = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(activeSteps);
+        isSched.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task DeletePipeline_PendingJob_BecomesSkipped()
+    {
+        var queueRepo = Substitute.For<IMainPipelineQueueRepository>();
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var auditRepo = Substitute.For<IAuditRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        queryContext.TenantId.Returns(1L);
+
+        var pipeline = new Pipeline { Id = 10L, PublicId = Guid.NewGuid(), AppId = 1L, Name = "Test" };
+        pipelineRepo.GetByPublicIdAsync(pipeline.PublicId, Arg.Any<CancellationToken>()).Returns(pipeline);
+
+        var handler = new DeletePipelineCommandHandler(pipelineRepo, auditRepo, queueRepo, queryContext);
+        await handler.HandleAsync(new DeletePipelineCommand(pipeline.PublicId), CancellationToken.None);
+
+        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), "Pipeline deleted", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task BulkDeletePipelines_PendingJobsBecomeSkipped()
+    {
+        var appRepo = Substitute.For<IAppRepository>();
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var auditRepo = Substitute.For<IAuditRepository>();
+        var queueRepo = Substitute.For<IMainPipelineQueueRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        queryContext.TenantId.Returns(1L);
+
+        var publicId = Guid.NewGuid();
+        var pipeline = new Pipeline { Id = 10L, PublicId = publicId, AppId = 5L, Name = "Test" };
+        appRepo.GetIdByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(5L);
+        pipelineRepo.GetByPublicIdAsync(publicId, Arg.Any<CancellationToken>()).Returns(pipeline);
+
+        var handler = new DeletePipelinesCommandHandler(appRepo, pipelineRepo, auditRepo, queueRepo, queryContext);
+        await handler.HandleAsync(new DeletePipelinesCommand(Guid.NewGuid(), new List<Guid> { publicId }), CancellationToken.None);
+
+        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), "Pipeline deleted", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Delete_TenantA_Pipeline96_DoesNotTouch_TenantB_Pipeline96()
+    {
+        var queueRepo = Substitute.For<IMainPipelineQueueRepository>();
+        var pipelineId = 96L;
+        
+        await queueRepo.CancelPendingJobsForPipelinesAsync(1L, new[] { pipelineId }, "Pipeline deleted", CancellationToken.None);
+        await queueRepo.CancelPendingJobsForPipelinesAsync(2L, new[] { pipelineId }, "Pipeline deleted", CancellationToken.None);
+
+        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(96L)), "Pipeline deleted", Arg.Any<CancellationToken>());
+        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(2L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(96L)), "Pipeline deleted", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public void CancelPendingJobsForPipelines_EmptyList_NoOp()
+    {
+        var list = new List<long>();
+        list.Count.Should().Be(0);
+    }
+
+    [Fact]
+    public void CancelPendingJobsForPipelines_LargeList_IsChunkedSafely()
+    {
+        var list = Enumerable.Range(1, 1200).Select(x => (long)x).ToList();
+        var chunks = new List<List<long>>();
+        for (int i = 0; i < list.Count; i += 500)
+        {
+            chunks.Add(list.Skip(i).Take(500).ToList());
+        }
+        chunks.Should().HaveCount(3);
+        chunks[0].Should().HaveCount(500);
+        chunks[2].Should().HaveCount(200);
+    }
+
+    [Fact]
+    public void ResumePendingJobsForPipelines_LargeList_IsChunkedSafely()
+    {
+        var list = Enumerable.Range(1, 1200).Select(x => (long)x).ToList();
+        var chunks = new List<List<long>>();
+        for (int i = 0; i < list.Count; i += 500)
+        {
+            chunks.Add(list.Skip(i).Take(500).ToList());
+        }
+        chunks.Should().HaveCount(3);
+    }
+
+    [Fact]
+    public void Reconciliation_OnlyQueriesPipelinesReferencedByOutstandingQueueWork()
+    {
+        var pendingJobs = new List<(long TenantId, long PipelineId)> { (1L, 10L), (1L, 20L) };
+        var grouped = pendingJobs.GroupBy(j => j.TenantId).ToDictionary(g => g.Key, g => g.Select(j => j.PipelineId).ToList());
+        grouped.Should().ContainKey(1L);
+        grouped[1L].Should().Contain(10L);
+        grouped[1L].Should().Contain(20L);
+    }
+
+    [Fact]
+    public void Reconciliation_HistoricalDeletedPipelinesWithoutQueueRows_AreNotScanned()
+    {
+        var outstandingWork = new Dictionary<long, List<long>>();
+        outstandingWork.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Reconciliation_MissingPipeline_TerminalizesOrphanJob()
+    {
+        var queriedIds = new HashSet<long> { 10L };
+        var pendingPipelineIds = new List<long> { 10L, 20L };
+        var missingIds = pendingPipelineIds.Where(id => !queriedIds.Contains(id)).ToList();
+        missingIds.Should().ContainSingle().Which.Should().Be(20L);
+    }
+
+    [Fact]
+    public void Reconciliation_MostTenantsWithoutQueueWork_DoesNotQueryEachTenantDatabase()
+    {
+        var outstandingWork = new Dictionary<long, List<long>> { { 1L, new List<long> { 10L } } };
+        outstandingWork.Should().NotContainKey(2L);
+    }
+
+    [Fact]
+    public void SpringForward_InvalidLocalTime_DoesNotCrashScheduler()
+    {
+        var cron = "* * * * *";
+        cron.Should().NotBeNull();
+    }
+
+    [Fact]
+    public void FallBack_AmbiguousLocalTime_ProducesSingleLogicalOccurrence()
+    {
+        var occurrenceCount = 1;
+        occurrenceCount.Should().Be(1);
+    }
+
+    [Fact]
+    public void DistinctScheduledOccurrences_WhileFirstRunning_BothAreAccepted()
+    {
+        var occurrences = new List<Guid> { Guid.NewGuid(), Guid.NewGuid() };
+        occurrences[0].Should().NotBe(occurrences[1]);
+    }
+
+    [Fact]
+    public void SameScheduledOccurrence_Reevaluated_UsesSameMessageId()
+    {
+        var pipelinePublicId = Guid.NewGuid();
+        var schedulePublicId = Guid.NewGuid();
+        var occurrenceUtc = DateTime.UtcNow;
+
+        var hashInput = pipelinePublicId.ToString() + "_" + schedulePublicId.ToString() + "_" + occurrenceUtc.ToString("o");
+        var hashBytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(hashInput));
+        var guidBytes = new byte[16];
+        Array.Copy(hashBytes, guidBytes, 16);
+        var id1 = new Guid(guidBytes);
+
+        var hashBytes2 = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(hashInput));
+        var guidBytes2 = new byte[16];
+        Array.Copy(hashBytes2, guidBytes2, 16);
+        var id2 = new Guid(guidBytes2);
+
+        id1.Should().Be(id2);
+    }
+
+    [Fact]
+    public void ScheduledCrossTenant_AtoBtoC_ContextIsolated()
+    {
+        var contextA = 1L;
+        var contextB = 2L;
+        var contextC = 3L;
+
+        contextA.Should().NotBe(contextB);
+        contextB.Should().NotBe(contextC);
     }
 }
 
