@@ -131,9 +131,11 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         """;
 
     private const string GetByAppAndUserSql = """
-        SELECT TOP 1 Id, PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ISNULL(ShowInUserPickers, 1) AS ShowInUserPickers, AddedBy, CreatedOn, UpdatedOn, IsDeleted, IsFromGroup, GroupId
-        FROM meta.AppUser
-        WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0 AND Status = 'Active'
+        SELECT TOP 1 au.Id, au.PublicId, au.AppId, au.UserId, au.UserPublicId, au.UserName, au.UserEmail, au.AppRoleId, au.Status, ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers, au.AddedBy, au.CreatedOn, au.UpdatedOn, au.IsDeleted, au.IsFromGroup, au.GroupId
+        FROM meta.AppUser au
+        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0 AND au.Status = 'Active'
+        ORDER BY ISNULL(ar.Rank, 999999) ASC, au.CreatedOn ASC
         """;
 
     private const string GetByPublicIdSql = """
@@ -178,19 +180,45 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         """;
 
     private const string GetUserRoleNameSql = """
-        SELECT TOP 1 ar.Name
-        FROM meta.AppUser au
-        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
-        WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
-        ORDER BY ISNULL(ar.Rank, 999999) ASC
+        SELECT TOP 1 Name FROM (
+            SELECT ar.Name, ISNULL(ar.Rank, 999999) AS SortRank
+            FROM meta.AppUser au
+            JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+            WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
+
+            UNION ALL
+
+            SELECT ar.Name, ISNULL(ar.Rank, 999999) AS SortRank
+            FROM meta.GroupMember gm
+            JOIN meta.[Group] g  ON g.Id  = gm.GroupId
+            JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+            JOIN meta.AppRole ar  ON ar.Id  = ga.AppRoleId
+            WHERE ga.AppId     = @appId
+              AND gm.UserId    = @userId
+              AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+        ) AS AllRoles
+        ORDER BY SortRank ASC
         """;
 
     private const string GetUserRolePublicIdSql = """
-        SELECT TOP 1 ar.PublicId
-        FROM meta.AppUser au
-        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
-        WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
-        ORDER BY ISNULL(ar.Rank, 999999) ASC
+        SELECT TOP 1 PublicId FROM (
+            SELECT ar.PublicId, ISNULL(ar.Rank, 999999) AS SortRank
+            FROM meta.AppUser au
+            JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+            WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
+
+            UNION ALL
+
+            SELECT ar.PublicId, ISNULL(ar.Rank, 999999) AS SortRank
+            FROM meta.GroupMember gm
+            JOIN meta.[Group] g  ON g.Id  = gm.GroupId
+            JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+            JOIN meta.AppRole ar  ON ar.Id  = ga.AppRoleId
+            WHERE ga.AppId     = @appId
+              AND gm.UserId    = @userId
+              AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+        ) AS AllRoles
+        ORDER BY SortRank ASC
         """;
 
     private const string GetPermissionFlagsSql = """

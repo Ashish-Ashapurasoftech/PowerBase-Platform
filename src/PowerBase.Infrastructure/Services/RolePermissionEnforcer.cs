@@ -33,13 +33,11 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
         if (_queryContext.IsSuperAdmin)
             return Unrestricted(fields);
 
-        var appUser = await _appUserRepo.GetByAppAndUserAsync(table.AppId, _queryContext.UserId, ct);
-        if (appUser is null)
-            return Unrestricted(fields); // not an app member via AppUser
-
         var roleIds = await _appUserRepo.GetUserAppRoleIdsAsync(table.AppId, _queryContext.UserId, ct);
         if (roleIds.Count == 0)
-            roleIds = new[] { appUser.AppRoleId };
+            return Unrestricted(fields); // not an app member
+
+        var appUser = await _appUserRepo.GetByAppAndUserAsync(table.AppId, _queryContext.UserId, ct);
 
         var permissions = new List<AppRoleTablePermission>();
         foreach (var rId in roleIds)
@@ -160,7 +158,7 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
     }
 
     private async Task<FilterGroup?> BuildCombinedViewFilterAsync(
-        IReadOnlyList<long> roleIds, AppUser appUser, AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct)
+        IReadOnlyList<long> roleIds, AppUser? appUser, AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct)
     {
         var childGroups = new List<FilterGroup>();
         foreach (var rId in roleIds)
@@ -178,7 +176,7 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             foreach (var c in conditions)
             {
                 if (!byPublicId.TryGetValue(c.FieldPublicId, out var field)) continue;
-                var value = c.UseCurrentUser ? appUser.UserPublicId?.ToString() : c.Value;
+                var value = c.UseCurrentUser ? (appUser?.UserPublicId?.ToString() ?? string.Empty) : c.Value;
                 var fieldId = field.Fid.HasValue ? (long)field.Fid.Value : field.Id;
                 nodes.Add(new FilterNode
                 {

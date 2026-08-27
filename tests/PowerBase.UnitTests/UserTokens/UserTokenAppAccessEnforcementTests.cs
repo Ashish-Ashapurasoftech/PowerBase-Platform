@@ -24,6 +24,8 @@ public class UserTokenAppAccessEnforcementTests
     {
         _queryContext.UserId.Returns(1001L);
         _queryContext.TenantId.Returns(500L);
+        // Simulate a user-token context so EnsureTokenAppAccess() fires in all tests.
+        _queryContext.IsUserToken.Returns(true);
 
         _service = new AppAccessService(
             _appRepo,
