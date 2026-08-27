@@ -64,8 +64,7 @@ public class UpdateAppRoleCommandHandler
             throw new UnauthorizedActionException("modify your own app role");
         }
 
-        var actorAppUser = await _appUserRepo.GetByAppAndUserAsync(role.AppId, _queryContext.UserId, ct);
-        if (actorAppUser == null && !_queryContext.IsSuperAdmin)
+        if (actorRole == null && !_queryContext.IsSuperAdmin)
         {
             throw new UnauthorizedActionException("You are not a member of this application.");
         }
