@@ -82,6 +82,8 @@ public class AppQueryHandlerTests
     public async Task DeleteApp_CallsDeleteOnRepo()
     {
         var id = Guid.NewGuid();
+        var app = new App { PublicId = id, Name = "Test App" };
+        _appRepo.GetByPublicIdAsync(id).Returns(app);
         var sut = new DeleteAppCommandHandler(_appRepo, _auditRepo);
 
         await sut.HandleAsync(new DeleteAppCommand(id));

@@ -47,15 +47,20 @@ public class DefaultReportSettingsHandlerTests
     {
         var tableId = Guid.NewGuid();
         var reportId = Guid.NewGuid();
-        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(MakeTable());
+        var roleId = Guid.NewGuid();
+        var roleReportId = Guid.NewGuid();
+        var table = MakeTable();
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(table);
         _reportRepo.BelongsToTableAsync(tableId, reportId, Arg.Any<CancellationToken>()).Returns(true);
+        _reportRepo.BelongsToTableAsync(tableId, roleReportId, Arg.Any<CancellationToken>()).Returns(true);
+        _appRoleRepo.GetByPublicIdAsync(roleId, Arg.Any<CancellationToken>()).Returns(MakeRole(roleId, table.AppId));
         var sut = new UpdateDefaultReportSettingsCommandHandler(_tableRepo, _appRoleRepo, _reportRepo, _appAccessService, _auditRepo);
 
         await sut.HandleAsync(new UpdateDefaultReportSettingsCommand(
             tableId,
             DefaultReportModes.Everyone,
             reportId,
-            new Dictionary<Guid, Guid?> { [Guid.NewGuid()] = Guid.NewGuid() }));
+            new Dictionary<Guid, Guid?> { [roleId] = roleReportId }));
 
         await _reportRepo.Received(1).SetDefaultAsync(tableId, reportId, Arg.Any<CancellationToken>());
         await _tableRepo.Received(1).UpdateDefaultReportSettingsAsync(
@@ -140,7 +145,9 @@ public class DefaultReportSettingsHandlerTests
         _reportRepo.GetDefaultByTableAsync(tableId, Arg.Any<CancellationToken>()).Returns(MakeReport(everyoneReportId, isDefault: true));
         _appUserRepo.GetUserRolePublicIdAsync(10L, 42L, Arg.Any<CancellationToken>()).Returns(roleId);
         _reportRepo.BelongsToTableAsync(tableId, roleReportId, Arg.Any<CancellationToken>()).Returns(true);
-        _reportRepo.GetByPublicIdAsync(roleReportId, Arg.Any<CancellationToken>()).Returns(MakeReport(roleReportId, name: "Role Report"));
+        var mappedReport = MakeReport(roleReportId, name: "Role Report");
+        _reportRepo.GetByPublicIdAsync(roleReportId, Arg.Any<CancellationToken>()).Returns(mappedReport);
+        _reportRepo.GetVisibleReportAsync(roleReportId, Arg.Any<CancellationToken>()).Returns(mappedReport);
         var sut = new ResolveDefaultReportQueryHandler(_tableRepo, _appUserRepo, _reportRepo, _queryContext);
 
         var result = await sut.HandleAsync(new ResolveDefaultReportQuery(tableId));
@@ -158,7 +165,9 @@ public class DefaultReportSettingsHandlerTests
         {
             Mode = DefaultReportModes.RoleBased,
         })));
-        _reportRepo.GetDefaultByTableAsync(tableId, Arg.Any<CancellationToken>()).Returns(MakeReport(everyoneReportId, isDefault: true, name: "Everyone Report"));
+        var everyoneReport = MakeReport(everyoneReportId, isDefault: true, name: "Everyone Report");
+        _reportRepo.GetDefaultByTableAsync(tableId, Arg.Any<CancellationToken>()).Returns(everyoneReport);
+        _reportRepo.GetVisibleReportAsync(everyoneReportId, Arg.Any<CancellationToken>()).Returns(everyoneReport);
         _appUserRepo.GetUserRolePublicIdAsync(10L, 42L, Arg.Any<CancellationToken>()).Returns(Guid.NewGuid());
         var sut = new ResolveDefaultReportQueryHandler(_tableRepo, _appUserRepo, _reportRepo, _queryContext);
 

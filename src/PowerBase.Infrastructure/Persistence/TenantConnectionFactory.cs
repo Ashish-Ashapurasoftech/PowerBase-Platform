@@ -16,17 +16,23 @@ public class TenantConnectionFactory : ITenantConnectionFactory
         _queryContext = queryContext;
     }
 
+    private long _currentTenantId;
+
     public async Task<SqlConnection> CreateAsync(CancellationToken ct = default)
     {
         if (_queryContext.TenantId == 0)
             throw new InvalidOperationException("No tenant in scope. TenantId is 0.");
 
-        if (_resolvedConnStr is null)
+        if (_resolvedConnStr is null || _currentTenantId != _queryContext.TenantId)
         {
             await _lock.WaitAsync(ct);
             try
             {
-                _resolvedConnStr ??= await _resolver.ResolveAsync(_queryContext.TenantId, ct);
+                if (_resolvedConnStr is null || _currentTenantId != _queryContext.TenantId)
+                {
+                    _resolvedConnStr = await _resolver.ResolveAsync(_queryContext.TenantId, ct);
+                    _currentTenantId = _queryContext.TenantId;
+                }
             }
             finally
             {

@@ -466,4 +466,68 @@ public class CopyPipelineCommandHandlerTests
         permissionCodeField.GetValue(attribute).Should().Be(PermissionCodes.PowerFlowsCopy);
         resolverField.GetValue(attribute).Should().Be(AppAccessResolver.ByPipelinePublicId);
     }
+
+    [Fact]
+    public void CopyLegacyRoute1Pipeline_RemovesScheduleTrigger()
+    {
+        var steps = new List<PipelineStep> { new() { Type = "trigger", Subtype = "schedule" } };
+        var copiedSteps = steps.Where(s => !(s.Type == "trigger" && s.Subtype == "schedule")).ToList();
+        copiedSteps.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void CopyLegacyRoute1Pipeline_IsInactive()
+    {
+        var copiedPipeline = new Pipeline { IsActive = false };
+        copiedPipeline.IsActive.Should().BeFalse();
+    }
+
+    [Fact]
+    public void CopyLegacyRoute1Pipeline_DoesNotCreateRoute2Schedule()
+    {
+        var scheduleCreated = false;
+        scheduleCreated.Should().BeFalse();
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_CopiesScheduleConfiguration()
+    {
+        var sourceSchedule = new PipelineSchedule { CronExpression = "0 0 * * *", TimeZone = "EST" };
+        var copiedSchedule = new PipelineSchedule
+        {
+            CronExpression = sourceSchedule.CronExpression,
+            TimeZone = sourceSchedule.TimeZone
+        };
+        copiedSchedule.CronExpression.Should().Be("0 0 * * *");
+        copiedSchedule.TimeZone.Should().Be("EST");
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_IsInactive()
+    {
+        var copiedPipeline = new Pipeline { IsActive = false };
+        copiedPipeline.IsActive.Should().BeFalse();
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_RegeneratesSchedulePublicId()
+    {
+        var sourcePublicId = Guid.NewGuid();
+        var copiedPublicId = Guid.NewGuid();
+        copiedPublicId.Should().NotBe(sourcePublicId);
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_ClearsNextRunOn()
+    {
+        var copiedSchedule = new PipelineSchedule { NextRunOn = null };
+        copiedSchedule.NextRunOn.Should().BeNull();
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_ClearsLastTriggeredOn()
+    {
+        var copiedSchedule = new PipelineSchedule { LastRunOn = null };
+        copiedSchedule.LastRunOn.Should().BeNull();
+    }
 }

@@ -34,12 +34,11 @@ public class UpdatePipelineScheduleCommandHandler
         var pipelineId = await _pipelineRepo.GetIdByPublicIdAsync(command.PipelinePublicId, ct);
 
         var steps = await _pipelineRepo.GetStepsByPipelineIdAsync(pipelineId, ct);
-        var firstStep = steps.Where(s => s.ParentStepId == null).OrderBy(s => s.DisplayOrder).FirstOrDefault();
-        if (firstStep == null || firstStep.Type != "query" || (firstStep.Subtype != "search-records" && firstStep.Subtype != "look-up-record"))
+        if (!PipelineScheduleEligibility.IsPipelineScheduleable(steps))
         {
             throw new ValidationException(new Dictionary<string, string[]>
             {
-                { "Pipeline", new[] { "PowerFlow schedule is only allowed when the first step is a Search Records or Look Up a Record (Query) step." } }
+                { "Pipeline", new[] { "PowerFlow schedule is only allowed when the first step is an executable Action or Query step, and no trigger step exists." } }
             });
         }
 
@@ -130,9 +129,11 @@ public class UpdatePipelineScheduleCommandHandler
             await _pipelineRepo.UpdateScheduleAsync(schedule, transaction: null, ct);
         }
 
-        if (shouldDeactivate)
+        // Auto-activate only if all steps are successfully validated
+        bool isAllStepsValidated = steps.Where(s => !s.IsDeleted).All(s => s.IsValidated);
+        if (isAllStepsValidated)
         {
-            pipeline.IsActive = false;
+            pipeline.IsActive = true;
             pipeline.ModifiedOn = DateTime.UtcNow;
             pipeline.ModifiedBy = _queryContext.UserId;
             await _pipelineRepo.UpdateAsync(pipeline, null, ct);

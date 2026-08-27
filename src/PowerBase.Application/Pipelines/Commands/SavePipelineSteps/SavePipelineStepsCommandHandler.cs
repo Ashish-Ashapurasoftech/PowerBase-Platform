@@ -21,6 +21,7 @@ public class SavePipelineStepsCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly ITenantRepository _tenantRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IMainPipelineQueueRepository _queueRepo;
     private readonly IServiceProvider _serviceProvider;
 
     public SavePipelineStepsCommandHandler(
@@ -32,6 +33,7 @@ public class SavePipelineStepsCommandHandler
         ITenantUnitOfWork uow,
         ITenantRepository tenantRepo,
         IQueryContext queryContext,
+        IMainPipelineQueueRepository queueRepo,
         IServiceProvider serviceProvider)
     {
         _pipelineRepo = pipelineRepo;
@@ -42,6 +44,7 @@ public class SavePipelineStepsCommandHandler
         _uow = uow;
         _tenantRepo = tenantRepo;
         _queryContext = queryContext;
+        _queueRepo = queueRepo;
         _serviceProvider = serviceProvider;
     }
 
@@ -117,6 +120,20 @@ public class SavePipelineStepsCommandHandler
         bool stepsChanged = StepsConfigChanged(dbSteps.ToList(), flatList);
         bool shouldDeactivate = pipeline.IsActive && stepsChanged;
 
+        // Custom validation check: Check for new Route 1 schedule triggers
+        var oldScheduleTriggers = dbSteps.Where(s => !s.IsDeleted && s.Type == "trigger" && s.Subtype == "schedule").Select(s => s.PublicId).ToHashSet();
+        var incomingScheduleTriggers = flatList.Where(s => s.Type == "trigger" && s.Subtype == "schedule").ToList();
+        foreach (var trigger in incomingScheduleTriggers)
+        {
+            if (!oldScheduleTriggers.Contains(trigger.PublicId))
+            {
+                throw new ValidationException(new Dictionary<string, string[]>
+                {
+                    { "Steps", new[] { "Creating new canvas schedule triggers is deprecated. Please configure schedule settings using the pipeline details panel." } }
+                });
+            }
+        }
+
         if (pipeline.IsActive && !shouldDeactivate)
         {
             bool HasInvalidStep(List<SavePipelineStepDto> dtoSteps)
@@ -153,8 +170,15 @@ public class SavePipelineStepsCommandHandler
             throw;
         }
 
-        var firstStep = flatList.Where(s => s.ParentPublicId == null).OrderBy(s => s.DisplayOrder).FirstOrDefault();
-        if (firstStep == null || firstStep.Type != "query" || (firstStep.Subtype != "search-records" && firstStep.Subtype != "look-up-record"))
+        if (shouldDeactivate)
+        {
+            var sentinelDate = new DateTime(9999, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+            await _queueRepo.PausePendingJobsAsync(_queryContext.TenantId, pipelineId, sentinelDate, ct);
+        }
+
+        bool isCompatible = PipelineScheduleEligibility.IsPipelineScheduleable(flatList);
+
+        if (!isCompatible)
         {
             try
             {

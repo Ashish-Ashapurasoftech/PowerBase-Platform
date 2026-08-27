@@ -15,6 +15,8 @@ public class UpdateFieldCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly ISchemaEngineService _schemaEngine;
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
+    private readonly IMessagePublisher _messagePublisher;
+    private readonly IQueryContext _queryContext;
 
     public UpdateFieldCommandHandler(
         IAppTableRepository tableRepo,
@@ -23,7 +25,9 @@ public class UpdateFieldCommandHandler
         IRecordRepository recordRepo,
         IAuditRepository auditRepo,
         ISchemaEngineService schemaEngine,
-        FieldSettingsValidatorRegistry settingsRegistry)
+        FieldSettingsValidatorRegistry settingsRegistry,
+        IMessagePublisher messagePublisher,
+        IQueryContext queryContext)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -32,6 +36,8 @@ public class UpdateFieldCommandHandler
         _auditRepo = auditRepo;
         _schemaEngine = schemaEngine;
         _settingsRegistry = settingsRegistry;
+        _messagePublisher = messagePublisher;
+        _queryContext = queryContext;
     }
 
     public async Task HandleAsync(UpdateFieldCommand command, CancellationToken ct = default)
@@ -145,6 +151,21 @@ public class UpdateFieldCommandHandler
             existing.IsRequired = command.IsRequired;
             existing.DefaultValue = command.DefaultValue;
             await _recordRepo.BackfillDefaultAsync(table, existing, command.DefaultValue!, ct);
+        }
+
+        // Search Index Sync: when IsSearchable changes, trigger a backfill or nullify
+        if (command.IsSearchable != existing.IsSearchable && existing.Fid.HasValue)
+        {
+            var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
+            {
+                Action = command.IsSearchable ? PowerBase.Application.Common.Models.IndexAction.BackfillField : PowerBase.Application.Common.Models.IndexAction.NullifyField,
+                TenantId = _queryContext.TenantId,
+                AppId = table.AppId,
+                TableId = table.Id,
+                FieldId = existing.Fid.Value,
+                Page = 1
+            };
+            _ = _messagePublisher.PublishAsync(msg, default);
         }
 
         await _auditRepo.LogActivityAsync(
