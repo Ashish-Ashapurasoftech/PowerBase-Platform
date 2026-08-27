@@ -350,10 +350,14 @@ public class PblValidator
                 field.LogicalRef));
     }
 
-    /// <summary>Matches CreateReportCommandHandler.AllowedReportTypes.</summary>
+    /// <summary>Matches ReportConfigValidatorRegistry's supported report types. GridEdit is no
+    /// longer a distinct report type (now a session-only client-side toggle on Table reports —
+    /// see QblToPblConverter.ConvertReport, which maps an imported QB::Report::GridEdit to
+    /// "Table"). Chart added here since it's a genuinely supported PowerBase report type that
+    /// this list had never been updated for.</summary>
     private static readonly IReadOnlyCollection<string> SupportedReportTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "Table", "Summary", "GridEdit",
+        "Table", "Summary", "Chart",
     };
 
     private static void ValidateReports(PblTable table, HashSet<string> validFieldNames, List<PblIssue> issues, HashSet<string> seenRefs)

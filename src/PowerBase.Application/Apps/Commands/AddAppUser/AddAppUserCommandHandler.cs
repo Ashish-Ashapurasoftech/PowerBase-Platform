@@ -40,10 +40,6 @@ public class AddAppUserCommandHandler
         var user = await _userRepo.GetByEmailAsync(command.Email)
             ?? throw new NotFoundException("User", command.Email);
 
-        var existing = await _appUserRepo.GetByAppAndUserAsync(appId, user.Id, ct);
-        if (existing is not null)
-            throw new DuplicateException("AppUser", $"User '{user.Email}' is already added to this application.");
-
         AppRole targetRole;
         if (command.RolePublicId.HasValue)
         {
@@ -61,9 +57,16 @@ public class AddAppUserCommandHandler
             { 
                 Id = defaultRoleDetail.Id, 
                 PublicId = defaultRoleDetail.PublicId, 
+                Name = defaultRoleDetail.Name,
                 Rank = defaultRoleDetail.Rank,
                 ManageableRolesType = defaultRoleDetail.ManageableRolesType
             };
+        }
+
+        var existingSameRole = await _appUserRepo.GetByAppUserAndRoleAsync(appId, user.Id, targetRole.Id, ct);
+        if (existingSameRole is not null)
+        {
+            throw new DuplicateException("AppUser", $"User '{user.Email}' already has the '{targetRole.Name}' role in this application.");
         }
 
         if (!_queryContext.IsSuperAdmin)

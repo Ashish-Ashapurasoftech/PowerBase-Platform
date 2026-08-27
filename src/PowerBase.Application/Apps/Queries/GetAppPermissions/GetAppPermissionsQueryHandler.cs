@@ -48,13 +48,14 @@ public class GetAppPermissionsQueryHandler
         var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
         var roleName = await _appUserRepo.GetUserRoleNameAsync(appId, _queryContext.UserId, ct);
 
-        var appUser = await _appUserRepo.GetByAppAndUserAsync(appId, _queryContext.UserId, ct);
-        if (appUser is null)
-            return new AppPermissionsResult(roleName, permissions, [], [], [], _queryContext.UserId);
-
+        // Fetch all role IDs for this user in this app — includes both direct assignments
+        // (multi-role supported) and group-based role assignments via UNION.
         var roleIds = await _appUserRepo.GetUserAppRoleIdsAsync(appId, _queryContext.UserId, ct);
+
+        // If the user has no roles at all (not directly assigned and not in any group
+        // that has access to this app), return flat permissions only (no granular perms).
         if (roleIds.Count == 0)
-            roleIds = new[] { appUser.AppRoleId };
+            return new AppPermissionsResult(roleName, permissions, [], [], [], _queryContext.UserId);
 
         var roleTablePerms = new Dictionary<long, IReadOnlyList<TablePermissionRow>>();
         var roleFieldPerms = new Dictionary<long, IReadOnlyList<FieldPermissionScopedRow>>();

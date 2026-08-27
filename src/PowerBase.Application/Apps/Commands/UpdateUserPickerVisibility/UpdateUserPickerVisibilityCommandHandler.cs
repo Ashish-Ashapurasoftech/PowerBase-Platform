@@ -28,10 +28,27 @@ public class UpdateUserPickerVisibilityCommandHandler
         var app = await _appRepo.GetByPublicIdAsync(command.AppPublicId, ct);
         var appId = app.Id;
 
+        // 1. Try resolving by AppUser assignment PublicId first
+        var appUser = await _appUserRepo.GetByPublicIdAsync(command.UserPublicId, ct);
+        if (appUser != null && appUser.AppId == appId)
+        {
+            await _appUserRepo.UpdateShowInUserPickersByAssignmentAsync(appId, appUser.PublicId, command.ShowInUserPickers, ct);
+
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Updated,
+                AuditEntityTypes.AppUser,
+                appUser.UserId.ToString(),
+                $"User picker visibility updated for app user {appUser.UserEmail} to {command.ShowInUserPickers}",
+                appId: appId,
+                ct: ct);
+            return;
+        }
+
+        // 2. Fallback: resolve by core User PublicId
         var user = await _userRepo.GetByPublicIdAsync(command.UserPublicId, ct)
             ?? throw new NotFoundException("User", command.UserPublicId);
 
-        var appUser = await _appUserRepo.GetByAppAndUserAsync(appId, user.Id, ct)
+        appUser = await _appUserRepo.GetByAppAndUserAsync(appId, user.Id, ct)
             ?? throw new NotFoundException("AppUser", command.UserPublicId);
 
         await _appUserRepo.UpdateShowInUserPickersAsync(appId, user.Id, command.ShowInUserPickers, ct);

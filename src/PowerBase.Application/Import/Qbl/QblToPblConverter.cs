@@ -816,7 +816,10 @@ public static class QblToPblConverter
         {
             "QB::Report::Table" => "Table",
             "QB::Report::Summary" => "Summary",
-            "QB::Report::GridEdit" => "GridEdit",
+            // GridEdit is no longer a distinct PowerBase report type (it's now a session-only
+            // client-side view toggle on Table reports) — a QuickBase grid-edit report imports
+            // as a plain Table report.
+            "QB::Report::GridEdit" => "Table",
             _ => null,
         };
 

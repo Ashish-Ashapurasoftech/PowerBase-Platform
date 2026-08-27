@@ -12,7 +12,7 @@ public record CreateReportCommand(
     long? GroupByFieldId,
     string GroupByMode,
     bool HideTotals,
-    bool GroupDefaultCollapsed,
+    bool? GroupDefaultCollapsed,
     bool GroupByDescending,
     List<SummaryAggregationCommand> Aggregations,
     string DynamicFilterType,
@@ -20,9 +20,20 @@ public record CreateReportCommand(
     List<CustomDynamicFilterItem>? CustomDynamicFilterItems,
     bool AllowQuickSearch,
     List<Guid>? VisibleToRoleIds,
-    ChartConfigCommand? Chart = null);
+    ChartConfigCommand? Chart = null,
+    string ColumnsMode = "Custom",
+    List<SortGroupLevelCommand>? TableSortGroup = null,
+    ReportOptionsCommand? Options = null);
 
 public record SummaryAggregationCommand(long FieldId, string Function, string DisplayAs = "Normal");
+
+public record SortGroupLevelCommand(long FieldId, bool Desc, bool IsGroup, string GroupByMode = "EqualValues");
+
+public record ReportOptionsCommand(
+    string ColumnHeaderText = "Default",
+    bool ShowEditIcon = true,
+    bool ShowViewIcon = true,
+    bool DisableBulkDelete = false);
 
 public record ChartConfigCommand(
     string ChartType,
@@ -47,4 +58,8 @@ public record ChartConfigCommand(
     bool LogScale2 = false,
     long? GaugeFieldId = null,
     decimal GaugeLowMaxPercent = 30,
-    decimal GaugeMediumMaxPercent = 70);
+    decimal GaugeMediumMaxPercent = 70,
+    string DataLabelDisplayAs = "Value",
+    string GaugeGoalType = "Fixed",
+    long? GaugeGoalFieldId = null,
+    string? GaugeGoalFunction = null);

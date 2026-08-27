@@ -55,9 +55,11 @@ two disagree again.
 | `QB::Application` | 1 | Name, Description, AppIcon→Icon, AppColor→Color. `TableOrder`/`RoleOrder` drive iteration order only. Currency/date/number-format/timezone app-level defaults have no PowerBase equivalent — informational only. |
 | `QB::Table` | 1 | Nests its own `Fields`/`Relationships`/`Reports`/`Forms` maps as children — **not** flat top-level `Resources` entries. |
 | Scalar + Formula fields (above) | 1 | |
-| `QB::Report::Table`, `GridEdit` | 1 | Direct type-name match to PowerBase's `Table`/`GridEdit` report types. |
+| `QB::Report::Table` | 1 | Direct type-name match to PowerBase's `Table` report type. |
+| `QB::Report::GridEdit` | 1 | GridEdit is no longer a distinct PowerBase report type (now a session-only client-side toggle on Table reports) — imports as a plain `Table` report. |
 | `QB::Report::Summary` | 1 | Direct match to PowerBase's `Summary` report type (not seen in the sample file, but the identifier matches PowerBase's own `ReportType` string). |
-| `QB::Report::Calendar`, `Timeline`/`DefaultTimeline`, `Kanban`, `Map`, `Chart` | — | **Unsupported.** No PowerBase report type equivalent (`CreateReportCommandHandler.AllowedReportTypes = Table/Summary/GridEdit` only). Chart may gain a path once the "Add Chart report type" commit (currently only on `develop`) merges into this branch — revisit then. |
+| `QB::Report::Chart` | 1 | Not yet wired into `ConvertReport`'s type switch (falls through to the "unsupported" branch below today) — PowerBase does support a `Chart` report type (`ReportConfigValidatorRegistry`'s supported types are `Table`/`Summary`/`Chart`), this mapping just hasn't been added to the converter yet. |
+| `QB::Report::Calendar`, `Timeline`/`DefaultTimeline`, `Kanban`, `Map` | — | **Unsupported.** No PowerBase report type equivalent. |
 | `QB::ReportGroup` | — | Organizational grouping construct only, not a data view — informational, nothing to import. |
 | `QB::Relationship::Child` / `Parent` | 2 | Linkage resolved via the Child node's own `Parent: !Ref{Table, Relationship}` property, not a shared flat node. |
 | Cross-app relationships (`CrossAppParent`/`CrossAppChild`) | — | **Unsupported.** Out of scope (Master/Child App mode deferred to M4). |

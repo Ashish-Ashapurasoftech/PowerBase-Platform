@@ -44,16 +44,28 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         """;
 
     private const string ListByUserSqlTemplate = """
-        SELECT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
+        SELECT DISTINCT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
                a.Status, a.Formatting, a.SecurityOptions, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
-        JOIN meta.AppUser au ON au.AppId = a.Id
-        WHERE au.UserId   = @userId
-          AND au.IsDeleted = 0
-          AND a.IsDeleted  = 0
-          AND a.Status = @Status
+        WHERE a.IsDeleted  = 0
+          AND a.Status     = @Status
           {1}
+          AND (
+              EXISTS (
+                  SELECT 1 FROM meta.AppUser au
+                  WHERE au.AppId = a.Id AND au.UserId = @userId AND au.IsDeleted = 0
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM meta.GroupMember gm
+                  JOIN meta.[Group] g  ON g.Id  = gm.GroupId
+                  JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+                  WHERE ga.AppId = a.Id
+                    AND gm.UserId  = @userId
+                    AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+              )
+          )
         ORDER BY {0}
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
         """;
@@ -76,24 +88,48 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
     }
 
     private const string CountByUserSqlTemplate = """
-        SELECT COUNT(1)
+        SELECT COUNT(DISTINCT a.Id)
         FROM meta.App a
-        JOIN meta.AppUser au ON au.AppId = a.Id
-        WHERE au.UserId   = @userId
-          AND au.IsDeleted = 0
-          AND a.IsDeleted  = 0
+        WHERE a.IsDeleted = 0
           {0}
+          AND (
+              EXISTS (
+                  SELECT 1 FROM meta.AppUser au
+                  WHERE au.AppId = a.Id AND au.UserId = @userId AND au.IsDeleted = 0
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM meta.GroupMember gm
+                  JOIN meta.[Group] g  ON g.Id  = gm.GroupId
+                  JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+                  WHERE ga.AppId = a.Id
+                    AND gm.UserId  = @userId
+                    AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+              )
+          )
         """;
 
-    private const string ListAllByUserSql = $"""
-        SELECT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
+    private const string ListAllByUserSql = """
+        SELECT DISTINCT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
                a.Status, a.Formatting, a.SecurityOptions, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
-        JOIN meta.AppUser au ON au.AppId = a.Id
-        WHERE au.UserId   = @userId
-          AND au.IsDeleted = 0
-          AND a.IsDeleted  = 0
+        WHERE a.IsDeleted = 0
+          AND (
+              EXISTS (
+                  SELECT 1 FROM meta.AppUser au
+                  WHERE au.AppId = a.Id AND au.UserId = @userId AND au.IsDeleted = 0
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM meta.GroupMember gm
+                  JOIN meta.[Group] g  ON g.Id  = gm.GroupId
+                  JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+                  WHERE ga.AppId = a.Id
+                    AND gm.UserId  = @userId
+                    AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+              )
+          )
         ORDER BY a.Name
         """;
 
