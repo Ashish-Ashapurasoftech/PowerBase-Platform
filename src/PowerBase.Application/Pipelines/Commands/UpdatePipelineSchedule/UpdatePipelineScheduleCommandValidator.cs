@@ -12,7 +12,9 @@ public class UpdatePipelineScheduleCommandValidator : AbstractValidator<UpdatePi
         RuleFor(x => x.ScheduleType).NotEmpty().Must(x => 
             x == "hourly" || x == "daily" || x == "weekly" || x == "monthly" || x == "yearly" || x == "custom");
         RuleFor(x => x.TimeZone).NotEmpty();
-        RuleFor(x => x.CronExpression).NotEmpty()
+        RuleFor(x => x.CronExpression)
+            .NotEmpty()
+            .When(x => x.ScheduleType == "custom" || x.ScheduleType == "hourly")
             .Must(IsValidCron).WithMessage("Invalid cron expression format. Must contain exactly 5 fields and no aliases.")
             .Must(IsAtLeastHourly).WithMessage("Minimum schedule frequency is 1 hour. Minute field must specify a single integer (0-59).");
         

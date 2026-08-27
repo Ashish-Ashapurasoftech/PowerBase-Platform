@@ -968,5 +968,248 @@ public class PipelineScheduleTests
         var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
         result.Should().BeTrue();
     }
+
+    [Fact]
+    public void Hourly_Every2Hours_BackwardCompatible()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "hourly",
+            Interval = 2,
+            CreatedOn = new DateTime(2026, 8, 27, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "UTC"
+        };
+        var from = new DateTime(2026, 8, 27, 9, 15, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        next.Should().Be(new DateTime(2026, 8, 27, 11, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Daily_Every2Days_NoDrift()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "daily",
+            Interval = 2,
+            TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2026, 8, 27, 16, 0, 0, DateTimeKind.Utc), // saved at 4 PM
+            TimeZone = "UTC"
+        };
+        var from = new DateTime(2026, 8, 27, 17, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        next.Should().Be(new DateTime(2026, 8, 29, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Weekly_Every2Weeks_MultipleDays()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "weekly",
+            Interval = 2,
+            Weekdays = "1,3,5", // Mon, Wed, Fri
+            TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2026, 8, 27, 9, 0, 0, DateTimeKind.Utc), // Thurs, Aug 27 (Week starts Sun, Aug 23)
+            TimeZone = "UTC"
+        };
+        // Candidate week 0: Aug 28 (Fri)
+        var from = new DateTime(2026, 8, 27, 10, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        next.Should().Be(new DateTime(2026, 8, 28, 9, 0, 0, DateTimeKind.Utc));
+
+        // Candidate week 2: Sep 7 (Mon), Sep 9 (Wed), Sep 11 (Fri)
+        var from2 = new DateTime(2026, 8, 28, 10, 0, 0, DateTimeKind.Utc);
+        var next2 = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from2);
+        next2.Should().Be(new DateTime(2026, 9, 7, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Monthly_Every2Months_MultipleDaysAndLast()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "monthly",
+            Interval = 2,
+            MonthDay = "1,15,last",
+            TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2026, 8, 27, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "UTC"
+        };
+        // Candidates for Aug (offset 0): Aug 31 (since 1, 15 are in past relative to from)
+        var from = new DateTime(2026, 8, 27, 10, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        next.Should().Be(new DateTime(2026, 8, 31, 9, 0, 0, DateTimeKind.Utc));
+
+        // Candidates for Oct (offset 2): Oct 1, Oct 15, Oct 31
+        var from2 = new DateTime(2026, 8, 31, 10, 0, 0, DateTimeKind.Utc);
+        var next2 = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from2);
+        next2.Should().Be(new DateTime(2026, 10, 1, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Monthly_LastDay_NonLeapFebruary()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "monthly",
+            Interval = 1,
+            MonthDay = "last",
+            TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2027, 1, 1, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "UTC"
+        };
+        var from = new DateTime(2027, 2, 1, 9, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        next.Should().Be(new DateTime(2027, 2, 28, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Monthly_LastDay_LeapFebruary()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "monthly",
+            Interval = 1,
+            MonthDay = "last",
+            TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2028, 1, 1, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "UTC"
+        };
+        var from = new DateTime(2028, 2, 1, 9, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        next.Should().Be(new DateTime(2028, 2, 29, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Monthly_Deduplicates31AndLast()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "monthly",
+            Interval = 1,
+            MonthDay = "31,last",
+            TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2026, 8, 1, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "UTC"
+        };
+        var from = new DateTime(2026, 8, 30, 9, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        next.Should().Be(new DateTime(2026, 8, 31, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Yearly_Every2Years()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "yearly",
+            Interval = 2,
+            MonthOfYear = 12,
+            MonthDay = "31",
+            TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2026, 8, 27, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "UTC"
+        };
+        var from = new DateTime(2026, 8, 27, 10, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        next.Should().Be(new DateTime(2026, 12, 31, 9, 0, 0, DateTimeKind.Utc));
+
+        var from2 = new DateTime(2026, 12, 31, 10, 0, 0, DateTimeKind.Utc);
+        var next2 = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from2);
+        // Next eligible year: 2028
+        next2.Should().Be(new DateTime(2028, 12, 31, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Yearly_Feb29_NonLeapYearsSkipped()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "yearly",
+            Interval = 1,
+            MonthOfYear = 2,
+            MonthDay = "29",
+            TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2026, 1, 1, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "UTC"
+        };
+        var from = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        // Non-leap years 2026, 2027 are skipped; returns leap year 2028
+        next.Should().Be(new DateTime(2028, 2, 29, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void DST_InvalidTime_SelectsNextValidInstant()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "daily",
+            Interval = 1,
+            TimeOfDay = new TimeSpan(2, 30, 0), // Invalid local time during Spring Forward transition
+            CreatedOn = new DateTime(2026, 3, 7, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "America/New_York"
+        };
+        // Reference time is March 7, 2026. Next execution is March 8, 2026 at 2:30 AM EST (invalid).
+        var from = new DateTime(2026, 3, 7, 10, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        // 02:30 AM local shifts to 03:30 AM local = UTC 07:30 AM (EDT is UTC-4)
+        next.Should().Be(new DateTime(2026, 3, 8, 7, 30, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void DST_AmbiguousTime_ExecutesOnce()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "daily",
+            Interval = 1,
+            TimeOfDay = new TimeSpan(1, 30, 0), // Ambiguous local time during Fall Back transition
+            CreatedOn = new DateTime(2026, 10, 31, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "America/New_York"
+        };
+        // Next run is November 1, 2026 at 1:30 AM.
+        var from = new DateTime(2026, 10, 31, 10, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        // Chooses first chronological occurrence (EDT, offset -4) = UTC 05:30 AM
+        next.Should().Be(new DateTime(2026, 11, 1, 5, 30, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void ExistingBasicSchedules_BackwardCompatible()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "daily",
+            Interval = null, // null defaults to 1
+            TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2026, 8, 27, 9, 0, 0, DateTimeKind.Utc),
+            TimeZone = "UTC"
+        };
+        var from = new DateTime(2026, 8, 27, 10, 0, 0, DateTimeKind.Utc);
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
+        next.Should().Be(new DateTime(2026, 8, 28, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void CustomCron_L_RemainsInvalid()
+    {
+        var validator = new UpdatePipelineScheduleCommandValidator();
+        var command = new UpdatePipelineScheduleCommand(
+            Guid.NewGuid(),
+            "custom",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "UTC",
+            "0 9 L * *"
+        );
+        var result = validator.Validate(command);
+        result.IsValid.Should().BeFalse();
+    }
 }
 
