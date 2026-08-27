@@ -1061,9 +1061,10 @@ public class PipelineEngine : IPipelineEngine
             var accountUow = accountScopeHandle.GetRequiredService<ITenantUnitOfWork>();
             var accountIdempotencyRepo = accountScopeHandle.GetRequiredService<IPipelineStepIdempotencyRepository>();
             var accountFileStorage = accountScopeHandle.GetRequiredService<IFileStorageService>();
+            var accountRecordSearchService = accountScopeHandle.Services.GetService<IPipelineRecordSearchService>() ?? _pipelineRecordSearchService;
 
             return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
-                accountRecordRepo, accountTableRepo, accountFieldRepo, accountWriteService, accountTriggerInterceptor, accountUow, accountIdempotencyRepo, accountFileStorage, ct);
+                accountRecordRepo, accountTableRepo, accountFieldRepo, accountWriteService, accountTriggerInterceptor, accountUow, accountIdempotencyRepo, accountFileStorage, accountRecordSearchService, ct);
         }
 
         if (isCrossTenant)
@@ -1098,15 +1099,16 @@ public class PipelineEngine : IPipelineEngine
                 var scopedUow = scope.ServiceProvider.GetRequiredService<ITenantUnitOfWork>();
                 var scopedIdempotencyRepo = scope.ServiceProvider.GetRequiredService<IPipelineStepIdempotencyRepository>();
                 var scopedFileStorage = scope.ServiceProvider.GetRequiredService<IFileStorageService>();
+                var scopedRecordSearchService = scope.ServiceProvider.GetService<IPipelineRecordSearchService>() ?? _pipelineRecordSearchService;
 
                 return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
-                    scopedRecordRepo, scopedTableRepo, scopedFieldRepo, scopedWriteService, scopedTriggerInterceptor, scopedUow, scopedIdempotencyRepo, scopedFileStorage, ct);
+                    scopedRecordRepo, scopedTableRepo, scopedFieldRepo, scopedWriteService, scopedTriggerInterceptor, scopedUow, scopedIdempotencyRepo, scopedFileStorage, scopedRecordSearchService, ct);
             }
         }
         else
         {
             return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
-                _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, _triggerInterceptor, _uow, _idempotencyRepo, _fileStorageService, ct);
+                _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, _triggerInterceptor, _uow, _idempotencyRepo, _fileStorageService, _pipelineRecordSearchService, ct);
         }
     }
 
@@ -1154,6 +1156,7 @@ public class PipelineEngine : IPipelineEngine
         ITenantUnitOfWork uow,
         IPipelineStepIdempotencyRepository idempotencyRepo,
         IFileStorageService fileStorageService,
+        IPipelineRecordSearchService recordSearchService,
         CancellationToken ct)
     {
         var subtype = step.Subtype?.ToLowerInvariant();
@@ -1280,17 +1283,14 @@ public class PipelineEngine : IPipelineEngine
             }
             else if (!string.IsNullOrWhiteSpace(config.FilterField))
             {
-                var field = fields.FirstOrDefault(f => 
-                    f.Name.Equals(config.FilterField, StringComparison.OrdinalIgnoreCase) || 
-                    $"fid_{f.Id}".Equals(config.FilterField, StringComparison.OrdinalIgnoreCase) ||
-                    $"fid_{f.Fid}".Equals(config.FilterField, StringComparison.OrdinalIgnoreCase));
+                var field = ResolvePipelineField(config.FilterField, fields);
 
-                if (field != null && field.Fid.HasValue)
+                if (field.Fid.HasValue)
                 {
                     evaluatedFilterVal = EvaluateTokens(config.FilterValue, payloadJson, executionPath, allSteps);
                     var filterCondition = new FilterCondition
                     {
-                        FieldId = field.Id,
+                        FieldId = field.Fid.Value,
                         Operator = "eq",
                         Value = evaluatedFilterVal
                     };
@@ -1315,8 +1315,8 @@ public class PipelineEngine : IPipelineEngine
                 MaxResults = limit
             });
 
-            var records = _pipelineRecordSearchService != null
-                ? await _pipelineRecordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
+            var records = recordSearchService != null
+                ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
                 : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit ?? 100000, filterTree: filterTree, ct: ct);
             var resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
             _logger.LogInformation("Search Records step {StepId} matched {Count} records.", step.Id, resultsList.Count);
@@ -1373,12 +1373,9 @@ public class PipelineEngine : IPipelineEngine
                 {
                     if (string.IsNullOrWhiteSpace(mapping.Field)) continue;
 
-                    var field = fields.FirstOrDefault(f => 
-                        f.Name.Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) || 
-                        $"fid_{f.Id}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) ||
-                        $"fid_{f.Fid}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase));
+                    var field = ResolvePipelineField(mapping.Field, fields);
 
-                    if (field != null && field.Fid.HasValue)
+                    if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
                         var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
@@ -1461,12 +1458,9 @@ public class PipelineEngine : IPipelineEngine
                 {
                     if (string.IsNullOrWhiteSpace(mapping.Field)) continue;
 
-                    var field = fields.FirstOrDefault(f => 
-                        f.Name.Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) || 
-                        $"fid_{f.Id}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) ||
-                        $"fid_{f.Fid}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase));
+                    var field = ResolvePipelineField(mapping.Field, fields);
 
-                    if (field != null && field.Fid.HasValue)
+                    if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
                         var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
@@ -1981,12 +1975,9 @@ public class PipelineEngine : IPipelineEngine
             var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
             var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
 
-            var mergeField = fields.FirstOrDefault(f => 
-                f.Name.Equals(session.MergeKeyFid, StringComparison.OrdinalIgnoreCase) || 
-                $"fid_{f.Id}".Equals(session.MergeKeyFid, StringComparison.OrdinalIgnoreCase) ||
-                $"fid_{f.Fid}".Equals(session.MergeKeyFid, StringComparison.OrdinalIgnoreCase));
+            var mergeField = ResolvePipelineField(session.MergeKeyFid, fields);
 
-            if (mergeField == null || !mergeField.Fid.HasValue)
+            if (!mergeField.Fid.HasValue)
                 throw new InvalidOperationException($"Failed to resolve merge key field: '{session.MergeKeyFid}'");
 
             int inserted = 0;
@@ -2027,7 +2018,7 @@ public class PipelineEngine : IPipelineEngine
 
                     var filterCondition = new FilterCondition
                     {
-                        FieldId = mergeField.Id,
+                        FieldId = mergeField.Fid.Value,
                         Operator = "eq",
                         Value = mergeVal.ToString()
                     };
@@ -3359,12 +3350,9 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (string.IsNullOrWhiteSpace(rule.Field)) continue;
 
-                var field = fields.FirstOrDefault(f =>
-                    f.Name.Equals(rule.Field, StringComparison.OrdinalIgnoreCase) ||
-                    $"fid_{f.Id}".Equals(rule.Field, StringComparison.OrdinalIgnoreCase) ||
-                    $"fid_{f.Fid}".Equals(rule.Field, StringComparison.OrdinalIgnoreCase));
+                var field = ResolvePipelineField(rule.Field, fields);
 
-                if (field != null && field.Fid.HasValue)
+                if (field.Fid.HasValue)
                 {
                     var rawValue = rule.Value;
                     var dbOp = MapUiOperatorToDbOperator(rule.Operator);
@@ -3384,7 +3372,7 @@ public class PipelineEngine : IPipelineEngine
                     {
                         Condition = new FilterCondition
                         {
-                            FieldId = field.Id,
+                            FieldId = field.Fid.Value,
                             Operator = dbOp,
                             Value = evaluatedValue
                         }
@@ -3767,6 +3755,55 @@ public class PipelineEngine : IPipelineEngine
                 return null;
             default:
                 return el.GetRawText();
+        }
+    }
+
+    private static AppField ResolvePipelineField(
+        string? fieldReference,
+        IReadOnlyList<AppField> fields)
+    {
+        if (string.IsNullOrWhiteSpace(fieldReference))
+        {
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Field reference cannot be null or empty.");
+        }
+
+        if (fieldReference.StartsWith("fid_", StringComparison.OrdinalIgnoreCase))
+        {
+            var fidStr = fieldReference.Substring(4);
+            if (int.TryParse(fidStr, out var fid))
+            {
+                var field = fields.FirstOrDefault(f => f.Fid == fid);
+                if (field != null)
+                {
+                    return field;
+                }
+            }
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with stable FID '{fidStr}' was not found in the target table.");
+        }
+        else if (fieldReference.StartsWith("f_", StringComparison.OrdinalIgnoreCase))
+        {
+            var fidStr = fieldReference.Substring(2);
+            if (int.TryParse(fidStr, out var fid))
+            {
+                var field = fields.FirstOrDefault(f => f.Fid == fid);
+                if (field != null)
+                {
+                    return field;
+                }
+            }
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with stable FID '{fidStr}' was not found in the target table.");
+        }
+        else
+        {
+            var field = fields.FirstOrDefault(f => f.Name.Equals(fieldReference, StringComparison.OrdinalIgnoreCase));
+            if (field != null)
+            {
+                return field;
+            }
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with name '{fieldReference}' was not found in the target table.");
         }
     }
 
