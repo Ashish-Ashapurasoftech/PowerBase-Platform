@@ -102,15 +102,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         parameters.Add("offset", (page - 1) * pageSize);
         parameters.Add("pageSize", pageSize);
 
-        var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var fieldLookup = BuildFieldLookup(fields);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var orderBy = sortFields?.Count > 0
             ? string.Join(", ", sortFields
                 .Where(s => !fieldLookup.TryGetValue(s.FieldId, out var sf2) || !PhysicalNaming.IsComputedTypeCode(sf2.TypeCode))
                 .Select(s =>
                 {
-                    var colName = fieldLookup.TryGetValue(s.FieldId, out var sf) && sf.IsSystem
-                        ? sf.PhysicalColumnName!
+                    var colName = fieldLookup.TryGetValue(s.FieldId, out var sf)
+                        ? ResolveColumnName(sf, s.FieldId)
                         : PhysicalNaming.ColumnName((int)s.FieldId);
                     return $"{colName} {(s.Desc ? "DESC" : "ASC")}";
                 })
@@ -140,7 +140,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
     {
         var parameters = new DynamicParameters();
-        var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var fieldLookup = BuildFieldLookup(fields);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -1089,15 +1089,58 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return (value, null);
     }
 
+    private static Dictionary<long, AppField> BuildFieldLookup(IEnumerable<AppField> fields)
+    {
+        var lookup = new Dictionary<long, AppField>();
+        foreach (var f in fields)
+        {
+            lookup[f.Id] = f;
+        }
+        foreach (var f in fields)
+        {
+            if (f.Fid.HasValue) lookup[(long)f.Fid.Value] = f;
+        }
+        return lookup;
+    }
+
+    private static string ResolveColumnName(AppField f, long fallbackFieldId)
+    {
+        if (!string.IsNullOrWhiteSpace(f.PhysicalColumnName))
+            return f.PhysicalColumnName;
+
+        if (f.IsSystem || (f.Fid.HasValue && f.Fid.Value is >= 1 and <= 5) || fallbackFieldId is >= 1 and <= 5)
+        {
+            var fid = f.Fid ?? fallbackFieldId;
+            return fid switch
+            {
+                1 => "CreatedOn",
+                2 => "ModifiedOn",
+                3 => "Id",
+                4 => "CreatedBy",
+                5 => "ModifiedBy",
+                _ => f.Fid.HasValue ? PhysicalNaming.ColumnName(f.Fid.Value) : PhysicalNaming.ColumnName((int)fallbackFieldId)
+            };
+        }
+
+        if (f.Fid.HasValue)
+            return PhysicalNaming.ColumnName(f.Fid.Value);
+
+        return PhysicalNaming.ColumnName((int)fallbackFieldId);
+    }
+
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
         IReadOnlyDictionary<long, AppField>? fieldLookup = null)
     {
+        // Skip empty filter values for operators that require a value
+        if (cond.Operator is not ("isEmpty" or "isNotEmpty") && string.IsNullOrEmpty(cond.Value))
+            return null;
+
         // Skip formula/computed fields — they have no physical column; filtered in-memory instead.
         if (fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var checkField)
             && PhysicalNaming.IsComputedTypeCode(checkField.TypeCode))
             return null;
 
-        // Use the physical column name for system fields (Id, CreatedOn, etc.) rather than f_{fid}
+        // Use physical column name or resolved Fid/Id column name
         AppField? resolvedField = null;
         string col;
         if (cond.FieldId == -1)
@@ -1107,11 +1150,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         else if (fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var f))
         {
             resolvedField = f;
-            col = f.IsSystem ? f.PhysicalColumnName! : PhysicalNaming.ColumnName((int)cond.FieldId);
+            col = ResolveColumnName(f, cond.FieldId);
         }
         else
         {
-            col = PhysicalNaming.ColumnName((int)cond.FieldId);
+            col = cond.FieldId switch
+            {
+                1 => "CreatedOn",
+                2 => "ModifiedOn",
+                3 => "Id",
+                4 => "CreatedBy",
+                5 => "ModifiedBy",
+                _ => PhysicalNaming.ColumnName((int)cond.FieldId)
+            };
         }
 
         // Range field: SubField "start" targets f_{fid}, "end" targets f_{fid}_e
@@ -1136,19 +1187,93 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             colExpr = col;
         }
         
+        var isNumericCol = col.Equals("Id", StringComparison.OrdinalIgnoreCase) ||
+                           col.Equals("CreatedBy", StringComparison.OrdinalIgnoreCase) ||
+                           col.Equals("ModifiedBy", StringComparison.OrdinalIgnoreCase) ||
+                           (resolvedField != null && (
+                               resolvedField.TypeCode.Equals("Number", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Numeric", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Currency", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Percent", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Rating", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Duration", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("RecordId", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Integer", StringComparison.OrdinalIgnoreCase) ||
+                               (resolvedField.IsSystem && resolvedField.PhysicalColumnName is "Id" or "CreatedBy" or "ModifiedBy")
+                           ));
+
+        Func<string?, object?> formatVal = rawVal =>
+        {
+            if (rawVal == null) return null;
+            if (isNumericCol)
+            {
+                if (long.TryParse(rawVal, out var l)) return l;
+                if (decimal.TryParse(rawVal, out var d)) return d;
+            }
+            return rawVal;
+        };
+
+        var isStringCol = resolvedField != null && (
+            resolvedField.TypeCode.Equals("Text", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("MultiLineText", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("Email", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("Phone", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("SingleSelect", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("MultiSelect", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("Address", StringComparison.OrdinalIgnoreCase)
+        );
+
+        var stringColExpr = isStringCol ? colExpr : $"CAST({colExpr} AS NVARCHAR(MAX))";
+
         switch (cond.Operator)
         {
-            case "eq":             p.Add(pname, cond.Value);        return $"{colExpr} = @{pname}";
-            case "ne":             p.Add(pname, cond.Value);        return $"{colExpr} <> @{pname}";
-            case "gt":              p.Add(pname, cond.Value);        return $"{colExpr} > @{pname}";
-            case "gte":            p.Add(pname, cond.Value);        return $"{colExpr} >= @{pname}";
-            case "lt":              p.Add(pname, cond.Value);        return $"{colExpr} < @{pname}";
-            case "lte":            p.Add(pname, cond.Value);        return $"{colExpr} <= @{pname}";
+            case "eq":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} = @{pname}";
+            }
+            case "ne":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} <> @{pname}";
+            }
+            case "gt":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} > @{pname}";
+            }
+            case "gte":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} >= @{pname}";
+            }
+            case "lt":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} < @{pname}";
+            }
+            case "lte":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} <= @{pname}";
+            }
             case "date_eq":        p.Add(pname, cond.Value);        return $"CAST({colExpr} AS DATE) = @{pname}";
-            case "contains":       p.Add(pname, $"%{cond.Value}%"); return $"{colExpr} LIKE @{pname}";
-            case "notContains":    p.Add(pname, $"%{cond.Value}%"); return $"{colExpr} NOT LIKE @{pname}";
-            case "startsWith":     p.Add(pname, $"{cond.Value}%");  return $"{colExpr} LIKE @{pname}";
-            case "notStartsWith":  p.Add(pname, $"{cond.Value}%");  return $"{colExpr} NOT LIKE @{pname}";
+            case "contains":       p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) LIKE @{pname}";
+            case "notContains":    p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
+            case "startsWith":     p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) LIKE @{pname}";
+            case "notStartsWith":  p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
             case "isEmpty":    i--; return $"({colExpr} IS NULL OR {colExpr} = '')";
             case "isNotEmpty": i--; return $"({colExpr} IS NOT NULL AND {colExpr} <> '')";
             case "in":
@@ -1157,14 +1282,24 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 var values = ParseValueList(cond.Value);
                 if (values.Count == 0) { i--; return null; }
                 var names = new List<string>(values.Count);
+                var hasNonNumeric = false;
+                var formattedValues = new List<object?>(values.Count);
                 foreach (var v in values)
                 {
+                    var fv = formatVal(v);
+                    if (fv is string) hasNonNumeric = true;
+                    formattedValues.Add(fv);
+                }
+
+                for (var idx = 0; idx < formattedValues.Count; idx++)
+                {
                     var pn = $"fv{i++}";
-                    p.Add(pn, v);
+                    p.Add(pn, formattedValues[idx]);
                     names.Add($"@{pn}");
                 }
                 var op = cond.Operator == "in" ? "IN" : "NOT IN";
-                return $"{colExpr} {op} ({string.Join(",", names)})";
+                var targetExpr = (isNumericCol && hasNonNumeric) ? stringColExpr : colExpr;
+                return $"{targetExpr} {op} ({string.Join(",", names)})";
             }
             default: i--; return null;
         }
@@ -1181,8 +1316,17 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (string.IsNullOrWhiteSpace(raw)) return [];
         try
         {
-            var arr = JsonSerializer.Deserialize<List<string>>(raw);
-            if (arr != null) return arr.Where(v => !string.IsNullOrEmpty(v)).ToList();
+            using var doc = JsonDocument.Parse(raw);
+            if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                var list = new List<string>();
+                foreach (var el in doc.RootElement.EnumerateArray())
+                {
+                    var str = el.ValueKind == JsonValueKind.String ? el.GetString() : el.GetRawText();
+                    if (!string.IsNullOrWhiteSpace(str)) list.Add(str.Trim('"'));
+                }
+                return list;
+            }
         }
         catch (JsonException) { /* not JSON — fall through to comma split */ }
         return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();

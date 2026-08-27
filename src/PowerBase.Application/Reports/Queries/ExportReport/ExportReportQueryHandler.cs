@@ -140,35 +140,7 @@ public class ExportReportQueryHandler
                 };
         }
 
-        if (filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
-        {
-            var odata = RunReport.OData.ODataFilterBuilder.Build(filterTree, allFields);
-            if (!string.IsNullOrWhiteSpace(odata))
-            {
-                var aiMatches = await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
-                if (aiMatches.Count == 0)
-                {
-                    return BuildExport([], [], "export", format);
-                }
 
-                var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
-                if (matchedIds.Count == 0)
-                {
-                    return BuildExport([], [], "export", format);
-                }
-
-                var aiSearchGroup = new FilterGroup
-                {
-                    Logic = "or",
-                    Nodes = matchedIds.Select(id => new FilterNode 
-                    {
-                        Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = id.ToString() }
-                    }).ToList()
-                };
-                
-                filterTree = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = aiSearchGroup }] };
-            }
-        }
 
         // Formula fields have no physical column — strip them from the SQL filter/sort and
         // apply them in-memory after projection (same approach as RunReportQueryHandler).
