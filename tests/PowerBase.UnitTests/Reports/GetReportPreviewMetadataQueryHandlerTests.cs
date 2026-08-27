@@ -1,5 +1,6 @@
 using System.Text.Json;
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
@@ -37,7 +38,8 @@ public class GetReportPreviewMetadataQueryHandlerTests
 
         var runHandler = new RunReportQueryHandler(
             _reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer,
-            _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+            _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext,
+            Substitute.For<ILogger<RunReportQueryHandler>>());
 
         var handler = new GetReportPreviewMetadataQueryHandler(_reportRepo, _tableRepo, _fieldRepo, runHandler);
 
@@ -97,7 +99,8 @@ public class GetReportPreviewMetadataQueryHandlerTests
 
         var runHandler = new RunReportQueryHandler(
             _reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer,
-            _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext);
+            _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext,
+            Substitute.For<ILogger<RunReportQueryHandler>>());
 
         var handler = new GetReportPreviewMetadataQueryHandler(_reportRepo, _tableRepo, _fieldRepo, runHandler);
 
