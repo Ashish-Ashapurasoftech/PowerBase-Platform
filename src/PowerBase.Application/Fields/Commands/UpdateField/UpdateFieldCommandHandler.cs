@@ -1,8 +1,10 @@
+using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.FieldSettings;
 
 namespace PowerBase.Application.Fields.Commands.UpdateField;
 
@@ -14,9 +16,14 @@ public class UpdateFieldCommandHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IAuditRepository _auditRepo;
     private readonly ISchemaEngineService _schemaEngine;
+    private readonly IFieldTypeRepository _fieldTypeRepo;
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
     private readonly IMessagePublisher _messagePublisher;
     private readonly IQueryContext _queryContext;
+
+    /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
+    /// "Display As" Behavior Setting is allowed to switch between (see NumericDisplayAs).</summary>
+    private static readonly string[] NumericFamilyTypeCodes = ["Number", "Currency", "Percent", "Rating"];
 
     public UpdateFieldCommandHandler(
         IAppTableRepository tableRepo,
@@ -26,6 +33,7 @@ public class UpdateFieldCommandHandler
         IAuditRepository auditRepo,
         ISchemaEngineService schemaEngine,
         FieldSettingsValidatorRegistry settingsRegistry,
+        IFieldTypeRepository fieldTypeRepo,
         IMessagePublisher messagePublisher,
         IQueryContext queryContext)
     {
@@ -35,6 +43,7 @@ public class UpdateFieldCommandHandler
         _recordRepo = recordRepo;
         _auditRepo = auditRepo;
         _schemaEngine = schemaEngine;
+        _fieldTypeRepo = fieldTypeRepo;
         _settingsRegistry = settingsRegistry;
         _messagePublisher = messagePublisher;
         _queryContext = queryContext;
@@ -74,6 +83,41 @@ public class UpdateFieldCommandHandler
             command.IsRequired, command.IsUnique, command.DefaultValue);
         if (capErrors.Count > 0)
             throw new ValidationException(capErrors.AsReadOnly());
+
+        // ── Numeric family "Display As" type switch ─────────────────────────────
+        // Number/Currency/Percent/Rating share one settings shape (NumericSettings) with a
+        // DisplayAs member. When it names a different TypeCode within that same family, the
+        // field's actual type changes to match — e.g. a Percent field whose Display As is
+        // switched to Currency becomes a Currency field. TypeCode is a pure FieldTypeId swap
+        // (see AppFieldRepository.UpdateFieldTypeAsync) — never a physical-column change,
+        // except for the one narrow, always-lossless INT-to-DECIMAL widening below (only ever
+        // needed for a legacy Rating field created before Rating's catalog type became
+        // DECIMAL(18,4) — see database/migrations/tenant/045_alter_fieldtype_rating_decimal.sql).
+        if (NumericFamilyTypeCodes.Contains(existing.TypeCode) && !string.IsNullOrWhiteSpace(command.Settings))
+        {
+            NumericSettings? numericSettings = null;
+            try
+            {
+                numericSettings = JsonSerializer.Deserialize<NumericSettings>(
+                    command.Settings, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch (JsonException) { /* already rejected above by _settingsRegistry.Validate */ }
+
+            if (numericSettings?.DisplayAs is string displayAs
+                && NumericFamilyTypeCodes.Contains(displayAs)
+                && !string.Equals(displayAs, existing.TypeCode, StringComparison.OrdinalIgnoreCase))
+            {
+                var targetFieldType = await _fieldTypeRepo.GetByCodeAsync(displayAs, ct)
+                    ?? throw new NotFoundException("FieldType", displayAs);
+
+                // Bring a legacy INT (pre-migration Rating) column up to DECIMAL(18,4) first —
+                // a no-op for every field created after that migration, since Number/Currency/
+                // Percent/Rating all already share that physical type.
+                await _schemaEngine.WidenIntColumnToDecimalIfNeededAsync(table, existing, ct);
+
+                await _fieldRepo.UpdateFieldTypeAsync(existing.Id, targetFieldType.Id, command.Settings, command.IsRequired, ct);
+            }
+        }
 
         // Invariant: a required field with no default value cannot be made required while some role has
         // it set to None — those users would never be able to create a record.

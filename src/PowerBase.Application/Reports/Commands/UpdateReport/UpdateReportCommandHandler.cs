@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Reports;
+using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -10,31 +11,34 @@ namespace PowerBase.Application.Reports.Commands.UpdateReport;
 public class UpdateReportCommandHandler
 {
     private readonly IReportRepository _reportRepo;
+    private readonly IAppFieldRepository _fieldRepo;
     private readonly IAppAccessService _appAccessService;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IAppRoleRepository _appRoleRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly ReportConfigValidatorRegistry _configValidatorRegistry;
 
-    private static readonly HashSet<string> AllowedOperators =
-        ["eq", "ne", "contains", "notContains", "startsWith", "notStartsWith", "gt", "gte", "lt", "lte", "in", "notIn", "isEmpty", "isNotEmpty", "date_eq"];
-    private static readonly HashSet<string> AllowedFunctions = ["Count", "Sum", "Avg", "Min", "Max"];
     private static readonly HashSet<string> AllowedVisibilities = ["Personal", "Shared", "MyRole", "SpecificRoles", "RoleScoped"];
 
     public UpdateReportCommandHandler(
         IReportRepository reportRepo,
+        IAppFieldRepository fieldRepo,
         IAppAccessService appAccessService,
         IAppUserRepository appUserRepo,
         IAppRoleRepository appRoleRepo,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        ReportConfigValidatorRegistry configValidatorRegistry)
     {
         _reportRepo = reportRepo;
+        _fieldRepo = fieldRepo;
         _appAccessService = appAccessService;
         _appUserRepo = appUserRepo;
         _appRoleRepo = appRoleRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
+        _configValidatorRegistry = configValidatorRegistry;
     }
 
     public async Task HandleAsync(UpdateReportCommand command, CancellationToken ct = default)
@@ -47,28 +51,43 @@ public class UpdateReportCommandHandler
             throw new ValidationException(new Dictionary<string, string[]>
                 { ["Visibility"] = [$"Visibility must be one of: {string.Join(", ", AllowedVisibilities)}"] });
 
-        // Validate filter tree operators
-        if (command.FilterTree is not null)
-            ValidateFilterGroup(command.FilterTree, AllowedOperators);
+        // Fetched up front (throws NotFoundException if missing) — ReportType is immutable after
+        // creation (not part of UpdateReportCommand), but the per-type validator still needs to
+        // know it, and AppTableId is needed to load the table's real fields for field-ID/type
+        // validation. Fixes a pre-existing gap: Update never validated column/filter field IDs
+        // against the table the way Create did.
+        var existingReport = await _reportRepo.GetByPublicIdAsync(command.ReportPublicId, ct);
+        var tableFields = await _fieldRepo.ListByTableAsync(existingReport.AppTableId, ct);
 
-        // Validate aggregations
-        foreach (var agg in command.Aggregations)
-        {
-            if (!AllowedFunctions.Contains(agg.Function))
-                throw new ValidationException(new Dictionary<string, string[]>
-                    { ["aggregations"] = [$"Invalid function '{agg.Function}'. Allowed: {string.Join(", ", AllowedFunctions)}"] });
-        }
+        var configErrors = _configValidatorRegistry.Validate(existingReport.ReportType, ReportConfigValidationInput.FromUpdate(command), tableFields);
+        if (configErrors.Count > 0)
+            throw new ValidationException(new Dictionary<string, string[]>(configErrors));
 
         var definition = new ReportDefinition
         {
             Columns = command.Columns,
+            ColumnsMode = string.IsNullOrWhiteSpace(command.ColumnsMode) ? "Custom" : command.ColumnsMode,
             SortFields = command.SortFields ?? [],
+            TableSortGroup = (command.TableSortGroup ?? []).Select(l => new SortGroupLevel
+            {
+                FieldId = l.FieldId,
+                Desc = l.Desc,
+                IsGroup = l.IsGroup,
+                GroupByMode = string.IsNullOrWhiteSpace(l.GroupByMode) ? "EqualValues" : l.GroupByMode,
+            }).ToList(),
             FilterTree = command.FilterTree,
             GroupByFieldId = command.GroupByFieldId,
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
             HideTotals = command.HideTotals,
             GroupDefaultCollapsed = command.GroupDefaultCollapsed,
             GroupByDescending = command.GroupByDescending,
+            Options = command.Options is null ? null : new ReportOptions
+            {
+                ColumnHeaderText = string.IsNullOrWhiteSpace(command.Options.ColumnHeaderText) ? "Default" : command.Options.ColumnHeaderText,
+                ShowEditIcon = command.Options.ShowEditIcon,
+                ShowViewIcon = command.Options.ShowViewIcon,
+                DisableBulkDelete = command.Options.DisableBulkDelete,
+            },
             Aggregations = command.Aggregations.Select(a => new SummaryAggregation
             {
                 FieldId = a.FieldId,
@@ -104,6 +123,10 @@ public class UpdateReportCommandHandler
                 GaugeFieldId = command.Chart.GaugeFieldId,
                 GaugeLowMaxPercent = command.Chart.GaugeLowMaxPercent,
                 GaugeMediumMaxPercent = command.Chart.GaugeMediumMaxPercent,
+                DataLabelDisplayAs = string.IsNullOrWhiteSpace(command.Chart.DataLabelDisplayAs) ? "Value" : command.Chart.DataLabelDisplayAs,
+                GaugeGoalType = string.IsNullOrWhiteSpace(command.Chart.GaugeGoalType) ? "Fixed" : command.Chart.GaugeGoalType,
+                GaugeGoalFieldId = command.Chart.GaugeGoalFieldId,
+                GaugeGoalFunction = command.Chart.GaugeGoalFunction,
             },
         };
 
@@ -116,7 +139,6 @@ public class UpdateReportCommandHandler
         if (affected == 0)
             throw new NotFoundException("Report", command.ReportPublicId);
 
-        var reportId = await _reportRepo.GetByPublicIdAsync(command.ReportPublicId, ct);
         var appId = await _reportRepo.GetAppIdByPublicIdAsync(command.ReportPublicId, ct);
 
         var reportRolesToSave = new List<long>();
@@ -142,28 +164,15 @@ public class UpdateReportCommandHandler
 
         if (command.Visibility == Domain.Enums.Visibility.MyRole.ToString() || command.Visibility == Domain.Enums.Visibility.SpecificRoles.ToString())
         {
-            await _reportRepo.SetReportRolesAsync(reportId.Id, reportRolesToSave, ct);
+            await _reportRepo.SetReportRolesAsync(existingReport.Id, reportRolesToSave, ct);
         }
         else
         {
             // Clear mappings if visibility changed to something else
-            await _reportRepo.SetReportRolesAsync(reportId.Id, [], ct);
+            await _reportRepo.SetReportRolesAsync(existingReport.Id, [], ct);
         }
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Report name changed to {command.Name}", appId: appId, ct: ct);
-    }
-
-    private static void ValidateFilterGroup(FilterGroup group, HashSet<string> allowedOperators)
-    {
-        foreach (var node in group.Nodes)
-        {
-            if (node.Condition is { } cond && !allowedOperators.Contains(cond.Operator))
-                throw new ValidationException(new Dictionary<string, string[]>
-                    { ["filterTree"] = [$"Invalid operator '{cond.Operator}'. Allowed: {string.Join(", ", allowedOperators)}"] });
-
-            if (node.Group is { } sub)
-                ValidateFilterGroup(sub, allowedOperators);
-        }
     }
 }

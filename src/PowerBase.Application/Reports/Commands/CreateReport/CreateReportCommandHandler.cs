@@ -2,6 +2,7 @@ using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
+using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -17,12 +18,8 @@ public class CreateReportCommandHandler
     private readonly IAppRoleRepository _appRoleRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly ReportConfigValidatorRegistry _configValidatorRegistry;
     private readonly CreateReportCommandValidator _validator;
-
-    private static readonly HashSet<string> AllowedReportTypes = ["Table", "Summary", "GridEdit", "Chart"];
-    private static readonly HashSet<string> AllowedOperators =
-        ["eq", "ne", "contains", "notContains", "startsWith", "notStartsWith", "gt", "gte", "lt", "lte", "in", "notIn", "isEmpty", "isNotEmpty", "date_eq"];
-    private static readonly HashSet<string> AllowedFunctions = ["Count", "Sum", "Avg", "Min", "Max"];
 
     public CreateReportCommandHandler(
         IAppTableRepository tableRepo,
@@ -31,7 +28,8 @@ public class CreateReportCommandHandler
         IAppUserRepository appUserRepo,
         IAppRoleRepository appRoleRepo,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        ReportConfigValidatorRegistry configValidatorRegistry)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -40,6 +38,7 @@ public class CreateReportCommandHandler
         _appRoleRepo = appRoleRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
+        _configValidatorRegistry = configValidatorRegistry;
         _validator = new CreateReportCommandValidator();
     }
 
@@ -52,55 +51,51 @@ public class CreateReportCommandHandler
                     .GroupBy(e => e.PropertyName)
                     .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
 
-        if (!AllowedReportTypes.Contains(command.ReportType))
+        // Fail fast on a nonsense ReportType before any repo call (matches the original
+        // AllowedReportTypes check's fail-fast position — the field-aware per-type checks below
+        // still need the table/fields loaded, but "is this even a real report type" doesn't).
+        if (!_configValidatorRegistry.IsSupported(command.ReportType))
             throw new ValidationException(new Dictionary<string, string[]>
-                { ["ReportType"] = [$"Report type must be one of: {string.Join(", ", AllowedReportTypes)}"] });
+                { ["ReportType"] = [$"Report type must be one of: {string.Join(", ", _configValidatorRegistry.SupportedReportTypes.OrderBy(t => t))}"] });
 
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
-        IReadOnlyList<AppField> tableFields = [];
-        var hasFilterTree = command.FilterTree?.Nodes.Count > 0;
-        if (command.Columns.Count > 0 || hasFilterTree || command.GroupByFieldId.HasValue || command.Aggregations.Count > 0)
-        {
-            tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
-        }
+        // Report columns/filters/aggregations carry per-table field IDs (AppField.Fid), matching
+        // what the client sends and how RunReport/ExportReport resolve them — not the global
+        // AppField.Id. Always loaded (not just when some field looks populated) because the
+        // per-type validator below independently re-derives which fields are/aren't applicable —
+        // it needs the full field list regardless of what the client happened to send.
+        var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 
-        // Report columns/filters carry per-table field IDs (AppField.Fid), matching what the client
-        // sends and how RunReport/ExportReport resolve them — not the global AppField.Id.
-        var validFieldIds = tableFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
-
-        if (command.Columns.Count > 0)
-        {
-            var invalid = command.Columns.Where(id => !validFieldIds.Contains(id)).ToList();
-            if (invalid.Count > 0)
-                throw new ValidationException(
-                    new Dictionary<string, string[]> { ["columns"] = [$"Unknown field IDs: {string.Join(", ", invalid)}"] });
-        }
-
-        // Validate filter tree operators + field IDs (recursive walk — an unknown fieldId would
-        // otherwise reach RecordRepository as a reference to a nonexistent f_{fid} column and
-        // fail as a raw SQL error at run time instead of a clean 400 here).
-        if (command.FilterTree is not null)
-            ValidateFilterGroup(command.FilterTree, AllowedOperators, validFieldIds);
-
-        // Validate aggregations
-        foreach (var agg in command.Aggregations)
-        {
-            if (!AllowedFunctions.Contains(agg.Function))
-                throw new ValidationException(new Dictionary<string, string[]>
-                    { ["aggregations"] = [$"Invalid function '{agg.Function}'. Allowed: {string.Join(", ", AllowedFunctions)}"] });
-        }
+        var configErrors = _configValidatorRegistry.Validate(command.ReportType, ReportConfigValidationInput.FromCreate(command), tableFields);
+        if (configErrors.Count > 0)
+            throw new ValidationException(new Dictionary<string, string[]>(configErrors));
 
         var definition = new ReportDefinition
         {
             Columns = command.Columns,
+            ColumnsMode = string.IsNullOrWhiteSpace(command.ColumnsMode) ? "Custom" : command.ColumnsMode,
             SortFields = command.SortFields ?? [],
+            TableSortGroup = (command.TableSortGroup ?? []).Select(l => new SortGroupLevel
+            {
+                FieldId = l.FieldId,
+                Desc = l.Desc,
+                IsGroup = l.IsGroup,
+                GroupByMode = string.IsNullOrWhiteSpace(l.GroupByMode) ? "EqualValues" : l.GroupByMode,
+            }).ToList(),
             FilterTree = command.FilterTree,
             GroupByFieldId = command.GroupByFieldId,
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
             HideTotals = command.HideTotals,
             GroupDefaultCollapsed = command.GroupDefaultCollapsed,
             GroupByDescending = command.GroupByDescending,
+            Options = command.Options is null ? null : new ReportOptions
+            {
+                ColumnHeaderText = string.IsNullOrWhiteSpace(command.Options.ColumnHeaderText) ? "Default" : command.Options.ColumnHeaderText,
+                ShowEditIcon = command.Options.ShowEditIcon,
+                ShowViewIcon = command.Options.ShowViewIcon,
+                DisableBulkDelete = command.Options.DisableBulkDelete,
+            },
             Aggregations = command.Aggregations.Select(a => new SummaryAggregation
             {
                 FieldId = a.FieldId,
@@ -136,6 +131,10 @@ public class CreateReportCommandHandler
                 GaugeFieldId = command.Chart.GaugeFieldId,
                 GaugeLowMaxPercent = command.Chart.GaugeLowMaxPercent,
                 GaugeMediumMaxPercent = command.Chart.GaugeMediumMaxPercent,
+                DataLabelDisplayAs = string.IsNullOrWhiteSpace(command.Chart.DataLabelDisplayAs) ? "Value" : command.Chart.DataLabelDisplayAs,
+                GaugeGoalType = string.IsNullOrWhiteSpace(command.Chart.GaugeGoalType) ? "Fixed" : command.Chart.GaugeGoalType,
+                GaugeGoalFieldId = command.Chart.GaugeGoalFieldId,
+                GaugeGoalFunction = command.Chart.GaugeGoalFunction,
             },
         };
 
@@ -198,22 +197,4 @@ public class CreateReportCommandHandler
         };
     }
 
-    private static void ValidateFilterGroup(FilterGroup group, HashSet<string> allowedOperators, HashSet<long> validFieldIds)
-    {
-        foreach (var node in group.Nodes)
-        {
-            if (node.Condition is { } cond)
-            {
-                if (!allowedOperators.Contains(cond.Operator))
-                    throw new ValidationException(new Dictionary<string, string[]>
-                        { ["filterTree"] = [$"Invalid operator '{cond.Operator}'. Allowed: {string.Join(", ", allowedOperators)}"] });
-                if (!validFieldIds.Contains(cond.FieldId))
-                    throw new ValidationException(new Dictionary<string, string[]>
-                        { ["filterTree"] = [$"Unknown field ID in filter: {cond.FieldId}"] });
-            }
-
-            if (node.Group is { } sub)
-                ValidateFilterGroup(sub, allowedOperators, validFieldIds);
-        }
-    }
 }

@@ -20,6 +20,7 @@ using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Commands.CreateReport;
+using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Formula;
@@ -89,7 +90,8 @@ public class ImportAppFromPblCommandHandlerTests
         var formulaTranslator = new FormulaTranslator(new FormulaEngine());
 
         var createReportHandler = new CreateReportCommandHandler(
-            _tableRepo, _fieldRepo, _reportRepo, _appUserRepo, _appRoleRepo, _queryContext, _auditRepo);
+            _tableRepo, _fieldRepo, _reportRepo, _appUserRepo, _appRoleRepo, _queryContext, _auditRepo,
+            new ReportConfigValidatorRegistry([new TableReportConfigValidator(), new SummaryReportConfigValidator(), new ChartReportConfigValidator()]));
 
         var relationshipFieldFactory = new PowerBase.Application.Relationships.RelationshipFieldFactory(
             _fieldRepo, _fieldTypeRepo, _schemaEngine, _formRepo, _queryContext, _fieldNameResolver);

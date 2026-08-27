@@ -147,7 +147,7 @@ public class AzureSearchService : IAzureSearchService
         foreach (var kvp in values)
         {
             var fieldName = $"f_{kvp.Key}";
-            document[fieldName] = ConvertValueToString(kvp.Value);
+            document[fieldName] = FormatIndexValue(kvp.Value);
         }
 
         var batch = IndexDocumentsBatch.MergeOrUpload(new[] { document });
@@ -162,6 +162,18 @@ public class AzureSearchService : IAzureSearchService
             throw new InvalidOperationException($"Failed to index record {publicId} in Azure AI Search (Index: {indexName}).", ex);
         }
     }
+
+    /// <summary>
+    /// Every f_{fid} field in the index is Edm.String (see EnsureTableSchemaAsync), but the raw
+    /// values handed in here come straight from Dapper — a Number/Currency/Percent field arrives
+    /// as a .NET decimal (e.g. 10.0000m for a DECIMAL(18,4) column), not the plain "10" a filter
+    /// value like a chart drilldown's clicked category actually sends. Left as `decimal.ToString()`,
+    /// the indexed value ("10.0000") would never exact-match a filter's "10" — this normalizes
+    /// numeric .NET values to the same plain-number string form before they're indexed, so an
+    /// ODataFilterBuilder "eq" (or any exact-match) filter built from a raw JS number actually
+    /// matches what's stored. Non-numeric values pass through unchanged.
+    /// </summary>
+
 
     public async Task BulkIndexRecordsAsync(IEnumerable<SearchIndexDocument> documents, CancellationToken ct = default)
     {
@@ -192,7 +204,7 @@ public class AzureSearchService : IAzureSearchService
                 foreach (var kvp in doc.Values)
                 {
                     var fieldName = $"f_{kvp.Key}";
-                    searchDoc[fieldName] = ConvertValueToString(kvp.Value);
+                    searchDoc[fieldName] = FormatIndexValue(kvp.Value);
                 }
                 return searchDoc;
             });
@@ -351,13 +363,20 @@ public class AzureSearchService : IAzureSearchService
         await EnsureIndexAndFieldsExistAsync(indexName, fields.Select(f => $"f_{f.Fid}"), ct);
     }
 
-    private static object? ConvertValueToString(object? val)
+    private static object FormatIndexValue(object? val)
     {
-        if (val is null) return null;
         if (val is System.Text.Json.JsonElement je)
         {
-            return je.ValueKind == System.Text.Json.JsonValueKind.String ? je.GetString() : je.GetRawText();
+            return (je.ValueKind == System.Text.Json.JsonValueKind.String ? je.GetString() : je.GetRawText()) ?? string.Empty;
         }
-        return val.ToString();
+
+        return val switch
+        {
+            null => string.Empty,
+            decimal d => d.ToString("0.####################", System.Globalization.CultureInfo.InvariantCulture),
+            double d => d.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+            float f => f.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+            _ => val.ToString() ?? string.Empty,
+        };
     }
 }

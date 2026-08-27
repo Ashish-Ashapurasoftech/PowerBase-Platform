@@ -1,4 +1,3 @@
-using PowerBase.Application.Formulas;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
@@ -45,15 +44,6 @@ public class RecordResult
             }
             else if (row.TryGetValue(col, out var val))
             {
-                // Url formula fields: override the stored URL with the computed template result.
-                if (field.TypeCode == "Url" && field.Fid.HasValue
-                    && FormulaTypeMap.UrlFormulaTemplate(field.Settings) != null
-                    && computedValues != null && computedValues.TryGetValue(field.Fid.Value, out var urlComputed))
-                {
-                    fieldData[(field.Fid ?? field.Id).ToString()] = urlComputed;
-                    continue;
-                }
-
                 // Resolve internal user IDs to display names for User/MultiUser and system user fields
                 var fid = (field.Fid ?? field.Id).ToString();
                 if (userNames != null && field.TypeCode is "User" or "MultiUser")

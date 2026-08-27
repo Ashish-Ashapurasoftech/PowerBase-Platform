@@ -145,6 +145,8 @@ internal sealed class Evaluator
                 if (lt == FormulaType.Duration && rt == FormulaType.Date) return FormulaValue.Date(AddToDate(r.AsDate(), l.AsDuration()));
                 if (lt == FormulaType.DateTime && rt == FormulaType.Duration) return FormulaValue.DateTime(l.AsDateTime() + r.AsDuration());
                 if (lt == FormulaType.Duration && rt == FormulaType.DateTime) return FormulaValue.DateTime(r.AsDateTime() + l.AsDuration());
+                if (lt == FormulaType.Time && rt == FormulaType.Duration) return FormulaValue.Time(l.AsTime().Add(r.AsDuration()));
+                if (lt == FormulaType.Duration && rt == FormulaType.Time) return FormulaValue.Time(r.AsTime().Add(l.AsDuration()));
                 break;
             case BinaryOp.Subtract:
                 if (lt == FormulaType.Duration && rt == FormulaType.Duration) return FormulaValue.Duration(l.AsDuration() - r.AsDuration());
@@ -152,6 +154,8 @@ internal sealed class Evaluator
                 if (lt == FormulaType.DateTime && rt == FormulaType.Duration) return FormulaValue.DateTime(l.AsDateTime() - r.AsDuration());
                 if (lt == FormulaType.Date && rt == FormulaType.Date) return FormulaValue.Duration(l.AsDate().ToDateTime(TimeOnly.MinValue) - r.AsDate().ToDateTime(TimeOnly.MinValue));
                 if (lt == FormulaType.DateTime && rt == FormulaType.DateTime) return FormulaValue.Duration(l.AsDateTime() - r.AsDateTime());
+                if (lt == FormulaType.Time && rt == FormulaType.Duration) return FormulaValue.Time(l.AsTime().Add(-r.AsDuration()));
+                if (lt == FormulaType.Time && rt == FormulaType.Time) return FormulaValue.Duration(l.AsTime().ToTimeSpan() - r.AsTime().ToTimeSpan());
                 break;
             case BinaryOp.Multiply:
                 if (lt == FormulaType.Duration && rt == FormulaType.Number) return FormulaValue.Duration(l.AsDuration() * (double)r.AsNumber());
