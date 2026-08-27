@@ -8,23 +8,17 @@ public class RemoveAppUserCommandHandler
 {
     private readonly IAppRepository _appRepo;
     private readonly IAppUserRepository _appUserRepo;
-    private readonly IUserRepository _userRepo;
-    private readonly IAppAccessService _appAccessService;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
 
     public RemoveAppUserCommandHandler(
         IAppRepository appRepo,
         IAppUserRepository appUserRepo,
-        IUserRepository userRepo,
-        IAppAccessService appAccessService,
         IQueryContext queryContext,
         IAuditRepository auditRepo)
     {
         _appRepo = appRepo;
         _appUserRepo = appUserRepo;
-        _userRepo = userRepo;
-        _appAccessService = appAccessService;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
     }
@@ -34,23 +28,24 @@ public class RemoveAppUserCommandHandler
         var app = await _appRepo.GetByPublicIdAsync(command.AppPublicId, ct);
         var appId = app.Id;
 
-        var user = await _userRepo.GetByPublicIdAsync(command.UserPublicId, ct)
-            ?? throw new NotFoundException("User", command.UserPublicId);
+        // Resolve by AppUser assignment PublicId.
+        // Multi-role: each AppUser row = one specific role assignment (GUID-ROW-A, GUID-ROW-B...).
+        // Callers MUST pass AppUser.PublicId (not User.PublicId) to remove a specific role.
+        // This prevents accidentally deleting ALL role assignments for a multi-role user.
+        var appUser = await _appUserRepo.GetByPublicIdAsync(command.UserPublicId, ct);
+        if (appUser == null || appUser.AppId != appId)
+            throw new NotFoundException("AppUser", command.UserPublicId);
 
-        if (app.OwnerId == user.Id)
-        {
+        if (app.OwnerId == appUser.UserId)
             throw new UnauthorizedActionException("Cannot remove the app owner.");
-        }
 
-        if (user.Id == _queryContext.UserId)
+        if (appUser.UserId == _queryContext.UserId)
             throw new UnauthorizedActionException("Cannot remove yourself from the app.");
 
-        var appUser = await _appUserRepo.GetByAppAndUserAsync(appId, user.Id, ct)
-            ?? throw new NotFoundException("AppUser", command.UserPublicId);
+        await _appUserRepo.RemoveAssignmentAsync(appId, appUser.PublicId, ct);
 
-        await _appUserRepo.RemoveAsync(appId, user.Id, ct);
-        
         await _auditRepo.LogActivityAsync(
-            AuditActions.Deleted, AuditEntityTypes.AppUser, user.Id.ToString(), $"User removed from app: {user.Email}", appId: appId, ct: ct);
+            AuditActions.Deleted, AuditEntityTypes.AppUser, appUser.UserId.ToString(),
+            $"User role assignment removed from app: {appUser.UserEmail}", appId: appId, ct: ct);
     }
 }

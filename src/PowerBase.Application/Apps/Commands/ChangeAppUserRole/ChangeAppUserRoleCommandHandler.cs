@@ -1,5 +1,6 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Apps.Commands.ChangeAppUserRole;
@@ -37,19 +38,53 @@ public class ChangeAppUserRoleCommandHandler
         var app = await _appRepo.GetByPublicIdAsync(command.AppPublicId, ct);
         var appId = app.Id;
 
-        var user = await _userRepo.GetByPublicIdAsync(command.UserPublicId, ct)
-            ?? throw new NotFoundException("User", command.UserPublicId);
+        var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId, ct)
+            ?? throw new NotFoundException("AppRole", command.RolePublicId);
 
-        if (app.OwnerId == user.Id)
+        AppUser? appUser = await _appUserRepo.GetByPublicIdAsync(command.UserPublicId, ct);
+        long targetUserId;
+        string targetUserEmail;
+        bool isAssignment = false;
+
+        if (appUser != null && appUser.AppId == appId)
+        {
+            targetUserId = appUser.UserId;
+            targetUserEmail = appUser.UserEmail ?? string.Empty;
+            isAssignment = true;
+        }
+        else
+        {
+            var user = await _userRepo.GetByPublicIdAsync(command.UserPublicId, ct)
+                ?? throw new NotFoundException("User", command.UserPublicId);
+
+            targetUserId = user.Id;
+            targetUserEmail = user.Email;
+
+            appUser = await _appUserRepo.GetByAppAndUserAsync(appId, user.Id, ct)
+                ?? throw new NotFoundException("AppUser", command.UserPublicId);
+        }
+
+        if (string.IsNullOrWhiteSpace(targetUserEmail))
+        {
+            var u = await _userRepo.GetByIdAsync(targetUserId, ct);
+            if (u != null) targetUserEmail = u.Email;
+        }
+
+        if (app.OwnerId == targetUserId)
         {
             throw new UnauthorizedActionException("Cannot change the role of the app owner.");
         }
 
-        var appUser = await _appUserRepo.GetByAppAndUserAsync(appId, user.Id, ct)
-            ?? throw new NotFoundException("AppUser", command.UserPublicId);
+        if (appUser.AppRoleId == role.Id)
+        {
+            throw new BadRequestException($"User '{targetUserEmail}' is already assigned the '{role.Name}' role.");
+        }
 
-        var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId, ct)
-            ?? throw new NotFoundException("AppRole", command.RolePublicId);
+        var existingWithTargetRole = await _appUserRepo.GetByAppUserAndRoleAsync(appId, targetUserId, role.Id, ct);
+        if (existingWithTargetRole != null && existingWithTargetRole.Id != appUser.Id)
+        {
+            throw new DuplicateException("AppUser", $"User '{targetUserEmail}' already has the '{role.Name}' role in this application.");
+        }
 
         if (!_queryContext.IsSuperAdmin)
         {
@@ -110,9 +145,16 @@ public class ChangeAppUserRoleCommandHandler
             }
         }
 
-        await _appUserRepo.UpdateRoleAsync(appId, user.Id, role.Id, ct);
+        if (isAssignment)
+        {
+            await _appUserRepo.UpdateRoleByAssignmentAsync(appId, appUser.PublicId, role.Id, ct);
+        }
+        else
+        {
+            await _appUserRepo.UpdateRoleAsync(appId, targetUserId, role.Id, ct);
+        }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.Updated, AuditEntityTypes.AppUser, user.Id.ToString(), $"User role changed in app: {user.Email} to {role.Name}", appId: appId, ct: ct);
+            AuditActions.Updated, AuditEntityTypes.AppUser, targetUserId.ToString(), $"User role changed in app: {targetUserEmail} to {role.Name}", appId: appId, ct: ct);
     }
 }
