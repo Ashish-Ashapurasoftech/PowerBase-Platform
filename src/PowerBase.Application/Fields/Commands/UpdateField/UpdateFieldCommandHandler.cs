@@ -20,6 +20,7 @@ public class UpdateFieldCommandHandler
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
     private readonly IMessagePublisher _messagePublisher;
     private readonly IQueryContext _queryContext;
+    private readonly IAzureSearchService _searchService;
 
     /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
     /// "Display As" Behavior Setting is allowed to switch between (see NumericDisplayAs).</summary>
@@ -35,7 +36,8 @@ public class UpdateFieldCommandHandler
         FieldSettingsValidatorRegistry settingsRegistry,
         IFieldTypeRepository fieldTypeRepo,
         IMessagePublisher messagePublisher,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAzureSearchService searchService)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -47,6 +49,7 @@ public class UpdateFieldCommandHandler
         _settingsRegistry = settingsRegistry;
         _messagePublisher = messagePublisher;
         _queryContext = queryContext;
+        _searchService = searchService;
     }
 
     public async Task HandleAsync(UpdateFieldCommand command, CancellationToken ct = default)
@@ -76,8 +79,6 @@ public class UpdateFieldCommandHandler
         if (settingsErrors.Count > 0)
             throw new ValidationException(settingsErrors.AsReadOnly());
 
-        // Reject Required/Unique/DefaultValue combinations the field's type doesn't support (only when
-        // something is being turned ON — leaving a flag off/blank is always allowed).
         var capErrors = FieldGeneralSettingsCapability.Validate(
             existing.TypeCode, command.Settings ?? existing.Settings, command.Label,
             command.IsRequired, command.IsUnique, command.DefaultValue);
@@ -170,6 +171,9 @@ public class UpdateFieldCommandHandler
             }
         }
 
+        // Save old IsSearchable state before UpdateAsync modifies metadata
+        bool wasSearchable = existing.IsSearchable;
+
         var affected = await _fieldRepo.UpdateAsync(
             existing.PublicId, table.Id,
             command.Label, command.Description,
@@ -198,11 +202,20 @@ public class UpdateFieldCommandHandler
         }
 
         // Search Index Sync: when IsSearchable changes, trigger a backfill or nullify
-        if (command.IsSearchable != existing.IsSearchable && existing.Fid.HasValue)
+        if (command.IsSearchable != wasSearchable && existing.Fid.HasValue)
         {
+            var isNullify = !command.IsSearchable;
+            var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, existing.Fid.Value, isNullify, page: 1, pageSize: 500, ct);
+
+            if (docs.Count > 0)
+            {
+                await _searchService.BulkIndexRecordsAsync(docs, ct);
+            }
+
+            var action = command.IsSearchable ? PowerBase.Application.Common.Models.IndexAction.BackfillField : PowerBase.Application.Common.Models.IndexAction.NullifyField;
             var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
             {
-                Action = command.IsSearchable ? PowerBase.Application.Common.Models.IndexAction.BackfillField : PowerBase.Application.Common.Models.IndexAction.NullifyField,
+                Action = action,
                 TenantId = _queryContext.TenantId,
                 AppId = table.AppId,
                 TableId = table.Id,

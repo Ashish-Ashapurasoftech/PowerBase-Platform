@@ -72,7 +72,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             
             if (rowDict.TryGetValue(colName, out var val))
             {
-                if (f.IsEncrypted && val is string cipherHex)
+                if (!f.IsSearchable)
+                {
+                    result[(long)f.Fid.Value] = null;
+                }
+                else if (f.IsEncrypted && val is string cipherHex)
                 {
                     result[(long)f.Fid.Value] = await enc.DecryptValueAsync(cipherHex, ct);
                 }
@@ -554,7 +558,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // Push searchable/filterable fields to Azure AI Search (using ORIGINAL plaintext values)
         var searchableValues = fields
             .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
-            .ToDictionary(f => f.Fid!.Value.ToString(), f => values[(long)f.Fid.Value]);
+            .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? values[(long)f.Fid.Value] : null);
 
         var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
         {
@@ -658,7 +662,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // Update Azure AI Search with searchable/filterable fields (using ORIGINAL plaintext values)
         var searchableValues = fields
             .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
-            .ToDictionary(f => f.Fid!.Value.ToString(), f => values[(long)f.Fid.Value]);
+            .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? values[(long)f.Fid.Value] : null);
 
         var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
         {
@@ -744,7 +748,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
             var searchableValues = fields
                 .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
-                .ToDictionary(f => f.Fid!.Value.ToString(), f => values[(long)f.Fid.Value]);
+                .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? values[(long)f.Fid.Value] : null);
 
             foreach (var pubId in publicIds)
             {
@@ -1508,7 +1512,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                                 var colName = PhysicalNaming.ColumnName(sf.Fid.Value);
                                 if (recDict.TryGetValue(colName, out var v))
                                 {
-                                    if (sf.IsEncrypted)
+                                    if (!sf.IsSearchable)
+                                    {
+                                        searchPayload[sf.Fid.Value.ToString()] = null;
+                                    }
+                                    else if (sf.IsEncrypted)
                                     {
                                         if (plainSearchableValues.TryGetValue(sf.Fid.Value, out var pv))
                                         {
@@ -1588,7 +1596,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             
             var documentValues = new Dictionary<long, object?>();
 
-            if (isNullify)
+            if (isNullify || !field.IsSearchable)
             {
                 documentValues[field.Fid.Value] = null;
             }
