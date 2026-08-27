@@ -28,8 +28,8 @@ public class ListAppsQueryHandler
         var page = query.Page < 1 ? 1 : query.Page;
         var pageSize = query.PageSize is < 1 or > 100 ? 20 : query.PageSize;
 
-        var items = await _appRepo.ListByUserAsync(_queryContext.UserId, page, pageSize, query.SortField, query.SortDescending, ct);
-        var total = await _appRepo.CountByUserAsync(_queryContext.UserId, ct);
+        var items = await _appRepo.ListByUserAsync(_queryContext.UserId, page, pageSize, query.Search, query.SortField, query.SortDescending, ct);
+        var total = await _appRepo.CountByUserAsync(_queryContext.UserId, query.Search, ct);
 
         return new ListAppsResult { Items = items, Total = total, Page = page, PageSize = pageSize };
     }

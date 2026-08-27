@@ -70,12 +70,11 @@ public class SearchIndexerWorker : BackgroundService
 
     private async Task ProcessMessageBatchAsync(IReadOnlyList<ServiceBusReceivedMessage> messages, CancellationToken stoppingToken)
     {
-        using var scope = _serviceProvider.CreateScope();
-        var searchService = scope.ServiceProvider.GetRequiredService<IAzureSearchService>();
-        var recordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
+        using var batchScope = _serviceProvider.CreateScope();
+        var searchService = batchScope.ServiceProvider.GetRequiredService<IAzureSearchService>();
 
         var documentsToIndex = new List<SearchIndexDocument>();
-        var recordsToDelete = new List<(long TableId, Guid RecordPublicId)>();
+        var recordsToDelete = new List<(long TenantId, long TableId, Guid RecordPublicId)>();
         var messagesToComplete = new List<ServiceBusReceivedMessage>();
 
         foreach (var sbMessage in messages)
@@ -117,6 +116,11 @@ public class SearchIndexerWorker : BackgroundService
                     }
                     else
                     {
+                        using var scope = _serviceProvider.CreateScope();
+                        var queryContext = scope.ServiceProvider.GetRequiredService<IQueryContext>();
+                        queryContext.SetTenantId(message.TenantId);
+                        var recordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
+                        
                         recordData = await recordRepo.GetSearchableFieldsAsync(message.RecordPublicId, stoppingToken);
                     }
 
@@ -133,15 +137,55 @@ public class SearchIndexerWorker : BackgroundService
                 }
                 else if (message.Action == IndexAction.Delete)
                 {
-                    recordsToDelete.Add((message.TableId, message.RecordPublicId));
+                    recordsToDelete.Add((message.TenantId, message.TableId, message.RecordPublicId));
+                }
+                else if (message.Action == IndexAction.BackfillField || message.Action == IndexAction.NullifyField)
+                {
+                    using var scope = _serviceProvider.CreateScope();
+                    var queryContext = scope.ServiceProvider.GetRequiredService<IQueryContext>();
+                    queryContext.SetTenantId(message.TenantId);
+                    var recordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
+
+                    var isNullify = message.Action == IndexAction.NullifyField;
+                    if (message.FieldId.HasValue)
+                    {
+                        var docs = await recordRepo.GetFieldBackfillBatchAsync(message.TenantId, message.AppId, message.TableId, message.FieldId.Value, isNullify, message.Page, 500, stoppingToken);
+                        if (docs.Count > 0)
+                        {
+                            documentsToIndex.AddRange(docs);
+                            
+                            // Send continuation message
+                            if (docs.Count == 500)
+                            {
+                                var nextMsg = new SearchIndexMessage
+                                {
+                                    Action = message.Action,
+                                    TenantId = message.TenantId,
+                                    AppId = message.AppId,
+                                    TableId = message.TableId,
+                                    FieldId = message.FieldId,
+                                    Page = message.Page + 1
+                                };
+                                var publisher = scope.ServiceProvider.GetRequiredService<IMessagePublisher>();
+                                await publisher.PublishAsync(nextMsg, stoppingToken);
+                            }
+                        }
+                    }
                 }
 
                 messagesToComplete.Add(sbMessage);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing individual search index message in batch.");
-                // We do not add it to messagesToComplete so it will be retried (abandoned)
+                if (sbMessage.DeliveryCount > 5)
+                {
+                    _logger.LogCritical(ex, "Search index message {MessageId} failed processing {Count} times. Moving to DLQ.", sbMessage.MessageId, sbMessage.DeliveryCount);
+                    await _receiver.DeadLetterMessageAsync(sbMessage, "ProcessingError", ex.Message, stoppingToken);
+                }
+                else
+                {
+                    _logger.LogError(ex, "Error processing individual search index message in batch. DeliveryCount: {Count}", sbMessage.DeliveryCount);
+                }
             }
         }
 
@@ -155,11 +199,10 @@ public class SearchIndexerWorker : BackgroundService
 
             if (recordsToDelete.Any())
             {
-                // We group deletes by TableId since BulkDelete is table-scoped in theory, though we only have one index.
-                var deleteGroups = recordsToDelete.GroupBy(x => x.TableId);
+                var deleteGroups = recordsToDelete.GroupBy(x => new { x.TenantId, x.TableId });
                 foreach (var group in deleteGroups)
                 {
-                    await searchService.BulkDeleteRecordsAsync(group.Key, group.Select(x => x.RecordPublicId).ToList(), stoppingToken);
+                    await searchService.BulkDeleteRecordsAsync(group.Key.TenantId, group.Key.TableId, group.Select(x => x.RecordPublicId).ToList(), stoppingToken);
                 }
             }
 
@@ -172,7 +215,16 @@ public class SearchIndexerWorker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error pushing bulk batch to Azure AI Search. Entire batch will be retried.");
-            // Do not complete any messages if the batch failed to upload, they will be retried
+            
+            // GAP #7: Monitor and explicitly dead-letter messages that fail continuously during bulk operations
+            foreach (var sbMessage in messages)
+            {
+                if (sbMessage.DeliveryCount > 5 && !messagesToComplete.Contains(sbMessage))
+                {
+                    _logger.LogCritical(ex, "Search index message {MessageId} failed bulk upload {Count} times. Moving to DLQ.", sbMessage.MessageId, sbMessage.DeliveryCount);
+                    await _receiver.DeadLetterMessageAsync(sbMessage, "BulkUploadFailed", ex.Message, stoppingToken);
+                }
+            }
         }
     }
 }

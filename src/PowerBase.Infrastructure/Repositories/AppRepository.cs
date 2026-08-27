@@ -53,6 +53,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
           AND au.IsDeleted = 0
           AND a.IsDeleted  = 0
           AND a.Status = @Status
+          {1}
         ORDER BY {0}
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
         """;
@@ -74,13 +75,14 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         return sortDescending ? $"{column} DESC" : $"{column} ASC";
     }
 
-    private const string CountByUserSql = """
+    private const string CountByUserSqlTemplate = """
         SELECT COUNT(1)
         FROM meta.App a
         JOIN meta.AppUser au ON au.AppId = a.Id
         WHERE au.UserId   = @userId
           AND au.IsDeleted = 0
           AND a.IsDeleted  = 0
+          {0}
         """;
 
     private const string ListAllByUserSql = $"""
@@ -295,20 +297,23 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         return insertedRow;
     }
 
-    public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, string? sortField = null, bool sortDescending = false, CancellationToken ct = default)
+    public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, string? search = null, string? sortField = null, bool sortDescending = false, CancellationToken ct = default)
     {
-        var sql = string.Format(ListByUserSqlTemplate, ResolveAppSortColumn(sortField, sortDescending));
+        var searchFilter = string.IsNullOrWhiteSpace(search) ? "" : "AND a.Name LIKE @search";
+        var sql = string.Format(ListByUserSqlTemplate, ResolveAppSortColumn(sortField, sortDescending), searchFilter);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var results = await connection.QueryAsync<AppListItemDto>(
-            new CommandDefinition(sql, new { userId, Status = "Active", offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
+            new CommandDefinition(sql, new { userId, Status = "Active", offset = (page - 1) * pageSize, pageSize, search = $"%{search}%" }, cancellationToken: ct));
         return results.AsList();
     }
 
-    public async Task<int> CountByUserAsync(long userId, CancellationToken ct = default)
+    public async Task<int> CountByUserAsync(long userId, string? search = null, CancellationToken ct = default)
     {
+        var searchFilter = string.IsNullOrWhiteSpace(search) ? "" : "AND a.Name LIKE @search";
+        var sql = string.Format(CountByUserSqlTemplate, searchFilter);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(
-            new CommandDefinition(CountByUserSql, new { userId }, cancellationToken: ct));
+            new CommandDefinition(sql, new { userId, search = $"%{search}%" }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<App>> ListAllByUserAsync(long userId, CancellationToken ct = default)

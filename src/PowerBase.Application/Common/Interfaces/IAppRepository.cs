@@ -12,8 +12,8 @@ public interface IAppRepository
     Task<Guid> GetPublicIdByIdAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<App>> ListAsync(int page, int pageSize, CancellationToken ct = default);
     Task<int> CountAsync(CancellationToken ct = default);
-    Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, string? sortField = null, bool sortDescending = false, CancellationToken ct = default);
-    Task<int> CountByUserAsync(long userId, CancellationToken ct = default);
+    Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, string? search = null, string? sortField = null, bool sortDescending = false, CancellationToken ct = default);
+    Task<int> CountByUserAsync(long userId, string? search = null, CancellationToken ct = default);
     Task<IReadOnlyList<App>> ListAllByUserAsync(long userId, CancellationToken ct = default);
     Task<bool> NameExistsAsync(string name, CancellationToken ct = default);
     Task<(Guid PublicId, long Id)> CreateAsync(App app, IDbTransaction? transaction = null, CancellationToken ct = default);
