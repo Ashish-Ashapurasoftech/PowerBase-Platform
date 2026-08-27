@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Records;
@@ -23,6 +24,9 @@ public class PagedReportRunResult
     public int Page { get; init; }
     public int PageSize { get; init; }
     public bool IsDataMasked { get; init; }
+    /// <summary>Gauge charts only, and only when Chart.GaugeGoalType is "DataValue" — see
+    /// ReportRunResponse.ResolvedGaugeGoalValue for the full contract.</summary>
+    public decimal? ResolvedGaugeGoalValue { get; init; }
 }
 
 public class RunReportQueryHandler
@@ -38,6 +42,12 @@ public class RunReportQueryHandler
     private readonly IAzureSearchService _searchService;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IQueryContext _queryContext;
+    private readonly ILogger<RunReportQueryHandler> _logger;
+
+    // GAP #2: Max records returned from Azure AI Search to prevent SQL parameter explosion.
+    // Azure AI Search returns GUIDs; injecting >2000 into SQL causes severe performance and
+    // parameter-limit issues. Capped here; UI shows a warning when results are truncated.
+    private const int AiSearchMaxResults = 2000;
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
@@ -50,7 +60,8 @@ public class RunReportQueryHandler
         Relationships.IRelationalProjector relationalProjector,
         IAzureSearchService searchService,
         IAppUserRepository appUserRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        ILogger<RunReportQueryHandler> logger)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -63,6 +74,7 @@ public class RunReportQueryHandler
         _searchService = searchService;
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
+        _logger = logger;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -106,6 +118,15 @@ public class RunReportQueryHandler
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
 
+        // Enforce the report's Dynamic Filter configuration server-side: when DynamicFilterType
+        // is "Custom", only the fields the report designer picked may be used as a runtime
+        // dynamic filter — previously this was a UI-only hint (any filterable field worked
+        // regardless of the saved config). Silently drop disallowed params (same "silent
+        // intersection" behavior the Columns restriction already uses below) rather than 400ing,
+        // since a stale client could otherwise break entirely on a report whose Custom field set
+        // was narrowed after the client loaded it.
+        var effectiveRuntimeFilters = FilterRuntimeFiltersByDynamicFilterConfig(definition, query.RuntimeFilters);
+
         // Resolve filter tree — support legacy flat Filters list
         var filterTree = definition.FilterTree;
         if (filterTree == null && definition.Filters.Count > 0)
@@ -120,21 +141,32 @@ public class RunReportQueryHandler
             };
         }
 
+        // Table reports: TableSortGroup (Phase 1's unified Sort+Group list) supersedes the legacy
+        // single-field GroupByFieldId + SortFields when non-empty — derive both the sort order
+        // and the effective group field from it. Reports saved before this existed have an empty
+        // TableSortGroup and fall through to the legacy fields below unchanged.
+        var tableSortGroupLevel = report.ReportType == "Table"
+            ? definition.TableSortGroup.FirstOrDefault(l => l.IsGroup)
+            : null;
+
         // Resolve sort fields — support legacy SortFieldId/SortDesc. A runtime sort (ad-hoc,
         // not persisted — the reference design's header-click sort) replaces the saved sort
         // outright rather than combining with it, matching single-column sort UX.
         IReadOnlyList<SortSpec> sortFields = query.RuntimeSortFieldId.HasValue
             ? [new SortSpec { FieldId = query.RuntimeSortFieldId.Value, Desc = query.RuntimeSortDesc }]
-            : (definition.SortFields.Count > 0
-                ? definition.SortFields
-                : (definition.SortFieldId.HasValue
-                    ? [new SortSpec { FieldId = definition.SortFieldId.Value, Desc = definition.SortDesc }]
-                    : []));
+            : (report.ReportType == "Table" && definition.TableSortGroup.Count > 0
+                ? definition.TableSortGroup.Select(l => new SortSpec { FieldId = l.FieldId, Desc = l.Desc }).ToList()
+                : (definition.SortFields.Count > 0
+                    ? definition.SortFields
+                    : (definition.SortFieldId.HasValue
+                        ? [new SortSpec { FieldId = definition.SortFieldId.Value, Desc = definition.SortDesc }]
+                        : [])));
 
-        // Runtime grouping (ad-hoc, not persisted — the per-column kebab menu) overrides the
-        // saved GroupByFieldId; ClearGrouping explicitly drops it even if the report has one saved.
-        var effectiveGroupByFieldId = query.ClearGrouping ? null : (query.RuntimeGroupByFieldId ?? definition.GroupByFieldId);
-        var effectiveGroupByDesc = query.RuntimeGroupByFieldId.HasValue ? query.RuntimeGroupByDesc : definition.GroupByDescending;
+        // Runtime grouping (ad-hoc, not persisted — the per-column kebab menu) overrides both the
+        // TableSortGroup-derived group level and the legacy saved GroupByFieldId; ClearGrouping
+        // explicitly drops it even if the report has one saved.
+        var effectiveGroupByFieldId = query.ClearGrouping ? null : (query.RuntimeGroupByFieldId ?? tableSortGroupLevel?.FieldId ?? definition.GroupByFieldId);
+        var effectiveGroupByDesc = query.RuntimeGroupByFieldId.HasValue ? query.RuntimeGroupByDesc : (tableSortGroupLevel?.Desc ?? definition.GroupByDescending);
 
         // For grouped Table reports: prepend group field as primary sort key so records
         // of the same group are contiguous — the frontend groups the flat result visually.
@@ -162,10 +194,10 @@ public class RunReportQueryHandler
         }
 
         if (report.ReportType is "Summary" or "Chart")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, query.RuntimeFilters, filterTree, isMaskedPreview, ct);
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
-            query.RuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, ct);
+            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, ct);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -197,8 +229,39 @@ public class RunReportQueryHandler
                 .Select(id => fieldMap[id])
                 .ToList();
         }
+        else if (definition.ColumnsMode == "Default")
+        {
+            // "Default columns" means the table's Default Report Settings columns, not literally
+            // every reportable field — resolve them from that table's actual default Report row.
+            // Falls back to all-reportable when the default report has no columns configured
+            // either (including when THIS report IS the default report and its own Columns is
+            // empty — GetDefaultByTableAsync then just returns itself, terminating in one hop).
+            var defaultReport = await _reportRepo.GetDefaultByTableAsync(table.PublicId, ct);
+            var defaultColumnIds = defaultReport is null
+                ? []
+                : (JsonSerializer.Deserialize<ReportDefinition>(defaultReport.Definition) ?? new ReportDefinition()).Columns;
+
+            if (defaultColumnIds.Count > 0)
+            {
+                var fieldMap = allFields
+                    .Where(f => f.Fid.HasValue)
+                    .GroupBy(f => (long)f.Fid!.Value)
+                    .ToDictionary(g => g.Key, g => g.First());
+                selectedFields = defaultColumnIds
+                    .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
+                    .Select(id => fieldMap[id])
+                    .ToList();
+            }
+            else
+            {
+                selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
+            }
+        }
         else
         {
+            // Columns empty but ColumnsMode isn't (or predates) "Default" — e.g. a report saved
+            // before Phase 1 whose empty Columns always meant "show all reportable fields" under
+            // the old implicit convention. Preserved unchanged for backward compatibility.
             selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
 
@@ -230,40 +293,48 @@ public class RunReportQueryHandler
         if (!string.IsNullOrWhiteSpace(quickSearch))
         {
             var hasSearchable = allFields.Any(f => f.IsSearchable);
-            
-            if (hasSearchable)
-            {
-                // Route query to Azure AI Search to bypass SQL encryption limitations
-                var aiMatches = await _searchService.SearchRecordsAsync(table.Id, quickSearch, ct);
-                
-                if (aiMatches.Count == 0)
-                {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
-                }
-                
-                var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
-                if (matchedIds.Count == 0)
-                {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
-                }
 
-                var aiSearchGroup = new FilterGroup
-                {
-                    Logic = "or",
-                    Nodes = matchedIds.Select(id => new FilterNode 
-                    {
-                        Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = id.ToString() }
-                    }).ToList()
-                };
-                
-                filterTree = filterTree == null
-                    ? aiSearchGroup
-                    : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = aiSearchGroup }] };
-            }
-            else
+            // GAP #3: Only use AI Search when the feature flag is enabled.
+            // GAP #4: Fallback to SQL LIKE if Azure AI Search is unavailable.
+            var useAiSearch = _searchService.IsGridSearchEnabled && hasSearchable;
+            var aiSearchSucceeded = false;
+
+            if (useAiSearch)
             {
-                // Standard SQL fallback for unencrypted tables
-                var textFields = allFields.Where(f => f.IsSearchable && (f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")).ToList();
+                try
+                {
+                    // Route query to Azure AI Search to bypass SQL encryption limitations.
+                    // GAP #2: Cap results at AiSearchMaxResults to prevent SQL parameter explosion.
+                    var aiMatches = await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, ct);
+                    var cappedMatches = aiMatches.Count > AiSearchMaxResults
+                        ? aiMatches.Take(AiSearchMaxResults).ToList()
+                        : aiMatches;
+
+                    if (cappedMatches.Count > 0)
+                    {
+                        // GAP #2: Use direct chunked IN query instead of OR FilterGroup nodes.
+                        filterTree = await BuildAiIdFilterAsync(table, cappedMatches, filterTree, ct);
+                    }
+                    else
+                    {
+                        return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
+                    }
+
+                    aiSearchSucceeded = true;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // GAP #4: AI Search is unavailable — fall through to SQL LIKE path.
+                    _logger.LogWarning(ex, "[QuickSearch] Azure AI Search unavailable for table {TableId}. Falling back to SQL LIKE.", table.Id);
+                }
+            }
+
+            if (!aiSearchSucceeded)
+            {
+                // Standard SQL LIKE fallback (also used when IsGridSearchEnabled=false).
+                var textFields = allFields
+                    .Where(f => f.IsSearchable && f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")
+                    .ToList();
                 if (quickSearchFieldIds is { Count: > 0 })
                 {
                     var allowed = quickSearchFieldIds.ToHashSet();
@@ -276,9 +347,7 @@ public class RunReportQueryHandler
                     {
                         Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = searchOperator, Value = quickSearch }
                     }).ToList();
-
                     var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
-
                     filterTree = filterTree == null
                         ? qsGroup
                         : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = qsGroup }] };
@@ -286,33 +355,35 @@ public class RunReportQueryHandler
             }
         }
 
-        if (filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
+        // Apply OData-based filter via Azure AI Search when the table has any AI-indexed fields.
+        // GAP #3: Only when IsGridSearchEnabled. GAP #4: Falls back to raw SQL tree on AI failure.
+        if (_searchService.IsGridSearchEnabled && filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
         {
             var odata = OData.ODataFilterBuilder.Build(filterTree, allFields);
             if (!string.IsNullOrWhiteSpace(odata))
             {
-                var aiMatches = await _searchService.SearchRecordsByFilterAsync(table.Id, odata, ct);
-                if (aiMatches.Count == 0)
+                try
                 {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
-                }
+                    // GAP #2: Cap results + use direct ID query instead of OR node explosion.
+                    var aiMatches = await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
+                    var cappedMatches = aiMatches.Count > AiSearchMaxResults
+                        ? aiMatches.Take(AiSearchMaxResults).ToList()
+                        : aiMatches;
 
-                var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
-                if (matchedIds.Count == 0)
-                {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
-                }
-
-                var aiSearchGroup = new FilterGroup
-                {
-                    Logic = "or",
-                    Nodes = matchedIds.Select(id => new FilterNode 
+                    if (cappedMatches.Count == 0)
                     {
-                        Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = id.ToString() }
-                    }).ToList()
-                };
-                
-                filterTree = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = aiSearchGroup }] };
+                        return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
+                    }
+
+                    // Rebuild filterTree: AND with matched IDs only (replaces original tree —
+                    // AI Search has already applied the filter, so we just restrict to its results).
+                    filterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // GAP #4: AI Search unavailable — use the original SQL filter tree as-is.
+                    _logger.LogWarning(ex, "[ODataFilter] Azure AI Search unavailable for table {TableId}. Executing filter via SQL.", table.Id);
+                }
             }
         }
 
@@ -399,6 +470,67 @@ public class RunReportQueryHandler
         };
     }
 
+    private async Task<FilterGroup?> BuildAiIdFilterAsync(AppTable table, IReadOnlyList<Guid> aiMatches, FilterGroup? existingFilter, CancellationToken ct)
+    {
+        var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
+        if (matchedIds.Count == 0)
+        {
+            // No matching records found in the database. Return a filter guaranteed to match nothing.
+            var emptyGroup = new FilterGroup
+            {
+                Logic = "and",
+                Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = "-1" } }]
+            };
+            return existingFilter == null
+                ? emptyGroup
+                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = existingFilter }, new FilterNode { Group = emptyGroup }] };
+        }
+
+        // GAP #2: Use "in" operator with a serialized array instead of generating N "eq" OR conditions.
+        // RecordRepository's BuildConditionClause parses this array into a single SQL IN (@p1, @p2, ...) clause.
+        // Since we capped matches at 2000, we stay safely under SQL Server's 2100 parameter limit.
+        var idJson = JsonSerializer.Serialize(matchedIds);
+        var aiSearchGroup = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "in", Value = idJson } }]
+        };
+
+        return existingFilter == null
+            ? aiSearchGroup
+            : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = existingFilter }, new FilterNode { Group = aiSearchGroup }] };
+    }
+
+    /// <summary>When definition.DynamicFilterType is "Custom", restricts runtimeFilters to only
+    /// the FieldId (+ matching SubField, for Address sub-fields) combinations present in the
+    /// report's CustomDynamicFilterItems/CustomDynamicFilterFields — everything else is silently
+    /// dropped. For "Default"/"None" (or unrecognized) DynamicFilterType, runtimeFilters passes
+    /// through unchanged (this call site does not restrict "Default" mode's own field set, which
+    /// today is defined by the table's Default Report Settings, resolved elsewhere).</summary>
+    internal static IReadOnlyList<(long FieldId, string Value, string? SubField)>? FilterRuntimeFiltersByDynamicFilterConfig(
+        ReportDefinition definition,
+        IReadOnlyList<(long FieldId, string Value, string? SubField)>? runtimeFilters)
+    {
+        if (runtimeFilters is not { Count: > 0 })
+            return runtimeFilters;
+
+        if (!string.Equals(definition.DynamicFilterType, "Custom", StringComparison.OrdinalIgnoreCase))
+            return runtimeFilters;
+
+        var allowedFieldIds = definition.CustomDynamicFilterFields.ToHashSet();
+        // (FieldId, SubField) pairs — SubField normalized to "" so a plain-field allowance
+        // (SubField == null) also matches a runtime filter whose SubField happens to be "".
+        var allowedFieldSubFieldPairs = definition.CustomDynamicFilterItems
+            .Select(i => (i.FieldId, SubField: i.SubField ?? string.Empty))
+            .ToHashSet();
+
+        return runtimeFilters
+            .Where(rf =>
+                allowedFieldIds.Contains(rf.FieldId) ||
+                allowedFieldSubFieldPairs.Contains((rf.FieldId, rf.SubField ?? string.Empty)))
+            .ToList();
+    }
+
     internal static FilterGroup? MergeRuntimeFilters(
         FilterGroup? filterTree,
         IReadOnlyList<AppField> allFields,
@@ -419,12 +551,20 @@ public class RunReportQueryHandler
         {
             var field = fieldDict.GetValueOrDefault(group.Key.FieldId);
 
-            // Use eq for SingleSelect/Boolean/User, contains for everything else
-            // For Address sub-fields (JSON path), use eq by default
+            // Use eq for SingleSelect/Boolean/User/numeric types, contains for everything else
+            // (free text). For Address sub-fields (JSON path), use eq by default.
+            // Numeric types (Number/Currency/Percent/Rating/Duration) must use eq, not contains —
+            // "contains" compiles to a SQL LIKE, and LIKE against a numeric column either fails
+            // outright or does an imprecise substring match (clicking "10" would also match "110",
+            // "210", "1.10", …). This runtime-filter path is exactly what chart drilldown clicks go
+            // through (an exact grouped category/series value, e.g. a Quantity value on a chart
+            // segment), so an inexact/broken match here was silently breaking drilldown for any
+            // numeric category field.
             var firstSubField = string.IsNullOrEmpty(group.Key.Item2) ? null : group.Key.Item2;
             var operatorName = field?.TypeCode is "Date" or "DateTime"
                 ? "date_eq"
-                : field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address" ? "eq" : "contains";
+                : field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address"
+                    or "Number" or "Currency" or "Percent" or "Rating" or "Duration" ? "eq" : "contains";
 
             var values = group.Select(rf => rf.Value).ToList();
 
@@ -530,10 +670,76 @@ public class RunReportQueryHandler
         }
         var summaryFilterTree = MergeRuntimeFilters(baseFilterTree, allFields, runtimeFilters);
 
+        // Gauge-only: when the goal is a live data value (not a fixed number), fold an extra
+        // aggregation into the same grouped query so it comes back alongside the gauge's own
+        // measure, then resolve one overall value from the per-group results below — summed
+        // straight across groups for Sum, or count-weighted for Avg (Σ(avg_i × count_i) /
+        // Σcount_i), since a plain average-of-per-group-averages would be wrong unless every
+        // group happened to have the same size.
+        SummaryAggregation? gaugeGoalAggregation = null;
+        if (definition.Chart?.ChartType == "Gauge" && definition.Chart.GaugeGoalType == "DataValue"
+            && definition.Chart.GaugeGoalFieldId is { } goalFieldId && visibleFieldIds.Contains(goalFieldId))
+        {
+            gaugeGoalAggregation = new SummaryAggregation { FieldId = goalFieldId, Function = definition.Chart.GaugeGoalFunction ?? "Sum" };
+        }
+        var aggregationsForQuery = gaugeGoalAggregation is null
+            ? visibleAggregations
+            : [.. visibleAggregations, gaugeGoalAggregation];
+
         var rows = await _recordRepo.SummarizeAsync(
-            table, groupByField, visibleAggregations, allFields, definition.GroupByMode,
+            table, groupByField, aggregationsForQuery, allFields, definition.GroupByMode,
             filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
             seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
+
+        // SummarizeAsync groups by the raw stored value — for a User field that's the numeric
+        // user ID, not a display name (unlike RunTableAsync's rows, which already go through
+        // ResolveUserNamesAsync). Resolve here too so Summary/Chart categories and series show
+        // "Jane Doe" instead of "4".
+        IReadOnlyDictionary<long, string>? groupUserNames = null;
+        if (groupByField.TypeCode is "User" or "MultiUser")
+        {
+            var ids = rows
+                .Select(r => r.TryGetValue("GroupValue", out var v) ? v : null)
+                .Where(v => v is not null && long.TryParse(v.ToString(), out _))
+                .Select(v => long.Parse(v!.ToString()!))
+                .ToHashSet();
+            if (ids.Count > 0)
+                groupUserNames = await _userRepo.GetNamesByIdsAsync(ids, ct);
+        }
+        IReadOnlyDictionary<long, string>? seriesUserNames = null;
+        if (seriesField?.TypeCode is "User" or "MultiUser")
+        {
+            var ids = rows
+                .Select(r => r.TryGetValue("SeriesValue", out var v) ? v : null)
+                .Where(v => v is not null && long.TryParse(v.ToString(), out _))
+                .Select(v => long.Parse(v!.ToString()!))
+                .ToHashSet();
+            if (ids.Count > 0)
+                seriesUserNames = await _userRepo.GetNamesByIdsAsync(ids, ct);
+        }
+
+        decimal? resolvedGaugeGoalValue = null;
+        if (gaugeGoalAggregation is not null && fieldMap.TryGetValue(gaugeGoalAggregation.FieldId, out var goalField))
+        {
+            var goalAlias = $"{gaugeGoalAggregation.Function}_{goalField.Name.Replace(" ", "_")}";
+            if (string.Equals(gaugeGoalAggregation.Function, "Avg", StringComparison.OrdinalIgnoreCase))
+            {
+                decimal weightedSum = 0;
+                long totalCount = 0;
+                foreach (var row in rows)
+                {
+                    var count = row.TryGetValue("Count", out var c) && c is not null ? Convert.ToInt64(c) : 0;
+                    var val = row.TryGetValue(goalAlias, out var v) && v is not null ? Convert.ToDecimal(v) : 0m;
+                    weightedSum += val * count;
+                    totalCount += count;
+                }
+                resolvedGaugeGoalValue = totalCount > 0 ? weightedSum / totalCount : 0m;
+            }
+            else
+            {
+                resolvedGaugeGoalValue = rows.Sum(row => row.TryGetValue(goalAlias, out var v) && v is not null ? Convert.ToDecimal(v) : 0m);
+            }
+        }
 
         // Build alias→fieldId map. Identify columns displayed as percent-of-total and compute their totals.
         var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -557,10 +763,12 @@ public class RunReportQueryHandler
         var items = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
-            fields[(groupByField.Fid ?? groupByField.Id).ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
+            fields[(groupByField.Fid ?? groupByField.Id).ToString()] = ResolveGroupOrSeriesValue(
+                row.TryGetValue("GroupValue", out var gv) ? gv : null, groupUserNames);
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
             if (seriesField is not null)
-                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = row.TryGetValue("SeriesValue", out var sv) ? sv : null;
+                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = ResolveGroupOrSeriesValue(
+                    row.TryGetValue("SeriesValue", out var sv) ? sv : null, seriesUserNames);
             foreach (var (alias, fieldId) in aggAliasToFieldId)
             {
                 if (!row.TryGetValue(alias, out var val)) continue;
@@ -604,7 +812,18 @@ public class RunReportQueryHandler
             Page = 1,
             PageSize = rows.Count > 0 ? rows.Count : pageSize,
             IsDataMasked = isMaskedPreview,
+            ResolvedGaugeGoalValue = resolvedGaugeGoalValue,
         };
+    }
+
+    /// <summary>Swaps a raw grouped/series value for its resolved display name when one was
+    /// looked up (User/MultiUser group-by or series fields in Summary/Chart reports) — returns
+    /// the value unchanged for every other field type, or if the id wasn't in the lookup
+    /// (e.g. a deleted user).</summary>
+    private static object? ResolveGroupOrSeriesValue(object? rawValue, IReadOnlyDictionary<long, string>? names)
+    {
+        if (names is null || rawValue is null) return rawValue;
+        return long.TryParse(rawValue.ToString(), out var id) && names.TryGetValue(id, out var name) ? name : rawValue;
     }
 
     internal static async Task<IReadOnlyDictionary<long, string>> ResolveUserNamesAsync(

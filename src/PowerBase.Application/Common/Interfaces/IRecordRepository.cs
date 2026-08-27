@@ -62,6 +62,11 @@ public interface IRecordRepository
 
     Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 
+    /// <summary>Returns true if the table has at least one non-deleted row — an EXISTS check, not a
+    /// COUNT, so it stays cheap on tables with millions of records. Used to gate whether a field's
+    /// encryption setting can still be changed (see FieldDetailResponse.HasRecords).</summary>
+    Task<bool> HasAnyRecordsAsync(AppTable table, CancellationToken ct = default);
+
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default);
 
@@ -133,4 +138,7 @@ public interface IRecordRepository
 
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
         AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default);
+
+    Task<int> SanitizeTableEncryptedDataAsync(AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
+    Task<IReadOnlyList<SearchIndexDocument>> GetFieldBackfillBatchAsync(long tenantId, long appId, long tableId, long fieldId, bool isNullify, int page, int pageSize, CancellationToken ct = default);
 }

@@ -129,20 +129,19 @@ public static class ODataFilterBuilder
     {
         if (string.IsNullOrEmpty(val)) return "''";
 
-        // Boolean, numbers, etc. in OData don't have quotes, but since we map most things to Edm.String in Azure Search (except IDs),
-        // we should default to string wrapping unless it's explicitly a numeric type mapped as such.
-        // In AzureSearchService.cs, f_X are mostly Edm.String, except maybe numbers? 
-        // Let's assume they are stored as strings for simplicity, or we can check type.
-        // Actually, EnsureTableSchemaAsync maps Number and Currency to Edm.Double, Checkbox to Edm.Boolean.
-        if (field.TypeCode is "Number" or "Currency")
-        {
-            return double.TryParse(val, out var d) ? d.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null";
-        }
-        if (field.TypeCode == "Checkbox")
-        {
-            return bool.TryParse(val, out var b) ? b.ToString().ToLowerInvariant() : "false";
-        }
-
+        // Every f_{fid} field in the Azure Search index is created via AzureSearchService's
+        // SearchableField (see EnsureTableSchemaAsync) — which is always Edm.String, regardless
+        // of the PowerBase field's own type. There is no Edm.Double/Edm.Boolean field in this
+        // index for Number/Currency/Checkbox fields to map onto, so every value must be quoted
+        // as a string here. Emitting a bare numeric/boolean literal (as this used to for
+        // Number/Currency/Checkbox) produces a genuine OData type mismatch against the
+        // string-typed index field ("Found operand types 'Edm.String' and 'Edm.Int32'") — not
+        // just a cosmetic formatting difference.
+        //
+        // Known limitation this leaves in place: gt/gte/lt/lte comparisons against a Number/
+        // Currency field still compare as strings (lexicographic, not numeric) since the index
+        // has no numeric field to compare against — fixing that would mean adding real typed
+        // fields to the Azure index schema, out of scope here.
         return $"'{val.Replace("'", "''")}'";
     }
 

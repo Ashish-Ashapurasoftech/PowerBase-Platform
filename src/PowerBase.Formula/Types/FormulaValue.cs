@@ -31,6 +31,7 @@ public readonly struct FormulaValue
     public static FormulaValue Bool(bool value) => new(FormulaType.Bool, false, value);
     public static FormulaValue Date(DateOnly value) => new(FormulaType.Date, false, value);
     public static FormulaValue DateTime(DateTime value) => new(FormulaType.DateTime, false, value);
+    public static FormulaValue Time(TimeOnly value) => new(FormulaType.Time, false, value);
     public static FormulaValue Duration(TimeSpan value) => new(FormulaType.Duration, false, value);
     public static FormulaValue User(UserRef? value)
         => value is null ? Null(FormulaType.User) : new(FormulaType.User, false, value);
@@ -57,6 +58,7 @@ public readonly struct FormulaValue
     public bool AsBool() => !IsNull && (bool)_value!;
     public DateOnly AsDate() => (DateOnly)_value!;
     public DateTime AsDateTime() => (DateTime)_value!;
+    public TimeOnly AsTime() => (TimeOnly)_value!;
     public TimeSpan AsDuration() => (TimeSpan)_value!;
     public UserRef AsUser() => (UserRef)_value!;
     public IReadOnlyList<UserRef> AsUserList() => (IReadOnlyList<UserRef>)_value!;

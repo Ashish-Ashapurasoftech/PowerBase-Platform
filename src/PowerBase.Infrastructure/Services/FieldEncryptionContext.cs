@@ -37,6 +37,9 @@ public sealed class FieldEncryptionContext
     /// <summary>Whether encryption is active (DEK is available).</summary>
     public bool IsActive => !string.IsNullOrEmpty(_wrappedDek);
 
+    /// <summary>The wrapped data encryption key (DEK).</summary>
+    public string? WrappedDek => _wrappedDek;
+
     /// <summary>Whether the App is marked as globally encrypted.</summary>
     public bool IsAppEncrypted { get; private set; }
 
@@ -146,8 +149,27 @@ public sealed class FieldEncryptionContext
         foreach (var f in toEncrypt)
         {
             var key = (long)f.Fid!.Value;
-            if (copy.TryGetValue(key, out var raw) && raw is string plainText && !string.IsNullOrEmpty(plainText))
-                copy[key] = await _encryptionService.EncryptDataAsync(plainText, _wrappedDek!, _tenantId, _appId, ct);
+            if (copy.TryGetValue(key, out var raw) && raw is not null)
+            {
+                string plainText;
+                if (raw is System.Text.Json.JsonElement je)
+                {
+                    plainText = je.ValueKind == System.Text.Json.JsonValueKind.String ? je.GetString() ?? string.Empty : je.GetRawText();
+                }
+                else if (raw is DateTime dt)
+                {
+                    plainText = dt.ToString("o");
+                }
+                else
+                {
+                    plainText = raw.ToString() ?? string.Empty;
+                }
+
+                if (!string.IsNullOrEmpty(plainText))
+                {
+                    copy[key] = await _encryptionService.EncryptDataAsync(plainText, _wrappedDek!, _tenantId, _appId, ct);
+                }
+            }
         }
         return copy;
     }
@@ -182,6 +204,13 @@ public sealed class FieldEncryptionContext
                 }
             }
         }
+    }
+
+    /// <summary>Encrypts a single string value.</summary>
+    public async Task<string> EncryptValueAsync(AppField field, string plainText, CancellationToken ct = default)
+    {
+        if (!IsActive || string.IsNullOrEmpty(plainText)) return plainText;
+        return await _encryptionService.EncryptDataAsync(plainText, _wrappedDek!, _tenantId, _appId, ct);
     }
 
     /// <summary>Decrypts a single string value. Swallows failures and returns the original.</summary>

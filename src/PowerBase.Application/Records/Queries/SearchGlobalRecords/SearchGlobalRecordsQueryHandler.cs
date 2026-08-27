@@ -24,15 +24,15 @@ public class SearchGlobalRecordsQueryHandler
 
     public async Task<SearchGlobalRecordsResult> HandleAsync(SearchGlobalRecordsQuery request, CancellationToken cancellationToken = default)
     {
-        var rawResults = await _searchService.SearchGlobalAsync(_queryContext.TenantId, request.SearchText, request.AppId, cancellationToken);
-        if (rawResults.Count == 0) return new SearchGlobalRecordsResult([]);
+        var rawResults = await _searchService.SearchGlobalAsync(_queryContext.TenantId, request.SearchText, request.AppId, request.Page, request.PageSize, cancellationToken);
+        if (rawResults.Items.Count == 0) return new SearchGlobalRecordsResult([], rawResults.TotalCount ?? 0, request.Page, request.PageSize);
 
         var appCache = new ConcurrentDictionary<long, Domain.Entities.App>();
         var tableCache = new ConcurrentDictionary<long, Domain.Entities.AppTable>();
         
         var finalResults = new List<SearchGlobalRecordsResultItem>();
 
-        foreach (var r in rawResults)
+        foreach (var r in rawResults.Items)
         {
             if (!tableCache.TryGetValue(r.TableId, out var table))
             {
@@ -79,6 +79,6 @@ public class SearchGlobalRecordsQueryHandler
                 primaryText));
         }
 
-        return new SearchGlobalRecordsResult(finalResults);
+        return new SearchGlobalRecordsResult(finalResults, rawResults.TotalCount ?? 0, request.Page, request.PageSize);
     }
 }

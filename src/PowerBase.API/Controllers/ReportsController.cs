@@ -107,7 +107,10 @@ public class ReportsController : ControllerBase
             request.CustomDynamicFilterItems?.Select(i => new CustomDynamicFilterItem { FieldId = i.FieldId, SubField = i.SubField }).ToList(),
             request.AllowQuickSearch,
             request.VisibleToRoleIds ?? [],
-            MapChartConfig(request.Chart));
+            MapChartConfig(request.Chart),
+            request.ColumnsMode,
+            request.TableSortGroup.Select(l => new SortGroupLevelCommand(l.FieldId, l.Desc, l.IsGroup, l.GroupByMode)).ToList(),
+            MapOptions(request.Options));
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
@@ -216,7 +219,10 @@ public class ReportsController : ControllerBase
             request.CustomDynamicFilterItems?.Select(i => new CustomDynamicFilterItem { FieldId = i.FieldId, SubField = i.SubField }).ToList(),
             request.AllowQuickSearch,
             request.VisibleToRoleIds ?? [],
-            MapChartConfig(request.Chart));
+            MapChartConfig(request.Chart),
+            request.ColumnsMode,
+            request.TableSortGroup.Select(l => new SortGroupLevelCommand(l.FieldId, l.Desc, l.IsGroup, l.GroupByMode)).ToList(),
+            MapOptions(request.Options));
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
     }
@@ -371,6 +377,7 @@ public class ReportsController : ControllerBase
         Page = result.Page,
         PageSize = result.PageSize,
         IsDataMasked = result.IsDataMasked,
+        ResolvedGaugeGoalValue = result.ResolvedGaugeGoalValue,
     };
 
     /// <summary>Export report results as CSV.</summary>
@@ -440,7 +447,15 @@ public class ReportsController : ControllerBase
         Definition = new ReportDefinitionDto
         {
             Columns = r.Definition.Columns,
+            ColumnsMode = r.Definition.ColumnsMode,
             SortFields = r.Definition.SortFields.Select(s => new SortSpecDto { FieldId = s.FieldId, Desc = s.Desc }).ToList(),
+            TableSortGroup = r.Definition.TableSortGroup.Select(l => new SortGroupLevelDto
+            {
+                FieldId = l.FieldId,
+                Desc = l.Desc,
+                IsGroup = l.IsGroup,
+                GroupByMode = l.GroupByMode,
+            }).ToList(),
             FilterTree = MapFilterGroupDto(r.Definition.FilterTree),
             // Legacy compat fields
             SortFieldId = r.Definition.SortFieldId,
@@ -471,6 +486,13 @@ public class ReportsController : ControllerBase
             }).ToList() ?? [],
             AllowQuickSearch = r.Definition.AllowQuickSearch,
             Chart = MapChartConfigDto(r.Definition.Chart),
+            Options = r.Definition.Options is null ? null : new ReportOptionsDto
+            {
+                ColumnHeaderText = r.Definition.Options.ColumnHeaderText,
+                ShowEditIcon = r.Definition.Options.ShowEditIcon,
+                ShowViewIcon = r.Definition.Options.ShowViewIcon,
+                DisableBulkDelete = r.Definition.Options.DisableBulkDelete,
+            },
         },
         IsDefault = r.IsDefault,
         DisplayOrder = r.DisplayOrder,
@@ -541,6 +563,11 @@ public class ReportsController : ControllerBase
         };
     }
 
+    // ── Table Options mapping helper ──────────────────────────────────────────
+
+    private static ReportOptionsCommand? MapOptions(ReportOptionsRequest? req) =>
+        req is null ? null : new ReportOptionsCommand(req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.DisableBulkDelete);
+
     // ── Chart config mapping helpers ──────────────────────────────────────────
 
     private static ChartConfigCommand? MapChartConfig(ChartConfigRequest? req)
@@ -569,7 +596,11 @@ public class ReportsController : ControllerBase
             req.LogScale2,
             req.GaugeFieldId,
             req.GaugeLowMaxPercent,
-            req.GaugeMediumMaxPercent);
+            req.GaugeMediumMaxPercent,
+            req.DataLabelDisplayAs,
+            req.GaugeGoalType,
+            req.GaugeGoalFieldId,
+            req.GaugeGoalFunction);
     }
 
     private static ChartConfigDto? MapChartConfigDto(ChartConfig? chart)
@@ -600,6 +631,10 @@ public class ReportsController : ControllerBase
             GaugeFieldId = chart.GaugeFieldId,
             GaugeLowMaxPercent = chart.GaugeLowMaxPercent,
             GaugeMediumMaxPercent = chart.GaugeMediumMaxPercent,
+            DataLabelDisplayAs = chart.DataLabelDisplayAs,
+            GaugeGoalType = chart.GaugeGoalType,
+            GaugeGoalFieldId = chart.GaugeGoalFieldId,
+            GaugeGoalFunction = chart.GaugeGoalFunction,
         };
     }
 }
