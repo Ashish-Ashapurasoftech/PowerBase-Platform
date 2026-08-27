@@ -4,11 +4,13 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Dapper;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Enums;
+using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Pipelines;
 
@@ -18,6 +20,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
     private readonly IRecordRepository _recordRepo;
     private readonly IQueryContext _queryContext;
     private readonly ITenantUnitOfWork _uow;
+    private readonly IControlConnectionFactory _controlConnFactory;
+    private readonly IMainPipelineQueueRepository _mainQueueRepo;
     private readonly ILogger<PipelineTriggerInterceptor> _logger;
 
     public PipelineTriggerInterceptor(
@@ -25,13 +29,28 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         IRecordRepository recordRepo,
         IQueryContext queryContext,
         ITenantUnitOfWork _uow,
+        IControlConnectionFactory controlConnFactory,
+        IMainPipelineQueueRepository mainQueueRepo,
         ILogger<PipelineTriggerInterceptor> logger)
     {
         _pipelineRepo = pipelineRepo;
         _recordRepo = recordRepo;
         _queryContext = queryContext;
         this._uow = _uow;
+        _controlConnFactory = controlConnFactory;
+        _mainQueueRepo = mainQueueRepo;
         _logger = logger;
+    }
+
+    [Obsolete("Use the constructor with controlConnFactory and mainQueueRepo instead.")]
+    public PipelineTriggerInterceptor(
+        IPipelineRepository pipelineRepo,
+        IRecordRepository recordRepo,
+        IQueryContext queryContext,
+        ITenantUnitOfWork _uow,
+        ILogger<PipelineTriggerInterceptor> logger)
+        : this(pipelineRepo, recordRepo, queryContext, _uow, null!, null!, logger)
+    {
     }
 
     public async Task InterceptAsync(
@@ -90,15 +109,15 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
             });
         }
 
-        var firstEvent = recordChanges[0].EventType;
         var uniqueIds = new HashSet<Guid>();
+        var firstEventType = recordChanges[0].EventType;
         foreach (var rc in recordChanges)
         {
-            if (rc.EventType != firstEvent)
+            if (rc.EventType != firstEventType)
             {
                 throw new PowerBase.Domain.Exceptions.ValidationException(new Dictionary<string, string[]>
                 {
-                    ["EventType"] = new[] { "All records in a batch must represent the same event type." }
+                    ["EventType"] = new[] { "All records in a bulk operation batch must share the same EventType." }
                 });
             }
             if (rc.RecordPublicId == Guid.Empty)
@@ -145,63 +164,105 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
             if (currentDepth > 10)
             {
-                _logger.LogWarning("Recursion check: Depth threshold exceeded ({Depth}). Skipping outbox queue.", currentDepth);
-                return;
+                //_logger.LogWarning("Recursion check: Depth threshold exceeded ({Depth}). Skipping outbox queue.", currentDepth);
+                //return;
+                _logger.LogInformation("Recursion check: Depth threshold exceeded 10 ({Depth}). Continuing recursion indefinitely as configured.", currentDepth);
             }
         }
 
         try
         {
-            // 2. Fetch all active pipelines
-            IReadOnlyList<Pipeline> activePipelines;
-            using (var suppressScope = new System.Transactions.TransactionScope(System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled))
+            // 2. Fetch matching active trigger subscriptions from the Control DB
+            IReadOnlyList<TriggerSubscription> subscriptions;
+            if (_controlConnFactory == null)
             {
-                activePipelines = await _pipelineRepo.ListAllActiveAsync(ct);
-            }
-            if (activePipelines.Count == 0) return;
-
-            foreach (var pipeline in activePipelines)
-            {
-                // Prevent cyclic dependency loops
-                if (currentChain.Contains(pipeline.Id))
-                {
-                    _logger.LogWarning("Cyclic dependency detected: Pipeline {PipelineId} already executed in the call chain. Skipping execution trigger.", pipeline.Id);
-                    continue;
-                }
-
-                IReadOnlyList<PipelineStep> steps;
+                IReadOnlyList<Pipeline> activePipelines;
                 using (var suppressScope = new System.Transactions.TransactionScope(System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled))
                 {
-                    steps = await _pipelineRepo.GetStepsByPipelineIdAsync(pipeline.Id, ct);
-                }
-                var triggerStep = steps.FirstOrDefault(s => !s.IsDeleted && s.Type == "trigger" && s.Subtype == "new-event");
-                if (triggerStep == null) continue;
-
-                if (string.IsNullOrEmpty(triggerStep.ConfigJson)) continue;
-
-                NewEventStepConfig config;
-                try
-                {
-                    config = JsonSerializer.Deserialize<NewEventStepConfig>(triggerStep.ConfigJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                        ?? throw new InvalidOperationException();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to parse trigger config for Pipeline: {PipelineId}", pipeline.Id);
-                    continue;
+                    activePipelines = await _pipelineRepo.ListAllActiveAsync(ct);
                 }
 
-                // Check table matches
-                if (string.IsNullOrEmpty(config.TablePublicId) || !Guid.TryParse(config.TablePublicId, out var configTableGuid) || configTableGuid != table.PublicId)
+                var mockSubs = new List<TriggerSubscription>();
+                foreach (var pipeline in activePipelines)
                 {
-                    continue;
+                    IReadOnlyList<PipelineStep> steps;
+                    using (var suppressScope = new System.Transactions.TransactionScope(System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled))
+                    {
+                        steps = await _pipelineRepo.GetStepsByPipelineIdAsync(pipeline.Id, ct);
+                    }
+                    var triggerStep = steps.FirstOrDefault(s => !s.IsDeleted && s.Type == "trigger" && (s.Subtype == "new-event" || s.Subtype == "new-bulk-event"));
+                    if (triggerStep == null || string.IsNullOrEmpty(triggerStep.ConfigJson)) continue;
+
+                    NewEventStepConfig config;
+                    try
+                    {
+                        config = JsonSerializer.Deserialize<NewEventStepConfig>(triggerStep.ConfigJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                            ?? throw new InvalidOperationException();
+                    }
+                    catch { continue; }
+
+                    if (string.IsNullOrEmpty(config.TablePublicId) || !Guid.TryParse(config.TablePublicId, out var configTableGuid) || configTableGuid != table.PublicId)
+                    {
+                        continue;
+                    }
+
+                    mockSubs.Add(new TriggerSubscription
+                    {
+                        OwnerTenantId = _queryContext.TenantId,
+                        OwnerPipelineId = pipeline.Id,
+                        PipelinePublicId = pipeline.PublicId,
+                        TriggerStepPublicId = triggerStep.PublicId,
+                        TriggerStepRefId = triggerStep.RefId,
+                        TargetTenantId = _queryContext.TenantId,
+                        TargetAppPublicId = Guid.TryParse(config.AppPublicId, out var appGuid) ? appGuid : Guid.Empty,
+                        TargetTablePublicId = configTableGuid,
+                        TargetConnectionPublicId = Guid.TryParse(config.ConnectionPublicId, out var connGuid) ? connGuid : Guid.Empty,
+                        TriggerOnAdded = config.TriggerOnAdded,
+                        TriggerOnModified = config.TriggerOnModified,
+                        TriggerOnDeleted = config.TriggerOnDeleted,
+                        TriggerOnAnyField = config.TriggerOnAnyField,
+                        TriggerFieldsJson = config.TriggerFields != null ? JsonSerializer.Serialize(config.TriggerFields) : null,
+                        FiltersJson = config.Filters != null ? JsonSerializer.Serialize(config.Filters) : null,
+                        FilterGroupsJson = config.FilterGroups != null ? JsonSerializer.Serialize(config.FilterGroups) : null,
+                        LimitRecords = config.LimitRecords,
+                        MaxRecords = config.MaxRecords,
+                        TriggerSubtype = triggerStep.Subtype
+                    });
+                }
+                subscriptions = mockSubs;
+            }
+            else
+            {
+                using (var suppressScope = new System.Transactions.TransactionScope(System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled))
+                {
+                    await using var controlConn = _controlConnFactory.Create();
+                    await controlConn.OpenAsync(ct);
+                    const string sql = """
+                        SELECT * FROM meta.PipelineTriggerSubscription 
+                        WHERE TargetTenantId = @TargetTenantId 
+                          AND TargetTablePublicId = @TargetTablePublicId 
+                          AND IsActive = 1
+                        """;
+                    var results = await controlConn.QueryAsync<TriggerSubscription>(
+                        new CommandDefinition(sql, new { TargetTenantId = _queryContext.TenantId, TargetTablePublicId = table.PublicId }, cancellationToken: ct));
+                    subscriptions = results.ToList();
+                }
+            }
+            if (subscriptions.Count == 0) return;
+
+            foreach (var sub in subscriptions)
+            {
+                // Prevent cyclic dependency loops
+                if (currentChain.Contains(sub.OwnerPipelineId))
+                {
+                    _logger.LogInformation("Cyclic/recursive path detected: Pipeline {PipelineId} already executed in the call chain. Processing trigger recursion normally.", sub.OwnerPipelineId);
+                    //continue;
                 }
 
-                // Enforce bulk maxRecords limits using total count N before event/field filtering
-                int totalChangedRecordCount = recordChanges.Count;
-                if (config.LimitRecords && totalChangedRecordCount > (config.MaxRecords ?? 0))
+                // Limit safety threshold check for single-record triggers
+                if (sub.LimitRecords && sub.TriggerSubtype != "new-bulk-event" && recordChanges.Count > (sub.MaxRecords ?? 1))
                 {
-                    _logger.LogInformation("Pipeline {PipelineId}: Total changed record count {Count} exceeds MaxRecords limit {Max}. Skipping trigger runs.", pipeline.Id, totalChangedRecordCount, config.MaxRecords);
+                    _logger.LogInformation("Pipeline {PipelineId}: Bulk mutation size {Count} exceeds maximum single-record trigger threshold {Max}. Skipping trigger generation.", sub.OwnerPipelineId, recordChanges.Count, sub.MaxRecords);
                     continue;
                 }
 
@@ -209,22 +270,26 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                 var matchingChanges = new List<PipelineRecordChange>();
                 foreach (var change in recordChanges)
                 {
-                    if (PipelineEventMapper.IsEventEnabled(change.EventType, config.TriggerOnAdded, config.TriggerOnModified, config.TriggerOnDeleted))
+                    if (PipelineEventMapper.IsEventEnabled(change.EventType, sub.TriggerOnAdded, sub.TriggerOnModified, sub.TriggerOnDeleted))
                     {
                         bool isCandidate = false;
                         if (change.EventType == PipelineRecordEventType.Modified)
                         {
-                            if (config.TriggerOnAnyField)
+                            if (sub.TriggerOnAnyField)
                             {
                                 isCandidate = true;
                             }
-                            else if (config.TriggerFields != null && config.TriggerFields.Any())
+                            else if (!string.IsNullOrEmpty(sub.TriggerFieldsJson))
                             {
-                                var triggerFids = config.TriggerFields.Select(f => ParseFid(f)).Where(x => x.HasValue).Select(x => x!.Value).ToList();
-                                var changedFids = fields.Where(f => change.ChangedFieldIds.Contains(f.Id) && f.Fid.HasValue).Select(f => f.Fid!.Value).ToList();
-                                if (triggerFids.Intersect(changedFids).Any())
+                                var triggerFields = JsonSerializer.Deserialize<List<string>>(sub.TriggerFieldsJson);
+                                if (triggerFields != null && triggerFields.Any())
                                 {
-                                    isCandidate = true;
+                                    var triggerFids = triggerFields.Select(f => ParseFid(f)).Where(x => x.HasValue).Select(x => x!.Value).ToList();
+                                    var changedFids = fields.Where(f => change.ChangedFieldIds.Contains(f.Id) && f.Fid.HasValue).Select(f => f.Fid!.Value).ToList();
+                                    if (triggerFids.Intersect(changedFids).Any())
+                                    {
+                                        isCandidate = true;
+                                    }
                                 }
                             }
                         }
@@ -237,11 +302,19 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                         {
                             var valuesSource = change.EventType == PipelineRecordEventType.Deleted ? change.BeforeValues : change.AfterValues;
                             bool filtersMatch = true;
-                            var nonBlankGroups = config.FilterGroups?
+
+                            var filters = !string.IsNullOrEmpty(sub.FiltersJson) 
+                                ? JsonSerializer.Deserialize<List<PowerBase.Application.Pipelines.TriggerFilterRule>>(sub.FiltersJson) 
+                                : null;
+                            var filterGroups = !string.IsNullOrEmpty(sub.FilterGroupsJson) 
+                                ? JsonSerializer.Deserialize<List<PowerBase.Application.Pipelines.TriggerFilterGroup>>(sub.FilterGroupsJson) 
+                                : null;
+
+                            var nonBlankGroups = filterGroups?
                                 .Where(g => !PowerBase.Application.Pipelines.PipelineFilterEvaluator.IsGroupCompletelyBlank(g))
                                 .ToList();
 
-                            var nonBlankRules = config.Filters?
+                            var nonBlankRules = filters?
                                 .Where(r => !PowerBase.Application.Pipelines.PipelineFilterEvaluator.IsRuleCompletelyBlank(r))
                                 .ToList();
 
@@ -265,147 +338,285 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
                 if (matchingChanges.Count == 0) continue;
 
-                // Generate outbox rows inside the current transaction
-                foreach (var change in matchingChanges)
+                bool isSameTenant = sub.OwnerTenantId == _queryContext.TenantId;
+                var nextChain = new List<long>(currentChain) { sub.OwnerPipelineId };
+
+                // BRANCH A: On New Bulk Event Execution
+                if (sub.TriggerSubtype == "new-bulk-event")
                 {
-                    var msgId = Guid.NewGuid();
+                    // Option B Minimum Threshold Evaluation
+                    if (sub.LimitRecords && matchingChanges.Count < (sub.MaxRecords ?? 1))
+                    {
+                        _logger.LogInformation("Pipeline {PipelineId}: Matching qualifying record count {Count} is below Minimum threshold {Min}. Skipping trigger runs.", sub.OwnerPipelineId, matchingChanges.Count, sub.MaxRecords);
+                        continue;
+                    }
+
+                    var bulkEventId = Guid.NewGuid();
+                    var ordinal = 1;
+                    var stagingRecords = new List<PowerBase.Domain.Entities.PipelineBulkEventRecord>();
+
+                    foreach (var change in matchingChanges)
+                    {
+                        var beforeValuesJson = change.BeforeValues != null && change.BeforeValues.Any() 
+                            ? JsonSerializer.Serialize(MapValues(change.BeforeValues, fields)) 
+                            : null;
+                        var afterValuesJson = change.AfterValues != null && change.AfterValues.Any() 
+                            ? JsonSerializer.Serialize(MapValues(change.AfterValues, fields)) 
+                            : null;
+                        var changedFieldFids = fields
+                            .Where(f => change.ChangedFieldIds.Contains(f.Id) && f.Fid.HasValue)
+                            .Select(f => $"fid_{f.Fid!.Value}")
+                            .ToList();
+                        var changedFieldsJson = changedFieldFids.Any() ? JsonSerializer.Serialize(changedFieldFids) : null;
+
+                        stagingRecords.Add(new PowerBase.Domain.Entities.PipelineBulkEventRecord
+                        {
+                            BulkEventId = bulkEventId,
+                            Ordinal = ordinal++,
+                            RecordPublicId = change.RecordPublicId,
+                            EventType = PipelineEventMapper.MapToString(change.EventType),
+                            BeforeValuesJson = beforeValuesJson,
+                            AfterValuesJson = afterValuesJson,
+                            ChangedFieldsJson = changedFieldsJson,
+                            Processed = 0,
+                            CreatedOn = DateTime.UtcNow
+                        });
+                    }
+
+                    // Batch insert staging records inside current transaction
+                    await _pipelineRepo.InsertBulkEventRecordsAsync(stagingRecords, _uow.Transaction, ct);
+
+                    // Map centralized queue payload
                     var payloadDict = new Dictionary<string, object?>();
-
                     payloadDict["PayloadVersion"] = "1.0";
-                    payloadDict["MessageId"] = msgId.ToString();
+                    payloadDict["MessageId"] = bulkEventId.ToString();
                     payloadDict["BatchId"] = batchId.ToString();
-                    payloadDict["PipelineId"] = pipeline.Id;
-                    payloadDict["TriggerStepId"] = triggerStep.Id;
-                    payloadDict["TriggerStepRefId"] = triggerStep.RefId;
-                    payloadDict["ConnectionPublicId"] = config.ConnectionPublicId;
-                    payloadDict["AppPublicId"] = config.AppPublicId;
-                    payloadDict["TablePublicId"] = config.TablePublicId;
-                    payloadDict["RecordPublicId"] = change.RecordPublicId.ToString();
-                    payloadDict["EventType"] = PipelineEventMapper.MapToString(change.EventType);
-                    payloadDict["BatchChangedRecordCount"] = totalChangedRecordCount;
-
-                    // Field IDs to Stable FID strings conversion
-                    var changedFieldFids = fields
-                        .Where(f => change.ChangedFieldIds.Contains(f.Id) && f.Fid.HasValue)
-                        .Select(f => $"fid_{f.Fid!.Value}")
-                        .ToList();
-
-                    payloadDict["ChangedFieldFids"] = changedFieldFids;
-
-                    // Populate SelectedFieldValues
-                    var valuesSource = change.EventType == PipelineRecordEventType.Deleted ? change.BeforeValues : change.AfterValues;
-                    var selectedValues = new Dictionary<string, object?>();
-                    foreach (var f in fields)
-                    {
-                        if (f.Fid.HasValue)
-                        {
-                            if (valuesSource.TryGetValue(f.Id, out var val))
-                            {
-                                selectedValues[$"fid_{f.Fid.Value}"] = val;
-                            }
-                            else if (valuesSource.TryGetValue(f.Fid.Value, out var valByFid))
-                            {
-                                selectedValues[$"fid_{f.Fid.Value}"] = valByFid;
-                            }
-                        }
-                    }
-                    payloadDict["SelectedFieldValues"] = selectedValues;
-
-                    // Event-specific Old/New value serialization (Added/Modified/Deleted semantics)
-                    if (change.EventType == PipelineRecordEventType.Added)
-                    {
-                        var newValues = new Dictionary<string, object?>();
-                        foreach (var f in fields)
-                        {
-                            if (f.Fid.HasValue)
-                            {
-                                if (change.AfterValues.TryGetValue(f.Id, out var val))
-                                    newValues[$"fid_{f.Fid.Value}"] = val;
-                                else if (change.AfterValues.TryGetValue(f.Fid.Value, out var valByFid))
-                                    newValues[$"fid_{f.Fid.Value}"] = valByFid;
-                            }
-                        }
-                        payloadDict["NewValues"] = newValues;
-                        payloadDict["OldValues"] = null;
-                    }
-                    else if (change.EventType == PipelineRecordEventType.Modified)
-                    {
-                        var oldValues = new Dictionary<string, object?>();
-                        var newValues = new Dictionary<string, object?>();
-                        foreach (var f in fields)
-                        {
-                            if (f.Fid.HasValue)
-                            {
-                                if (change.BeforeValues.TryGetValue(f.Id, out var oval))
-                                    oldValues[$"fid_{f.Fid.Value}"] = oval;
-                                else if (change.BeforeValues.TryGetValue(f.Fid.Value, out var ovalByFid))
-                                    oldValues[$"fid_{f.Fid.Value}"] = ovalByFid;
-
-                                if (change.AfterValues.TryGetValue(f.Id, out var nval))
-                                    newValues[$"fid_{f.Fid.Value}"] = nval;
-                                else if (change.AfterValues.TryGetValue(f.Fid.Value, out var nvalByFid))
-                                    newValues[$"fid_{f.Fid.Value}"] = nvalByFid;
-                            }
-                        }
-                        payloadDict["OldValues"] = oldValues;
-                        payloadDict["NewValues"] = newValues;
-                    }
-                    else if (change.EventType == PipelineRecordEventType.Deleted)
-                    {
-                        var oldValues = new Dictionary<string, object?>();
-                        foreach (var f in fields)
-                        {
-                            if (f.Fid.HasValue)
-                            {
-                                if (change.BeforeValues.TryGetValue(f.Id, out var oval))
-                                    oldValues[$"fid_{f.Fid.Value}"] = oval;
-                                else if (change.BeforeValues.TryGetValue(f.Fid.Value, out var ovalByFid))
-                                    oldValues[$"fid_{f.Fid.Value}"] = ovalByFid;
-                            }
-                        }
-                        payloadDict["OldValues"] = oldValues;
-                        payloadDict["NewValues"] = null;
-                    }
-
+                    payloadDict["PipelineId"] = sub.OwnerPipelineId;
+                    payloadDict["TriggerStepId"] = 0;
+                    payloadDict["TriggerStepRefId"] = sub.TriggerStepRefId;
+                    payloadDict["ConnectionPublicId"] = isSameTenant ? null : sub.TargetConnectionPublicId.ToString();
+                    payloadDict["AppPublicId"] = sub.TargetAppPublicId.ToString();
+                    payloadDict["TablePublicId"] = sub.TargetTablePublicId.ToString();
+                    payloadDict["EventType"] = "bulk";
+                    payloadDict["Count"] = matchingChanges.Count;
                     payloadDict["CorrelationId"] = correlationId.ToString();
                     payloadDict["Depth"] = currentDepth;
-
-                    var nextChain = new List<long>(currentChain) { pipeline.Id };
                     payloadDict["PipelineChain"] = nextChain;
                     payloadDict["TriggeredBy"] = actorUserId;
                     payloadDict["EventTimestamp"] = DateTime.UtcNow.ToString("o");
 
-                    var outboxItem = new PipelineOutboxItem
+                    if (isSameTenant)
                     {
-                        PipelineId = pipeline.Id,
-                        TriggerEvent = "new-event",
-                        TriggerPayloadJson = JsonSerializer.Serialize(payloadDict),
-                        TriggeredBy = actorUserId,
-                        TriggerTablePublicId = table.PublicId,
-                        CorrelationId = correlationId,
-                        Depth = currentDepth,
-                        PipelineChain = JsonSerializer.Serialize(nextChain),
-                        MessageId = msgId,
-                        BatchId = batchId,
-                        PayloadVersion = "1.0",
-                        Published = 0
-                    };
+                        var outboxItem = new PipelineOutboxItem
+                        {
+                            PipelineId = sub.OwnerPipelineId,
+                            TriggerEvent = "new-bulk-event",
+                            TriggerPayloadJson = JsonSerializer.Serialize(payloadDict),
+                            TriggeredBy = actorUserId,
+                            TriggerTablePublicId = table.PublicId,
+                            CorrelationId = correlationId,
+                            Depth = currentDepth,
+                            PipelineChain = JsonSerializer.Serialize(nextChain),
+                            MessageId = bulkEventId,
+                            BatchId = batchId,
+                            PayloadVersion = "1.0",
+                            Published = 0
+                        };
 
-                    await _pipelineRepo.CreateOutboxItemAsync(outboxItem, _uow.Transaction, ct);
-                }
-
-                // If in transaction and post-commit action register is supported, trigger wake event on dispatcher
-                if (_uow.Transaction != null && _uow is PowerBase.Infrastructure.UOW.TriggerPublishingTenantUnitOfWork publishUow)
-                {
-                    publishUow.RegisterPostCommitAction(async () =>
+                        await _pipelineRepo.CreateOutboxItemAsync(outboxItem, _uow.Transaction, ct);
+                    }
+                    else
                     {
-                        PipelineOutboxWakeNotifier.Wake();
-                        await Task.CompletedTask;
-                    });
+                        var queueJob = new PipelineQueue
+                        {
+                            MessageId = bulkEventId,
+                            TenantId = sub.OwnerTenantId,
+                            TenantPublicId = Guid.Empty,
+                            PipelineId = sub.OwnerPipelineId,
+                            PipelinePublicId = sub.PipelinePublicId,
+                            QueueSource = "Event",
+                            TriggerStepId = 0,
+                            TriggerStepRefId = sub.TriggerStepRefId,
+                            TriggerEvent = "new-bulk-event",
+                            TriggerPayloadJson = JsonSerializer.Serialize(payloadDict),
+                            PayloadHash = PowerBase.Infrastructure.Pipelines.PayloadHashHelper.ComputeHash(JsonSerializer.Serialize(payloadDict)),
+                            TriggeredBy = actorUserId,
+                            TriggerTablePublicId = table.PublicId,
+                            CorrelationId = correlationId,
+                            Depth = currentDepth,
+                            PipelineChain = JsonSerializer.Serialize(nextChain),
+                            BatchId = batchId,
+                            PayloadVersion = "1.0",
+                            EventTimestamp = DateTime.UtcNow,
+                            LockedBy = null,
+                            LockedUntil = null,
+                            AttemptCount = 0,
+                            MaxAttempts = 5,
+                            Status = "Pending"
+                        };
+
+                        if (_uow is PowerBase.Infrastructure.UOW.TriggerPublishingTenantUnitOfWork publishUow)
+                        {
+                            publishUow.RegisterPostCommitAction(async () =>
+                            {
+                                try
+                                {
+                                    await _mainQueueRepo.EnqueueAsync(queueJob, null, ct);
+                                    DatabasePipelineQueueWakeNotifier.Wake();
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError(ex, "Failed to enqueue cross-tenant trigger from post-commit action for Pipeline {PipelineId}", sub.OwnerPipelineId);
+                                }
+                            });
+                        }
+                        else
+                        {
+                            await _mainQueueRepo.EnqueueAsync(queueJob, null, ct);
+                            DatabasePipelineQueueWakeNotifier.Wake();
+                        }
+                    }
                 }
+                // BRANCH B: On New Event Execution (Single record flow)
                 else
                 {
-                    PipelineOutboxWakeNotifier.Wake();
+                    foreach (var change in matchingChanges)
+                    {
+                        var msgId = Guid.NewGuid();
+                        var payloadDict = new Dictionary<string, object?>();
+
+                        payloadDict["PayloadVersion"] = "1.0";
+                        payloadDict["MessageId"] = msgId.ToString();
+                        payloadDict["BatchId"] = batchId.ToString();
+                        payloadDict["PipelineId"] = sub.OwnerPipelineId;
+                        payloadDict["TriggerStepId"] = 0;
+                        payloadDict["TriggerStepRefId"] = sub.TriggerStepRefId;
+                        payloadDict["ConnectionPublicId"] = isSameTenant ? null : sub.TargetConnectionPublicId.ToString();
+                        payloadDict["AppPublicId"] = sub.TargetAppPublicId.ToString();
+                        payloadDict["TablePublicId"] = sub.TargetTablePublicId.ToString();
+                        payloadDict["RecordPublicId"] = change.RecordPublicId.ToString();
+                        payloadDict["EventType"] = PipelineEventMapper.MapToString(change.EventType);
+                        payloadDict["BatchChangedRecordCount"] = recordChanges.Count;
+
+                        var changedFieldFids = fields
+                            .Where(f => change.ChangedFieldIds.Contains(f.Id) && f.Fid.HasValue)
+                            .Select(f => $"fid_{f.Fid!.Value}")
+                            .ToList();
+
+                        payloadDict["ChangedFieldFids"] = changedFieldFids;
+                        payloadDict["SelectedFieldValues"] = MapValues(change.EventType == PipelineRecordEventType.Deleted ? change.BeforeValues : change.AfterValues, fields);
+
+                        if (change.EventType == PipelineRecordEventType.Added)
+                        {
+                            payloadDict["NewValues"] = MapValues(change.AfterValues, fields);
+                            payloadDict["OldValues"] = null;
+                        }
+                        else if (change.EventType == PipelineRecordEventType.Modified)
+                        {
+                            payloadDict["OldValues"] = MapValues(change.BeforeValues, fields);
+                            payloadDict["NewValues"] = MapValues(change.AfterValues, fields);
+                        }
+                        else if (change.EventType == PipelineRecordEventType.Deleted)
+                        {
+                            payloadDict["OldValues"] = MapValues(change.BeforeValues, fields);
+                            payloadDict["NewValues"] = null;
+                        }
+
+                        payloadDict["CorrelationId"] = correlationId.ToString();
+                        payloadDict["Depth"] = currentDepth;
+
+                        payloadDict["PipelineChain"] = nextChain;
+                        payloadDict["TriggeredBy"] = actorUserId;
+                        payloadDict["EventTimestamp"] = DateTime.UtcNow.ToString("o");
+
+                        if (isSameTenant)
+                        {
+                            var outboxItem = new PipelineOutboxItem
+                            {
+                                PipelineId = sub.OwnerPipelineId,
+                                TriggerEvent = "new-event",
+                                TriggerPayloadJson = JsonSerializer.Serialize(payloadDict),
+                                TriggeredBy = actorUserId,
+                                TriggerTablePublicId = table.PublicId,
+                                CorrelationId = correlationId,
+                                Depth = currentDepth,
+                                PipelineChain = JsonSerializer.Serialize(nextChain),
+                                MessageId = msgId,
+                                BatchId = batchId,
+                                PayloadVersion = "1.0",
+                                Published = 0
+                            };
+
+                            await _pipelineRepo.CreateOutboxItemAsync(outboxItem, _uow.Transaction, ct);
+                        }
+                        else
+                        {
+                            var queueJob = new PipelineQueue
+                            {
+                                MessageId = msgId,
+                                TenantId = sub.OwnerTenantId,
+                                TenantPublicId = Guid.Empty,
+                                PipelineId = sub.OwnerPipelineId,
+                                PipelinePublicId = sub.PipelinePublicId,
+                                QueueSource = "Event",
+                                TriggerStepId = 0,
+                                TriggerStepRefId = sub.TriggerStepRefId,
+                                TriggerEvent = "new-event",
+                                TriggerPayloadJson = JsonSerializer.Serialize(payloadDict),
+                                PayloadHash = PowerBase.Infrastructure.Pipelines.PayloadHashHelper.ComputeHash(JsonSerializer.Serialize(payloadDict)),
+                                TriggeredBy = actorUserId,
+                                TriggerTablePublicId = table.PublicId,
+                                CorrelationId = correlationId,
+                                Depth = currentDepth,
+                                PipelineChain = JsonSerializer.Serialize(nextChain),
+                                BatchId = batchId,
+                                PayloadVersion = "1.0",
+                                EventTimestamp = DateTime.UtcNow,
+                                LockedBy = null,
+                                LockedUntil = null,
+                                AttemptCount = 0,
+                                MaxAttempts = 5,
+                                Status = "Pending"
+                            };
+
+                            if (_uow is PowerBase.Infrastructure.UOW.TriggerPublishingTenantUnitOfWork publishUow)
+                            {
+                                publishUow.RegisterPostCommitAction(async () =>
+                                {
+                                    try
+                                    {
+                                        await _mainQueueRepo.EnqueueAsync(queueJob, null, ct);
+                                        DatabasePipelineQueueWakeNotifier.Wake();
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        _logger.LogError(ex, "Failed to enqueue cross-tenant trigger from post-commit action for Pipeline {PipelineId}", sub.OwnerPipelineId);
+                                    }
+                                });
+                            }
+                            else
+                            {
+                                await _mainQueueRepo.EnqueueAsync(queueJob, null, ct);
+                                DatabasePipelineQueueWakeNotifier.Wake();
+                            }
+                        }
+                    }
+                }
+
+                if (isSameTenant)
+                {
+                    if (_uow.Transaction != null && _uow is PowerBase.Infrastructure.UOW.TriggerPublishingTenantUnitOfWork publishUow)
+                    {
+                        publishUow.RegisterPostCommitAction(async () =>
+                        {
+                            PipelineOutboxWakeNotifier.Wake();
+                            await Task.CompletedTask;
+                        });
+                    }
+                    else
+                    {
+                        PipelineOutboxWakeNotifier.Wake();
+                    }
                 }
             }
         }
@@ -413,6 +624,23 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         {
             _logger.LogError(ex, "Error occurred during batch pipeline trigger interception.");
         }
+    }
+
+    private static Dictionary<string, object?> MapValues(IReadOnlyDictionary<long, object?> values, IReadOnlyList<AppField> fields)
+    {
+        var result = new Dictionary<string, object?>();
+        if (values == null) return result;
+        foreach (var f in fields)
+        {
+            if (f.Fid.HasValue)
+            {
+                if (values.TryGetValue(f.Id, out var val))
+                    result[$"fid_{f.Fid.Value}"] = val;
+                else if (values.TryGetValue(f.Fid.Value, out var valByFid))
+                    result[$"fid_{f.Fid.Value}"] = valByFid;
+            }
+        }
+        return result;
     }
 
     private static int? ParseFid(string fidStr)
@@ -445,6 +673,30 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         public int? MaxRecords { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterRule>? Filters { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterGroup>? FilterGroups { get; set; }
+    }
+
+    private class TriggerSubscription
+    {
+        public Guid PublicId { get; set; }
+        public long OwnerTenantId { get; set; }
+        public long OwnerPipelineId { get; set; }
+        public Guid PipelinePublicId { get; set; }
+        public Guid TriggerStepPublicId { get; set; }
+        public string TriggerStepRefId { get; set; } = string.Empty;
+        public long TargetTenantId { get; set; }
+        public Guid TargetAppPublicId { get; set; }
+        public Guid TargetTablePublicId { get; set; }
+        public Guid TargetConnectionPublicId { get; set; }
+        public bool TriggerOnAdded { get; set; }
+        public bool TriggerOnModified { get; set; }
+        public bool TriggerOnDeleted { get; set; }
+        public bool TriggerOnAnyField { get; set; }
+        public string? TriggerFieldsJson { get; set; }
+        public string? FiltersJson { get; set; }
+        public string? FilterGroupsJson { get; set; }
+        public bool LimitRecords { get; set; }
+        public int? MaxRecords { get; set; }
+        public string TriggerSubtype { get; set; } = "new-event";
     }
 }
 

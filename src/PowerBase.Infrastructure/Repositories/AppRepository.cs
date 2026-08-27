@@ -22,6 +22,13 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
           AND IsDeleted = 0
         """;
 
+    private const string GetByIdSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.App
+        WHERE Id = @id
+          AND IsDeleted = 0
+        """;
+
     private const string ListSql = $"""
         SELECT {SelectColumns}
         FROM meta.App
@@ -37,15 +44,28 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         """;
 
     private const string ListByUserSqlTemplate = """
-        SELECT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
+        SELECT DISTINCT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
                a.Status, a.Formatting, a.SecurityOptions, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
-        JOIN meta.AppUser au ON au.AppId = a.Id
-        WHERE au.UserId   = @userId
-          AND au.IsDeleted = 0
-          AND a.IsDeleted  = 0
-          AND a.Status = @Status
+        WHERE a.IsDeleted  = 0
+          AND a.Status     = @Status
+          {1}
+          AND (
+              EXISTS (
+                  SELECT 1 FROM meta.AppUser au
+                  WHERE au.AppId = a.Id AND au.UserId = @userId AND au.IsDeleted = 0
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM meta.GroupMember gm
+                  JOIN meta.[Group] g  ON g.Id  = gm.GroupId
+                  JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+                  WHERE ga.AppId = a.Id
+                    AND gm.UserId  = @userId
+                    AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+              )
+          )
         ORDER BY {0}
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
         """;
@@ -67,24 +87,49 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         return sortDescending ? $"{column} DESC" : $"{column} ASC";
     }
 
-    private const string CountByUserSql = """
-        SELECT COUNT(1)
+    private const string CountByUserSqlTemplate = """
+        SELECT COUNT(DISTINCT a.Id)
         FROM meta.App a
-        JOIN meta.AppUser au ON au.AppId = a.Id
-        WHERE au.UserId   = @userId
-          AND au.IsDeleted = 0
-          AND a.IsDeleted  = 0
+        WHERE a.IsDeleted = 0
+          {0}
+          AND (
+              EXISTS (
+                  SELECT 1 FROM meta.AppUser au
+                  WHERE au.AppId = a.Id AND au.UserId = @userId AND au.IsDeleted = 0
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM meta.GroupMember gm
+                  JOIN meta.[Group] g  ON g.Id  = gm.GroupId
+                  JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+                  WHERE ga.AppId = a.Id
+                    AND gm.UserId  = @userId
+                    AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+              )
+          )
         """;
 
-    private const string ListAllByUserSql = $"""
-        SELECT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
+    private const string ListAllByUserSql = """
+        SELECT DISTINCT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
                a.Status, a.Formatting, a.SecurityOptions, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
-        JOIN meta.AppUser au ON au.AppId = a.Id
-        WHERE au.UserId   = @userId
-          AND au.IsDeleted = 0
-          AND a.IsDeleted  = 0
+        WHERE a.IsDeleted = 0
+          AND (
+              EXISTS (
+                  SELECT 1 FROM meta.AppUser au
+                  WHERE au.AppId = a.Id AND au.UserId = @userId AND au.IsDeleted = 0
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM meta.GroupMember gm
+                  JOIN meta.[Group] g  ON g.Id  = gm.GroupId
+                  JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+                  WHERE ga.AppId = a.Id
+                    AND gm.UserId  = @userId
+                    AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+              )
+          )
         ORDER BY a.Name
         """;
 
@@ -172,6 +217,14 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         var app = await connection.QuerySingleOrDefaultAsync<App>(
             new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
         return app ?? throw new NotFoundException("App", publicId);
+    }
+
+    public async Task<App> GetByIdAsync(long id, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var app = await connection.QuerySingleOrDefaultAsync<App>(
+            new CommandDefinition(GetByIdSql, new { id }, cancellationToken: ct));
+        return app ?? throw new NotFoundException("App", id);
     }
 
     public async Task<IReadOnlyList<App>> ListAsync(int page, int pageSize, CancellationToken ct = default)
@@ -280,20 +333,23 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
         return insertedRow;
     }
 
-    public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, string? sortField = null, bool sortDescending = false, CancellationToken ct = default)
+    public async Task<IReadOnlyList<AppListItemDto>> ListByUserAsync(long userId, int page, int pageSize, string? search = null, string? sortField = null, bool sortDescending = false, CancellationToken ct = default)
     {
-        var sql = string.Format(ListByUserSqlTemplate, ResolveAppSortColumn(sortField, sortDescending));
+        var searchFilter = string.IsNullOrWhiteSpace(search) ? "" : "AND a.Name LIKE @search";
+        var sql = string.Format(ListByUserSqlTemplate, ResolveAppSortColumn(sortField, sortDescending), searchFilter);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var results = await connection.QueryAsync<AppListItemDto>(
-            new CommandDefinition(sql, new { userId, Status = "Active", offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
+            new CommandDefinition(sql, new { userId, Status = "Active", offset = (page - 1) * pageSize, pageSize, search = $"%{search}%" }, cancellationToken: ct));
         return results.AsList();
     }
 
-    public async Task<int> CountByUserAsync(long userId, CancellationToken ct = default)
+    public async Task<int> CountByUserAsync(long userId, string? search = null, CancellationToken ct = default)
     {
+        var searchFilter = string.IsNullOrWhiteSpace(search) ? "" : "AND a.Name LIKE @search";
+        var sql = string.Format(CountByUserSqlTemplate, searchFilter);
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(
-            new CommandDefinition(CountByUserSql, new { userId }, cancellationToken: ct));
+            new CommandDefinition(sql, new { userId, search = $"%{search}%" }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<App>> ListAllByUserAsync(long userId, CancellationToken ct = default)

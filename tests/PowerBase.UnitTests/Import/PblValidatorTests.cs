@@ -108,12 +108,12 @@ public class PblValidatorTests
     public void Validate_UnsupportedFieldType_ReturnsWarningNotError()
     {
         var doc = ValidDocument();
-        doc.Tables[0].Fields.Add(new PblField { LogicalRef = "$Field_Clients_Formula", Name = "Computed", TypeCode = "Formula" });
+        doc.Tables[0].Fields.Add(new PblField { LogicalRef = "$Field_Clients_Reference", Name = "Ref", TypeCode = "Reference" });
 
         var result = _validator.Validate(doc);
 
         result.IsValid.Should().BeTrue();
-        result.Warnings.Should().Contain(w => w.Code == "UNSUPPORTED_FIELD_TYPE" && w.ElementRef == "$Field_Clients_Formula");
+        result.Warnings.Should().Contain(w => w.Code == "UNSUPPORTED_FIELD_TYPE" && w.ElementRef == "$Field_Clients_Reference");
     }
 
     [Fact]

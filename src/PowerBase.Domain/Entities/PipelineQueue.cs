@@ -30,6 +30,7 @@ public class PipelineQueue
     public int AttemptCount { get; set; }
     public int MaxAttempts { get; set; } = 5;
     public DateTime? NextAttemptOn { get; set; }
+    public DateTime? PausedNextAttemptOn { get; set; }
     public string? LockedBy { get; set; }
     public DateTime? LockedUntil { get; set; }
     public Guid? ClaimToken { get; set; }

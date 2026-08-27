@@ -26,7 +26,8 @@ public interface IRecordWriteService
         string entityTitle,
         CancellationToken ct = default,
         System.Data.IDbTransaction? transaction = null,
-        bool suppressInterception = false);
+        bool suppressInterception = false,
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
 }
 
 public sealed class RecordWriteService : IRecordWriteService
@@ -98,7 +99,8 @@ public sealed class RecordWriteService : IRecordWriteService
         string entityTitle,
         CancellationToken ct = default,
         System.Data.IDbTransaction? transaction = null,
-        bool suppressInterception = false)
+        bool suppressInterception = false,
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
     {
         // Reference fields must point at an existing parent record.
         var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
@@ -115,7 +117,7 @@ public sealed class RecordWriteService : IRecordWriteService
         var recordId = Convert.ToInt64(oldRecord["Id"]);
         await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct);
 
-        await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct);
+        await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct, onIndexMessageCreated);
 
         // Build before/after values and genuinely changed field IDs keyed by f.Id
         var beforeValues = new Dictionary<long, object?>();

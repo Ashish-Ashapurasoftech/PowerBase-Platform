@@ -17,7 +17,7 @@ public class GetPipelineRunStepsQueryHandler
         _pipelineRepo = pipelineRepo;
     }
 
-    public async Task<IReadOnlyList<PipelineStepRunDto>> HandleAsync(GetPipelineRunStepsQuery query, CancellationToken ct = default)
+    public async Task<PipelineStepRunsResultDto> HandleAsync(GetPipelineRunStepsQuery query, CancellationToken ct = default)
     {
         var run = await _pipelineRepo.GetRunByPublicIdAsync(query.RunPublicId, ct);
         if (run == null)
@@ -26,7 +26,12 @@ public class GetPipelineRunStepsQueryHandler
         var steps = await _pipelineRepo.GetStepsByPipelineIdAsync(run.PipelineId, ct);
         var stepsMap = steps.ToDictionary(s => s.Id);
 
-        var stepRuns = await _pipelineRepo.GetStepRunsByRunIdAsync(run.Id, ct);
+        var page = query.Page > 0 ? query.Page : 1;
+        var pageSize = query.PageSize > 0 ? query.PageSize : 50;
+        if (pageSize > 200) pageSize = 200; // Enforce MaxPageSize limit
+
+        var totalCount = await _pipelineRepo.CountStepRunsByRunIdAsync(run.Id, ct);
+        var stepRuns = await _pipelineRepo.GetStepRunsByRunIdAsync(run.Id, page, pageSize, ct);
 
         var items = stepRuns.Select(sr => {
             var stepExists = stepsMap.TryGetValue(sr.StepId, out var step);
@@ -46,6 +51,6 @@ public class GetPipelineRunStepsQueryHandler
             );
         }).ToList();
 
-        return items;
+        return new PipelineStepRunsResultDto(items, totalCount, page, pageSize);
     }
 }

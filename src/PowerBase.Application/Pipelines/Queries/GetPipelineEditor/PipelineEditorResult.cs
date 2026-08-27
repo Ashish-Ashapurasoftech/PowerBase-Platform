@@ -116,6 +116,12 @@ public enum PipelineEditorRefReason
     AccessDenied,
     /// <summary>The tenant identified by connectionPublicId could not be resolved.</summary>
     TenantNotFound,
+    /// <summary>
+    /// The connectionPublicId is a saved PowerFlows account whose credential can no longer be
+    /// honoured (revoked token, the token owner left the realm). The step keeps its stored ids;
+    /// the editor must tell the user to reconnect rather than silently show owner-tenant fields.
+    /// </summary>
+    ConnectionUnavailable,
     /// <summary>An unexpected infrastructure error occurred resolving this reference.</summary>
     ResolutionError
 }

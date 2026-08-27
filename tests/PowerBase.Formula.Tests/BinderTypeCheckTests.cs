@@ -17,7 +17,9 @@ public class BinderTypeCheckTests
         .Add("Flag", FormulaType.Bool)
         .Add("Start", FormulaType.Date)
         .Add("End", FormulaType.Date)
-        .Add("Span", FormulaType.Duration);
+        .Add("Span", FormulaType.Duration)
+        .Add("Clock", FormulaType.Time)
+        .Add("Clock2", FormulaType.Time);
 
     private static CompiledFormula Compile(string expr, FormulaType? expected = null) => Engine.Compile(expr, Schema(), expected);
 
@@ -75,6 +77,19 @@ public class BinderTypeCheckTests
     [InlineData("[Span] + [Span]", FormulaType.Duration)]  // Duration + Duration
     [InlineData("[Span] * 2", FormulaType.Duration)]       // Duration * Number
     public void Date_and_duration_arithmetic(string expr, FormulaType expected)
+    {
+        var c = Compile(expr);
+        c.HasErrors.Should().BeFalse();
+        c.ResultType.Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData("[Clock2] - [Clock]", FormulaType.Duration)]  // Time - Time → Duration
+    [InlineData("[Clock] + [Span]", FormulaType.Time)]        // Time + Duration → Time
+    [InlineData("[Clock] - [Span]", FormulaType.Time)]        // Time - Duration → Time
+    [InlineData("[Clock] < [Clock2]", FormulaType.Bool)]      // Time ordering
+    [InlineData("[Clock] = [Clock2]", FormulaType.Bool)]      // Time equality
+    public void Time_arithmetic_and_comparison(string expr, FormulaType expected)
     {
         var c = Compile(expr);
         c.HasErrors.Should().BeFalse();

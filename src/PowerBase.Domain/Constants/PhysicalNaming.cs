@@ -28,7 +28,15 @@ public static class PhysicalNaming
     /// value is never stored; clicking it writes to other fields via a dedicated endpoint.
     /// </summary>
     public static bool IsComputedTypeCode(string typeCode) =>
-        typeCode is "Formula" or "Lookup" or "Summary" or "ReportLink" || IsActionButtonTypeCode(typeCode);
+        typeCode is "Formula" or "Lookup" or "Summary" or "ReportLink"
+        || IsActionButtonTypeCode(typeCode) || IsFormulaVariantTypeCode(typeCode);
+
+    /// <summary>True for the generic 'Formula' TypeCode's per-variant codes (Formula_Text,
+    /// Formula_Number, Formula_Time, …) — mirrors <see cref="IsActionButtonTypeCode"/>'s
+    /// StartsWith pattern for the same reason: each variant is a distinct, independently
+    /// selectable TypeCode, not a Settings.Variant discriminator on one generic row.</summary>
+    public static bool IsFormulaVariantTypeCode(string typeCode) =>
+        typeCode.StartsWith("Formula_", StringComparison.Ordinal);
 
     /// <summary>True for the generic 'ActionButton' TypeCode and its four per-variant codes
     /// (ActionButton_Signature/File/Prompt/Data). Different tenant databases can have either

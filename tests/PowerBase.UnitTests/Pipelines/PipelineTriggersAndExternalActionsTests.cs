@@ -82,7 +82,7 @@ public class PipelineTriggersAndExternalActionsTests
     }
 
     [Fact]
-    public async Task RunPipelineAttemptAsync_DepthExceedsLimit_AbortsExecutionAndSendsAlert()
+    public async Task RunPipelineAttemptAsync_DepthExceedsLimit_DoesNotAbortExecution()
     {
         // Arrange
         var task = new PipelineExecutionTask
@@ -98,6 +98,9 @@ public class PipelineTriggersAndExternalActionsTests
         _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>())
             .Returns((Guid.NewGuid(), 1L));
 
+        _pipelineRepo.GetStepsByPipelineIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new List<PipelineStep>());
+
         // Act
         var act = () => _engine.ExecuteAsync(task, CancellationToken.None);
 
@@ -105,14 +108,14 @@ public class PipelineTriggersAndExternalActionsTests
         await act.Should().NotThrowAsync();
         
         await _pipelineRepo.Received(1).UpdateRunAsync(
-            Arg.Is<PipelineRun>(r => r.Status == "Failed" && r.ErrorMessage.Contains("recursion")),
+            Arg.Is<PipelineRun>(r => r.Status == "Skipped"),
             Arg.Any<CancellationToken>());
 
-        await _emailService.Received(1).SendRecursionAlertEmailAsync(
-            1,
-            task.CorrelationId,
-            11,
-            Arg.Is<string>(s => s.Contains("recursion")),
+        await _emailService.DidNotReceive().SendRecursionAlertEmailAsync(
+            Arg.Any<long>(),
+            Arg.Any<string>(),
+            Arg.Any<int>(),
+            Arg.Any<string>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -1162,7 +1165,7 @@ public class PipelineTriggersAndExternalActionsTests
         queryContext.UserId.Returns(101L);
 
         var handler = new BulkDeleteRecordsCommandHandler(
-            tableRepo, fieldRepo, recordRepo, enforcer, Substitute.For<IAuditRepository>(), Substitute.For<IRelationshipRepository>(), triggerInterceptor, uow, queryContext
+            tableRepo, fieldRepo, recordRepo, enforcer, Substitute.For<IAuditRepository>(), Substitute.For<IRelationshipRepository>(), triggerInterceptor, uow, queryContext, Substitute.For<IMessagePublisher>()
         );
 
         var recordId = Guid.NewGuid();
@@ -1178,6 +1181,301 @@ public class PipelineTriggersAndExternalActionsTests
         // Verify snapshots are captured with correct before values and stable FIDs and pass the user context (101L)
         await triggerInterceptor.Received(1).InterceptBulkAsync(
             table, fields, Arg.Is<IReadOnlyList<PowerBase.Application.Common.Models.PipelineRecordChange>>(list => list.Count == 1 && list[0].BeforeValues[10] as string == "New"), Arg.Any<Guid>(), Arg.Any<Guid>(), 101L, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Interceptor_CrossTenantTenantConnection_KeepsTenantPublicId()
+    {
+        var table = new AppTable { Id = 1, PublicId = Guid.NewGuid(), Name = "Leads" };
+        var fields = new List<AppField> { new AppField { Id = 10, Fid = 101, Name = "Status", TypeCode = "Text" } };
+
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(dbTx);
+
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        
+        // Sequence return: 1st and 2nd for mockSubs setup (OwnerTenantId = 6, TargetTenantId = 6),
+        // 3rd for isSameTenant comparison (returns 7, so OwnerTenantId (6) != CurrentTenant (7) -> cross-tenant)
+        queryContext.TenantId.Returns(6L, 6L, 7L);
+
+        var mainQueueRepo = Substitute.For<IMainPipelineQueueRepository>();
+        var logger = Substitute.For<ILogger<PipelineTriggerInterceptor>>();
+
+        var connectionPublicId = Guid.NewGuid(); // represents TenantPublicId
+
+        var pipeline = new Pipeline { Id = 101, IsActive = true, IsDeleted = false, PublicId = Guid.NewGuid() };
+        var step = new PipelineStep
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "step_1",
+            Type = "trigger",
+            Subtype = "new-event",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ConnectionPublicId = connectionPublicId.ToString(),
+                AppPublicId = Guid.NewGuid().ToString(),
+                TablePublicId = table.PublicId.ToString(),
+                TriggerOnAdded = true,
+                TriggerOnAnyField = true
+            })
+        };
+
+        pipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { pipeline });
+        pipelineRepo.GetStepsByPipelineIdAsync(101, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep> { step });
+
+        var interceptor = new PipelineTriggerInterceptor(pipelineRepo, recordRepo, queryContext, uow, null!, mainQueueRepo, logger);
+
+        var changes = new List<PowerBase.Application.Common.Models.PipelineRecordChange>
+        {
+            new(Guid.NewGuid(), new Dictionary<long, object?>(), new Dictionary<long, object?> { [10] = "Alice" }, new List<long>(), PipelineRecordEventType.Added)
+        };
+
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
+
+        await mainQueueRepo.Received(1).EnqueueAsync(Arg.Is<PipelineQueue>(job => 
+            HasMatchingConnectionId(job.TriggerPayloadJson, connectionPublicId.ToString())
+        ), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Interceptor_CrossTenantSavedAccountConnection_KeepsPipelineAccountPublicId()
+    {
+        var table = new AppTable { Id = 1, PublicId = Guid.NewGuid(), Name = "Leads" };
+        var fields = new List<AppField> { new AppField { Id = 10, Fid = 101, Name = "Status", TypeCode = "Text" } };
+
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(dbTx);
+
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        
+        // Sequence return for cross-tenant
+        queryContext.TenantId.Returns(6L, 6L, 8L);
+
+        var mainQueueRepo = Substitute.For<IMainPipelineQueueRepository>();
+        var logger = Substitute.For<ILogger<PipelineTriggerInterceptor>>();
+
+        var pipelineAccountPublicId = Guid.NewGuid(); // represents saved PipelineAccount.PublicId
+
+        var pipeline = new Pipeline { Id = 101, IsActive = true, IsDeleted = false, PublicId = Guid.NewGuid() };
+        var step = new PipelineStep
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "step_1",
+            Type = "trigger",
+            Subtype = "new-event",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ConnectionPublicId = pipelineAccountPublicId.ToString(),
+                AppPublicId = Guid.NewGuid().ToString(),
+                TablePublicId = table.PublicId.ToString(),
+                TriggerOnAdded = true,
+                TriggerOnAnyField = true
+            })
+        };
+
+        pipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { pipeline });
+        pipelineRepo.GetStepsByPipelineIdAsync(101, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep> { step });
+
+        var interceptor = new PipelineTriggerInterceptor(pipelineRepo, recordRepo, queryContext, uow, null!, mainQueueRepo, logger);
+
+        var changes = new List<PowerBase.Application.Common.Models.PipelineRecordChange>
+        {
+            new(Guid.NewGuid(), new Dictionary<long, object?>(), new Dictionary<long, object?> { [10] = "Alice" }, new List<long>(), PipelineRecordEventType.Added)
+        };
+
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
+
+        await mainQueueRepo.Received(1).EnqueueAsync(Arg.Is<PipelineQueue>(job => 
+            HasMatchingConnectionId(job.TriggerPayloadJson, pipelineAccountPublicId.ToString())
+        ), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>());
+    }
+
+    private static bool HasMatchingConnectionId(string payloadJson, string expectedGuidStr)
+    {
+        using var doc = JsonDocument.Parse(payloadJson);
+        if (doc.RootElement.TryGetProperty("ConnectionPublicId", out var prop))
+        {
+            return prop.GetString() == expectedGuidStr;
+        }
+        return false;
+    }
+
+    [Fact]
+    public async Task Interceptor_SelfTriggerRecursion_DoesNotSuppressAndPropagatesChainAndDepth()
+    {
+        // Arrange
+        var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid() };
+        var fields = new List<AppField> { new AppField { Id = 10, Fid = 10, Name = "Name", TypeCode = "Text" } };
+
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(dbTx);
+
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        var logger = Substitute.For<ILogger<PipelineTriggerInterceptor>>();
+
+        // Setup QueryContext to mimic running Pipeline 101
+        queryContext.IsPipelineExecution.Returns(true);
+        queryContext.PipelineDepth.Returns(1);
+        queryContext.PipelineChainJson.Returns("[101]");
+
+        // Set up active pipeline 101 trigger
+        var pipeline = new Pipeline { Id = 101, IsActive = true, IsDeleted = false };
+        var step = new PipelineStep
+        {
+            Type = "trigger",
+            Subtype = "new-event",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ConnectionPublicId = Guid.NewGuid().ToString(),
+                AppPublicId = Guid.NewGuid().ToString(),
+                TablePublicId = table.PublicId.ToString(),
+                TriggerOnAdded = true,
+                TriggerOnAnyField = true
+            })
+        };
+
+        pipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { pipeline });
+        pipelineRepo.GetStepsByPipelineIdAsync(101, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep> { step });
+
+        var interceptor = new PipelineTriggerInterceptor(pipelineRepo, recordRepo, queryContext, uow, logger);
+        var changes = new List<PowerBase.Application.Common.Models.PipelineRecordChange>
+        {
+            new(Guid.NewGuid(), new Dictionary<long, object?>(), new Dictionary<long, object?> { [10] = "Value" }, new List<long>(), PipelineRecordEventType.Added)
+        };
+
+        // Act
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
+
+        // Assert: The pipeline is triggered again (depth=2, chain=[101, 101])
+        await pipelineRepo.Received(1).CreateOutboxItemAsync(Arg.Is<PipelineOutboxItem>(item =>
+            item.PipelineId == 101 &&
+            item.Depth == 2 &&
+            item.PipelineChain == "[101,101]"
+        ), dbTx, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Interceptor_CyclicRecurrence_DoesNotSuppressAndPropagatesChainAndDepth()
+    {
+        // Arrange
+        var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid() };
+        var fields = new List<AppField> { new AppField { Id = 10, Fid = 10, Name = "Name", TypeCode = "Text" } };
+
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(dbTx);
+
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        var logger = Substitute.For<ILogger<PipelineTriggerInterceptor>>();
+
+        // Setup QueryContext: A -> B -> A (current chain is [101, 102], executing B, writing event that will trigger A)
+        queryContext.IsPipelineExecution.Returns(true);
+        queryContext.PipelineDepth.Returns(2);
+        queryContext.PipelineChainJson.Returns("[101,102]");
+
+        // Set up active pipeline 101 trigger
+        var pipelineA = new Pipeline { Id = 101, IsActive = true, IsDeleted = false };
+        var stepA = new PipelineStep
+        {
+            Type = "trigger",
+            Subtype = "new-event",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ConnectionPublicId = Guid.NewGuid().ToString(),
+                AppPublicId = Guid.NewGuid().ToString(),
+                TablePublicId = table.PublicId.ToString(),
+                TriggerOnAdded = true,
+                TriggerOnAnyField = true
+            })
+        };
+
+        pipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { pipelineA });
+        pipelineRepo.GetStepsByPipelineIdAsync(101, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep> { stepA });
+
+        var interceptor = new PipelineTriggerInterceptor(pipelineRepo, recordRepo, queryContext, uow, logger);
+        var changes = new List<PowerBase.Application.Common.Models.PipelineRecordChange>
+        {
+            new(Guid.NewGuid(), new Dictionary<long, object?>(), new Dictionary<long, object?> { [10] = "Value" }, new List<long>(), PipelineRecordEventType.Added)
+        };
+
+        // Act
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
+
+        // Assert: A triggers again (depth=3, chain=[101, 102, 101])
+        await pipelineRepo.Received(1).CreateOutboxItemAsync(Arg.Is<PipelineOutboxItem>(item =>
+            item.PipelineId == 101 &&
+            item.Depth == 3 &&
+            item.PipelineChain == "[101,102,101]"
+        ), dbTx, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Interceptor_DepthBoundary_Depth10Allowed_Depth11Allowed()
+    {
+        // Arrange
+        var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid() };
+        var fields = new List<AppField> { new AppField { Id = 10, Fid = 10, Name = "Name", TypeCode = "Text" } };
+
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(dbTx);
+
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        var logger = Substitute.For<ILogger<PipelineTriggerInterceptor>>();
+
+        // Case 1: PipelineDepth is 9 -> currentDepth will be 10 -> Allowed
+        queryContext.IsPipelineExecution.Returns(true);
+        queryContext.PipelineDepth.Returns(9);
+        queryContext.PipelineChainJson.Returns("[101]");
+
+        var pipeline = new Pipeline { Id = 101, IsActive = true, IsDeleted = false };
+        var step = new PipelineStep
+        {
+            Type = "trigger",
+            Subtype = "new-event",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ConnectionPublicId = Guid.NewGuid().ToString(),
+                AppPublicId = Guid.NewGuid().ToString(),
+                TablePublicId = table.PublicId.ToString(),
+                TriggerOnAdded = true,
+                TriggerOnAnyField = true
+            })
+        };
+
+        pipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { pipeline });
+        pipelineRepo.GetStepsByPipelineIdAsync(101, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep> { step });
+
+        var interceptor = new PipelineTriggerInterceptor(pipelineRepo, recordRepo, queryContext, uow, logger);
+        var changes = new List<PowerBase.Application.Common.Models.PipelineRecordChange>
+        {
+            new(Guid.NewGuid(), new Dictionary<long, object?>(), new Dictionary<long, object?> { [10] = "Val" }, new List<long>(), PipelineRecordEventType.Added)
+        };
+
+        // Act & Assert Case 1
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
+        await pipelineRepo.Received(1).CreateOutboxItemAsync(Arg.Is<PipelineOutboxItem>(item => item.Depth == 10), dbTx, Arg.Any<CancellationToken>());
+
+        // Case 2: PipelineDepth is 10 -> currentDepth will be 11 -> Now Allowed
+        queryContext.PipelineDepth.Returns(10);
+        pipelineRepo.ClearReceivedCalls();
+
+        // Act & Assert Case 2
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
+        await pipelineRepo.Received(1).CreateOutboxItemAsync(Arg.Is<PipelineOutboxItem>(item => item.Depth == 11), dbTx, Arg.Any<CancellationToken>());
     }
 }
 

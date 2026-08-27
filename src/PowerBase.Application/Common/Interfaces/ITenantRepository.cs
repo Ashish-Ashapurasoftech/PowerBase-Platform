@@ -8,6 +8,7 @@ namespace PowerBase.Application.Common.Interfaces;
 public interface ITenantRepository
 {
     Task<bool> SlugExistsAsync(string slug, CancellationToken ct = default);
+    Task<Tenant?> GetTenantBySlugAsync(string slug, CancellationToken ct = default);
     Task<string?> GetTenantNameByIdAsync(long tenantId, CancellationToken ct = default);
     Task<long> GetActiveTenantIdByUserIdAsync(long userId, CancellationToken ct = default);
     Task<IReadOnlyList<TenantItem>> ListTenantsForUserAsync(long userId, CancellationToken ct = default);

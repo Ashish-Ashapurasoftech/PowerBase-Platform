@@ -25,38 +25,138 @@ public sealed class ValidationSettings
     public decimal? Max { get; set; }
 }
 
-public sealed class NumberSettings
+// ── Display trio shared by nearly every renderable field type ────────────────
+// Not a nested object on the wire (kept flat on each settings class, matching the
+// pre-existing ReportLinkSettings convention) — this is just a doc-comment anchor;
+// each settings class below declares its own DisplayBold/NoWrap/ColumnWidth members.
+
+public sealed class TextSettings
+{
+    public ValidationSettings? Validation { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+/// <summary>RichText's Behavior Settings are deliberately smaller than Text's — no
+/// bold/no-wrap/regex (rich text already carries its own formatting).</summary>
+public sealed class RichTextSettings
+{
+    public int? MaxLength { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+public sealed class EmailSettings
+{
+    /// <summary>Leave empty to use the email address itself as the link text.</summary>
+    public string? LinkText { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+    /// <summary>Display the entire email address.</summary>
+    public bool? ShowFullAddress { get; set; }
+    /// <summary>Display just the part before "@".</summary>
+    public bool? ShowBeforeAt { get; set; }
+    /// <summary>Display just the part before the first "_".</summary>
+    public bool? ShowBeforeUnderscore { get; set; }
+}
+
+public sealed class PhoneSettings
+{
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+// ── Select (choices themselves stay in General; these are Behavior only) ─────
+// One shared shape for SingleSelect and MultiSelect (the validator has no way to know,
+// at validation time, which of its SupportedTypeCodes triggered a given call — see
+// FieldSettingsValidatorRegistry — so per-typeCode restriction of MaxLength to
+// SingleSelect-only is enforced by the frontend panel, which simply never renders/sends
+// it for MultiSelect).
+
+public sealed class SelectSettingsBase
+{
+    public string[]? Options { get; set; }
+    /// <summary>Max characters override. Meaningful for SingleSelect only.</summary>
+    public int? MaxLength { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+// ── Numeric family: Number / Currency / Percent / Rating ─────────────────────
+// One shared shape for all four TypeCodes. "DisplayAs" is what drives the
+// dynamic field-type switch on save (see NumericDisplayAs / UpdateFieldCommandHandler) —
+// Symbol/Position are meaningful when DisplayAs = Currency, Max when DisplayAs = Rating.
+
+public sealed class NumericSettings
 {
     public int? Decimals { get; set; }
     public string? Separator { get; set; }
     public ValidationSettings? Validation { get; set; }
-}
 
-public sealed class CurrencySettings
-{
+    /// <summary>One of <see cref="NumericDisplayAs"/>. Drives which TypeCode this field
+    /// should have after save — see UpdateFieldCommandHandler.</summary>
+    public string? DisplayAs { get; set; }
+
+    /// <summary>Currency symbol (meaningful when DisplayAs = Currency).</summary>
     public string? Symbol { get; set; }
-    /// <summary>"before" | "after".</summary>
+    /// <summary>One of <see cref="CurrencyPositions"/> (meaningful when DisplayAs = Currency).</summary>
     public string? Position { get; set; }
-    public int? Decimals { get; set; }
-    public string? Separator { get; set; }
-    public ValidationSettings? Validation { get; set; }
-}
-
-public sealed class PercentSettings
-{
-    public int? Decimals { get; set; }
-    public ValidationSettings? Validation { get; set; }
-}
-
-public sealed class RatingSettings
-{
+    /// <summary>Maximum stars, 1-20 (meaningful when DisplayAs = Rating).</summary>
     public int? Max { get; set; }
+
+    /// <summary>Text appended to the field name to describe the values in this field.</summary>
+    public string? UnitsDescription { get; set; }
+    /// <summary>Treat blank values as 0 in calculations. Defaults to true when absent.</summary>
+    public bool? TreatBlankAsZero { get; set; }
+    public bool? ShowTotalInReports { get; set; }
+    public bool? ShowAverageInReports { get; set; }
+
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+public static class NumericDisplayAs
+{
+    public const string Number = "Number";
+    public const string Currency = "Currency";
+    public const string Percent = "Percent";
+    public const string Rating = "Rating";
+    public static readonly string[] All = [Number, Currency, Percent, Rating];
 }
 
 public sealed class DateSettings
 {
+    public bool? ShowMonthName { get; set; }
+    public bool? ShowDayOfWeek { get; set; }
+    /// <summary>Don't show the year for dates that fall in the current year.</summary>
+    public bool? HideYearIfCurrent { get; set; }
+    /// <summary>DateTime only — checked by default. Ignored for plain Date.</summary>
+    public bool? ShowTime { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+/// <summary>Settings for the Time (TimeOfDay) field type.</summary>
+public sealed class TimeSettings
+{
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+    /// <summary>One of <see cref="TimeFormats"/>.</summary>
     public string? Format { get; set; }
-    public bool? DefaultToday { get; set; }
+    public bool? Use24Hour { get; set; }
+}
+
+public static class TimeFormats
+{
+    public const string HHMM = "HHMM";
+    public const string HHMMSS = "HHMMSS";
+    public static readonly string[] All = [HHMM, HHMMSS];
 }
 
 public sealed class DurationSettings
@@ -64,19 +164,65 @@ public sealed class DurationSettings
     /// <summary>One of <see cref="DurationDisplays"/>.</summary>
     public string? Display { get; set; }
     public int? Decimals { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
 }
 
 public sealed class UrlSettings
 {
-    /// <summary>"plain" | "formula" (formula variant deferred).</summary>
-    public string? Variant { get; set; }
-    public string? Template { get; set; }
     public ValidationSettings? Validation { get; set; }
+
+    /// <summary>Leave empty to use the URL itself as the link text.</summary>
+    public string? LinkText { get; set; }
+    /// <summary>Don't show "http://" when showing the URL.</summary>
+    public bool? HideProtocol { get; set; }
+    /// <summary>Display as a button on forms and reports.</summary>
+    public bool? DisplayAsButton { get; set; }
+    /// <summary>Embed as an iframe in forms.</summary>
+    public bool? EmbedAsIframe { get; set; }
+    /// <summary>One of <see cref="UrlOpenTargets"/>.</summary>
+    public string? OpenTarget { get; set; }
+
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
 }
 
-public sealed class TextSettings
+/// <summary>
+/// Configuration for a Formula URL field: a computed field (see PhysicalNaming.IsComputedTypeCode)
+/// whose value is the Text result of evaluating <see cref="Template"/> against the record,
+/// same as a Formula field — see FormulaProjector/FormulaTypeMap.FormulaUrlTemplate. Split out
+/// from the plain Url field type (which used to carry this as a "formula variant") so the two
+/// are independently selectable field types.
+/// </summary>
+public sealed class FormulaUrlSettings
 {
-    public ValidationSettings? Validation { get; set; }
+    /// <summary>The Quickbase-style formula expression text; must evaluate to Text.</summary>
+    public string? Template { get; set; }
+
+    /// <summary>Leave empty to use the computed URL itself as the link text.</summary>
+    public string? LinkText { get; set; }
+    /// <summary>Don't show "http://" when showing the URL.</summary>
+    public bool? HideProtocol { get; set; }
+    /// <summary>Display as a button on forms and reports.</summary>
+    public bool? DisplayAsButton { get; set; }
+    /// <summary>Embed as an iframe in forms.</summary>
+    public bool? EmbedAsIframe { get; set; }
+    /// <summary>One of <see cref="UrlOpenTargets"/>.</summary>
+    public string? OpenTarget { get; set; }
+
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+public static class UrlOpenTargets
+{
+    public const string SamePage = "SamePage";
+    public const string NewWindow = "NewWindow";
+    public const string Popup = "Popup";
+    public static readonly string[] All = [SamePage, NewWindow, Popup];
 }
 
 public static class CurrencyPositions
@@ -84,13 +230,6 @@ public static class CurrencyPositions
     public const string Before = "before";
     public const string After = "after";
     public static readonly string[] All = [Before, After];
-}
-
-public static class UrlVariants
-{
-    public const string Plain = "plain";
-    public const string Formula = "formula";
-    public static readonly string[] All = [Plain, Formula];
 }
 
 public static class DurationDisplays
@@ -112,6 +251,79 @@ public sealed class NumericRangeSettings
 {
     public int? Decimals { get; set; }
     public string? Separator { get; set; }
+}
+
+// ── Checkbox (Boolean) ────────────────────────────────────────────────────────
+
+public sealed class BooleanSettings
+{
+    /// <summary>Show the value as "Yes"/"No" in reports instead of a checkbox glyph.</summary>
+    public bool? ShowYesNo { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+// ── File Attachment ───────────────────────────────────────────────────────────
+
+public sealed class FileSettings
+{
+    /// <summary>Leave empty to use the file name as the link text.</summary>
+    public string? LinkText { get; set; }
+    /// <summary>Show .jpg/.png/.gif files as images in forms.</summary>
+    public bool? ShowImagePreview { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+// ── Address ────────────────────────────────────────────────────────────────────
+
+public sealed class AddressSettings
+{
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+// ── User / MultiUser ──────────────────────────────────────────────────────────
+
+public sealed class UserFieldSettings
+{
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+    /// <summary>One of <see cref="UserDisplayAsOptions"/>.</summary>
+    public string? DisplayAs { get; set; }
+    /// <summary>One of <see cref="UserSetModes"/>.</summary>
+    public string? UserSetMode { get; set; }
+    /// <summary>PublicIds of the allowed users when UserSetMode = Custom.</summary>
+    public string[]? CustomUserPublicIds { get; set; }
+}
+
+public sealed class MultiUserFieldSettings
+{
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+    /// <summary>One of <see cref="UserSetModes"/>.</summary>
+    public string? UserSetMode { get; set; }
+    public string[]? CustomUserPublicIds { get; set; }
+}
+
+public static class UserDisplayAsOptions
+{
+    public const string FullName = "FullName";
+    public const string LastFirst = "LastFirst";
+    public const string UserName = "UserName";
+    public static readonly string[] All = [FullName, LastFirst, UserName];
+}
+
+public static class UserSetModes
+{
+    public const string Default = "Default";
+    public const string Custom = "Custom";
+    public static readonly string[] All = [Default, Custom];
 }
 
 /// <summary>
@@ -149,6 +361,155 @@ public static class FormulaResultTypes
     public const string User = "User";
 
     public static readonly string[] All = [Text, Number, Date, DateTime, Duration, Bool, User];
+}
+
+// ── Formula field-type family: one dedicated settings class per Formula_{X}
+// TypeCode (Formula_Text, Formula_Number, …), each carrying its own Expression
+// plus exactly the Behavior Settings for that result type — distinct from (not a
+// copy of) the corresponding plain type's settings class, since a computed value
+// has no user-entered validation and several variants deliberately drop/add
+// fields relative to their plain counterpart (see FIELD_TYPES spec). The legacy
+// generic FormulaSettings/FormulaResultTypes above are unchanged and still serve
+// the bare "Formula" TypeCode.
+
+public sealed class FormulaTextSettings
+{
+    public string? Expression { get; set; }
+    public int? MaxLength { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+    /// <summary>Same meaning as <see cref="FormulaSettings.ReturnsButton"/>.</summary>
+    public bool? ReturnsButton { get; set; }
+}
+
+public sealed class FormulaNumericSettings
+{
+    public string? Expression { get; set; }
+    public int? Decimals { get; set; }
+    public string? Separator { get; set; }
+    /// <summary>One of <see cref="NumberDisplayPatterns"/> — digit-grouping style
+    /// (Standard 3-digit vs Indian lakh/crore), independent of Separator.</summary>
+    public string? DigitGrouping { get; set; }
+    /// <summary>One of <see cref="NumericDisplayAs"/>.</summary>
+    public string? DisplayAs { get; set; }
+    public string? Symbol { get; set; }
+    /// <summary>One of <see cref="FormulaCurrencyPositions"/> — three options here (the plain
+    /// Numeric family's <see cref="CurrencyPositions"/> only has two), per spec: "before number,
+    /// between '-' and the number, after number".</summary>
+    public string? Position { get; set; }
+    /// <summary>Maximum stars, 1-20 (DisplayAs = Rating).</summary>
+    public int? Max { get; set; }
+    public string? UnitsDescription { get; set; }
+    public bool? ShowTotalInReports { get; set; }
+    public bool? ShowAverageInReports { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+/// <summary>Formula_Number's currency-symbol position — three options, unlike the plain Numeric
+/// family's two (<see cref="CurrencyPositions"/>): "before number, between '-' and the number,
+/// after number" (spec, Formula Fields category, item 21).</summary>
+public static class FormulaCurrencyPositions
+{
+    public const string Before = "before";
+    /// <summary>Symbol sits between the negative sign and the digits, e.g. "-$100".</summary>
+    public const string BetweenSignAndNumber = "betweenSignAndNumber";
+    public const string After = "after";
+    public static readonly string[] All = [Before, BetweenSignAndNumber, After];
+}
+
+public static class NumberDisplayPatterns
+{
+    public const string Standard = "Standard";
+    public const string Indian = "Indian";
+    public static readonly string[] All = [Standard, Indian];
+}
+
+/// <summary>Shared by Formula_Date and Formula_DateTime — ShowTime only meaningful for the latter.</summary>
+public sealed class FormulaDateSettings
+{
+    public string? Expression { get; set; }
+    public bool? ShowMonthName { get; set; }
+    public bool? ShowDayOfWeek { get; set; }
+    public bool? HideYearIfCurrent { get; set; }
+    /// <summary>Formula_DateTime only. Ignored for Formula_Date.</summary>
+    public bool? ShowTime { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+public sealed class FormulaTimeSettings
+{
+    public string? Expression { get; set; }
+    /// <summary>One of <see cref="TimeFormats"/>.</summary>
+    public string? Format { get; set; }
+    public bool? Use24Hour { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+public sealed class FormulaDurationSettings
+{
+    public string? Expression { get; set; }
+    /// <summary>One of <see cref="DurationDisplays"/>.</summary>
+    public string? Display { get; set; }
+    public bool? ShowTotalInReports { get; set; }
+    public bool? ShowAverageInReports { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+public sealed class FormulaBooleanSettings
+{
+    public string? Expression { get; set; }
+    /// <summary>Show a totals row (count of true) in reports.</summary>
+    public bool? ShowTotalsRow { get; set; }
+    public bool? ShowYesNo { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+public sealed class FormulaPhoneSettings
+{
+    public string? Expression { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+public sealed class FormulaEmailSettings
+{
+    public string? Expression { get; set; }
+    public string? LinkText { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+    public bool? ShowFullAddress { get; set; }
+    public bool? ShowBeforeAt { get; set; }
+    public bool? ShowBeforeUnderscore { get; set; }
+}
+
+public sealed class FormulaUserSettings
+{
+    public string? Expression { get; set; }
+    /// <summary>One of <see cref="UserDisplayAsOptions"/>.</summary>
+    public string? DisplayAs { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
+public sealed class FormulaRichTextSettings
+{
+    public string? Expression { get; set; }
+    public int? MaxLength { get; set; }
+    public int? ColumnWidth { get; set; }
 }
 
 // ── Relationship field settings ──────────────────────────────────────────────

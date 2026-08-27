@@ -78,6 +78,25 @@ public class PipelineSchedulerWorker : BackgroundService
             return;
         }
 
+        // Bounded Outstanding-Work Discovery (queries Control DB exactly once)
+        Dictionary<long, List<long>> outstandingWork = new();
+        try
+        {
+            await using var conn = _controlConnectionFactory.Create();
+            await conn.OpenAsync(ct);
+            var discoverySql = "SELECT DISTINCT TenantId, PipelineId FROM meta.PipelineQueue WHERE Status = 'Pending';";
+            var pendingJobs = await conn.QueryAsync<(long TenantId, long PipelineId)>(
+                new CommandDefinition(discoverySql, cancellationToken: ct));
+
+            outstandingWork = pendingJobs
+                .GroupBy(j => j.TenantId)
+                .ToDictionary(g => g.Key, g => g.Select(j => j.PipelineId).Distinct().ToList());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to discover outstanding queue work for reconciliation.");
+        }
+
         // 2. Evaluate schedules per tenant
         foreach (var tenantId in tenantIds)
         {
@@ -108,12 +127,60 @@ public class PipelineSchedulerWorker : BackgroundService
                 {
                     var pipelineRepo = scope.ServiceProvider.GetRequiredService<IPipelineRepository>();
                     var queue = scope.ServiceProvider.GetRequiredService<IPipelineExecutionQueue>();
+                    var queueRepo = scope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
 
                     var utcNow = DateTime.UtcNow;
 
+                    // Combined metadata query (1 Tenant DB query instead of 3)
+                    var metadata = await pipelineRepo.GetSchedulerMetadataAsync(ct);
+
+                    // Bounded Queue Reconciliation Sweep (self-healing recovery)
+                    if (outstandingWork.TryGetValue(tenantId, out var pendingPipelineIds) && pendingPipelineIds.Count > 0)
+                    {
+                        var pipelineStates = await pipelineRepo.GetPipelineStatesAsync(pendingPipelineIds, ct);
+                        var activePipelineIds = new List<long>();
+                        var deletedPipelineIds = new List<long>();
+
+                        var queriedIds = pipelineStates.Select(p => p.Id).ToHashSet();
+                        
+                        // Orphaned/missing pipelines that exist in Queue but not in Pipeline table
+                        var missingIds = pendingPipelineIds.Where(id => !queriedIds.Contains(id)).ToList();
+                        deletedPipelineIds.AddRange(missingIds);
+
+                        foreach (var state in pipelineStates)
+                        {
+                            if (state.IsDeleted)
+                            {
+                                deletedPipelineIds.Add(state.Id);
+                            }
+                            else if (state.IsActive)
+                            {
+                                activePipelineIds.Add(state.Id);
+                            }
+                        }
+
+                        var sentinelDate = new DateTime(9999, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+                        if (activePipelineIds.Count > 0)
+                        {
+                            var resumedCount = await queueRepo.ResumePendingJobsForPipelinesAsync(tenantId, activePipelineIds, sentinelDate, ct);
+                            if (resumedCount > 0)
+                            {
+                                _logger.LogInformation("Recovery sweep: Resumed {ResumedCount} sentinel-paused pending jobs for active pipelines in Tenant {TenantId}.", resumedCount, tenantId);
+                            }
+                        }
+
+                        if (deletedPipelineIds.Count > 0)
+                        {
+                            var cancelledCount = await queueRepo.CancelPendingJobsForPipelinesAsync(tenantId, deletedPipelineIds, "Pipeline deleted", ct);
+                            if (cancelledCount > 0)
+                            {
+                                _logger.LogInformation("Recovery sweep: Cancelled {CancelledCount} pending jobs for deleted/missing pipelines in Tenant {TenantId}.", cancelledCount, tenantId);
+                            }
+                        }
+                    }
+
                     // Route 1: Evaluate Existing Schedule Steps (Unchanged canvas-level trigger blocks)
-                    var activeScheduleSteps = await pipelineRepo.GetActiveScheduleStepsAsync(ct);
-                    foreach (var step in activeScheduleSteps)
+                    foreach (var step in metadata.ActiveScheduleSteps)
                     {
                         if (ct.IsCancellationRequested) break;
 
@@ -149,9 +216,32 @@ public class PipelineSchedulerWorker : BackgroundService
                             if (occurrences.Count > 0)
                             {
                                 var latestOccurrenceLocal = occurrences.Last();
-                                var latestOccurrenceUtc = TimeZoneInfo.ConvertTimeToUtc(latestOccurrenceLocal, timeZoneInfo);
+                                var latestOccurrenceUtc = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(latestOccurrenceLocal, timeZoneInfo));
 
                                 var pipeline = await pipelineRepo.GetByIdAsync(step.PipelineId, ct);
+                                if (pipeline == null || !pipeline.IsActive || pipeline.IsDeleted)
+                                {
+                                    continue;
+                                }
+
+                                // Authoritative current-state check
+                                var currentSteps = await pipelineRepo.GetStepsByPipelineIdAsync(step.PipelineId, ct);
+                                var activeSteps = currentSteps.Where(s => !s.IsDeleted).ToList();
+                                var rootSteps = activeSteps.Where(s => s.ParentStepId == null).ToList();
+
+                                if (rootSteps.Count != 1)
+                                {
+                                    _logger.LogWarning("Skipping scheduled enqueue for Step {StepId} of Pipeline {PipelineId}: Multiple active root steps found.", step.Id, step.PipelineId);
+                                    continue;
+                                }
+
+                                var rootStep = rootSteps[0];
+                                if (rootStep == null || rootStep.Type != "trigger" || rootStep.Subtype != "schedule" || rootStep.Id != step.Id)
+                                {
+                                    _logger.LogWarning("Skipping scheduled enqueue for Step {StepId} of Pipeline {PipelineId}: root step trigger mismatch or invalid configuration.", step.Id, step.PipelineId);
+                                    continue;
+                                }
+
                                 Guid messageId;
                                 if (pipeline != null)
                                 {
@@ -179,7 +269,7 @@ public class PipelineSchedulerWorker : BackgroundService
                                         TriggerStepId = step.Id,
                                         TriggerStepRefId = step.RefId
                                     }),
-                                    TriggeredBy = 0,
+                                    TriggeredBy = pipeline.CreatedBy,
                                     VariablesJson = null,
                                     CorrelationId = Guid.NewGuid().ToString(),
                                     Depth = 1,
@@ -204,7 +294,7 @@ public class PipelineSchedulerWorker : BackgroundService
 
                                 if (enqueueSuccess)
                                 {
-                                    await pipelineRepo.UpdateStepLastTriggeredOnAsync(step.Id, step.LastTriggeredOn, latestOccurrenceUtc, ct);
+                                    await pipelineRepo.UpdateStepLastTriggeredOnAsync(step.Id, step.LastTriggeredOn, latestOccurrenceUtc, step.RowVersion, ct);
                                     _logger.LogInformation("Enqueued scheduled pipeline execution for Step {StepId} (Tenant {TenantId}) at scheduled local time {ScheduledTime}.", step.Id, tenantId, latestOccurrenceLocal);
                                 }
                             }
@@ -216,8 +306,7 @@ public class PipelineSchedulerWorker : BackgroundService
                     }
 
                     // Route 2: Evaluate New Pipeline-Level Schedules
-                    var activeSchedules = await pipelineRepo.GetActivePipelineSchedulesAsync(ct);
-                    foreach (var sched in activeSchedules)
+                    foreach (var sched in metadata.ActiveSchedules)
                     {
                         if (ct.IsCancellationRequested) break;
 
@@ -237,13 +326,29 @@ public class PipelineSchedulerWorker : BackgroundService
                             // Initialize NextRunOn if missing (fresh start or reactivation)
                             if (!sched.NextRunOn.HasValue)
                             {
-                                var scheduleInstance = CrontabSchedule.Parse(sched.CronExpression);
-                                var startForNext = sched.LastRunOn.HasValue
-                                    ? TimeZoneInfo.ConvertTimeFromUtc(sched.LastRunOn.Value, timeZoneInfo)
-                                    : nowLocal.AddMinutes(-1);
-                                var nextOccurrenceLocal = scheduleInstance.GetNextOccurrence(startForNext);
-                                sched.NextRunOn = TimeZoneInfo.ConvertTimeToUtc(nextOccurrenceLocal, timeZoneInfo);
+                                try
+                                {
+                                    var scheduleInstance = CrontabSchedule.Parse(sched.CronExpression);
+                                    var startForNext = sched.LastRunOn.HasValue
+                                        ? TimeZoneInfo.ConvertTimeFromUtc(sched.LastRunOn.Value, timeZoneInfo)
+                                        : nowLocal.AddMinutes(-1);
+                                    var nextOccurrenceLocal = scheduleInstance.GetNextOccurrence(startForNext);
+                                    sched.NextRunOn = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextOccurrenceLocal, timeZoneInfo));
+                                }
+                                catch (ArgumentException)
+                                {
+                                    // POWERFLOWS SAFETY BEHAVIOR — QUICKBASE PARITY UNVERIFIED
+                                    // Defer nonexistent local hour (Spring Forward gap)
+                                    var startForNext = sched.LastRunOn.HasValue
+                                        ? TimeZoneInfo.ConvertTimeFromUtc(sched.LastRunOn.Value, timeZoneInfo).AddHours(1)
+                                        : nowLocal.AddHours(1);
+                                    var scheduleInstance = CrontabSchedule.Parse(sched.CronExpression);
+                                    var nextOccurrenceLocal = scheduleInstance.GetNextOccurrence(startForNext);
+                                    sched.NextRunOn = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextOccurrenceLocal, timeZoneInfo));
+                                    _logger.LogWarning("DST Spring Forward: skipped invalid local time for schedule {ScheduleId}, advanced next occurrence.", sched.Id);
+                                }
                                 await pipelineRepo.UpdateScheduleAsync(sched, transaction: null, ct);
+                                continue;
                             }
 
                             // If NextRunOn is in the future, skip
@@ -253,16 +358,44 @@ public class PipelineSchedulerWorker : BackgroundService
                             }
 
                             // We are due! Trigger enqueuing
-                            var latestOccurrenceUtc = sched.NextRunOn.Value;
+                            var latestOccurrenceUtc = TrimToMilliseconds(sched.NextRunOn.Value);
                             var latestOccurrenceLocal = TimeZoneInfo.ConvertTimeFromUtc(latestOccurrenceUtc, timeZoneInfo);
 
                             // Compute NextRunOn strictly starting from nowLocal to prevent backlog/stampede
-                            var scheduleInstance2 = CrontabSchedule.Parse(sched.CronExpression);
-                            var nextRunLocal = scheduleInstance2.GetNextOccurrence(nowLocal);
-                            var nextRunUtc = TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo);
+                            DateTime nextRunUtc;
+                            try
+                            {
+                                var scheduleInstance2 = CrontabSchedule.Parse(sched.CronExpression);
+                                var nextRunLocal = scheduleInstance2.GetNextOccurrence(nowLocal);
+                                nextRunUtc = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo));
+                            }
+                            catch (ArgumentException)
+                            {
+                                // POWERFLOWS SAFETY BEHAVIOR — QUICKBASE PARITY UNVERIFIED
+                                // Defer nonexistent local hour (Spring Forward gap)
+                                var scheduleInstance2 = CrontabSchedule.Parse(sched.CronExpression);
+                                var nextRunLocal = scheduleInstance2.GetNextOccurrence(nowLocal.AddHours(1));
+                                nextRunUtc = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo));
+                                _logger.LogWarning("DST Spring Forward: skipped invalid local time for schedule {ScheduleId}, advanced next run time.", sched.Id);
+                            }
 
                             // Distributed CAS lock on schedule metadata
                             var pipeline = await pipelineRepo.GetByIdAsync(sched.PipelineId, ct);
+                            if (pipeline == null || !pipeline.IsActive || pipeline.IsDeleted)
+                            {
+                                continue;
+                            }
+
+                            // Authoritative current-state check using centralized helper
+                            var currentSteps = await pipelineRepo.GetStepsByPipelineIdAsync(sched.PipelineId, ct);
+                            var activeSteps = currentSteps.Where(s => !s.IsDeleted).ToList();
+
+                            if (!PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(activeSteps))
+                            {
+                                _logger.LogWarning("Skipping scheduled enqueue for Schedule {ScheduleId} of Pipeline {PipelineId}: step configuration is not scheduleable.", sched.Id, sched.PipelineId);
+                                continue;
+                            }
+
                             Guid messageId;
                             if (pipeline != null)
                             {
@@ -288,7 +421,7 @@ public class PipelineSchedulerWorker : BackgroundService
                                     ScheduledTime = latestOccurrenceLocal,
                                     CronExpression = sched.CronExpression
                                 }),
-                                TriggeredBy = 0,
+                                TriggeredBy = pipeline.CreatedBy,
                                 VariablesJson = null,
                                 CorrelationId = Guid.NewGuid().ToString(),
                                 Depth = 1,
@@ -313,7 +446,7 @@ public class PipelineSchedulerWorker : BackgroundService
 
                             if (enqueueSuccess)
                             {
-                                await pipelineRepo.UpdateScheduleLastAndNextRunOnAsync(sched.Id, sched.LastRunOn, latestOccurrenceUtc, nextRunUtc, ct);
+                                await pipelineRepo.UpdateScheduleLastAndNextRunOnAsync(sched.Id, sched.LastRunOn, latestOccurrenceUtc, nextRunUtc, sched.RowVersion, ct);
                                 _logger.LogInformation("Enqueued Pipeline-Level scheduled execution for Schedule {ScheduleId} (Tenant {TenantId}) at scheduled local time {ScheduledTime}.", sched.Id, tenantId, latestOccurrenceLocal);
                             }
                         }
@@ -344,6 +477,17 @@ public class PipelineSchedulerWorker : BackgroundService
         }
     }
 
+
+    private static DateTime TrimToMilliseconds(DateTime dt)
+    {
+        return new DateTime(dt.Ticks - (dt.Ticks % TimeSpan.TicksPerMillisecond), dt.Kind);
+    }
+
+    private static DateTime? TrimToMilliseconds(DateTime? dt)
+    {
+        if (!dt.HasValue) return null;
+        return TrimToMilliseconds(dt.Value);
+    }
 
     private class SchedulerStepConfig
     {

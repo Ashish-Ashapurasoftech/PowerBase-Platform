@@ -15,9 +15,19 @@ public class RecordConstraintViolationException : DomainException
 {
     public IReadOnlyList<RecordConstraintViolation> Violations { get; }
 
+    /// <summary>Builds the top-level Message from the individual violation messages (see
+    /// <see cref="PowerBase.Domain.Exceptions.ValidationException"/>'s identical rationale) —
+    /// deduplicated since the same message (e.g. "'Email' is required.") commonly repeats
+    /// across many records in a bulk operation.</summary>
     public RecordConstraintViolationException(IReadOnlyList<RecordConstraintViolation> violations)
-        : base("RECORD_CONSTRAINT_VIOLATION", "One or more records failed field constraint validation.")
+        : base("RECORD_CONSTRAINT_VIOLATION", BuildMessage(violations))
     {
         Violations = violations;
+    }
+
+    private static string BuildMessage(IReadOnlyList<RecordConstraintViolation> violations)
+    {
+        var messages = violations.Select(v => v.Message).Distinct().ToList();
+        return messages.Count > 0 ? string.Join(" ", messages) : "One or more records failed field constraint validation.";
     }
 }

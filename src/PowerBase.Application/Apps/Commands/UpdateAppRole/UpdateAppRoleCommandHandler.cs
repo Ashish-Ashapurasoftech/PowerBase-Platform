@@ -64,8 +64,7 @@ public class UpdateAppRoleCommandHandler
             throw new UnauthorizedActionException("modify your own app role");
         }
 
-        var actorAppUser = await _appUserRepo.GetByAppAndUserAsync(role.AppId, _queryContext.UserId, ct);
-        if (actorAppUser == null && !_queryContext.IsSuperAdmin)
+        if (actorRole == null && !_queryContext.IsSuperAdmin)
         {
             throw new UnauthorizedActionException("You are not a member of this application.");
         }
@@ -125,7 +124,7 @@ public class UpdateAppRoleCommandHandler
         {
             string manageableRolesType = command.ManageableRolesType ?? role.ManageableRolesType;
             int? rank = command.Rank.HasValue ? command.Rank.Value : role.Rank;
-            var allowedIds = command.ManageableRolePublicIds ?? (await _appRoleRepo.GetManageableRolePublicIdsAsync(role.Id, ct)) ?? new List<Guid>();
+            IReadOnlyList<Guid> allowedIds = command.ManageableRolePublicIds ?? (await _appRoleRepo.GetManageableRolePublicIdsAsync(role.Id, ct)) ?? Array.Empty<Guid>();
 
             if (manageableRolesType == "Manual" && allowedIds != null)
             {

@@ -2,12 +2,12 @@ using PowerBase.Domain.FieldSettings;
 
 namespace PowerBase.Application.Fields.Settings;
 
-// ─── Text / Email / Phone ─────────────────────────────────────────────────────
+// ─── Text ───────────────────────────────────────────────────────────────────
 
 public sealed class TextSettingsValidator : FieldSettingsValidatorBase<TextSettings>
 {
     public override IReadOnlyList<string> SupportedTypeCodes =>
-        ["Text", "TextMultiLine", "RichText", "Email", "Phone"];
+        ["Text", "TextMultiLine"];
 
     protected override IDictionary<string, string[]> ValidateTyped(TextSettings s)
     {
@@ -19,17 +19,89 @@ public sealed class TextSettingsValidator : FieldSettingsValidatorBase<TextSetti
         if (s.Validation?.Regex is string rx && !IsValidRegex(rx))
             AddError(errors, "Settings.Validation.Regex", $"'{rx}' is not a valid regular expression.");
 
+        ValidateColumnWidth(s.ColumnWidth, errors);
+
         return errors;
     }
 }
 
-// ─── Number ───────────────────────────────────────────────────────────────────
+// ─── RichText ─────────────────────────────────────────────────────────────────
 
-public sealed class NumberSettingsValidator : FieldSettingsValidatorBase<NumberSettings>
+public sealed class RichTextSettingsValidator : FieldSettingsValidatorBase<RichTextSettings>
 {
-    public override IReadOnlyList<string> SupportedTypeCodes => ["Number"];
+    public override IReadOnlyList<string> SupportedTypeCodes => ["RichText"];
 
-    protected override IDictionary<string, string[]> ValidateTyped(NumberSettings s)
+    protected override IDictionary<string, string[]> ValidateTyped(RichTextSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (s.MaxLength is < 1)
+            AddError(errors, "Settings.MaxLength", "MaxLength must be at least 1.");
+
+        ValidateColumnWidth(s.ColumnWidth, errors);
+
+        return errors;
+    }
+}
+
+// ─── Email ────────────────────────────────────────────────────────────────────
+
+public sealed class EmailSettingsValidator : FieldSettingsValidatorBase<EmailSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Email"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(EmailSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+// ─── Phone ────────────────────────────────────────────────────────────────────
+
+public sealed class PhoneSettingsValidator : FieldSettingsValidatorBase<PhoneSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Phone"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(PhoneSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+// ─── Select (SingleSelect / MultiSelect) ───────────────────────────────────────
+
+public sealed class SelectSettingsValidator : FieldSettingsValidatorBase<SelectSettingsBase>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["SingleSelect", "MultiSelect"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(SelectSettingsBase s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        // MaxLength is only meaningful for SingleSelect — the frontend panel never renders/sends
+        // it for MultiSelect. The validator itself is registered for both typeCodes and (per
+        // FieldSettingsValidatorRegistry) has no way to tell which one triggered a given call, so
+        // it's just range-checked here whenever present, regardless of which type sent it.
+        if (s.MaxLength is < 1)
+            AddError(errors, "Settings.MaxLength", "MaxLength must be at least 1.");
+
+        ValidateColumnWidth(s.ColumnWidth, errors);
+
+        return errors;
+    }
+}
+
+// ─── Numeric family: Number / Currency / Percent / Rating ──────────────────────
+
+public sealed class NumericSettingsValidator : FieldSettingsValidatorBase<NumericSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Number", "Currency", "Percent", "Rating"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(NumericSettings s)
     {
         var errors = new Dictionary<string, string[]>();
 
@@ -39,19 +111,9 @@ public sealed class NumberSettingsValidator : FieldSettingsValidatorBase<NumberS
         if (s.Validation?.Min is decimal min && s.Validation?.Max is decimal max && min > max)
             AddError(errors, "Settings.Validation", "Min must not be greater than Max.");
 
-        return errors;
-    }
-}
-
-// ─── Currency ─────────────────────────────────────────────────────────────────
-
-public sealed class CurrencySettingsValidator : FieldSettingsValidatorBase<CurrencySettings>
-{
-    public override IReadOnlyList<string> SupportedTypeCodes => ["Currency"];
-
-    protected override IDictionary<string, string[]> ValidateTyped(CurrencySettings s)
-    {
-        var errors = new Dictionary<string, string[]>();
+        if (s.DisplayAs is not null && !NumericDisplayAs.All.Contains(s.DisplayAs))
+            AddError(errors, "Settings.DisplayAs",
+                $"DisplayAs must be one of: {string.Join(", ", NumericDisplayAs.All)}.");
 
         if (s.Symbol is not null && s.Symbol.Length > 10)
             AddError(errors, "Settings.Symbol", "Currency symbol must be 10 characters or fewer.");
@@ -60,45 +122,10 @@ public sealed class CurrencySettingsValidator : FieldSettingsValidatorBase<Curre
             AddError(errors, "Settings.Position",
                 $"Position must be one of: {string.Join(", ", CurrencyPositions.All)}.");
 
-        if (s.Decimals is < 0 or > 10)
-            AddError(errors, "Settings.Decimals", "Decimals must be between 0 and 10.");
-
-        return errors;
-    }
-}
-
-// ─── Percent ──────────────────────────────────────────────────────────────────
-
-public sealed class PercentSettingsValidator : FieldSettingsValidatorBase<PercentSettings>
-{
-    public override IReadOnlyList<string> SupportedTypeCodes => ["Percent"];
-
-    protected override IDictionary<string, string[]> ValidateTyped(PercentSettings s)
-    {
-        var errors = new Dictionary<string, string[]>();
-
-        if (s.Decimals is < 0 or > 10)
-            AddError(errors, "Settings.Decimals", "Decimals must be between 0 and 10.");
-
-        if (s.Validation?.Min is decimal min && s.Validation?.Max is decimal max && min > max)
-            AddError(errors, "Settings.Validation", "Min must not be greater than Max.");
-
-        return errors;
-    }
-}
-
-// ─── Rating ───────────────────────────────────────────────────────────────────
-
-public sealed class RatingSettingsValidator : FieldSettingsValidatorBase<RatingSettings>
-{
-    public override IReadOnlyList<string> SupportedTypeCodes => ["Rating"];
-
-    protected override IDictionary<string, string[]> ValidateTyped(RatingSettings s)
-    {
-        var errors = new Dictionary<string, string[]>();
-
         if (s.Max is < 1 or > 20)
             AddError(errors, "Settings.Max", "Rating max must be between 1 and 20.");
+
+        ValidateColumnWidth(s.ColumnWidth, errors);
 
         return errors;
     }
@@ -110,23 +137,31 @@ public sealed class DateSettingsValidator : FieldSettingsValidatorBase<DateSetti
 {
     public override IReadOnlyList<string> SupportedTypeCodes => ["Date", "DateTime"];
 
-    private static readonly string[] ValidFormats =
-    [
-        "MM-DD-YYYY", "DD-MM-YYYY", "YYYY-MM-DD",
-        "MM/DD/YYYY", "DD/MM/YYYY", "YYYY/MM/DD",
-        "MMM D, YYYY", "D MMM YYYY",
-        // DateTime extras
-        "MM-DD-YYYY HH:mm", "DD-MM-YYYY HH:mm", "YYYY-MM-DD HH:mm",
-        "MM/DD/YYYY HH:mm", "DD/MM/YYYY HH:mm",
-    ];
-
     protected override IDictionary<string, string[]> ValidateTyped(DateSettings s)
     {
         var errors = new Dictionary<string, string[]>();
 
-        if (s.Format is not null && !ValidFormats.Contains(s.Format))
+        ValidateColumnWidth(s.ColumnWidth, errors);
+
+        return errors;
+    }
+}
+
+// ─── Time (TimeOfDay) ───────────────────────────────────────────────────────────
+
+public sealed class TimeSettingsValidator : FieldSettingsValidatorBase<TimeSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Time"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(TimeSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (s.Format is not null && !TimeFormats.All.Contains(s.Format))
             AddError(errors, "Settings.Format",
-                $"Format '{s.Format}' is not a recognised date format.");
+                $"Format must be one of: {string.Join(", ", TimeFormats.All)}.");
+
+        ValidateColumnWidth(s.ColumnWidth, errors);
 
         return errors;
     }
@@ -149,6 +184,8 @@ public sealed class DurationSettingsValidator : FieldSettingsValidatorBase<Durat
         if (s.Decimals is < 0 or > 6)
             AddError(errors, "Settings.Decimals", "Decimals must be between 0 and 6.");
 
+        ValidateColumnWidth(s.ColumnWidth, errors);
+
         return errors;
     }
 }
@@ -163,13 +200,37 @@ public sealed class UrlSettingsValidator : FieldSettingsValidatorBase<UrlSetting
     {
         var errors = new Dictionary<string, string[]>();
 
-        if (s.Variant is not null && !UrlVariants.All.Contains(s.Variant))
-            AddError(errors, "Settings.Variant",
-                $"Variant must be one of: {string.Join(", ", UrlVariants.All)}.");
+        if (s.OpenTarget is not null && !UrlOpenTargets.All.Contains(s.OpenTarget))
+            AddError(errors, "Settings.OpenTarget",
+                $"OpenTarget must be one of: {string.Join(", ", UrlOpenTargets.All)}.");
 
-        if (s.Variant == UrlVariants.Formula && string.IsNullOrWhiteSpace(s.Template))
-            AddError(errors, "Settings.Template",
-                "A template is required for formula URL fields.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+
+        return errors;
+    }
+}
+
+// ─── Formula URL ──────────────────────────────────────────────────────────────
+
+public sealed class FormulaUrlSettingsValidator : FieldSettingsValidatorBase<FormulaUrlSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_Url"];
+
+    // Shape-only validation here (no table schema) — matches FormulaSettingsValidator's
+    // approach; the expression is compiled/validated live via the frontend's
+    // /formula/validate call, same as every other Formula-family field.
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaUrlSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (string.IsNullOrWhiteSpace(s.Template))
+            AddError(errors, "Settings.Template", "A formula template is required.");
+
+        if (s.OpenTarget is not null && !UrlOpenTargets.All.Contains(s.OpenTarget))
+            AddError(errors, "Settings.OpenTarget",
+                $"OpenTarget must be one of: {string.Join(", ", UrlOpenTargets.All)}.");
+
+        ValidateColumnWidth(s.ColumnWidth, errors);
 
         return errors;
     }
@@ -202,6 +263,100 @@ public sealed class NumericRangeSettingsValidator : FieldSettingsValidatorBase<N
     }
 }
 
+// ─── Checkbox (Boolean) ───────────────────────────────────────────────────────
+
+public sealed class BooleanSettingsValidator : FieldSettingsValidatorBase<BooleanSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Boolean"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(BooleanSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+// ─── File Attachment ──────────────────────────────────────────────────────────
+
+public sealed class FileSettingsValidator : FieldSettingsValidatorBase<FileSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["File"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FileSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+// ─── Address ──────────────────────────────────────────────────────────────────
+
+public sealed class AddressSettingsValidator : FieldSettingsValidatorBase<AddressSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Address"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(AddressSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+// ─── User ─────────────────────────────────────────────────────────────────────
+
+public sealed class UserFieldSettingsValidator : FieldSettingsValidatorBase<UserFieldSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["User"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(UserFieldSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (s.DisplayAs is not null && !UserDisplayAsOptions.All.Contains(s.DisplayAs))
+            AddError(errors, "Settings.DisplayAs",
+                $"DisplayAs must be one of: {string.Join(", ", UserDisplayAsOptions.All)}.");
+
+        if (s.UserSetMode is not null && !UserSetModes.All.Contains(s.UserSetMode))
+            AddError(errors, "Settings.UserSetMode",
+                $"UserSetMode must be one of: {string.Join(", ", UserSetModes.All)}.");
+
+        if (s.UserSetMode == UserSetModes.Custom && (s.CustomUserPublicIds is null || s.CustomUserPublicIds.Length == 0))
+            AddError(errors, "Settings.CustomUserPublicIds",
+                "At least one user is required when UserSetMode is Custom.");
+
+        ValidateColumnWidth(s.ColumnWidth, errors);
+
+        return errors;
+    }
+}
+
+// ─── MultiUser ────────────────────────────────────────────────────────────────
+
+public sealed class MultiUserFieldSettingsValidator : FieldSettingsValidatorBase<MultiUserFieldSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["MultiUser"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(MultiUserFieldSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+
+        if (s.UserSetMode is not null && !UserSetModes.All.Contains(s.UserSetMode))
+            AddError(errors, "Settings.UserSetMode",
+                $"UserSetMode must be one of: {string.Join(", ", UserSetModes.All)}.");
+
+        if (s.UserSetMode == UserSetModes.Custom && (s.CustomUserPublicIds is null || s.CustomUserPublicIds.Length == 0))
+            AddError(errors, "Settings.CustomUserPublicIds",
+                "At least one user is required when UserSetMode is Custom.");
+
+        ValidateColumnWidth(s.ColumnWidth, errors);
+
+        return errors;
+    }
+}
+
 // ─── Report Link ─────────────────────────────────────────────────────────────
 
 public sealed class ReportLinkSettingsValidator : FieldSettingsValidatorBase<ReportLinkSettings>
@@ -218,8 +373,7 @@ public sealed class ReportLinkSettingsValidator : FieldSettingsValidatorBase<Rep
         if (s.TargetFid is null)
             AddError(errors, "Settings.TargetFid", "A target field is required.");
 
-        if (s.ColumnWidth is < 20 or > 2000)
-            AddError(errors, "Settings.ColumnWidth", "Column width must be between 20 and 2000.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
 
         return errors;
     }
@@ -243,6 +397,179 @@ public sealed class FormulaSettingsValidator : FieldSettingsValidatorBase<Formul
             AddError(errors, "Settings.ResultType",
                 $"Result type must be one of: {string.Join(", ", FormulaResultTypes.All)}.");
 
+        return errors;
+    }
+}
+
+// ─── Formula field-type family (Formula_Text, Formula_Number, …) ──────────────
+// Shape-only validation, same rationale as FormulaSettingsValidator/
+// FormulaUrlSettingsValidator: the expression is compiled/type-checked live via
+// the frontend's /formula/validate call, not re-parsed here.
+
+public sealed class FormulaTextSettingsValidator : FieldSettingsValidatorBase<FormulaTextSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_Text"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaTextSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        if (s.MaxLength is < 1)
+            AddError(errors, "Settings.MaxLength", "MaxLength must be at least 1.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+public sealed class FormulaNumericSettingsValidator : FieldSettingsValidatorBase<FormulaNumericSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_Number"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaNumericSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        if (s.Decimals is < 0 or > 10)
+            AddError(errors, "Settings.Decimals", "Decimals must be between 0 and 10.");
+        if (s.DigitGrouping is not null && !NumberDisplayPatterns.All.Contains(s.DigitGrouping))
+            AddError(errors, "Settings.DigitGrouping",
+                $"DigitGrouping must be one of: {string.Join(", ", NumberDisplayPatterns.All)}.");
+        if (s.DisplayAs is not null && !NumericDisplayAs.All.Contains(s.DisplayAs))
+            AddError(errors, "Settings.DisplayAs",
+                $"DisplayAs must be one of: {string.Join(", ", NumericDisplayAs.All)}.");
+        if (s.Symbol is not null && s.Symbol.Length > 10)
+            AddError(errors, "Settings.Symbol", "Currency symbol must be 10 characters or fewer.");
+        if (s.Position is not null && !FormulaCurrencyPositions.All.Contains(s.Position))
+            AddError(errors, "Settings.Position",
+                $"Position must be one of: {string.Join(", ", FormulaCurrencyPositions.All)}.");
+        if (s.Max is < 1 or > 20)
+            AddError(errors, "Settings.Max", "Rating max must be between 1 and 20.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+public sealed class FormulaDateSettingsValidator : FieldSettingsValidatorBase<FormulaDateSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_Date", "Formula_DateTime"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaDateSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+public sealed class FormulaTimeSettingsValidator : FieldSettingsValidatorBase<FormulaTimeSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_Time"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaTimeSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        if (s.Format is not null && !TimeFormats.All.Contains(s.Format))
+            AddError(errors, "Settings.Format",
+                $"Format must be one of: {string.Join(", ", TimeFormats.All)}.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+public sealed class FormulaDurationSettingsValidator : FieldSettingsValidatorBase<FormulaDurationSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_Duration"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaDurationSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        if (s.Display is not null && !DurationDisplays.All.Contains(s.Display))
+            AddError(errors, "Settings.Display",
+                $"Display must be one of: {string.Join(", ", DurationDisplays.All)}.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+public sealed class FormulaBooleanSettingsValidator : FieldSettingsValidatorBase<FormulaBooleanSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_Bool"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaBooleanSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+public sealed class FormulaPhoneSettingsValidator : FieldSettingsValidatorBase<FormulaPhoneSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_Phone"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaPhoneSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+public sealed class FormulaEmailSettingsValidator : FieldSettingsValidatorBase<FormulaEmailSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_Email"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaEmailSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+public sealed class FormulaUserSettingsValidator : FieldSettingsValidatorBase<FormulaUserSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_User"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaUserSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        if (s.DisplayAs is not null && !UserDisplayAsOptions.All.Contains(s.DisplayAs))
+            AddError(errors, "Settings.DisplayAs",
+                $"DisplayAs must be one of: {string.Join(", ", UserDisplayAsOptions.All)}.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
+public sealed class FormulaRichTextSettingsValidator : FieldSettingsValidatorBase<FormulaRichTextSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_RichText"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaRichTextSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        if (s.MaxLength is < 1)
+            AddError(errors, "Settings.MaxLength", "MaxLength must be at least 1.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
         return errors;
     }
 }

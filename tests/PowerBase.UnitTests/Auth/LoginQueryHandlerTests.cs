@@ -55,7 +55,7 @@ public class LoginQueryHandlerTests
         var sut = CreateSut();
 
         await sut.Invoking(s => s.HandleAsync(new LoginQuery("ghost@example.com", "pass", "127.0.0.1")))
-            .Should().ThrowAsync<UnauthorizedActionException>();
+            .Should().ThrowAsync<BadRequestException>();
     }
 
     [Fact]
@@ -67,7 +67,7 @@ public class LoginQueryHandlerTests
         var sut = CreateSut();
 
         await sut.Invoking(s => s.HandleAsync(new LoginQuery("user@example.com", "wrong", "127.0.0.1")))
-            .Should().ThrowAsync<UnauthorizedActionException>();
+            .Should().ThrowAsync<BadRequestException>();
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public class LoginQueryHandlerTests
         var sut = CreateSut();
 
         await sut.Invoking(s => s.HandleAsync(new LoginQuery("user@example.com", "wrong", "1.2.3.4")))
-            .Should().ThrowAsync<UnauthorizedActionException>();
+            .Should().ThrowAsync<BadRequestException>();
 
         await _auditRepo.Received().RecordLoginAttemptAsync(
             "user@example.com", "1.2.3.4", wasSuccessful: false,

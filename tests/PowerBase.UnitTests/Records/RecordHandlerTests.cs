@@ -1,4 +1,5 @@
 using System.Data;
+using System.Text.Json;
 using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
@@ -25,8 +26,8 @@ public class RecordHandlerTests
     private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
     private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
     private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
+    private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
-    private readonly IFormulaDefaultResolver _formulaDefaults = Substitute.For<IFormulaDefaultResolver>();
     private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
     private readonly PowerBase.Application.Relationships.IRelationalProjector _relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
     private readonly IPipelineTriggerInterceptor _triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
@@ -83,9 +84,9 @@ public class RecordHandlerTests
         var publicId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(publicId);
-        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _formulaDefaults, _triggerInterceptor, _uow);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo, Substitute.For<IMessagePublisher>());
 
         var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId,
             new Dictionary<long, object?> { [1L] = "Alice" }));
@@ -100,11 +101,67 @@ public class RecordHandlerTests
         var table = MakeTable();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { MakeField(1) });
-        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _formulaDefaults, _triggerInterceptor, _uow);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo, Substitute.For<IMessagePublisher>());
 
         await sut.Invoking(s => s.HandleAsync(new CreateRecordCommand(table.PublicId,
                 new Dictionary<long, object?> { [999L] = "X" })))
             .Should().ThrowAsync<ValidationException>();
+    }
+
+    [Fact]
+    public async Task CreateRecord_BooleanDefaultValue_CoercesToBool()
+    {
+        var table = MakeTable();
+        var field = new AppField { Id = 1, Fid = 1, Name = "Active", TypeCode = "Boolean", DefaultValue = "true" };
+        var publicId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
+            .Returns(publicId);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo, Substitute.For<IMessagePublisher>());
+
+        var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
+
+        result.Fields["1"].Should().Be(true);
+    }
+
+    [Fact]
+    public async Task CreateRecord_NumericRangeDefaultValue_ParsesToJsonElementWithStartEnd()
+    {
+        var table = MakeTable();
+        var field = new AppField { Id = 1, Fid = 1, Name = "Range", TypeCode = "NumericRange", DefaultValue = "{\"start\":\"1\",\"end\":\"10\"}" };
+        var publicId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
+            .Returns(publicId);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo, Substitute.For<IMessagePublisher>());
+
+        var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
+
+        var element = (JsonElement)result.Fields["1"]!;
+        element.GetProperty("start").GetString().Should().Be("1");
+        element.GetProperty("end").GetString().Should().Be("10");
+    }
+
+    [Fact]
+    public async Task CreateRecord_UserDefaultValue_CurrentUser_ResolvesToRequestingUserPublicId()
+    {
+        var table = MakeTable();
+        var field = new AppField { Id = 1, Fid = 1, Name = "Owner", TypeCode = "User", DefaultValue = "{\"mode\":\"CurrentUser\"}" };
+        var publicId = Guid.NewGuid();
+        var currentUserPublicId = Guid.NewGuid();
+        _queryContext.UserId.Returns(42L);
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(new User { Id = 42, PublicId = currentUserPublicId });
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
+            .Returns(publicId);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo, Substitute.For<IMessagePublisher>());
+
+        var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
+
+        result.Fields["1"].Should().Be(currentUserPublicId.ToString());
     }
 
     // --- UpdateRecordCommandHandler ---
@@ -118,14 +175,14 @@ public class RecordHandlerTests
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
         IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo, _triggerInterceptor);
-        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow);
+        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow, Substitute.For<IMessagePublisher>());
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, recordId,
             new Dictionary<long, object?> { [1L] = "Updated" }));
 
         await _recordRepo.Received(1).UpdateAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), recordId,
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -133,14 +190,14 @@ public class RecordHandlerTests
     {
         var table = MakeTable();
         IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo, _triggerInterceptor);
-        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow);
+        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow, Substitute.For<IMessagePublisher>());
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, Guid.NewGuid(),
             new Dictionary<long, object?>()));
 
-        await _recordRepo.DidNotReceive().UpdateAsync(
+        await _recordRepo.DidNotReceiveWithAnyArgs().UpdateAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     // --- DeleteRecordCommandHandler ---
@@ -151,11 +208,11 @@ public class RecordHandlerTests
         var table = MakeTable();
         var recordId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
-        var sut = new DeleteRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _relRepo, _triggerInterceptor, _uow);
+        var sut = new DeleteRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _relRepo, _triggerInterceptor, _uow, Substitute.For<IMessagePublisher>());
 
         await sut.HandleAsync(new DeleteRecordCommand(table.PublicId, recordId));
 
-        await _recordRepo.Received(1).DeleteAsync(table, recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).DeleteAsync(table, recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     // --- GetRecordQueryHandler ---
@@ -290,4 +347,48 @@ public class RecordHandlerTests
             Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>(),
             Arg.Any<long?>(), Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task GetActiveRecordIdByPublicIdAsync_UsesActiveRecordPredicate()
+    {
+        var table = MakeTable();
+        var publicId = Guid.NewGuid();
+        _recordRepo.GetActiveRecordIdByPublicIdAsync(table, publicId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(42L);
+
+        var result = await _recordRepo.GetActiveRecordIdByPublicIdAsync(table, publicId, null, CancellationToken.None);
+
+        result.Should().Be(42L);
+        await _recordRepo.Received(1).GetActiveRecordIdByPublicIdAsync(table, publicId, null, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task GetActiveRecordIdsByPublicIdsAsync_UsesActiveRecordPredicate()
+    {
+        var table = MakeTable();
+        var publicIds = new[] { Guid.NewGuid() };
+        var expectedDict = new Dictionary<Guid, long> { [publicIds[0]] = 42L };
+        _recordRepo.GetActiveRecordIdsByPublicIdsAsync(table, publicIds, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(expectedDict);
+
+        var result = await _recordRepo.GetActiveRecordIdsByPublicIdsAsync(table, publicIds, null, CancellationToken.None);
+
+        result.Should().BeEquivalentTo(expectedDict);
+        await _recordRepo.Received(1).GetActiveRecordIdsByPublicIdsAsync(table, publicIds, null, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task GetActiveRecordIdByPublicIdAsync_SoftDeletedRecordNotReturned()
+    {
+        // For a soft-deleted record, active record lookup returns 0 (not found) or throws
+        var table = MakeTable();
+        var publicId = Guid.NewGuid();
+        _recordRepo.GetActiveRecordIdByPublicIdAsync(table, publicId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(0L);
+
+        var result = await _recordRepo.GetActiveRecordIdByPublicIdAsync(table, publicId, null, CancellationToken.None);
+
+        result.Should().Be(0L);
+    }
 }
+

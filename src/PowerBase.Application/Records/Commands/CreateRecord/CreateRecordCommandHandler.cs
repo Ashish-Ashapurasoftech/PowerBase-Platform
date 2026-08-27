@@ -1,7 +1,8 @@
+using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
-using PowerBase.Application.Formulas;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Records.Commands.CreateRecord;
@@ -13,9 +14,12 @@ public class CreateRecordCommandHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
-    private readonly IFormulaDefaultResolver _formulaDefaults;
+    //private readonly IFormulaDefaultResolver _formulaDefaults;
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly ITenantUnitOfWork _uow;
+    private readonly IQueryContext _queryContext;
+    private readonly IUserRepository _userRepo;
+    private readonly IMessagePublisher _messagePublisher;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -23,18 +27,24 @@ public class CreateRecordCommandHandler
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
         IAuditRepository auditRepo,
-        IFormulaDefaultResolver formulaDefaults,
+        //IFormulaDefaultResolver formulaDefaults,
         IPipelineTriggerInterceptor triggerInterceptor,
-        ITenantUnitOfWork uow)
+        ITenantUnitOfWork uow,
+        IQueryContext queryContext,
+        IUserRepository userRepo,
+        IMessagePublisher messagePublisher)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _enforcer = enforcer;
         _auditRepo = auditRepo;
-        _formulaDefaults = formulaDefaults;
+        //_formulaDefaults = formulaDefaults;
         _triggerInterceptor = triggerInterceptor;
         _uow = uow;
+        _queryContext = queryContext;
+        _userRepo = userRepo;
+        _messagePublisher = messagePublisher;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -79,8 +89,11 @@ public class CreateRecordCommandHandler
         {
             if (field.IsSystem || field.IsDeleted || !field.Fid.HasValue || PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
             if (effectiveValues.ContainsKey((long)field.Fid.Value)) continue;
-            if (!string.IsNullOrWhiteSpace(field.DefaultValue))
-                effectiveValues[(long)field.Fid.Value] = _formulaDefaults.Resolve(field.DefaultValue, field, fields, effectiveValues, table);
+            if (string.IsNullOrWhiteSpace(field.DefaultValue)) continue;
+
+            var (apply, value) = await ResolveDefaultValueAsync(field, ct);
+            if (apply)
+                effectiveValues[(long)field.Fid.Value] = value;
         }
 
         // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
@@ -88,10 +101,12 @@ public class CreateRecordCommandHandler
         await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: true, excludeRecordId: null, ct);
 
         Guid publicId;
+        PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;
+
         await _uow.BeginAsync(ct);
         try
         {
-            publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, _uow.Transaction, ct);
+            publicId = await _recordRepo.CreateAsync(table, fields, effectiveValues, _uow.Transaction, ct, msg => indexMessage = msg);
 
             var recordId = await _recordRepo.GetRecordIdByPublicIdAsync(table, publicId, _uow.Transaction, ct);
             effectiveValues[3] = recordId;
@@ -111,6 +126,11 @@ public class CreateRecordCommandHandler
             throw;
         }
 
+        if (indexMessage != null)
+        {
+            _ = _messagePublisher.PublishAsync(indexMessage, default);
+        }
+
         var fieldData = new Dictionary<string, object?>();
         foreach (var field in fields.Where(f => f.Fid.HasValue && effectiveValues.ContainsKey((long)f.Fid.Value)))
             fieldData[field.Fid!.Value.ToString()] = effectiveValues[(long)field.Fid.Value];
@@ -122,5 +142,63 @@ public class CreateRecordCommandHandler
             ModifiedOn = null,
             Fields = fieldData,
         };
+    }
+
+    /// <summary>Interprets a field's stored DefaultValue against its type — most types are a literal
+    /// string copied verbatim, but Boolean/Range/User/MultiUser carry a structured encoding (see
+    /// <see cref="PowerBase.Application.Fields.FieldGeneralSettingsCapability"/> for the shapes) that
+    /// needs coercion/resolution before it can be written. Returns Apply=false when no default should be
+    /// applied (malformed JSON, or a User/MultiUser default whose mode is "None").</summary>
+    private async Task<(bool Apply, object? Value)> ResolveDefaultValueAsync(AppField field, CancellationToken ct)
+    {
+        var raw = field.DefaultValue!;
+        switch (field.TypeCode)
+        {
+            case "Boolean":
+                return (true, string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase));
+
+            case "NumericRange":
+            case "DateRange":
+                try
+                {
+                    using var doc = JsonDocument.Parse(raw);
+                    return (true, doc.RootElement.Clone());
+                }
+                catch (JsonException) { return (false, null); }
+
+            case "User":
+                return await ResolveUserDefaultAsync(raw, isMulti: false, ct);
+
+            case "MultiUser":
+                return await ResolveUserDefaultAsync(raw, isMulti: true, ct);
+
+            default:
+                return (true, raw);
+        }
+    }
+
+    private async Task<(bool Apply, object? Value)> ResolveUserDefaultAsync(string raw, bool isMulti, CancellationToken ct)
+    {
+        string? mode = null;
+        string? userPublicId = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            if (doc.RootElement.TryGetProperty("mode", out var m) && m.ValueKind == JsonValueKind.String)
+                mode = m.GetString();
+            if (doc.RootElement.TryGetProperty("userPublicId", out var u) && u.ValueKind == JsonValueKind.String)
+                userPublicId = u.GetString();
+        }
+        catch (JsonException) { return (false, null); }
+
+        string? resolvedId = mode switch
+        {
+            "CurrentUser" => (await _userRepo.GetByIdAsync(_queryContext.UserId, ct)).PublicId.ToString(),
+            "SpecificUser" => userPublicId,
+            _ => null, // "None" or an unrecognized mode — apply no default.
+        };
+
+        if (resolvedId is null) return (false, null);
+        return (true, isMulti ? JsonSerializer.Serialize(new[] { resolvedId }) : resolvedId);
     }
 }

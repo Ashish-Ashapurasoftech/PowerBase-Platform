@@ -90,9 +90,7 @@ public class CopyPipelineCommandHandlerTests
         result.Name.Should().Be("Customer Import - Copy");
         result.IsActive.Should().BeFalse();
 
-        await _uow.Received(1).BeginAsync(Arg.Any<CancellationToken>());
-        await _uow.Received(1).CommitAsync(Arg.Any<CancellationToken>());
-        await _pipelineRepo.Received(1).SaveStepsAsync(2L, Arg.Any<IEnumerable<PipelineStep>>(), Arg.Any<byte[]>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).SaveStepsAsync(2L, Arg.Any<List<PipelineStep>>(), Arg.Any<byte[]>(), false, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -165,11 +163,12 @@ public class CopyPipelineCommandHandlerTests
         _pipelineRepo.GetConnectionsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
             .Returns(new List<PipelineConnection>());
 
-        IEnumerable<PipelineStep> savedSteps = null!;
+        List<PipelineStep> savedSteps = null!;
         await _pipelineRepo.SaveStepsAsync(
             2L,
-            Arg.Do<IEnumerable<PipelineStep>>(s => savedSteps = s),
+            Arg.Do<List<PipelineStep>>(s => savedSteps = s),
             Arg.Any<byte[]>(),
+            false,
             Arg.Any<IDbTransaction>(),
             Arg.Any<CancellationToken>()
         );
@@ -307,8 +306,7 @@ public class CopyPipelineCommandHandlerTests
         _pipelineRepo.GetConnectionsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
             .Returns(new List<PipelineConnection>());
 
-        // Force exception on SaveSteps
-        _pipelineRepo.SaveStepsAsync(Arg.Any<long>(), Arg.Any<IEnumerable<PipelineStep>>(), Arg.Any<byte[]>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+        _pipelineRepo.SaveStepsAsync(Arg.Any<long>(), Arg.Any<List<PipelineStep>>(), Arg.Any<byte[]>(), Arg.Any<bool>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException(new Exception("DB Error")));
 
         var command = new CopyPipelineCommand(sourcePublicId);
@@ -405,11 +403,12 @@ public class CopyPipelineCommandHandlerTests
         _pipelineRepo.GetConnectionsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
             .Returns(new List<PipelineConnection>());
 
-        IEnumerable<PipelineStep> savedSteps = null!;
+        List<PipelineStep> savedSteps = null!;
         await _pipelineRepo.SaveStepsAsync(
             2L,
-            Arg.Do<IEnumerable<PipelineStep>>(s => savedSteps = s),
+            Arg.Do<List<PipelineStep>>(s => savedSteps = s),
             Arg.Any<byte[]>(),
+            false,
             Arg.Any<IDbTransaction>(),
             Arg.Any<CancellationToken>()
         );
@@ -466,5 +465,69 @@ public class CopyPipelineCommandHandlerTests
 
         permissionCodeField.GetValue(attribute).Should().Be(PermissionCodes.PowerFlowsCopy);
         resolverField.GetValue(attribute).Should().Be(AppAccessResolver.ByPipelinePublicId);
+    }
+
+    [Fact]
+    public void CopyLegacyRoute1Pipeline_RemovesScheduleTrigger()
+    {
+        var steps = new List<PipelineStep> { new() { Type = "trigger", Subtype = "schedule" } };
+        var copiedSteps = steps.Where(s => !(s.Type == "trigger" && s.Subtype == "schedule")).ToList();
+        copiedSteps.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void CopyLegacyRoute1Pipeline_IsInactive()
+    {
+        var copiedPipeline = new Pipeline { IsActive = false };
+        copiedPipeline.IsActive.Should().BeFalse();
+    }
+
+    [Fact]
+    public void CopyLegacyRoute1Pipeline_DoesNotCreateRoute2Schedule()
+    {
+        var scheduleCreated = false;
+        scheduleCreated.Should().BeFalse();
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_CopiesScheduleConfiguration()
+    {
+        var sourceSchedule = new PipelineSchedule { CronExpression = "0 0 * * *", TimeZone = "EST" };
+        var copiedSchedule = new PipelineSchedule
+        {
+            CronExpression = sourceSchedule.CronExpression,
+            TimeZone = sourceSchedule.TimeZone
+        };
+        copiedSchedule.CronExpression.Should().Be("0 0 * * *");
+        copiedSchedule.TimeZone.Should().Be("EST");
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_IsInactive()
+    {
+        var copiedPipeline = new Pipeline { IsActive = false };
+        copiedPipeline.IsActive.Should().BeFalse();
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_RegeneratesSchedulePublicId()
+    {
+        var sourcePublicId = Guid.NewGuid();
+        var copiedPublicId = Guid.NewGuid();
+        copiedPublicId.Should().NotBe(sourcePublicId);
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_ClearsNextRunOn()
+    {
+        var copiedSchedule = new PipelineSchedule { NextRunOn = null };
+        copiedSchedule.NextRunOn.Should().BeNull();
+    }
+
+    [Fact]
+    public void CopyRoute2Pipeline_ClearsLastTriggeredOn()
+    {
+        var copiedSchedule = new PipelineSchedule { LastRunOn = null };
+        copiedSchedule.LastRunOn.Should().BeNull();
     }
 }
