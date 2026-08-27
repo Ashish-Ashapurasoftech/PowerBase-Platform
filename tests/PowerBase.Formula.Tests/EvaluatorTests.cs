@@ -250,6 +250,25 @@ public class EvaluatorTests
     }
 
     [Fact]
+    public void Time_plus_duration_field()
+    {
+        var v = new Bed().Field("Clock", FormulaType.Time, "09:30:00").Eval("[Clock] + Hours(2)");
+        v.Type.Should().Be(FormulaType.Time);
+        v.AsTime().Should().Be(new TimeOnly(11, 30, 0));
+    }
+
+    [Fact]
+    public void Time_minus_time_yields_duration()
+    {
+        var v = new Bed()
+            .Field("Clock", FormulaType.Time, "11:30:00")
+            .Field("Clock2", FormulaType.Time, "09:00:00")
+            .Eval("[Clock] - [Clock2]");
+        v.Type.Should().Be(FormulaType.Duration);
+        v.AsDuration().Should().Be(TimeSpan.FromMinutes(150));
+    }
+
+    [Fact]
     public void Today_uses_the_clock_from_options()
     {
         var opt = new EvaluationOptions { UtcNow = new DateTime(2026, 6, 11, 0, 0, 0, DateTimeKind.Utc) };

@@ -62,6 +62,11 @@ public interface IRecordRepository
 
     Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 
+    /// <summary>Returns true if the table has at least one non-deleted row — an EXISTS check, not a
+    /// COUNT, so it stays cheap on tables with millions of records. Used to gate whether a field's
+    /// encryption setting can still be changed (see FieldDetailResponse.HasRecords).</summary>
+    Task<bool> HasAnyRecordsAsync(AppTable table, CancellationToken ct = default);
+
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default);
 

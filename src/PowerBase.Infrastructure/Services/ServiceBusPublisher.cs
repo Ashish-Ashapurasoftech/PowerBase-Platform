@@ -16,7 +16,11 @@ public class ServiceBusPublisher : IMessagePublisher
 
     public ServiceBusPublisher(IConfiguration configuration)
     {
-        var connectionString = configuration["AzureServiceBus:ConnectionString"] ?? "Endpoint=sb://mock.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=mock";
+        var connectionString = configuration["AzureServiceBus:ConnectionString"];
+        if (string.IsNullOrWhiteSpace(connectionString) || connectionString.StartsWith("<") || !connectionString.Contains("Endpoint="))
+        {
+            connectionString = "Endpoint=sb://mock.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=mock";
+        }
         var queueName = configuration["AzureServiceBus:SearchIndexQueue"] ?? "search-indexing-queue";
         
         _client = new ServiceBusClient(connectionString);

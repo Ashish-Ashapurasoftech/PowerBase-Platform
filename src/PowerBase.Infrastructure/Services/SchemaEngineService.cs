@@ -154,4 +154,33 @@ public class SchemaEngineService : ISchemaEngineService
         await connection.OpenAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
     }
+
+    public async Task WidenIntColumnToDecimalIfNeededAsync(AppTable table, AppField field, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var tableName = PhysicalNaming.TableName(table.Id);
+        var physicalColumn = PhysicalNaming.GetPhysicalColumnName(field);
+
+        // Guarded on the actual physical type (not the catalog row) — only ever widens a
+        // genuine legacy INT column to DECIMAL(18,4). A column that's already DECIMAL (or any
+        // other type) is left untouched; this is not a general-purpose column-type changer.
+        var sql = $"""
+            IF EXISTS (
+                SELECT 1 FROM sys.columns c
+                JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+                JOIN sys.tables t ON t.object_id = c.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = 'data'
+                  AND t.name = '{tableName}'
+                  AND c.name = '{physicalColumn}'
+                  AND ty.name = 'int')
+            BEGIN
+                ALTER TABLE {physicalTable} ALTER COLUMN {physicalColumn} DECIMAL(18,4) NULL;
+            END
+            """;
+
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+    }
 }

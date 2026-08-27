@@ -111,8 +111,8 @@ public class FieldsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Get(Guid tableId, Guid publicId, CancellationToken ct)
     {
-        var field = await _getHandler.HandleAsync(new GetFieldQuery(tableId, publicId), ct);
-        return Ok(new ApiResponse<FieldDetailResponse>(MapToDetailResponse(field)));
+        var result = await _getHandler.HandleAsync(new GetFieldQuery(tableId, publicId), ct);
+        return Ok(new ApiResponse<FieldDetailResponse>(MapToDetailResponse(result.Field, result.HasRecords)));
     }
 
     /// <summary>List every supported field type configuration (reference data — not tenant- or table-scoped).</summary>
@@ -245,7 +245,7 @@ public class FieldsController : ControllerBase
         IsKeyField = f.IsKeyField,
     };
 
-    private static FieldDetailResponse MapToDetailResponse(AppField f) => new()
+    private static FieldDetailResponse MapToDetailResponse(AppField f, bool hasRecords) => new()
     {
         Id = f.Id,
         PublicId = f.PublicId,
@@ -266,6 +266,7 @@ public class FieldsController : ControllerBase
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,
+        HasRecords = hasRecords,
     };
 
     private static FieldTypeResponse MapToResponse(FieldType ft) => new()

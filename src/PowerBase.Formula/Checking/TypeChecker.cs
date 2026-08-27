@@ -139,6 +139,7 @@ public sealed class TypeChecker
         static bool N(FormulaType t) => t == FormulaType.Number;
         static bool D(FormulaType t) => t == FormulaType.Duration;
         static bool Dt(FormulaType t) => t is FormulaType.Date or FormulaType.DateTime;
+        static bool Tm(FormulaType t) => t == FormulaType.Time;
 
         switch (op)
         {
@@ -147,6 +148,8 @@ public sealed class TypeChecker
                 if (D(l) && D(r)) return FormulaType.Duration;
                 if (Dt(l) && D(r)) return l;   // Date/DateTime + Duration → same date type
                 if (D(l) && Dt(r)) return r;
+                if (Tm(l) && D(r)) return FormulaType.Time;   // Time + Duration → Time
+                if (D(l) && Tm(r)) return FormulaType.Time;
                 return null;
             case BinaryOp.Subtract:
                 if (N(l) && N(r)) return FormulaType.Number;
@@ -154,6 +157,8 @@ public sealed class TypeChecker
                 if (Dt(l) && D(r)) return l;   // Date - Duration → Date
                 if (l == FormulaType.Date && r == FormulaType.Date) return FormulaType.Duration;
                 if (l == FormulaType.DateTime && r == FormulaType.DateTime) return FormulaType.Duration;
+                if (Tm(l) && D(r)) return FormulaType.Time;   // Time - Duration → Time
+                if (Tm(l) && Tm(r)) return FormulaType.Duration;   // Time - Time → Duration
                 return null;
             case BinaryOp.Multiply:
                 if (N(l) && N(r)) return FormulaType.Number;
@@ -221,11 +226,11 @@ public sealed class TypeChecker
     }
 
     private static bool IsOrderable(FormulaType t) =>
-        t is FormulaType.Number or FormulaType.Date or FormulaType.DateTime or FormulaType.Duration or FormulaType.Text;
+        t is FormulaType.Number or FormulaType.Date or FormulaType.DateTime or FormulaType.Time or FormulaType.Duration or FormulaType.Text;
 
     private static bool IsEquatable(FormulaType t) =>
         t is FormulaType.Number or FormulaType.Text or FormulaType.Bool
-          or FormulaType.Date or FormulaType.DateTime or FormulaType.Duration or FormulaType.User;
+          or FormulaType.Date or FormulaType.DateTime or FormulaType.Time or FormulaType.Duration or FormulaType.User;
 
     private void Mismatch(TextSpan span, string message) =>
         _diags.Add(new FormulaDiagnostic(FormulaErrorCode.TypeMismatch, message, span));

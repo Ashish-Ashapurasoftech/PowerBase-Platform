@@ -20,9 +20,13 @@ public class ReportResponse
 public class ReportDefinitionDto
 {
     public List<long> Columns { get; init; } = [];
+    public string ColumnsMode { get; init; } = "Custom";
 
-    // New multi-sort
+    // New multi-sort (Summary/Chart)
     public List<SortSpecDto> SortFields { get; init; } = [];
+
+    /// <summary>Table-only unified Sort + Group list.</summary>
+    public List<SortGroupLevelDto> TableSortGroup { get; init; } = [];
 
     // New filter tree
     public FilterGroupDto? FilterTree { get; init; }
@@ -30,7 +34,7 @@ public class ReportDefinitionDto
     public long? GroupByFieldId { get; init; }
     public string GroupByMode { get; init; } = "EqualValues";
     public bool HideTotals { get; init; }
-    public bool GroupDefaultCollapsed { get; init; }
+    public bool? GroupDefaultCollapsed { get; init; }
     public bool GroupByDescending { get; init; }
     public List<SummaryAggregationDto> Aggregations { get; init; } = [];
     public string DynamicFilterType { get; init; } = "Default";
@@ -41,10 +45,29 @@ public class ReportDefinitionDto
     // Chart-only
     public ChartConfigDto? Chart { get; init; }
 
+    /// <summary>Table-only.</summary>
+    public ReportOptionsDto? Options { get; init; }
+
     // Legacy fields — included for backward-compat clients
     public long? SortFieldId { get; init; }
     public bool SortDesc { get; init; }
     public List<ReportFilterDto> Filters { get; init; } = [];
+}
+
+public class SortGroupLevelDto
+{
+    public long FieldId { get; init; }
+    public bool Desc { get; init; }
+    public bool IsGroup { get; init; }
+    public string GroupByMode { get; init; } = "EqualValues";
+}
+
+public class ReportOptionsDto
+{
+    public string ColumnHeaderText { get; init; } = "Default";
+    public bool ShowEditIcon { get; init; } = true;
+    public bool ShowViewIcon { get; init; } = true;
+    public bool DisableBulkDelete { get; init; }
 }
 
 public class CustomDynamicFilterItemDto
@@ -126,4 +149,8 @@ public class ChartConfigDto
     public long? GaugeFieldId { get; init; }
     public decimal GaugeLowMaxPercent { get; init; } = 30;
     public decimal GaugeMediumMaxPercent { get; init; } = 70;
+    public string DataLabelDisplayAs { get; init; } = "Value";
+    public string GaugeGoalType { get; init; } = "Fixed";
+    public long? GaugeGoalFieldId { get; init; }
+    public string? GaugeGoalFunction { get; init; }
 }

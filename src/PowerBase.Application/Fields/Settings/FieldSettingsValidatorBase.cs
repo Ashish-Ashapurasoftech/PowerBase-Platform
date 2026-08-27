@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace PowerBase.Application.Fields.Settings;
@@ -8,8 +9,12 @@ namespace PowerBase.Application.Fields.Settings;
 /// </summary>
 public abstract class FieldSettingsValidatorBase<T> : IFieldSettingsValidator where T : class
 {
+    // UnmappedMemberHandling.Disallow is what makes "a field type only accepts its own
+    // supported Behavior Settings" real: posting a property that doesn't exist on this
+    // type's settings class (e.g. Currency's "symbol" against a Text field) now fails
+    // deserialization instead of being silently ignored.
     private static readonly JsonSerializerOptions _opts =
-        new() { PropertyNameCaseInsensitive = true };
+        new() { PropertyNameCaseInsensitive = true, UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
 
     public abstract IReadOnlyList<string> SupportedTypeCodes { get; }
 
@@ -25,7 +30,7 @@ public abstract class FieldSettingsValidatorBase<T> : IFieldSettingsValidator wh
         }
         catch (JsonException)
         {
-            return Error("Settings", "Settings must be valid JSON.");
+            return Error("Settings", "Settings contains one or more properties not supported by this field type.");
         }
 
         if (parsed is null)
@@ -55,5 +60,14 @@ public abstract class FieldSettingsValidatorBase<T> : IFieldSettingsValidator wh
     {
         try { _ = new Regex(pattern, RegexOptions.None, TimeSpan.FromSeconds(1)); return true; }
         catch { return false; }
+    }
+
+    /// <summary>Shared range check for the "Default column width" Behavior Setting that
+    /// recurs across nearly every field type (mirrors ReportLinkSettingsValidator's
+    /// original rule — 20 to 2000 px).</summary>
+    protected static void ValidateColumnWidth(int? columnWidth, IDictionary<string, string[]> errors)
+    {
+        if (columnWidth is < 20 or > 2000)
+            AddError(errors, "Settings.ColumnWidth", "Column width must be between 20 and 2000.");
     }
 }

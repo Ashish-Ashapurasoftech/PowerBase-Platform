@@ -87,7 +87,7 @@ public sealed class PblReport
     public string LogicalRef { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
 
-    /// <summary>One of CreateReportCommandHandler's AllowedReportTypes: Table, Summary, GridEdit.</summary>
+    /// <summary>One of ReportConfigValidatorRegistry's supported report types: Table, Summary, Chart.</summary>
     public string ReportType { get; set; } = "Table";
 
     /// <summary>Field Names (matching a <see cref="PblField.Name"/> in the same table) to

@@ -40,8 +40,11 @@ public static class FieldGeneralSettingsCapability
         ["MultiUser"] = new Capabilities(true, false, true),
     };
 
+    // Formula_Url now follows the same "Formula_{X}" naming convention as every other Formula
+    // variant (it used to be the standalone "FormulaUrl" code, special-cased directly in Base
+    // above) so "Url" belongs in this suffix-derived set alongside Time/Phone/Email/RichText.
     private static readonly HashSet<string> FormulaUniqueOnlyResultTypes =
-        new(StringComparer.OrdinalIgnoreCase) { "Text", "Number", "Date", "DateTime", "Duration" };
+        new(StringComparer.OrdinalIgnoreCase) { "Text", "Number", "Date", "DateTime", "Duration", "Time", "Phone", "Email", "RichText", "Url" };
 
     private static readonly HashSet<string> FormulaNoneResultTypes =
         new(StringComparer.OrdinalIgnoreCase) { "Bool", "User" };
@@ -120,7 +123,9 @@ public static class FieldGeneralSettingsCapability
 
     private static string? ValidateDefaultValueShape(string typeCode, string value) => typeCode switch
     {
-        "Boolean" => value is "true" or "false" ? null : "Default value must be true or false.",
+        // Date = "default to today's date", DateTime = "default to the current date & time" —
+        // both just a plain true/false flag, same shape as Boolean's own default.
+        "Boolean" or "Date" or "DateTime" => value is "true" or "false" ? null : "Default value must be true or false.",
         "NumericRange" or "DateRange" => ValidateJsonObjectShape(value),
         "User" => ValidateUserDefaultShape(value, allowSpecificUser: true),
         "MultiUser" => ValidateUserDefaultShape(value, allowSpecificUser: false),

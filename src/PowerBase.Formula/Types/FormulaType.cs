@@ -13,6 +13,7 @@ public enum FormulaType
     Number,
     Date,
     DateTime,
+    Time,
     Duration,
     Bool,
     User,

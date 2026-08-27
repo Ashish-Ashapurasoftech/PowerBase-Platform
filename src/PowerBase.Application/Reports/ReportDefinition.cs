@@ -4,20 +4,40 @@ public class ReportDefinition
 {
     public List<long> Columns { get; set; } = [];
 
-    // New multi-sort (supersedes SortFieldId/SortDesc when non-empty)
+    /// <summary>Table-only: 'Default' (Columns is empty — show all reportable fields) or
+    /// 'Custom' (Columns holds the explicit picked set). Purely a UI-reconstruction hint —
+    /// RunTableAsync's "empty Columns = all reportable fields" behavior is unchanged and doesn't
+    /// read this; it exists so the wizard can round-trip which mode the user explicitly chose.</summary>
+    public string ColumnsMode { get; set; } = "Custom";
+
+    // Legacy multi-sort for Summary/Chart (Table reports now use TableSortGroup below — supersedes
+    // SortFieldId/SortDesc when non-empty)
     public List<SortSpec> SortFields { get; set; } = [];
+
+    /// <summary>Table-only: one ordered list unifying sort + group (each level is either a plain
+    /// sort, or a sort-and-group with a combine mode), replacing the separate GroupByFieldId +
+    /// SortFields mechanism for Table reports specifically. Empty = fall back to
+    /// GroupByFieldId/SortFields below (legacy-compat, same convention as SortFieldId/SortDesc).
+    /// Summary/Chart reports do not use this — they keep GroupByFieldId/SortFields directly.</summary>
+    public List<SortGroupLevel> TableSortGroup { get; set; } = [];
 
     // New filter tree (supersedes Filters when set)
     public FilterGroup? FilterTree { get; set; }
 
-    // Summary-only
+    // Used by Table (single-field Group panel — legacy fallback once TableSortGroup is set) and Summary (Rows).
     public long? GroupByFieldId { get; set; }
     /// <summary>EqualValues (default), FirstWord, FirstLetter</summary>
     public string GroupByMode { get; set; } = "EqualValues";
     public bool HideTotals { get; set; }
-    public bool GroupDefaultCollapsed { get; set; }
+    /// <summary>null = "Default report setting" (renders the same as false/Expanded, but keeps
+    /// that choice distinguishable from an explicit "Expanded by default" pick), true = Collapsed
+    /// by default, false = Expanded by default.</summary>
+    public bool? GroupDefaultCollapsed { get; set; }
     public bool GroupByDescending { get; set; }
     public List<SummaryAggregation> Aggregations { get; set; } = [];
+
+    /// <summary>Table-only. Null when not a Table report or when nothing has been customized.</summary>
+    public ReportOptions? Options { get; set; }
 
     // Dynamic Filters
     public string DynamicFilterType { get; set; } = "Default"; // Default, Custom, None
@@ -33,6 +53,32 @@ public class ReportDefinition
     public long? SortFieldId { get; set; }
     public bool SortDesc { get; set; }
     public List<ReportFilter> Filters { get; set; } = [];
+}
+
+// ── Table: unified Sort + Group ────────────────────────────────────────────────
+
+public class SortGroupLevel
+{
+    public long FieldId { get; set; }
+    public bool Desc { get; set; }
+    /// <summary>False = plain sort. True = sort-and-group — GroupByMode applies, and the first
+    /// level with IsGroup=true becomes the effective grouping field (matching today's single
+    /// GroupByFieldId's role: records of the same group must be contiguous).</summary>
+    public bool IsGroup { get; set; }
+    /// <summary>Only meaningful when IsGroup is true. EqualValues (default), FirstWord, FirstLetter.</summary>
+    public string GroupByMode { get; set; } = "EqualValues";
+}
+
+// ── Table: Options ──────────────────────────────────────────────────────────────
+
+public class ReportOptions
+{
+    /// <summary>Default (no truncation/clamp — today's unstated baseline behavior), Truncate
+    /// (single line, ellipsis), Wrap (up to 3 lines).</summary>
+    public string ColumnHeaderText { get; set; } = "Default";
+    public bool ShowEditIcon { get; set; } = true;
+    public bool ShowViewIcon { get; set; } = true;
+    public bool DisableBulkDelete { get; set; }
 }
 
 // ── Filter tree ──────────────────────────────────────────────────────────────
@@ -134,6 +180,10 @@ public class ChartConfig
     public string? GoalLabel { get; set; }
 
     public bool DataLabelsVisible { get; set; }
+    /// <summary>Only meaningful when DataLabelsVisible is true. "Value" (default) or "PercentOfSeries"
+    /// (each label shows its share of that dataset's own total). Not applicable to Gauge, which has
+    /// no data-labels toggle at all.</summary>
+    public string DataLabelDisplayAs { get; set; } = "Value";
     public bool HideMissingCategories { get; set; }
 
     /// <summary>Report opened when a chart segment is clicked, filtered by the clicked category value. Null = use the table's default report.</summary>
@@ -154,4 +204,11 @@ public class ChartConfig
     public decimal GaugeLowMaxPercent { get; set; } = 30;
     /// <summary>Upper bound (%) of the "Medium" color band; above this is "High".</summary>
     public decimal GaugeMediumMaxPercent { get; set; } = 70;
+    /// <summary>"Fixed" (default — GoalValue is a literal number) or "DataValue" (the goal is a
+    /// live aggregate — GaugeGoalFieldId summarized by GaugeGoalFunction — resolved at query time).</summary>
+    public string GaugeGoalType { get; set; } = "Fixed";
+    /// <summary>Only meaningful when GaugeGoalType is "DataValue".</summary>
+    public long? GaugeGoalFieldId { get; set; }
+    /// <summary>Sum or Avg. Only meaningful when GaugeGoalType is "DataValue".</summary>
+    public string? GaugeGoalFunction { get; set; }
 }
