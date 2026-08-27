@@ -4,6 +4,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -217,7 +218,7 @@ public class RunReportQueryHandler
     {
         // Intersect report columns with fields the role can see (drop None-access fields)
         var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
-        IReadOnlyList<AppField> selectedFields;
+        IReadOnlyList<AppField> selectedFields = [];
         if (definition.Columns.Count > 0)
         {
             var fieldMap = allFields
@@ -229,13 +230,9 @@ public class RunReportQueryHandler
                 .Select(id => fieldMap[id])
                 .ToList();
         }
-        else if (definition.ColumnsMode == "Default")
+
+        if (selectedFields.Count == 0 && definition.ColumnsMode == "Default")
         {
-            // "Default columns" means the table's Default Report Settings columns, not literally
-            // every reportable field — resolve them from that table's actual default Report row.
-            // Falls back to all-reportable when the default report has no columns configured
-            // either (including when THIS report IS the default report and its own Columns is
-            // empty — GetDefaultByTableAsync then just returns itself, terminating in one hop).
             var defaultReport = await _reportRepo.GetDefaultByTableAsync(table.PublicId, ct);
             var defaultColumnIds = defaultReport is null
                 ? []
@@ -252,17 +249,15 @@ public class RunReportQueryHandler
                     .Select(id => fieldMap[id])
                     .ToList();
             }
-            else
-            {
-                selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
-            }
         }
-        else
+
+        if (selectedFields.Count == 0)
         {
-            // Columns empty but ColumnsMode isn't (or predates) "Default" — e.g. a report saved
-            // before Phase 1 whose empty Columns always meant "show all reportable fields" under
-            // the old implicit convention. Preserved unchanged for backward compatibility.
             selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
+        }
+        if (selectedFields.Count == 0)
+        {
+            selectedFields = allFields.Where(f => f.Fid.HasValue && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
 
         // Merge role record filter into the report's filter tree
@@ -294,9 +289,7 @@ public class RunReportQueryHandler
         {
             var hasSearchable = allFields.Any(f => f.IsSearchable);
 
-            // GAP #3: Only use AI Search when the feature flag is enabled.
-            // GAP #4: Fallback to SQL LIKE if Azure AI Search is unavailable.
-            var useAiSearch = _searchService.IsGridSearchEnabled && hasSearchable;
+            var useAiSearch = _searchService.IsGridSearchEnabled && hasSearchable && await _searchService.IsHealthyAsync(ct);
             var aiSearchSucceeded = false;
 
             if (useAiSearch)
@@ -304,36 +297,33 @@ public class RunReportQueryHandler
                 try
                 {
                     // Route query to Azure AI Search to bypass SQL encryption limitations.
-                    // GAP #2: Cap results at AiSearchMaxResults to prevent SQL parameter explosion.
                     var aiMatches = await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, ct);
-                    var cappedMatches = aiMatches.Count > AiSearchMaxResults
-                        ? aiMatches.Take(AiSearchMaxResults).ToList()
-                        : aiMatches;
-
-                    if (cappedMatches.Count > 0)
+                    if (aiMatches.Count > 0)
                     {
-                        // GAP #2: Use direct chunked IN query instead of OR FilterGroup nodes.
+                        var cappedMatches = aiMatches.Count > AiSearchMaxResults
+                            ? aiMatches.Take(AiSearchMaxResults).ToList()
+                            : aiMatches;
+
                         filterTree = await BuildAiIdFilterAsync(table, cappedMatches, filterTree, ct);
+                        aiSearchSucceeded = true;
                     }
-                    else
-                    {
-                        return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
-                    }
-
-                    aiSearchSucceeded = true;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    // GAP #4: AI Search is unavailable — fall through to SQL LIKE path.
                     _logger.LogWarning(ex, "[QuickSearch] Azure AI Search unavailable for table {TableId}. Falling back to SQL LIKE.", table.Id);
                 }
             }
 
             if (!aiSearchSucceeded)
             {
-                // Standard SQL LIKE fallback (also used when IsGridSearchEnabled=false).
+                // Standard SQL LIKE fallback (used when AI Search is disabled, unhealthy, or returns 0 matches).
                 var textFields = allFields
-                    .Where(f => f.IsSearchable && f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")
+                    .Where(f => !PhysicalNaming.IsComputedTypeCode(f.TypeCode) &&
+                                !f.TypeCode.Equals("File", StringComparison.OrdinalIgnoreCase) &&
+                                !f.TypeCode.Equals("Attachment", StringComparison.OrdinalIgnoreCase) &&
+                                !f.TypeCode.Equals("Signature", StringComparison.OrdinalIgnoreCase) &&
+                                !f.TypeCode.Equals("DateRange", StringComparison.OrdinalIgnoreCase) &&
+                                !f.TypeCode.Equals("NumericRange", StringComparison.OrdinalIgnoreCase))
                     .ToList();
                 if (quickSearchFieldIds is { Count: > 0 })
                 {
@@ -351,38 +341,6 @@ public class RunReportQueryHandler
                     filterTree = filterTree == null
                         ? qsGroup
                         : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = qsGroup }] };
-                }
-            }
-        }
-
-        // Apply OData-based filter via Azure AI Search when the table has any AI-indexed fields.
-        // GAP #3: Only when IsGridSearchEnabled. GAP #4: Falls back to raw SQL tree on AI failure.
-        if (_searchService.IsGridSearchEnabled && filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
-        {
-            var odata = OData.ODataFilterBuilder.Build(filterTree, allFields);
-            if (!string.IsNullOrWhiteSpace(odata))
-            {
-                try
-                {
-                    // GAP #2: Cap results + use direct ID query instead of OR node explosion.
-                    var aiMatches = await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
-                    var cappedMatches = aiMatches.Count > AiSearchMaxResults
-                        ? aiMatches.Take(AiSearchMaxResults).ToList()
-                        : aiMatches;
-
-                    if (cappedMatches.Count == 0)
-                    {
-                        return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
-                    }
-
-                    // Rebuild filterTree: AND with matched IDs only (replaces original tree —
-                    // AI Search has already applied the filter, so we just restrict to its results).
-                    filterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    // GAP #4: AI Search unavailable — use the original SQL filter tree as-is.
-                    _logger.LogWarning(ex, "[ODataFilter] Azure AI Search unavailable for table {TableId}. Executing filter via SQL.", table.Id);
                 }
             }
         }
@@ -540,7 +498,12 @@ public class RunReportQueryHandler
 
         var runtimeNodes = new List<FilterNode>();
 
-        var fieldDict = allFields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var fieldDict = new Dictionary<long, AppField>();
+        foreach (var f in allFields)
+        {
+            if (f.Fid.HasValue) fieldDict[(long)f.Fid.Value] = f;
+            fieldDict[f.Id] = f;
+        }
 
         // Group by (FieldId, SubField) to support:
         //  - Same-field multi-select → OR'd together
