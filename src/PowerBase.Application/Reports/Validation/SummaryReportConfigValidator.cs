@@ -29,6 +29,14 @@ public sealed class SummaryReportConfigValidator : IReportConfigValidator
         CommonReportValidationHelpers.RequirePopulated(input.GroupByFieldId.HasValue, "groupByFieldId", "Summary", errors);
         if (input.GroupByFieldId.HasValue && !validFieldIds.Contains(input.GroupByFieldId.Value))
             CommonReportValidationHelpers.AddError(errors, "groupByFieldId", $"Unknown field ID: {input.GroupByFieldId.Value}");
+        if (!string.IsNullOrWhiteSpace(input.GroupByMode) && input.GroupByFieldId.HasValue
+            && fieldMap.TryGetValue(input.GroupByFieldId.Value, out var groupByField))
+        {
+            var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(groupByField.TypeCode);
+            if (!allowed.Contains(input.GroupByMode, StringComparer.OrdinalIgnoreCase))
+                CommonReportValidationHelpers.AddError(errors, "groupByMode",
+                    $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{groupByField.TypeCode}'.");
+        }
 
         ValidateAggregationsWithFieldTypeRules(input, fieldMap, errors);
 

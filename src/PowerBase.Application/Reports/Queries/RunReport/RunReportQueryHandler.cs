@@ -503,12 +503,20 @@ public class RunReportQueryHandler
         {
             var field = fieldDict.GetValueOrDefault(group.Key.FieldId);
 
-            // Use eq for SingleSelect/Boolean/User, contains for everything else
-            // For Address sub-fields (JSON path), use eq by default
+            // Use eq for SingleSelect/Boolean/User/numeric types, contains for everything else
+            // (free text). For Address sub-fields (JSON path), use eq by default.
+            // Numeric types (Number/Currency/Percent/Rating/Duration) must use eq, not contains —
+            // "contains" compiles to a SQL LIKE, and LIKE against a numeric column either fails
+            // outright or does an imprecise substring match (clicking "10" would also match "110",
+            // "210", "1.10", …). This runtime-filter path is exactly what chart drilldown clicks go
+            // through (an exact grouped category/series value, e.g. a Quantity value on a chart
+            // segment), so an inexact/broken match here was silently breaking drilldown for any
+            // numeric category field.
             var firstSubField = string.IsNullOrEmpty(group.Key.Item2) ? null : group.Key.Item2;
             var operatorName = field?.TypeCode is "Date" or "DateTime"
                 ? "date_eq"
-                : field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address" ? "eq" : "contains";
+                : field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address"
+                    or "Number" or "Currency" or "Percent" or "Rating" or "Duration" ? "eq" : "contains";
 
             var values = group.Select(rf => rf.Value).ToList();
 
@@ -635,6 +643,33 @@ public class RunReportQueryHandler
             filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
             seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
 
+        // SummarizeAsync groups by the raw stored value — for a User field that's the numeric
+        // user ID, not a display name (unlike RunTableAsync's rows, which already go through
+        // ResolveUserNamesAsync). Resolve here too so Summary/Chart categories and series show
+        // "Jane Doe" instead of "4".
+        IReadOnlyDictionary<long, string>? groupUserNames = null;
+        if (groupByField.TypeCode is "User" or "MultiUser")
+        {
+            var ids = rows
+                .Select(r => r.TryGetValue("GroupValue", out var v) ? v : null)
+                .Where(v => v is not null && long.TryParse(v.ToString(), out _))
+                .Select(v => long.Parse(v!.ToString()!))
+                .ToHashSet();
+            if (ids.Count > 0)
+                groupUserNames = await _userRepo.GetNamesByIdsAsync(ids, ct);
+        }
+        IReadOnlyDictionary<long, string>? seriesUserNames = null;
+        if (seriesField?.TypeCode is "User" or "MultiUser")
+        {
+            var ids = rows
+                .Select(r => r.TryGetValue("SeriesValue", out var v) ? v : null)
+                .Where(v => v is not null && long.TryParse(v.ToString(), out _))
+                .Select(v => long.Parse(v!.ToString()!))
+                .ToHashSet();
+            if (ids.Count > 0)
+                seriesUserNames = await _userRepo.GetNamesByIdsAsync(ids, ct);
+        }
+
         decimal? resolvedGaugeGoalValue = null;
         if (gaugeGoalAggregation is not null && fieldMap.TryGetValue(gaugeGoalAggregation.FieldId, out var goalField))
         {
@@ -680,10 +715,12 @@ public class RunReportQueryHandler
         var items = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
-            fields[(groupByField.Fid ?? groupByField.Id).ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
+            fields[(groupByField.Fid ?? groupByField.Id).ToString()] = ResolveGroupOrSeriesValue(
+                row.TryGetValue("GroupValue", out var gv) ? gv : null, groupUserNames);
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
             if (seriesField is not null)
-                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = row.TryGetValue("SeriesValue", out var sv) ? sv : null;
+                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = ResolveGroupOrSeriesValue(
+                    row.TryGetValue("SeriesValue", out var sv) ? sv : null, seriesUserNames);
             foreach (var (alias, fieldId) in aggAliasToFieldId)
             {
                 if (!row.TryGetValue(alias, out var val)) continue;
@@ -729,6 +766,16 @@ public class RunReportQueryHandler
             IsDataMasked = isMaskedPreview,
             ResolvedGaugeGoalValue = resolvedGaugeGoalValue,
         };
+    }
+
+    /// <summary>Swaps a raw grouped/series value for its resolved display name when one was
+    /// looked up (User/MultiUser group-by or series fields in Summary/Chart reports) — returns
+    /// the value unchanged for every other field type, or if the id wasn't in the lookup
+    /// (e.g. a deleted user).</summary>
+    private static object? ResolveGroupOrSeriesValue(object? rawValue, IReadOnlyDictionary<long, string>? names)
+    {
+        if (names is null || rawValue is null) return rawValue;
+        return long.TryParse(rawValue.ToString(), out var id) && names.TryGetValue(id, out var name) ? name : rawValue;
     }
 
     internal static async Task<IReadOnlyDictionary<long, string>> ResolveUserNamesAsync(

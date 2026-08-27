@@ -28,8 +28,6 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
 
     private static readonly HashSet<string> AllowedSortBy = new(StringComparer.OrdinalIgnoreCase) { "Labels", "Values" };
     private static readonly HashSet<string> AllowedDirection = new(StringComparer.OrdinalIgnoreCase) { "Asc", "Desc" };
-    private static readonly HashSet<string> AllowedGroupByMode = new(StringComparer.OrdinalIgnoreCase)
-        { "EqualValues", "FirstWord", "FirstLetter" };
     private static readonly HashSet<string> AllowedDataLabelDisplayAs = new(StringComparer.OrdinalIgnoreCase)
         { "Value", "PercentOfSeries" };
     private static readonly HashSet<string> AllowedGaugeGoalType = new(StringComparer.OrdinalIgnoreCase) { "Fixed", "DataValue" };
@@ -41,6 +39,7 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
     {
         var errors = new Dictionary<string, string[]>();
         var validFieldIds = CommonReportValidationHelpers.GetValidFieldIds(tableFields);
+        var fieldMap = tableFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value, f => f);
 
         CommonReportValidationHelpers.ValidateFilterGroup(input.FilterTree, validFieldIds, errors);
         CommonReportValidationHelpers.ValidateDynamicFilterFields(input, validFieldIds, errors);
@@ -49,8 +48,14 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
         CommonReportValidationHelpers.RequirePopulated(input.GroupByFieldId.HasValue, "groupByFieldId", "Chart", errors);
         if (input.GroupByFieldId.HasValue && !validFieldIds.Contains(input.GroupByFieldId.Value))
             CommonReportValidationHelpers.AddError(errors, "groupByFieldId", $"Unknown field ID: {input.GroupByFieldId.Value}");
-        if (!string.IsNullOrWhiteSpace(input.GroupByMode) && !AllowedGroupByMode.Contains(input.GroupByMode))
-            CommonReportValidationHelpers.AddError(errors, "groupByMode", $"groupByMode must be one of: {string.Join(", ", AllowedGroupByMode)}");
+        if (!string.IsNullOrWhiteSpace(input.GroupByMode) && input.GroupByFieldId.HasValue
+            && fieldMap.TryGetValue(input.GroupByFieldId.Value, out var groupByField))
+        {
+            var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(groupByField.TypeCode);
+            if (!allowed.Contains(input.GroupByMode, StringComparer.OrdinalIgnoreCase))
+                CommonReportValidationHelpers.AddError(errors, "groupByMode",
+                    $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{groupByField.TypeCode}'.");
+        }
 
         CommonReportValidationHelpers.ForbidIfPopulated(input.Columns.Count > 0, "columns", "Chart", errors);
         CommonReportValidationHelpers.ForbidIfPopulated(input.TableSortGroup.Count > 0, "tableSortGroup", "Chart", errors);
@@ -58,12 +63,13 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
 
         CommonReportValidationHelpers.RequirePopulated(input.Chart is not null, "chart", "Chart", errors);
         if (input.Chart is not null)
-            ValidateChart(input.Chart, validFieldIds, errors);
+            ValidateChart(input.Chart, validFieldIds, fieldMap, errors);
 
         return errors;
     }
 
-    private static void ValidateChart(ChartConfigCommand chart, HashSet<long> validFieldIds, IDictionary<string, string[]> errors)
+    private static void ValidateChart(
+        ChartConfigCommand chart, HashSet<long> validFieldIds, Dictionary<long, AppField> fieldMap, IDictionary<string, string[]> errors)
     {
         if (string.IsNullOrWhiteSpace(chart.ChartType) || !AllowedChartTypes.Contains(chart.ChartType))
         {
@@ -79,8 +85,14 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
             if (NoSeriesChartTypes.Contains(chart.ChartType))
                 CommonReportValidationHelpers.AddError(errors, "chart.seriesFieldId", $"Series is not applicable to {chart.ChartType} charts.");
         }
-        if (!string.IsNullOrWhiteSpace(chart.SeriesMode) && !AllowedGroupByMode.Contains(chart.SeriesMode))
-            CommonReportValidationHelpers.AddError(errors, "chart.seriesMode", $"seriesMode must be one of: {string.Join(", ", AllowedGroupByMode)}");
+        if (!string.IsNullOrWhiteSpace(chart.SeriesMode) && chart.SeriesFieldId is { } seriesModeFieldId
+            && fieldMap.TryGetValue(seriesModeFieldId, out var seriesField))
+        {
+            var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(seriesField.TypeCode);
+            if (!allowed.Contains(chart.SeriesMode, StringComparer.OrdinalIgnoreCase))
+                CommonReportValidationHelpers.AddError(errors, "chart.seriesMode",
+                    $"seriesMode must be one of: {string.Join(", ", allowed)} for field type '{seriesField.TypeCode}'.");
+        }
 
         if (!string.IsNullOrWhiteSpace(chart.SortBy) && !AllowedSortBy.Contains(chart.SortBy))
             CommonReportValidationHelpers.AddError(errors, "chart.sortBy", $"sortBy must be one of: {string.Join(", ", AllowedSortBy)}");

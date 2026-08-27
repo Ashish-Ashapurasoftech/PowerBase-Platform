@@ -1,9 +1,11 @@
 using System.Data;
 using System.Text.Json;
 using Dapper;
+using Microsoft.Data.SqlClient;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Application.Reports;
+using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -400,6 +402,29 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return resRows.ToDictionary(x => x.PublicId, x => x.Id);
     }
 
+    /// <summary>Runs a single INSERT/UPDATE, translating a unique-index violation into a clean
+    /// <see cref="ConflictException"/> instead of letting the raw SqlException reach
+    /// ExceptionHandlingMiddleware's generic 500 fallback. This is a backstop for the rare race
+    /// where two concurrent writes slip past RecordConstraintValidator's SELECT-then-write
+    /// uniqueness pre-check (not atomic with the following INSERT/UPDATE) and both hit the
+    /// physical filtered unique index (see SchemaEngineService.SetUniqueAsync) at once — the
+    /// normal case (a single write colliding with existing data) is already caught earlier and
+    /// reported with a specific field name by RecordConstraintValidator, so this message stays
+    /// generic rather than trying to parse the field back out of SQL Server's (locale-dependent)
+    /// error text.</summary>
+    private static async Task<T> ExecuteTranslatingUniqueViolationsAsync<T>(Func<Task<T>> action)
+    {
+        try
+        {
+            return await action();
+        }
+        catch (SqlException ex) when (ex.Number is 2601 or 2627)
+        {
+            throw new ConflictException(
+                "This value conflicts with an existing record — a unique field's value is already in use. Please try again.");
+        }
+    }
+
     public async Task<Guid> CreateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
     {
@@ -487,12 +512,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         Guid insertedPublicId;
         if (transaction is not null)
         {
-            insertedPublicId = await transaction.Connection!.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct));
+            insertedPublicId = await ExecuteTranslatingUniqueViolationsAsync(() =>
+                transaction.Connection!.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct)));
         }
         else
         {
             await using var connection = await ConnectionFactory.CreateAsync(ct);
-            insertedPublicId = await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+            insertedPublicId = await ExecuteTranslatingUniqueViolationsAsync(() =>
+                connection.ExecuteScalarAsync<Guid>(new CommandDefinition(sql, parameters, cancellationToken: ct)));
         }
 
         // Push searchable/filterable fields to Azure AI Search (using ORIGINAL plaintext values)
@@ -586,13 +613,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         if (transaction is not null)
         {
-            var affectedTx = await transaction.Connection!.ExecuteAsync(new CommandDefinition(updateSql, parameters, transaction, cancellationToken: ct));
+            var affectedTx = await ExecuteTranslatingUniqueViolationsAsync(() =>
+                transaction.Connection!.ExecuteAsync(new CommandDefinition(updateSql, parameters, transaction, cancellationToken: ct)));
             if (affectedTx == 0) throw new NotFoundException("Record", publicId);
         }
         else
         {
             await using var connection = await ConnectionFactory.CreateAsync(ct);
-            var affected = await connection.ExecuteAsync(new CommandDefinition(updateSql, parameters, cancellationToken: ct));
+            var affected = await ExecuteTranslatingUniqueViolationsAsync(() =>
+                connection.ExecuteAsync(new CommandDefinition(updateSql, parameters, cancellationToken: ct)));
             if (affected == 0) throw new NotFoundException("Record", publicId);
         }
 
@@ -660,7 +689,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        return await ExecuteTranslatingUniqueViolationsAsync(() =>
+            connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)));
     }
 
     public async Task DeleteAsync(AppTable table, Guid publicId, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
@@ -778,7 +808,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var groupCol = groupByField.IsSystem && !string.IsNullOrEmpty(groupByField.PhysicalColumnName)
             ? groupByField.PhysicalColumnName!
             : PhysicalNaming.ColumnName(groupByField.Fid!.Value);
-        var groupExpr = BuildGroupByExpr(groupCol, groupByMode);
+        var groupExpr = BuildGroupByExpr(groupCol, groupByMode, groupByField.TypeCode);
         var fieldMap = allFields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
 
         string? seriesExpr = null;
@@ -787,7 +817,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             var seriesCol = seriesField.IsSystem && !string.IsNullOrEmpty(seriesField.PhysicalColumnName)
                 ? seriesField.PhysicalColumnName!
                 : PhysicalNaming.ColumnName(seriesField.Fid!.Value);
-            seriesExpr = BuildGroupByExpr(seriesCol, seriesMode);
+            seriesExpr = BuildGroupByExpr(seriesCol, seriesMode, seriesField.TypeCode);
         }
 
         var aggClauses = new List<string> { "COUNT(*) AS [Count]" };
@@ -831,12 +861,74 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return rows.Select(ToDictionary).ToList();
     }
 
-    private static string BuildGroupByExpr(string col, string mode) => mode switch
+    /// <summary>Builds the GROUP BY / SELECT expression for a group-by or series field,
+    /// branching by the field's type family (<see cref="GroupByModeCategoryHelper"/>) before
+    /// interpreting <paramref name="mode"/> — the same mode string means something different
+    /// per family (e.g. "Day" buckets a Date column to its calendar day, but buckets a
+    /// Duration column, stored in whole minutes, to a day-sized chunk of minutes). Unmatched
+    /// mode/family combinations (including every family's "EqualValues") fall through to the
+    /// raw column — this must stay exactly `col` for EqualValues so existing saved reports'
+    /// grouping behavior never changes.</summary>
+    private static string BuildGroupByExpr(string col, string mode, string typeCode)
     {
-        "FirstWord" => $"LEFT({col}, CASE WHEN CHARINDEX(' ', {col}) > 0 THEN CHARINDEX(' ', {col}) - 1 ELSE LEN({col}) END)",
-        "FirstLetter" => $"LEFT({col}, 1)",
-        _ => col,
-    };
+        var family = GroupByModeCategoryHelper.GetFamily(typeCode);
+
+        if (family is GroupByModeCategoryHelper.GroupByFamily.TextRich or GroupByModeCategoryHelper.GroupByFamily.User)
+        {
+            return mode switch
+            {
+                "FirstWord" => $"LEFT({col}, CASE WHEN CHARINDEX(' ', {col}) > 0 THEN CHARINDEX(' ', {col}) - 1 ELSE LEN({col}) END)",
+                "FirstLetter" => $"LEFT({col}, 1)",
+                _ => col,
+            };
+        }
+
+        if (family == GroupByModeCategoryHelper.GroupByFamily.DateFamily)
+        {
+            return mode switch
+            {
+                "Day" => $"CAST({col} AS DATE)",
+                "Week" => $"DATEADD(WEEK, DATEDIFF(WEEK, 0, {col}), 0)",
+                "Month" => $"DATEADD(MONTH, DATEDIFF(MONTH, 0, {col}), 0)",
+                "Quarter" => $"DATEADD(QUARTER, DATEDIFF(QUARTER, 0, {col}), 0)",
+                "Year" => $"DATEADD(YEAR, DATEDIFF(YEAR, 0, {col}), 0)",
+                "Decade" => $"DATEFROMPARTS((YEAR({col}) / 10) * 10, 1, 1)",
+                _ => col,
+            };
+        }
+
+        if (family == GroupByModeCategoryHelper.GroupByFamily.DurationFamily)
+        {
+            // Duration's physical value is stored in whole minutes (see
+            // pb-duration-input.component.ts's parseDuration on the frontend), so "Minute" is
+            // just the raw column — same as EqualValues.
+            return mode switch
+            {
+                "Hour" => $"(({col} / 60) * 60)",
+                "Day" => $"(({col} / 1440) * 1440)",
+                "Week" => $"(({col} / 10080) * 10080)",
+                _ => col,
+            };
+        }
+
+        if (family == GroupByModeCategoryHelper.GroupByFamily.Numeric)
+        {
+            return mode switch
+            {
+                "Increment1" => $"(FLOOR({col} / 1) * 1)",
+                "Increment10" => $"(FLOOR({col} / 10) * 10)",
+                "Increment100" => $"(FLOOR({col} / 100) * 100)",
+                "Increment1000" => $"(FLOOR({col} / 1000) * 1000)",
+                "Increment10000" => $"(FLOOR({col} / 10000) * 10000)",
+                _ => col,
+            };
+        }
+
+        // TextSimple, Boolean, MultiUser, Time, Unclassified, NoGrouping — none of these
+        // families have a mode beyond "EqualValues" (validators reject anything else for
+        // them), so grouping by the raw column is always correct here.
+        return col;
+    }
 
     private static string BuildFieldColumnList(IReadOnlyList<AppField> fields)
     {

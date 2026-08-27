@@ -28,6 +28,7 @@ public sealed class TableReportConfigValidator : IReportConfigValidator
     {
         var errors = new Dictionary<string, string[]>();
         var validFieldIds = CommonReportValidationHelpers.GetValidFieldIds(tableFields);
+        var fieldMap = tableFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value, f => f);
 
         CommonReportValidationHelpers.ValidateColumns(input.Columns, validFieldIds, errors);
         CommonReportValidationHelpers.ValidateFilterGroup(input.FilterTree, validFieldIds, errors);
@@ -39,7 +40,7 @@ public sealed class TableReportConfigValidator : IReportConfigValidator
         if (input.GroupByFieldId.HasValue && !validFieldIds.Contains(input.GroupByFieldId.Value))
             CommonReportValidationHelpers.AddError(errors, "groupByFieldId", $"Unknown field ID: {input.GroupByFieldId.Value}");
 
-        ValidateTableSortGroup(input.TableSortGroup, validFieldIds, errors);
+        ValidateTableSortGroup(input.TableSortGroup, validFieldIds, fieldMap, errors);
         ValidateOptions(input.Options, errors);
 
         CommonReportValidationHelpers.ForbidIfPopulated(input.Aggregations.Count > 0, "aggregations", "Table", errors);
@@ -48,7 +49,8 @@ public sealed class TableReportConfigValidator : IReportConfigValidator
         return errors;
     }
 
-    private static void ValidateTableSortGroup(List<SortGroupLevelCommand> levels, HashSet<long> validFieldIds, IDictionary<string, string[]> errors)
+    private static void ValidateTableSortGroup(
+        List<SortGroupLevelCommand> levels, HashSet<long> validFieldIds, Dictionary<long, AppField> fieldMap, IDictionary<string, string[]> errors)
     {
         if (levels.Count == 0)
             return;
@@ -59,7 +61,20 @@ public sealed class TableReportConfigValidator : IReportConfigValidator
         foreach (var level in levels)
         {
             if (!validFieldIds.Contains(level.FieldId))
+            {
                 CommonReportValidationHelpers.AddError(errors, "tableSortGroup", $"Unknown field ID: {level.FieldId}");
+                continue;
+            }
+
+            // GroupByMode is only meaningful when the level actually groups (IsGroup) — a
+            // sort-only level's GroupByMode is inert and not worth rejecting on.
+            if (level.IsGroup && !string.IsNullOrWhiteSpace(level.GroupByMode) && fieldMap.TryGetValue(level.FieldId, out var field))
+            {
+                var allowed = GroupByModeCategoryHelper.GetAllowedGroupByModes(field.TypeCode);
+                if (!allowed.Contains(level.GroupByMode, StringComparer.OrdinalIgnoreCase))
+                    CommonReportValidationHelpers.AddError(errors, "tableSortGroup",
+                        $"groupByMode must be one of: {string.Join(", ", allowed)} for field type '{field.TypeCode}'.");
+            }
         }
     }
 
