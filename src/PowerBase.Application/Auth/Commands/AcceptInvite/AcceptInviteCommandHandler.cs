@@ -73,8 +73,8 @@ public class AcceptInviteCommandHandler
         {
             _queryContext.SetTenantId(tokenRecord.TenantId.Value);
 
-            // check if user is already in app to prevent duplicates if somehow triggered twice
-            var existingAppUser = await _appUserRepo.GetByAppAndUserAsync(tokenRecord.AppId.Value, user.Id, ct);
+            // check if user already has this specific role in the app to prevent duplicates if somehow triggered twice
+            var existingAppUser = await _appUserRepo.GetByAppUserAndRoleAsync(tokenRecord.AppId.Value, user.Id, tokenRecord.AppRoleId.Value, ct);
             if (existingAppUser is null)
             {
                 await _appUserRepo.CreateAsync(new AppUser

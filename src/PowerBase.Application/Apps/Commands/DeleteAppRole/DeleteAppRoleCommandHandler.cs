@@ -36,15 +36,9 @@ public class DeleteAppRoleCommandHandler
 
         if (!_queryContext.IsSuperAdmin)
         {
-            var actorAppUser = await _appUserRepo.GetByAppAndUserAsync(role.AppId, _queryContext.UserId, ct);
-            if (actorAppUser == null)
-            {
-                throw new UnauthorizedActionException("You are not a member of this application.");
-            }
-
             if (!currentUserRolePublicId.HasValue)
             {
-                throw new UnauthorizedActionException("Your role was not found.");
+                throw new UnauthorizedActionException("You are not a member of this application.");
             }
 
             var actorRole = await _appRoleRepo.GetByPublicIdAsync(currentUserRolePublicId.Value, ct);
