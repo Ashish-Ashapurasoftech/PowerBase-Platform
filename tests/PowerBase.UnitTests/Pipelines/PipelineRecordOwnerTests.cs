@@ -858,4 +858,526 @@ public class PipelineRecordOwnerTests
         await _queueRepo.DidNotReceive().MarkFailedAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
         await _queueRepo.DidNotReceive().ScheduleRetryAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task CrossTenantTrigger_OwnerTenantMismatch_BlocksExecution()
+    {
+        // Arrange
+        var job = new PipelineQueue
+        {
+            Id = 201,
+            TenantId = 6L, // Owner tenant is 6
+            PipelineId = 100,
+            QueueSource = "Event",
+            TriggerStepRefId = "step_trigger",
+            TriggeredBy = 40016L, // Tenant 8 User
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
+
+        var subInfo = new TriggerSubInfo
+        {
+            OwnerTenantId = 8L, // Mismatch! (Expected 6)
+            TargetTenantId = 8L,
+            TargetConnectionPublicId = Guid.NewGuid()
+        };
+
+        var worker = new TestDatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>(),
+            (_, _) => Task.FromResult<TriggerSubInfo?>(subInfo)
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert: Should fail terminal since owner tenant doesn't match
+        await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Is<string>(s => s.Contains("Subscription owner tenant")), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CrossTenantTrigger_TargetTenantMismatch_BlocksExecution()
+    {
+        // Arrange
+        var job = new PipelineQueue
+        {
+            Id = 202,
+            TenantId = 6L,
+            PipelineId = 100,
+            QueueSource = "Event",
+            TriggerStepRefId = "step_trigger",
+            TriggeredBy = 40016L,
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
+        var execUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
+
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+
+        var connectionGuid = Guid.NewGuid();
+        var subInfo = new TriggerSubInfo
+        {
+            OwnerTenantId = 6L,
+            TargetTenantId = 8L, // Trigger tenant is 8
+            TargetConnectionPublicId = connectionGuid
+        };
+
+        var accountRepo = Substitute.For<IPipelineAccountRepository>();
+        var userTokenRepo = Substitute.For<IUserTokenRepository>();
+        var connectionResolver = new PowerBase.Application.Connections.Common.ConnectionScopeResolver(
+            accountRepo,
+            userTokenRepo,
+            _queryContext
+        );
+
+        var account = new PipelineAccount
+        {
+            Id = 1L,
+            PublicId = connectionGuid,
+            Name = "Test Account",
+            IsActive = true,
+            Status = PipelineAccountStatuses.Active,
+            AuthMode = PipelineAccountAuthModes.UserToken,
+            TokenHash = "mock_hash",
+            TargetTenantId = 9L, // Mismatch! Connection targets 9 instead of subscription target 8
+            TargetUserId = 999L,
+            TenantId = 6L
+        };
+        accountRepo.GetByPublicIdForUserAsync(connectionGuid, 42L, Arg.Any<CancellationToken>()).Returns(account);
+
+        var userToken = new UserToken
+        {
+            Id = 1L,
+            AccessAllApps = true,
+            UserId = 999L,
+            TenantId = 9L,
+            IsActive = true,
+            IsDeleted = false,
+            TokenHash = "mock_hash"
+        };
+        userTokenRepo.GetByHashAsync("mock_hash", Arg.Any<CancellationToken>()).Returns(userToken);
+        _serviceProvider.GetService(typeof(PowerBase.Application.Connections.Common.ConnectionScopeResolver)).Returns(connectionResolver);
+
+        var worker = new TestDatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>(),
+            (_, _) => Task.FromResult<TriggerSubInfo?>(subInfo)
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert: targets tenant mismatch blocks execution
+        await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Is<string>(s => s.Contains("targets tenant")), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CrossTenantTrigger_WrongQueueSource_NoFallback()
+    {
+        // Arrange
+        var job = new PipelineQueue
+        {
+            Id = 203,
+            TenantId = 6L,
+            PipelineId = 100,
+            QueueSource = "Manual", // Wrong queue source!
+            TriggerStepRefId = "step_trigger",
+            TriggeredBy = 40016L, // Tenant 8 User who is not a member of Tenant 6
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
+        var execUser = new User { Id = 40016L, IsActive = true, IsDeleted = false };
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
+        _userRepo.GetByIdAsync(40016L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(40016L, Arg.Any<CancellationToken>()).Returns(false); // Non-member
+
+        var worker = new TestDatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>()
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert: Should not fallback to creator, should fail membership check for TriggeredBy user
+        await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Is<string>(s => s.Contains("is not an active member")), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CrossTenantTrigger_MissingTriggerStepRefId_NoFallback()
+    {
+        // Arrange
+        var job = new PipelineQueue
+        {
+            Id = 204,
+            TenantId = 6L,
+            PipelineId = 100,
+            QueueSource = "Event",
+            TriggerStepRefId = null, // Missing!
+            TriggeredBy = 40016L,
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
+        var execUser = new User { Id = 40016L, IsActive = true, IsDeleted = false };
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
+        _userRepo.GetByIdAsync(40016L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(40016L, Arg.Any<CancellationToken>()).Returns(false);
+
+        var worker = new TestDatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>()
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert
+        await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Is<string>(s => s.Contains("is not an active member")), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CrossTenantTrigger_Valid_UsesCreatorAuthority()
+    {
+        // Arrange
+        var job = new PipelineQueue
+        {
+            Id = 205,
+            TenantId = 6L,
+            PipelineId = 100,
+            QueueSource = "Event",
+            TriggerStepRefId = "step_trigger",
+            TriggeredBy = 40016L, // Triggered by Tenant 8 user
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
+        var creatorUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
+
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(creatorUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(42L, 6L, Arg.Any<CancellationToken>()).Returns(new HashSet<string>());
+
+        var connectionGuid = Guid.NewGuid();
+        var subInfo = new TriggerSubInfo
+        {
+            OwnerTenantId = 6L,
+            TargetTenantId = 8L,
+            TargetConnectionPublicId = connectionGuid
+        };
+
+        var accountRepo = Substitute.For<IPipelineAccountRepository>();
+        var userTokenRepo = Substitute.For<IUserTokenRepository>();
+        var connectionResolver = new PowerBase.Application.Connections.Common.ConnectionScopeResolver(
+            accountRepo,
+            userTokenRepo,
+            _queryContext
+        );
+
+        var account = new PipelineAccount
+        {
+            Id = 1L,
+            PublicId = connectionGuid,
+            Name = "Test Account",
+            IsActive = true,
+            Status = PipelineAccountStatuses.Active,
+            AuthMode = PipelineAccountAuthModes.UserToken,
+            TokenHash = "mock_hash",
+            TargetTenantId = 8L, // Match
+            TargetUserId = 999L,
+            TenantId = 6L
+        };
+        accountRepo.GetByPublicIdForUserAsync(connectionGuid, 42L, Arg.Any<CancellationToken>()).Returns(account);
+
+        var userToken = new UserToken
+        {
+            Id = 1L,
+            AccessAllApps = true,
+            UserId = 999L,
+            TenantId = 8L,
+            IsActive = true,
+            IsDeleted = false,
+            TokenHash = "mock_hash"
+        };
+        userTokenRepo.GetByHashAsync("mock_hash", Arg.Any<CancellationToken>()).Returns(userToken);
+        _serviceProvider.GetService(typeof(PowerBase.Application.Connections.Common.ConnectionScopeResolver)).Returns(connectionResolver);
+
+        var worker = new TestDatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>(),
+            (_, _) => Task.FromResult<TriggerSubInfo?>(subInfo)
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert: Resolved user must be creator 42L
+        _queryContext.UserId.Should().Be(42L);
+        await _queueRepo.Received(1).MarkSucceededAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task SameTenantTrigger_RetainsOriginalTriggerActor()
+    {
+        // Arrange
+        var job = new PipelineQueue
+        {
+            Id = 206,
+            TenantId = 6L,
+            PipelineId = 100,
+            QueueSource = "Event",
+            TriggerStepRefId = "step_trigger",
+            TriggeredBy = 99L, // Same-tenant trigger user
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
+        var execUser = new User { Id = 99L, IsActive = true, IsDeleted = false };
+
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
+        _userRepo.GetByIdAsync(99L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(99L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(99L, 6L, Arg.Any<CancellationToken>()).Returns(new HashSet<string>());
+
+        var subInfo = new TriggerSubInfo
+        {
+            OwnerTenantId = 6L,
+            TargetTenantId = 6L, // Same tenant!
+            TargetConnectionPublicId = Guid.Empty
+        };
+
+        var worker = new TestDatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>(),
+            (_, _) => Task.FromResult<TriggerSubInfo?>(subInfo)
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert: UserId remains 99L (not fallback to creator 42L)
+        _queryContext.UserId.Should().Be(99L);
+        await _queueRepo.Received(1).MarkSucceededAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task SameTenantTrigger_NonMemberTriggerActor_BlocksExecution()
+    {
+        // Arrange
+        var job = new PipelineQueue
+        {
+            Id = 207,
+            TenantId = 6L,
+            PipelineId = 100,
+            QueueSource = "Event",
+            TriggerStepRefId = "step_trigger",
+            TriggeredBy = 99L,
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
+        var execUser = new User { Id = 99L, IsActive = true, IsDeleted = false };
+
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
+        _userRepo.GetByIdAsync(99L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(99L, Arg.Any<CancellationToken>()).Returns(false); // Non-member!
+
+        var subInfo = new TriggerSubInfo
+        {
+            OwnerTenantId = 6L,
+            TargetTenantId = 6L, // Same tenant
+            TargetConnectionPublicId = Guid.Empty
+        };
+
+        var worker = new TestDatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>(),
+            (_, _) => Task.FromResult<TriggerSubInfo?>(subInfo)
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert
+        await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Is<string>(s => s.Contains("is not an active member")), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task SameTenantTrigger_CrossTenantAction_RemainsWorking()
+    {
+        // Arrange: Ronak 6 trigger (Tenant 6) → Tenant 8 action (on Tenant 6 owned pipeline)
+        var job = new PipelineQueue
+        {
+            Id = 301,
+            TenantId = 6L, // Owner Tenant 6
+            PipelineId = 100,
+            QueueSource = "Event",
+            TriggerStepRefId = "step_trigger",
+            TriggeredBy = 60001L, // Same-tenant trigger user ID
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
+        var execUser = new User { Id = 60001L, IsActive = true, IsDeleted = false };
+
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
+        _userRepo.GetByIdAsync(60001L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(60001L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(60001L, 6L, Arg.Any<CancellationToken>()).Returns(new HashSet<string>());
+
+        var subInfo = new TriggerSubInfo
+        {
+            OwnerTenantId = 6L,
+            TargetTenantId = 6L, // Same tenant trigger
+            TargetConnectionPublicId = Guid.Empty
+        };
+
+        var worker = new TestDatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>(),
+            (_, _) => Task.FromResult<TriggerSubInfo?>(subInfo)
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert: Preserves same-tenant actor as execution authority (not pipeline creator 42L)
+        _queryContext.UserId.Should().Be(60001L);
+        await _queueRepo.Received(1).MarkSucceededAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Worker_SetsOwnerTenantBeforePipelineRepositoryAccess()
+    {
+        // Arrange
+        var job = new PipelineQueue
+        {
+            Id = 302,
+            TenantId = 6L,
+            PipelineId = 100,
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
+        var execUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
+
+        // We want to prove that the QueryContext TenantId is set to 6 AT THE MOMENT GetByIdAsync is called.
+        long tenantIdAtCallTime = 0;
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(callInfo =>
+        {
+            tenantIdAtCallTime = _queryContext.TenantId;
+            return pipeline;
+        });
+
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+
+        var worker = new DatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>()
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert: TenantId was established before repo query
+        tenantIdAtCallTime.Should().Be(6L);
+    }
+
+    [Fact]
+    public async Task MissingOwnerTenant_BlocksNonRetryably()
+    {
+        // Arrange
+        var job = new PipelineQueue
+        {
+            Id = 303,
+            TenantId = 0, // Invalid/missing owner tenant!
+            PipelineId = 100,
+            MessageId = Guid.NewGuid(),
+            ClaimToken = Guid.NewGuid()
+        };
+
+        var worker = new DatabasePipelineExecutionWorker(
+            _serviceProvider,
+            Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>()
+        );
+
+        // Act
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
+
+        // Assert: Marked failed non-retryably, and never called pipelineRepo
+        await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Is<string>(s => s.Contains("Job has invalid or missing Owner TenantId")), Arg.Any<CancellationToken>());
+        await _pipelineRepo.DidNotReceive().GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>());
+    }
+
+    private class TestDatabasePipelineExecutionWorker : DatabasePipelineExecutionWorker
+    {
+        private readonly Func<long, string, Task<TriggerSubInfo?>>? _subscriptionResolver;
+
+        public TestDatabasePipelineExecutionWorker(
+            IServiceProvider serviceProvider,
+            IControlConnectionFactory controlConnFactory,
+            IOptions<PipelineExecutionOptions> options,
+            ILogger<DatabasePipelineExecutionWorker> logger,
+            Func<long, string, Task<TriggerSubInfo?>>? subscriptionResolver = null)
+            : base(serviceProvider, controlConnFactory, options, logger)
+        {
+            _subscriptionResolver = subscriptionResolver;
+        }
+
+        protected override Task<TriggerSubInfo?> GetTriggerSubscriptionAsync(long pipelineId, string refId, CancellationToken ct)
+        {
+            if (_subscriptionResolver != null)
+            {
+                return _subscriptionResolver(pipelineId, refId);
+            }
+            return Task.FromResult<TriggerSubInfo?>(null);
+        }
+    }
 }

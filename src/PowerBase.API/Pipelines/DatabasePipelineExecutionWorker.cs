@@ -222,6 +222,16 @@ public class DatabasePipelineExecutionWorker : BackgroundService
 
     private async Task ProcessJobAsync(PipelineQueue job, CancellationToken ct)
     {
+        if (job.TenantId <= 0)
+        {
+            using var earlyScope = _serviceProvider.CreateScope();
+            var earlyQueueRepo = earlyScope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
+            var earlyClaimToken = job.ClaimToken ?? Guid.Empty;
+            _logger.LogError("Job {Id} has invalid or missing Owner TenantId: {TenantId}. Marking Failed non-retryably.", job.Id, job.TenantId);
+            await earlyQueueRepo.MarkFailedAsync(job.Id, _workerId, earlyClaimToken, $"Job has invalid or missing Owner TenantId: {job.TenantId}", ct);
+            return;
+        }
+
         var semaphore = TenantSemaphores.GetOrAdd(job.TenantId, _ => new SemaphoreSlim(_options.PerInstanceTenantConcurrencyLimit, _options.PerInstanceTenantConcurrencyLimit));
         await semaphore.WaitAsync(ct);
 
@@ -269,19 +279,19 @@ public class DatabasePipelineExecutionWorker : BackgroundService
 
             try
             {
-                // Execute execution within a scoped context
+                // Resolve query context and assign tenant ID immediately
                 var queryContext = scope.ServiceProvider.GetRequiredService<IQueryContext>();
                 queryContext.SetTenantId(job.TenantId);
+
+                // Set early safe context values
                 if (queryContext is QueryContext qc)
                 {
-                    qc.UserId = job.TriggeredBy ?? 0;
                     qc.IsPipelineExecution = true;
                     qc.PipelineDepth = job.Depth;
                     qc.PipelineChainJson = job.PipelineChain;
                 }
 
                 var pipelineRepo = scope.ServiceProvider.GetRequiredService<IPipelineRepository>();
-
                 var pipeline = await pipelineRepo.GetByIdAsync(job.PipelineId, ct);
                 if (pipeline == null || pipeline.IsDeleted)
                 {
@@ -297,9 +307,13 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                     return;
                 }
 
-                if (queryContext is QueryContext qc2 && qc2.UserId == 0 && pipeline != null)
+                // Resolve execution user using exact security rules
+                var resolvedUserId = await ResolveExecutionIdentityAsync(job, pipeline, scope.ServiceProvider, ct);
+
+                // Set the resolved UserId into the query context
+                if (queryContext is QueryContext qc2)
                 {
-                    qc2.UserId = pipeline.CreatedBy;
+                    qc2.UserId = resolvedUserId;
                 }
 
                 // Validate resolved execution user
@@ -472,6 +486,101 @@ public class DatabasePipelineExecutionWorker : BackgroundService
         }
     }
 
+    private async Task<long> ResolveExecutionIdentityAsync(
+        PipelineQueue job,
+        Pipeline pipeline,
+        IServiceProvider services,
+        CancellationToken ct)
+    {
+        var resolvedUserId = job.TriggeredBy ?? 0;
+
+        if (job.QueueSource == "Event" && !string.IsNullOrEmpty(job.TriggerStepRefId))
+        {
+            TriggerSubInfo? subscription;
+            try
+            {
+                subscription = await GetTriggerSubscriptionAsync(job.PipelineId, job.TriggerStepRefId, ct);
+            }
+            catch (Exception ex)
+            {
+                throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Pipeline trigger subscription lookup failed or returned duplicates: {ex.Message}");
+            }
+
+            if (subscription == null)
+            {
+                throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Active pipeline trigger subscription not found for step {job.TriggerStepRefId}.");
+            }
+
+            // Bind Subscription to the exact Owner Tenant
+            if (subscription.OwnerTenantId != job.TenantId)
+            {
+                throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Subscription owner tenant {subscription.OwnerTenantId} does not match job owner tenant {job.TenantId}.");
+            }
+
+            // Proven cross-tenant trigger using target connection
+            if (subscription.TargetTenantId != subscription.OwnerTenantId)
+            {
+                var creatorId = pipeline.CreatedBy;
+                if (creatorId <= 0)
+                {
+                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline creator ID is invalid.");
+                }
+
+                var userRepo = services.GetRequiredService<IUserRepository>();
+                var creatorUser = await userRepo.GetByIdAsync(creatorId, ct);
+                if (creatorUser == null || !creatorUser.IsActive || creatorUser.IsDeleted)
+                {
+                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Pipeline creator user {creatorId} is inactive, deleted, or does not exist.");
+                }
+
+                var tenantRepo = services.GetRequiredService<ITenantRepository>();
+                var isCreatorMember = await tenantRepo.IsActiveMemberAsync(creatorId, ct);
+                if (!isCreatorMember)
+                {
+                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Pipeline creator user {creatorId} is not an active member of owner tenant {job.TenantId}.");
+                }
+
+                // Verify the saved connection and target tenant match
+                var connectionResolver = services.GetRequiredService<PowerBase.Application.Connections.Common.ConnectionScopeResolver>();
+                try
+                {
+                    var connectionScope = await connectionResolver.TryResolveForUserAsync(subscription.TargetConnectionPublicId, creatorId, ct);
+                    if (connectionScope == null)
+                    {
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Saved connection {subscription.TargetConnectionPublicId} not found or not owned by creator {creatorId}.");
+                    }
+                    if (connectionScope.TargetTenantId != subscription.TargetTenantId)
+                    {
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Saved connection {subscription.TargetConnectionPublicId} targets tenant {connectionScope.TargetTenantId} instead of subscription tenant {subscription.TargetTenantId}.");
+                    }
+                }
+                catch (Exception ex) when (!(ex is PowerBase.Domain.Exceptions.PipelineNonRetryableException))
+                {
+                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Saved connection validation failed: {ex.Message}");
+                }
+
+                resolvedUserId = creatorId;
+            }
+        }
+
+        return resolvedUserId > 0 ? resolvedUserId : pipeline.CreatedBy;
+    }
+
+    protected virtual async Task<TriggerSubInfo?> GetTriggerSubscriptionAsync(long pipelineId, string refId, CancellationToken ct)
+    {
+        await using var controlConn = _controlConnFactory.Create();
+        await controlConn.OpenAsync(ct);
+        const string subSql = """
+            SELECT TargetTenantId, TargetConnectionPublicId, OwnerTenantId
+            FROM meta.PipelineTriggerSubscription
+            WHERE OwnerPipelineId = @pipelineId 
+              AND TriggerStepRefId = @refId
+              AND IsActive = 1
+            """;
+        return await controlConn.QuerySingleOrDefaultAsync<TriggerSubInfo>(
+            new CommandDefinition(subSql, new { pipelineId, refId }, cancellationToken: ct));
+    }
+
     private async Task HandleJobFailureAsync(IMainPipelineQueueRepository queueRepo, PipelineQueue job, Guid claimToken, string error, CancellationToken ct)
     {
         if (job.AttemptCount >= job.MaxAttempts)
@@ -487,3 +596,11 @@ public class DatabasePipelineExecutionWorker : BackgroundService
         }
     }
 }
+
+public class TriggerSubInfo
+{
+    public long TargetTenantId { get; set; }
+    public Guid TargetConnectionPublicId { get; set; }
+    public long OwnerTenantId { get; set; }
+}
+
