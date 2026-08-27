@@ -214,7 +214,20 @@ builder.Services.AddScoped<IRolePermissionEnforcer, RolePermissionEnforcer>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
-builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
+var storageProvider = builder.Configuration["Storage:Provider"] ?? "Local";
+var azureBlobConnStr = builder.Configuration["Storage:AzureBlob:ConnectionString"] ?? builder.Configuration["AzureBlob:ConnectionString"];
+bool hasValidAzureBlobConfig = !string.IsNullOrWhiteSpace(azureBlobConnStr) && 
+                               !azureBlobConnStr.StartsWith("<") && 
+                               (azureBlobConnStr.StartsWith("DefaultEndpointsProtocol=", StringComparison.OrdinalIgnoreCase) || azureBlobConnStr.Contains("AccountName="));
+
+if (string.Equals(storageProvider, "AzureBlob", StringComparison.OrdinalIgnoreCase) && hasValidAzureBlobConfig)
+{
+    builder.Services.AddScoped<IFileStorageService, AzureBlobStorageService>();
+}
+else
+{
+    builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
+}
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineRecordSearchService, PowerBase.Infrastructure.Services.PipelineRecordSearchService>();
 builder.Services.AddSingleton<IAzureSearchService, PowerBase.Infrastructure.Services.AzureSearchService>();
 builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService, PowerBase.Application.Records.RecordWriteService>();
