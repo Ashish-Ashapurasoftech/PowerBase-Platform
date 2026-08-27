@@ -24,7 +24,9 @@ public sealed class AzureBlobStorageService : IFileStorageService
                             ?? configuration["AzureBlob:ContainerName"] 
                             ?? "powerbase-uploads";
 
-        if (!string.IsNullOrWhiteSpace(connectionString))
+        if (!string.IsNullOrWhiteSpace(connectionString) && 
+            !connectionString.StartsWith("<") && 
+            (connectionString.StartsWith("DefaultEndpointsProtocol=", StringComparison.OrdinalIgnoreCase) || connectionString.Contains("AccountName=")))
         {
             _containerClient = new BlobContainerClient(connectionString, containerName);
             _isEnabled = true;
