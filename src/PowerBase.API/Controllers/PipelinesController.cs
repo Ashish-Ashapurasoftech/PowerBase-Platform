@@ -171,7 +171,7 @@ public class PipelinesController : ControllerBase
         var command = new SavePipelineStepsCommand(publicId, request.Steps, rowVersion);
         await _saveStepsHandler.HandleAsync(command, ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { rowVersion = Convert.ToBase64String(pipeline.RowVersion) });
+        return Ok(new { rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Soft-delete a pipeline workflow.</summary>
@@ -314,6 +314,7 @@ public class PipelinesController : ControllerBase
                 PipelineEditorRefReason.AppNotFound => "app_not_found",
                 PipelineEditorRefReason.AccessDenied => "access_denied",
                 PipelineEditorRefReason.TenantNotFound => "tenant_not_found",
+                PipelineEditorRefReason.ConnectionUnavailable => "connection_unavailable",
                 _ => "resolution_error"
             }
         }).ToList()
@@ -384,20 +385,22 @@ public class PipelinesController : ControllerBase
             request.CronExpression);
 
         await handler.HandleAsync(command, ct);
-        return Ok(new { message = "Schedule updated successfully." });
+        var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
+        return Ok(new { message = "Schedule updated successfully.", rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Delete a pipeline's schedule.</summary>
     [HttpDelete("pipelines/{publicId:guid}/schedule")]
     [RequireAppPermission(PermissionCodes.PowerFlowsUpdate, AppAccessResolver.ByPipelinePublicId)]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<IActionResult> DeleteSchedule(
         Guid publicId,
         [FromServices] DeletePipelineScheduleCommandHandler handler,
         CancellationToken ct)
     {
         await handler.HandleAsync(new DeletePipelineScheduleCommand(publicId), ct);
-        return NoContent();
+        var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
+        return Ok(new { message = "Schedule deleted successfully.", rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Run a pipeline manually on demand.</summary>
@@ -473,7 +476,7 @@ public class PipelinesController : ControllerBase
     }
 
     [HttpGet("pipelines/runs/{runPublicId:guid}/steps")]
-    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<PipelineStepRunDto>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiListResponse<PipelineStepRunDto>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -482,6 +485,8 @@ public class PipelinesController : ControllerBase
         [FromServices] GetPipelineRunStepsQueryHandler handler,
         [FromServices] IAppAccessService appAccessService,
         [FromServices] IPipelineRepository pipelineRepo,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 50,
         CancellationToken ct = default)
     {
         var run = await pipelineRepo.GetRunByPublicIdAsync(runPublicId, ct);
@@ -501,9 +506,9 @@ public class PipelinesController : ControllerBase
             return StatusCode(StatusCodes.Status403Forbidden, new { error = new { code = "FORBIDDEN", message = ex.Message } });
         }
 
-        var query = new GetPipelineRunStepsQuery(runPublicId);
+        var query = new GetPipelineRunStepsQuery(runPublicId, page, pageSize);
         var result = await handler.HandleAsync(query, ct);
-        return Ok(new ApiResponse<IReadOnlyList<PipelineStepRunDto>>(result));
+        return Ok(new ApiListResponse<PipelineStepRunDto>(result.Items, result.TotalCount, result.Page, result.PageSize));
     }
 
     /// <summary>Get list of all tenants accessible to the logged-in user for pipeline connection setup.</summary>

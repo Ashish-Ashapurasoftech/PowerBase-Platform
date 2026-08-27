@@ -52,6 +52,7 @@ public class UpdateDeleteReportHandlerTests
         _reportRepo.GetByPublicIdAsync(id, Arg.Any<CancellationToken>()).Returns(MakeExistingReport(id));
         _fieldRepo.ListByTableAsync(5, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
         _reportRepo.UpdateAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(1);
+        _reportRepo.GetByPublicIdAsync(id, Arg.Any<CancellationToken>()).Returns(new PowerBase.Domain.Entities.Report { Id = 10, PublicId = id, Name = "Test Report" });
         var sut = CreateUpdateSut();
 
         await sut.HandleAsync(ValidCommand(id));
@@ -96,6 +97,7 @@ public class UpdateDeleteReportHandlerTests
     public async Task DeleteReport_CallsDeleteOnRepo()
     {
         var id = Guid.NewGuid();
+        _reportRepo.GetByPublicIdAsync(id, Arg.Any<CancellationToken>()).Returns(new PowerBase.Domain.Entities.Report { PublicId = id, Name = "Test Report" });
         _reportRepo.DeleteAsync(id, Arg.Any<CancellationToken>()).Returns(1);
         var sut = CreateDeleteSut();
 
@@ -108,6 +110,7 @@ public class UpdateDeleteReportHandlerTests
     public async Task DeleteReport_NotFound_ThrowsNotFoundException()
     {
         var id = Guid.NewGuid();
+        _reportRepo.GetByPublicIdAsync(id, Arg.Any<CancellationToken>()).Returns(new PowerBase.Domain.Entities.Report { PublicId = id, Name = "Test Report" });
         _reportRepo.DeleteAsync(id, Arg.Any<CancellationToken>()).Returns(0);
         var sut = CreateDeleteSut();
 

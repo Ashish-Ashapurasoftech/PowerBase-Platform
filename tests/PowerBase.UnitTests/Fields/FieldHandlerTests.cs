@@ -73,10 +73,15 @@ public class FieldHandlerTests
     }
 
     [Fact]
-    public async Task CreateField_InvalidTypeCode_ThrowsValidationException()
+    public async Task CreateField_InvalidTypeCode_ThrowsNotFoundException()
     {
-        await MakeSut().Invoking(s => s.HandleAsync(new CreateFieldCommand(Guid.NewGuid(), "Blob", "File", null, false)))
-            .Should().ThrowAsync<ValidationException>();
+        var table = MakeTable();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.LabelExistsInTableAsync(table.Id, "File", Arg.Any<long?>(), Arg.Any<CancellationToken>()).Returns(false);
+        _fieldTypeRepo.GetByCodeAsync("Blob", Arg.Any<CancellationToken>()).Returns((FieldType?)null);
+
+        await MakeSut().Invoking(s => s.HandleAsync(new CreateFieldCommand(table.PublicId, "Blob", "File", null, false)))
+            .Should().ThrowAsync<NotFoundException>();
     }
 
     [Fact]

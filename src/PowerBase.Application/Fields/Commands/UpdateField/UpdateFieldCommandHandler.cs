@@ -18,6 +18,8 @@ public class UpdateFieldCommandHandler
     private readonly ISchemaEngineService _schemaEngine;
     private readonly IFieldTypeRepository _fieldTypeRepo;
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
+    private readonly IMessagePublisher _messagePublisher;
+    private readonly IQueryContext _queryContext;
 
     /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
     /// "Display As" Behavior Setting is allowed to switch between (see NumericDisplayAs).</summary>
@@ -30,8 +32,10 @@ public class UpdateFieldCommandHandler
         IRecordRepository recordRepo,
         IAuditRepository auditRepo,
         ISchemaEngineService schemaEngine,
+        FieldSettingsValidatorRegistry settingsRegistry,
         IFieldTypeRepository fieldTypeRepo,
-        FieldSettingsValidatorRegistry settingsRegistry)
+        IMessagePublisher messagePublisher,
+        IQueryContext queryContext)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -41,6 +45,8 @@ public class UpdateFieldCommandHandler
         _schemaEngine = schemaEngine;
         _fieldTypeRepo = fieldTypeRepo;
         _settingsRegistry = settingsRegistry;
+        _messagePublisher = messagePublisher;
+        _queryContext = queryContext;
     }
 
     public async Task HandleAsync(UpdateFieldCommand command, CancellationToken ct = default)
@@ -189,6 +195,21 @@ public class UpdateFieldCommandHandler
             existing.IsRequired = command.IsRequired;
             existing.DefaultValue = command.DefaultValue;
             await _recordRepo.BackfillDefaultAsync(table, existing, command.DefaultValue!, ct);
+        }
+
+        // Search Index Sync: when IsSearchable changes, trigger a backfill or nullify
+        if (command.IsSearchable != existing.IsSearchable && existing.Fid.HasValue)
+        {
+            var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
+            {
+                Action = command.IsSearchable ? PowerBase.Application.Common.Models.IndexAction.BackfillField : PowerBase.Application.Common.Models.IndexAction.NullifyField,
+                TenantId = _queryContext.TenantId,
+                AppId = table.AppId,
+                TableId = table.Id,
+                FieldId = existing.Fid.Value,
+                Page = 1
+            };
+            _ = _messagePublisher.PublishAsync(msg, default);
         }
 
         await _auditRepo.LogActivityAsync(

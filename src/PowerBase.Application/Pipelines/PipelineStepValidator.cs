@@ -4,7 +4,9 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Connections.Common;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -66,6 +68,16 @@ public class PipelineStepValidator
     /// </summary>
     private readonly Func<long, Task<TargetTenantRepos>>? _targetScopeFactory;
 
+    /// <summary>
+    /// Resolves a connectionPublicId that refers to a saved PowerFlows account
+    /// (meta.PipelineAccount). Together with <see cref="_serviceScopeFactory"/> this lets
+    /// App/Table/Field validation run inside the account's realm as the account's token owner.
+    /// Both are optional so the validator can still be constructed without saved-account
+    /// support (unit tests, same-tenant-only callers) — exactly like _targetScopeFactory.
+    /// </summary>
+    private readonly ConnectionScopeResolver? _connectionScopeResolver;
+    private readonly IServiceScopeFactory? _serviceScopeFactory;
+
     public static readonly HashSet<Guid> SystemConnectionIds = new()
     {
         new Guid("00000000-0000-0000-0000-000000000001"),
@@ -81,7 +93,9 @@ public class PipelineStepValidator
         IAppAccessService appAccessService,
         ITenantRepository tenantRepo,
         IQueryContext queryContext,
-        Func<long, Task<TargetTenantRepos>>? targetScopeFactory = null)
+        Func<long, Task<TargetTenantRepos>>? targetScopeFactory = null,
+        ConnectionScopeResolver? connectionScopeResolver = null,
+        IServiceScopeFactory? serviceScopeFactory = null)
     {
         _pipelineRepo = pipelineRepo;
         _appRepo = appRepo;
@@ -91,6 +105,40 @@ public class PipelineStepValidator
         _tenantRepo = tenantRepo;
         _queryContext = queryContext;
         _targetScopeFactory = targetScopeFactory;
+        _connectionScopeResolver = connectionScopeResolver;
+        _serviceScopeFactory = serviceScopeFactory;
+    }
+
+    /// <summary>
+    /// Returns the verified scope when the connection is a saved account, or null when the id
+    /// is not a saved account at all. Throws <see cref="UnauthorizedActionException"/> when it
+    /// IS a saved account whose credential can no longer be honoured — the caller must surface
+    /// that, never fall back to the owner tenant.
+    /// </summary>
+    private async Task<ConnectionScope?> TryResolveSavedAccountAsync(Guid connectionGuid, CancellationToken ct)
+    {
+        if (_connectionScopeResolver is null || _serviceScopeFactory is null) return null;
+        return await _connectionScopeResolver.TryResolveAsync(connectionGuid, ct);
+    }
+
+    /// <summary>Opens the account's realm and resolves the repositories validation needs from it.</summary>
+    private async Task<TargetTenantRepos> OpenAccountReposAsync(ConnectionScope connection, CancellationToken ct)
+    {
+        var scope = await TargetTenantScopeHelper.OpenAsync(_serviceScopeFactory!, connection, ct);
+        try
+        {
+            return new TargetTenantRepos(
+                scope.GetRequiredService<IAppRepository>(),
+                scope.GetRequiredService<IAppTableRepository>(),
+                scope.GetRequiredService<IAppFieldRepository>(),
+                scope.GetRequiredService<IAppAccessService>(),
+                scope);
+        }
+        catch
+        {
+            await scope.DisposeAsync();
+            throw;
+        }
     }
 
     public async Task ValidateStepConnectionAndTenantAccessAsync(string configJson, CancellationToken ct)
@@ -129,7 +177,18 @@ public class PipelineStepValidator
         }
         catch
         {
-            // fallback to check pipeline connection
+            // fallback to check saved account, then pipeline connection
+        }
+
+        // A saved PowerFlows account ("Connect new account"). Resolving it also re-verifies the
+        // credential, so a step can never be saved against an account that has gone stale.
+        try
+        {
+            if (await TryResolveSavedAccountAsync(connectionGuid, ct) is not null) return;
+        }
+        catch (UnauthorizedActionException ex)
+        {
+            throw new ValidationException(new Dictionary<string, string[]> { { "ConnectionPublicId", new[] { ex.Message } } });
         }
 
         var connection = await _pipelineRepo.GetConnectionByPublicIdAsync(connectionGuid, ct);
@@ -159,6 +218,7 @@ public class PipelineStepValidator
 
         // 1. Connection — resolve target tenant for cross-tenant step metadata validation
         long targetTenantId = _queryContext.TenantId; // default: same as owner
+        ConnectionScope? accountScope = null;         // set only for saved PowerFlows accounts
         if (string.IsNullOrEmpty(config.ConnectionPublicId) || !Guid.TryParse(config.ConnectionPublicId, out var connectionGuid))
         {
             AddError(errors, "ConnectionPublicId", "Connection is required and must be a valid Guid.");
@@ -175,10 +235,30 @@ public class PipelineStepValidator
             }
             catch
             {
-                var connection = await _pipelineRepo.GetConnectionByPublicIdAsync(connectionGuid, ct);
-                if (connection == null || connection.IsDeleted)
+                // Not one of the user's own realms. It may be a saved PowerFlows account, whose
+                // realm we must validate against — falling through to the owner tenant here is
+                // what used to make cross-realm steps validate against the wrong schema.
+                try
                 {
-                    AddError(errors, "ConnectionPublicId", "Connection does not exist or is inactive.");
+                    accountScope = await TryResolveSavedAccountAsync(connectionGuid, ct);
+                }
+                catch (UnauthorizedActionException ex)
+                {
+                    // It IS a saved account, but its credential can no longer be honoured.
+                    AddError(errors, "ConnectionPublicId", ex.Message);
+                }
+
+                if (accountScope != null)
+                {
+                    targetTenantId = accountScope.TargetTenantId;
+                }
+                else if (!errors.ContainsKey("ConnectionPublicId"))
+                {
+                    var connection = await _pipelineRepo.GetConnectionByPublicIdAsync(connectionGuid, ct);
+                    if (connection == null || connection.IsDeleted)
+                    {
+                        AddError(errors, "ConnectionPublicId", "Connection does not exist or is inactive.");
+                    }
                 }
             }
         }
@@ -191,7 +271,15 @@ public class PipelineStepValidator
 
         // 2-4. App / Table / Field validation — use target-tenant scope for cross-tenant connections
         bool isTargetTenant = targetTenantId != _queryContext.TenantId;
-        if (isTargetTenant && _targetScopeFactory is not null)
+        if (accountScope != null)
+        {
+            // Saved account: validate as the account's token owner, inside the account's realm and
+            // under the token's app restrictions. Checked first because a saved account may point
+            // at the owner's own realm and still must not be validated with the caller's identity.
+            await using var accountRepos = await OpenAccountReposAsync(accountScope, ct);
+            await ValidateAppTableFieldsAsync(config, accountRepos.AppRepo, accountRepos.TableRepo, accountRepos.FieldRepo, accountRepos.AppAccessService, errors, ct);
+        }
+        else if (isTargetTenant && _targetScopeFactory is not null)
         {
             // Create a fresh scope scoped to the target tenant's database
             await using var targetRepos = await _targetScopeFactory(targetTenantId);

@@ -2,9 +2,12 @@ using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Pipelines.Commands.UpdatePipeline;
@@ -19,6 +22,7 @@ public class UpdatePipelineCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IAppAccessService _appAccessService;
     private readonly ITenantRepository _tenantRepo;
+    private readonly IMainPipelineQueueRepository _queueRepo;
     private readonly IServiceProvider _serviceProvider;
 
     public UpdatePipelineCommandHandler(
@@ -30,6 +34,7 @@ public class UpdatePipelineCommandHandler
         IAppFieldRepository fieldRepo,
         IAppAccessService appAccessService,
         ITenantRepository tenantRepo,
+        IMainPipelineQueueRepository queueRepo,
         IServiceProvider serviceProvider)
     {
         _pipelineRepo = pipelineRepo;
@@ -40,6 +45,7 @@ public class UpdatePipelineCommandHandler
         _fieldRepo = fieldRepo;
         _appAccessService = appAccessService;
         _tenantRepo = tenantRepo;
+        _queueRepo = queueRepo;
         _serviceProvider = serviceProvider;
     }
 
@@ -54,6 +60,8 @@ public class UpdatePipelineCommandHandler
                     .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
 
         var pipeline = await _pipelineRepo.GetByPublicIdAsync(command.PublicId, ct);
+        bool isTransitioningToActive = !pipeline.IsActive && command.IsActive;
+        bool isTransitioningToInactive = pipeline.IsActive && !command.IsActive;
 
         if (command.IsActive)
         {
@@ -100,9 +108,12 @@ public class UpdatePipelineCommandHandler
             var stepValidator = new PipelineStepValidator(
                 _pipelineRepo, _appRepo, _tableRepo, _fieldRepo,
                 _appAccessService, _tenantRepo, _queryContext,
-                targetScopeFactory);
+                targetScopeFactory,
+                // Optional: absent means no saved-account support (see SavePipelineStepsCommandHandler).
+                _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>(),
+                _serviceProvider.GetService<IServiceScopeFactory>());
 
-            foreach (var step in steps.Where(s => !s.IsDeleted && s.Type == "trigger" && s.Subtype == "new-event"))
+            foreach (var step in steps.Where(s => !s.IsDeleted && s.Type == "trigger" && (s.Subtype == "new-event" || s.Subtype == "new-bulk-event")))
             {
                 await stepValidator.ValidateNewEventStepAsync(step.ConfigJson ?? string.Empty, ct);
             }
@@ -126,6 +137,63 @@ public class UpdatePipelineCommandHandler
         if (affected == 0)
         {
             throw new ConcurrencyException("Pipeline config has been modified by another process. Please reload and try again.");
+        }
+
+        var logger = _serviceProvider.GetService<ILogger<UpdatePipelineCommandHandler>>();
+        logger?.LogInformation("Pipeline {PipelineId} (PublicId: {PublicId}) successfully updated. Active: {IsActive}", pipeline.Id, pipeline.PublicId, pipeline.IsActive);
+
+        var sentinelDate = new DateTime(9999, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+
+        if (isTransitioningToActive)
+        {
+            // Resume sentinel-paused jobs in the Control DB
+            var resumedJobs = await _queueRepo.ResumePendingJobsAsync(_queryContext.TenantId, pipeline.Id, sentinelDate, ct);
+            logger?.LogInformation("Pipeline {PipelineId} reactivated. Resumed {ResumedCount} sentinel-paused jobs in queue.", pipeline.Id, resumedJobs);
+
+            var schedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(pipeline.Id, ct);
+            if (schedule != null)
+            {
+                TimeZoneInfo timeZoneInfo;
+                try
+                {
+                    timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(schedule.TimeZone);
+                }
+                catch
+                {
+                    var map = new System.Collections.Generic.Dictionary<string, string>
+                    {
+                        { "America/New_York", "Eastern Standard Time" },
+                        { "America/Chicago", "Central Standard Time" },
+                        { "America/Denver", "Mountain Standard Time" },
+                        { "America/Los_Angeles", "Pacific Standard Time" },
+                        { "Asia/Kolkata", "India Standard Time" },
+                        { "UTC", "UTC" }
+                    };
+                    if (map.TryGetValue(schedule.TimeZone, out var winId))
+                    {
+                        try { timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(winId); }
+                        catch { timeZoneInfo = TimeZoneInfo.Utc; }
+                    }
+                    else
+                    {
+                        timeZoneInfo = TimeZoneInfo.Utc;
+                    }
+                }
+
+                var cron = NCrontab.CrontabSchedule.Parse(schedule.CronExpression);
+                var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, timeZoneInfo);
+                var nextRunLocal = cron.GetNextOccurrence(nowLocal);
+                var nextRunUtc = TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo);
+                schedule.NextRunOn = nextRunUtc;
+                await _pipelineRepo.UpdateScheduleAsync(schedule, transaction: null, ct);
+                logger?.LogInformation("Pipeline {PipelineId} schedule NextRunOn recalculated on reactivation: {NextRunOn}", pipeline.Id, nextRunUtc);
+            }
+        }
+        else if (isTransitioningToInactive)
+        {
+            // Pause pending jobs in the Control DB using sentinel date
+            var pausedJobs = await _queueRepo.PausePendingJobsAsync(_queryContext.TenantId, pipeline.Id, sentinelDate, ct);
+            logger?.LogInformation("Pipeline {PipelineId} deactivated. Paused {PausedCount} pending jobs in queue with sentinel date.", pipeline.Id, pausedJobs);
         }
 
         await _auditRepo.LogActivityAsync(

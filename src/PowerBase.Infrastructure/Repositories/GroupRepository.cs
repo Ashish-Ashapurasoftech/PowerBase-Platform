@@ -192,20 +192,31 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
             new { groupId = groupId.Value }, cancellationToken: ct))).ToList();
 
         const string upsertSql = @"
-            IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId)
+            IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId)
             BEGIN
-                UPDATE meta.AppUser
-                SET Status = 'Active',
-                    IsDeleted = 0,
-                    AppRoleId = CASE WHEN IsFromGroup = 1 THEN @appRoleId ELSE AppRoleId END,
-                    GroupId = CASE WHEN IsFromGroup = 1 THEN @groupId ELSE GroupId END,
-                    UpdatedOn = SYSUTCDATETIME()
-                WHERE AppId = @appId AND UserId = @userId
+                IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsDeleted = 0 AND NOT (IsFromGroup = 1 AND GroupId = @groupId))
+                BEGIN
+                    UPDATE meta.AppUser
+                    SET IsDeleted = 1, Status = 'InActive', UpdatedOn = SYSUTCDATETIME()
+                    WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId
+                END
+                ELSE
+                BEGIN
+                    UPDATE meta.AppUser
+                    SET Status = 'Active',
+                        IsDeleted = 0,
+                        AppRoleId = @appRoleId,
+                        UpdatedOn = SYSUTCDATETIME()
+                    WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId
+                END
             END
             ELSE
             BEGIN
-                INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
-                VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId)
+                IF NOT EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsDeleted = 0)
+                BEGIN
+                    INSERT INTO meta.AppUser (PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
+                    VALUES (NEWID(), @appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId)
+                END
             END";
 
         foreach (var userId in userIds)
@@ -481,20 +492,31 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
             new { memberUserIds }, cancellationToken: ct))).ToDictionary(u => (long)u.Id);
             
         const string upsertSql = @"
-            IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId)
+            IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId)
             BEGIN
-                UPDATE meta.AppUser
-                SET Status = 'Active',
-                    IsDeleted = 0,
-                    AppRoleId = CASE WHEN IsFromGroup = 1 THEN @appRoleId ELSE AppRoleId END,
-                    GroupId = CASE WHEN IsFromGroup = 1 THEN @groupId ELSE GroupId END,
-                    UpdatedOn = SYSUTCDATETIME()
-                WHERE AppId = @appId AND UserId = @userId
+                IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsDeleted = 0 AND NOT (IsFromGroup = 1 AND GroupId = @groupId))
+                BEGIN
+                    UPDATE meta.AppUser
+                    SET IsDeleted = 1, Status = 'InActive', UpdatedOn = SYSUTCDATETIME()
+                    WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId
+                END
+                ELSE
+                BEGIN
+                    UPDATE meta.AppUser
+                    SET Status = 'Active',
+                        IsDeleted = 0,
+                        AppRoleId = @appRoleId,
+                        UpdatedOn = SYSUTCDATETIME()
+                    WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId
+                END
             END
             ELSE
             BEGIN
-                INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
-                VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId)
+                IF NOT EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsDeleted = 0)
+                BEGIN
+                    INSERT INTO meta.AppUser (PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
+                    VALUES (NEWID(), @appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId)
+                END
             END";
             
         foreach (var appId in appIds)
@@ -553,8 +575,8 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
                       SET GroupId = @otherGroupId,
                           AppRoleId = @otherAppRoleId,
                           UpdatedOn = SYSUTCDATETIME()
-                      WHERE AppId = @appId AND UserId = @userId",
-                    new { appId, userId, otherGroupId = (long)otherGroup.GroupId, otherAppRoleId = (long)otherGroup.AppRoleId },
+                      WHERE AppId = @appId AND UserId = @userId AND GroupId = @groupId AND IsFromGroup = 1 AND IsDeleted = 0",
+                    new { appId, userId, groupId, otherGroupId = (long)otherGroup.GroupId, otherAppRoleId = (long)otherGroup.AppRoleId },
                     cancellationToken: ct));
             }
             else
@@ -564,8 +586,8 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
                       SET IsDeleted = 1,
                           Status = 'InActive',
                           UpdatedOn = SYSUTCDATETIME()
-                      WHERE AppId = @appId AND UserId = @userId",
-                    new { appId, userId },
+                      WHERE AppId = @appId AND UserId = @userId AND GroupId = @groupId AND IsFromGroup = 1 AND IsDeleted = 0",
+                    new { appId, userId, groupId },
                     cancellationToken: ct));
             }
         }

@@ -118,11 +118,22 @@ var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get
 
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("Frontend", policy => policy
-        .WithOrigins(allowedOrigins)
-        .AllowAnyHeader()
-        .AllowAnyMethod()
-        .AllowCredentials());
+    options.AddPolicy("Frontend", policy =>
+    {
+        if (allowedOrigins.Length > 0)
+        {
+            policy.WithOrigins(allowedOrigins);
+        }
+        else
+        {
+            policy.SetIsOriginAllowed(origin =>
+                new Uri(origin).Host.EndsWith(".azurestaticapps.net") ||
+                new Uri(origin).Host == "localhost");
+        }
+        policy.AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials();
+    });
 });
 
 builder.Services.AddControllers();
@@ -204,6 +215,7 @@ builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
 builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineRecordSearchService, PowerBase.Infrastructure.Services.PipelineRecordSearchService>();
 builder.Services.AddSingleton<IAzureSearchService, PowerBase.Infrastructure.Services.AzureSearchService>();
 builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService, PowerBase.Application.Records.RecordWriteService>();
 builder.Services.AddScoped<IAppSeeder, AppSeeder>();
@@ -296,6 +308,7 @@ builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
 builder.Services.AddScoped<IReportRepository, ReportRepository>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
 builder.Services.AddScoped<IPermissionRepository, PermissionRepository>();
 builder.Services.AddScoped<IUserPermissionRepository, UserPermissionRepository>();
 builder.Services.AddScoped<IFormRepository, FormRepository>();
@@ -307,6 +320,7 @@ builder.Services.AddScoped<IPipelineRepository, PipelineRepository>();
 builder.Services.AddScoped<IPipelineStepIdempotencyRepository, PipelineStepIdempotencyRepository>();
 builder.Services.AddScoped<IUserTokenRepository, UserTokenRepository>();
 builder.Services.AddScoped<IAppTokenRepository, AppTokenRepository>();
+builder.Services.AddScoped<IPipelineAccountRepository, PipelineAccountRepository>();
 builder.Services.AddScoped<IGroupRepository, GroupRepository>();
 
 
@@ -325,6 +339,14 @@ builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineRu
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineSchedule.GetPipelineScheduleQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.UpdatePipelineSchedule.UpdatePipelineScheduleCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.DeletePipelineSchedule.DeletePipelineScheduleCommandHandler>();
+
+// Saved PowerFlows accounts ("Connect new account")
+builder.Services.AddScoped<PowerBase.Application.Connections.Common.ConnectionScopeResolver>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Queries.GetConnections.GetConnectionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Commands.CreateConnection.CreateConnectionCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Queries.GetConnectionApps.GetConnectionAppsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Queries.GetConnectionTables.GetConnectionTablesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Connections.Queries.GetConnectionFields.GetConnectionFieldsQueryHandler>();
 
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Commands.CreateUserToken.CreateUserTokenCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.UserTokens.Queries.GetMyUserTokens.GetMyUserTokensQueryHandler>();
@@ -414,6 +436,7 @@ builder.Services.AddScoped<ListRecordsQueryHandler>();
 builder.Services.AddScoped<GetRecordQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.SearchGlobalRecords.SearchGlobalRecordsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetDistinctFieldValues.GetDistinctFieldValuesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.CreateRelationship.CreateRelationshipCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.DeleteRelationship.DeleteRelationshipCommandHandler>();

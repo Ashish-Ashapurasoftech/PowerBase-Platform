@@ -24,10 +24,15 @@ public interface IAppUserRepository
     Task<IReadOnlyList<AppUserDetail>> ListByAppFilteredAsync(long appId,string? search,string? role,string sortBy,bool sortDesc,CancellationToken ct = default);
     Task<int> CountByAppAsync(long appId,string? search,string? role,CancellationToken ct = default);
     Task<AppUser?> GetByAppAndUserAsync(long appId, long userId, CancellationToken ct = default);
+    Task<AppUser?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
+    Task<AppUser?> GetByAppUserAndRoleAsync(long appId, long userId, long appRoleId, CancellationToken ct = default);
     Task CreateAsync(AppUser appUser, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task UpdateRoleAsync(long appId, long userId, long newRoleId, CancellationToken ct = default);
+    Task UpdateRoleByAssignmentAsync(long appId, Guid appUserPublicId, long newRoleId, CancellationToken ct = default);
     Task UpdateShowInUserPickersAsync(long appId, long userId, bool showInUserPickers, CancellationToken ct = default);
+    Task UpdateShowInUserPickersByAssignmentAsync(long appId, Guid appUserPublicId, bool showInUserPickers, CancellationToken ct = default);
     Task RemoveAsync(long appId, long userId, CancellationToken ct = default);
+    Task RemoveAssignmentAsync(long appId, Guid appUserPublicId, CancellationToken ct = default);
     Task<string?> GetUserRoleNameAsync(long appId, long userId, CancellationToken ct = default);
     Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default);
     Task<IReadOnlySet<string>> GetUserAppPermissionsAsync(long appId, long userId, CancellationToken ct = default);

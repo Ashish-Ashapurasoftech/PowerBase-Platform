@@ -26,7 +26,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
 
         // Rule 1: Must begin with exactly one Trigger or Search/Query step at root index 0
         var firstStep = steps[0];
-        bool isValidFirstStep = firstStep.Type == "trigger" || (firstStep.Type == "query" && firstStep.Subtype == "search-records");
+        bool isValidFirstStep = firstStep.Type == "trigger" || (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record"));
         if (!isValidFirstStep)
         {
             context.AddFailure("Steps", "A pipeline must begin with either a Trigger step or a Search/Query step.");
@@ -220,6 +220,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                         var isSingleRecordProvider = targetStep.Subtype == "create-record" ||
                                                      targetStep.Subtype == "update-record" ||
                                                      targetStep.Type == "loop" ||
+                                                     targetStep.Subtype == "look-up-record" ||
                                                      targetStep.Subtype == "new-event";
                         if (!isSingleRecordProvider)
                         {
@@ -248,6 +249,40 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                 if (step.IsValidated && (string.IsNullOrEmpty(tableId) || !Guid.TryParse(tableId, out _)))
                 {
                     context.AddFailure("Steps", $"Search Records step '{step.RefId}' requires a valid table selection.");
+                }
+            }
+
+            if (step.Subtype == "look-up-record")
+            {
+                string? tablePublicId = null;
+                string? recordIdValue = null;
+                if (!string.IsNullOrEmpty(step.ConfigJson))
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(step.ConfigJson);
+                        if (doc.RootElement.TryGetProperty("tablePublicId", out var prop))
+                        {
+                            tablePublicId = prop.GetString();
+                        }
+                        if (doc.RootElement.TryGetProperty("recordIdValue", out var propVal))
+                        {
+                            recordIdValue = propVal.GetString();
+                        }
+                    }
+                    catch { }
+                }
+
+                if (step.IsValidated)
+                {
+                    if (string.IsNullOrEmpty(tablePublicId) || !Guid.TryParse(tablePublicId, out _))
+                    {
+                        context.AddFailure("Steps", $"Look Up a Record step '{step.RefId}' requires a valid table selection.");
+                    }
+                    if (string.IsNullOrEmpty(recordIdValue))
+                    {
+                        context.AddFailure("Steps", $"Look Up a Record step '{step.RefId}' requires a valid lookup value.");
+                    }
                 }
             }
 

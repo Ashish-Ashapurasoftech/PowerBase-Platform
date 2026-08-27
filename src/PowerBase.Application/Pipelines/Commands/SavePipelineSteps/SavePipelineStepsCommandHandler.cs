@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,6 +21,7 @@ public class SavePipelineStepsCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly ITenantRepository _tenantRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IMainPipelineQueueRepository _queueRepo;
     private readonly IServiceProvider _serviceProvider;
 
     public SavePipelineStepsCommandHandler(
@@ -31,6 +33,7 @@ public class SavePipelineStepsCommandHandler
         ITenantUnitOfWork uow,
         ITenantRepository tenantRepo,
         IQueryContext queryContext,
+        IMainPipelineQueueRepository queueRepo,
         IServiceProvider serviceProvider)
     {
         _pipelineRepo = pipelineRepo;
@@ -41,6 +44,7 @@ public class SavePipelineStepsCommandHandler
         _uow = uow;
         _tenantRepo = tenantRepo;
         _queryContext = queryContext;
+        _queueRepo = queueRepo;
         _serviceProvider = serviceProvider;
     }
 
@@ -95,12 +99,42 @@ public class SavePipelineStepsCommandHandler
         var stepValidator = new PipelineStepValidator(
             _pipelineRepo, _appRepo, _tableRepo, _fieldRepo,
             _appAccessService, _tenantRepo, _queryContext,
-            targetScopeFactory);
+            targetScopeFactory,
+            // Optional (GetService, not GetRequiredService): when absent the validator simply has
+            // no saved-account support, which is what test doubles for IServiceProvider give us.
+            _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>(),
+            _serviceProvider.GetService<IServiceScopeFactory>());
         await ValidateStepsConfigAsync(command.Steps, stepValidator, ct);
 
         var pipelineId = await _pipelineRepo.GetIdByPublicIdAsync(command.PipelinePublicId, ct);
         var pipeline = await _pipelineRepo.GetByPublicIdAsync(command.PipelinePublicId, ct);
-        if (pipeline.IsActive)
+
+        // Load existing active steps to check for modifications
+        var dbSteps = await _pipelineRepo.GetStepsByPipelineIdAsync(pipelineId, ct);
+
+        // Flatten the hierarchy tree
+        var flatList = new List<PipelineStep>();
+        var rootOrder = 0;
+        FlattenSteps(command.Steps, null, null, ref rootOrder, flatList);
+
+        bool stepsChanged = StepsConfigChanged(dbSteps.ToList(), flatList);
+        bool shouldDeactivate = pipeline.IsActive && stepsChanged;
+
+        // Custom validation check: Check for new Route 1 schedule triggers
+        var oldScheduleTriggers = dbSteps.Where(s => !s.IsDeleted && s.Type == "trigger" && s.Subtype == "schedule").Select(s => s.PublicId).ToHashSet();
+        var incomingScheduleTriggers = flatList.Where(s => s.Type == "trigger" && s.Subtype == "schedule").ToList();
+        foreach (var trigger in incomingScheduleTriggers)
+        {
+            if (!oldScheduleTriggers.Contains(trigger.PublicId))
+            {
+                throw new ValidationException(new Dictionary<string, string[]>
+                {
+                    { "Steps", new[] { "Creating new canvas schedule triggers is deprecated. Please configure schedule settings using the pipeline details panel." } }
+                });
+            }
+        }
+
+        if (pipeline.IsActive && !shouldDeactivate)
         {
             bool HasInvalidStep(List<SavePipelineStepDto> dtoSteps)
             {
@@ -124,21 +158,40 @@ public class SavePipelineStepsCommandHandler
             }
         }
 
-        // Flatten the hierarchy tree
-        var flatList = new List<PipelineStep>();
-        var rootOrder = 0;
-        FlattenSteps(command.Steps, null, null, ref rootOrder, flatList);
-
         await _uow.BeginAsync(ct);
         try
         {
-            await _pipelineRepo.SaveStepsAsync(pipelineId, flatList, command.RowVersion, _uow.Transaction, ct);
+            await _pipelineRepo.SaveStepsAsync(pipelineId, flatList, command.RowVersion, shouldDeactivate, _uow.Transaction, ct);
             await _uow.CommitAsync(ct);
         }
         catch
         {
             await _uow.RollbackAsync(ct);
             throw;
+        }
+
+        if (shouldDeactivate)
+        {
+            var sentinelDate = new DateTime(9999, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+            await _queueRepo.PausePendingJobsAsync(_queryContext.TenantId, pipelineId, sentinelDate, ct);
+        }
+
+        bool isCompatible = PipelineScheduleEligibility.IsPipelineScheduleable(flatList);
+
+        if (!isCompatible)
+        {
+            try
+            {
+                var schedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(pipelineId, ct);
+                if (schedule != null)
+                {
+                    await _pipelineRepo.DeleteScheduleAsync(schedule.PublicId, ct);
+                }
+            }
+            catch (NotFoundException)
+            {
+                // Already deleted or not found, safe to ignore
+            }
         }
     }
 
@@ -152,7 +205,7 @@ public class SavePipelineStepsCommandHandler
                 await stepValidator.ValidateStepConnectionAndTenantAccessAsync(dto.ConfigJson, ct);
             }
 
-            if (dto.Type == "trigger" && dto.Subtype == "new-event")
+            if (dto.Type == "trigger" && (dto.Subtype == "new-event" || dto.Subtype == "new-bulk-event"))
             {
                 await stepValidator.ValidateNewEventStepAsync(dto.ConfigJson ?? string.Empty, ct);
             }
@@ -204,6 +257,48 @@ public class SavePipelineStepsCommandHandler
                 var errorOrder = 0;
                 FlattenSteps(dto.ErrorChildren, stepPublicId, "errorChildren", ref errorOrder, flatList);
             }
+        }
+    }
+
+    private bool StepsConfigChanged(List<PipelineStep> oldSteps, List<PipelineStep> newSteps)
+    {
+        var activeOld = oldSteps.Where(s => !s.IsDeleted).ToList();
+        if (activeOld.Count != newSteps.Count)
+            return true;
+
+        var oldDict = activeOld.ToDictionary(s => s.PublicId);
+        foreach (var newStep in newSteps)
+        {
+            if (!oldDict.TryGetValue(newStep.PublicId, out var oldStep))
+                return true;
+
+            if (oldStep.RefId != newStep.RefId ||
+                oldStep.Type != newStep.Type ||
+                oldStep.Subtype != newStep.Subtype ||
+                oldStep.DisplayOrder != newStep.DisplayOrder ||
+                oldStep.ParentPublicId != newStep.ParentPublicId ||
+                oldStep.ParentBranch != newStep.ParentBranch ||
+                !JsonConfigNodeEquals(oldStep.ConfigJson, newStep.ConfigJson))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool JsonConfigNodeEquals(string? json1, string? json2)
+    {
+        if (string.IsNullOrEmpty(json1) && string.IsNullOrEmpty(json2)) return true;
+        if (string.IsNullOrEmpty(json1) || string.IsNullOrEmpty(json2)) return false;
+        try
+        {
+            var node1 = JsonNode.Parse(json1);
+            var node2 = JsonNode.Parse(json2);
+            return JsonNode.DeepEquals(node1, node2);
+        }
+        catch
+        {
+            return json1 == json2;
         }
     }
 }

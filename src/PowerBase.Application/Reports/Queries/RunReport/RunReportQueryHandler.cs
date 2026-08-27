@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Records;
@@ -41,6 +42,12 @@ public class RunReportQueryHandler
     private readonly IAzureSearchService _searchService;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IQueryContext _queryContext;
+    private readonly ILogger<RunReportQueryHandler> _logger;
+
+    // GAP #2: Max records returned from Azure AI Search to prevent SQL parameter explosion.
+    // Azure AI Search returns GUIDs; injecting >2000 into SQL causes severe performance and
+    // parameter-limit issues. Capped here; UI shows a warning when results are truncated.
+    private const int AiSearchMaxResults = 2000;
 
     public RunReportQueryHandler(
         IReportRepository reportRepo,
@@ -53,7 +60,8 @@ public class RunReportQueryHandler
         Relationships.IRelationalProjector relationalProjector,
         IAzureSearchService searchService,
         IAppUserRepository appUserRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        ILogger<RunReportQueryHandler> logger)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -66,6 +74,7 @@ public class RunReportQueryHandler
         _searchService = searchService;
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
+        _logger = logger;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -284,40 +293,48 @@ public class RunReportQueryHandler
         if (!string.IsNullOrWhiteSpace(quickSearch))
         {
             var hasSearchable = allFields.Any(f => f.IsSearchable);
-            
-            if (hasSearchable)
-            {
-                // Route query to Azure AI Search to bypass SQL encryption limitations
-                var aiMatches = await _searchService.SearchRecordsAsync(table.Id, quickSearch, ct);
-                
-                if (aiMatches.Count == 0)
-                {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
-                }
-                
-                var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
-                if (matchedIds.Count == 0)
-                {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
-                }
 
-                var aiSearchGroup = new FilterGroup
-                {
-                    Logic = "or",
-                    Nodes = matchedIds.Select(id => new FilterNode 
-                    {
-                        Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = id.ToString() }
-                    }).ToList()
-                };
-                
-                filterTree = filterTree == null
-                    ? aiSearchGroup
-                    : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = aiSearchGroup }] };
-            }
-            else
+            // GAP #3: Only use AI Search when the feature flag is enabled.
+            // GAP #4: Fallback to SQL LIKE if Azure AI Search is unavailable.
+            var useAiSearch = _searchService.IsGridSearchEnabled && hasSearchable;
+            var aiSearchSucceeded = false;
+
+            if (useAiSearch)
             {
-                // Standard SQL fallback for unencrypted tables
-                var textFields = allFields.Where(f => f.IsSearchable && (f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")).ToList();
+                try
+                {
+                    // Route query to Azure AI Search to bypass SQL encryption limitations.
+                    // GAP #2: Cap results at AiSearchMaxResults to prevent SQL parameter explosion.
+                    var aiMatches = await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, ct);
+                    var cappedMatches = aiMatches.Count > AiSearchMaxResults
+                        ? aiMatches.Take(AiSearchMaxResults).ToList()
+                        : aiMatches;
+
+                    if (cappedMatches.Count > 0)
+                    {
+                        // GAP #2: Use direct chunked IN query instead of OR FilterGroup nodes.
+                        filterTree = await BuildAiIdFilterAsync(table, cappedMatches, filterTree, ct);
+                    }
+                    else
+                    {
+                        return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
+                    }
+
+                    aiSearchSucceeded = true;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // GAP #4: AI Search is unavailable — fall through to SQL LIKE path.
+                    _logger.LogWarning(ex, "[QuickSearch] Azure AI Search unavailable for table {TableId}. Falling back to SQL LIKE.", table.Id);
+                }
+            }
+
+            if (!aiSearchSucceeded)
+            {
+                // Standard SQL LIKE fallback (also used when IsGridSearchEnabled=false).
+                var textFields = allFields
+                    .Where(f => f.IsSearchable && f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")
+                    .ToList();
                 if (quickSearchFieldIds is { Count: > 0 })
                 {
                     var allowed = quickSearchFieldIds.ToHashSet();
@@ -330,9 +347,7 @@ public class RunReportQueryHandler
                     {
                         Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = searchOperator, Value = quickSearch }
                     }).ToList();
-
                     var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
-
                     filterTree = filterTree == null
                         ? qsGroup
                         : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = qsGroup }] };
@@ -340,33 +355,35 @@ public class RunReportQueryHandler
             }
         }
 
-        if (filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
+        // Apply OData-based filter via Azure AI Search when the table has any AI-indexed fields.
+        // GAP #3: Only when IsGridSearchEnabled. GAP #4: Falls back to raw SQL tree on AI failure.
+        if (_searchService.IsGridSearchEnabled && filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
         {
             var odata = OData.ODataFilterBuilder.Build(filterTree, allFields);
             if (!string.IsNullOrWhiteSpace(odata))
             {
-                var aiMatches = await _searchService.SearchRecordsByFilterAsync(table.Id, odata, ct);
-                if (aiMatches.Count == 0)
+                try
                 {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
-                }
+                    // GAP #2: Cap results + use direct ID query instead of OR node explosion.
+                    var aiMatches = await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
+                    var cappedMatches = aiMatches.Count > AiSearchMaxResults
+                        ? aiMatches.Take(AiSearchMaxResults).ToList()
+                        : aiMatches;
 
-                var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
-                if (matchedIds.Count == 0)
-                {
-                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns }; // Nothing found
-                }
-
-                var aiSearchGroup = new FilterGroup
-                {
-                    Logic = "or",
-                    Nodes = matchedIds.Select(id => new FilterNode 
+                    if (cappedMatches.Count == 0)
                     {
-                        Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = id.ToString() }
-                    }).ToList()
-                };
-                
-                filterTree = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = aiSearchGroup }] };
+                        return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
+                    }
+
+                    // Rebuild filterTree: AND with matched IDs only (replaces original tree —
+                    // AI Search has already applied the filter, so we just restrict to its results).
+                    filterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // GAP #4: AI Search unavailable — use the original SQL filter tree as-is.
+                    _logger.LogWarning(ex, "[ODataFilter] Azure AI Search unavailable for table {TableId}. Executing filter via SQL.", table.Id);
+                }
             }
         }
 
@@ -451,6 +468,37 @@ public class RunReportQueryHandler
             PageSize = pageSize,
             IsDataMasked = isMaskedPreview,
         };
+    }
+
+    private async Task<FilterGroup?> BuildAiIdFilterAsync(AppTable table, IReadOnlyList<Guid> aiMatches, FilterGroup? existingFilter, CancellationToken ct)
+    {
+        var matchedIds = await _recordRepo.GetIdsByPublicIdsAsync(table, aiMatches, ct);
+        if (matchedIds.Count == 0)
+        {
+            // No matching records found in the database. Return a filter guaranteed to match nothing.
+            var emptyGroup = new FilterGroup
+            {
+                Logic = "and",
+                Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "eq", Value = "-1" } }]
+            };
+            return existingFilter == null
+                ? emptyGroup
+                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = existingFilter }, new FilterNode { Group = emptyGroup }] };
+        }
+
+        // GAP #2: Use "in" operator with a serialized array instead of generating N "eq" OR conditions.
+        // RecordRepository's BuildConditionClause parses this array into a single SQL IN (@p1, @p2, ...) clause.
+        // Since we capped matches at 2000, we stay safely under SQL Server's 2100 parameter limit.
+        var idJson = JsonSerializer.Serialize(matchedIds);
+        var aiSearchGroup = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "in", Value = idJson } }]
+        };
+
+        return existingFilter == null
+            ? aiSearchGroup
+            : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = existingFilter }, new FilterNode { Group = aiSearchGroup }] };
     }
 
     /// <summary>When definition.DynamicFilterType is "Custom", restricts runtimeFilters to only
