@@ -30,26 +30,46 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         """;
 
     private const string ListForUserPickerSql = """
+        WITH RankedUsers AS (
+            SELECT
+                au.PublicId,
+                au.UserPublicId,
+                au.UserName,
+                au.UserEmail,
+                ar.PublicId AS RolePublicId,
+                ar.Name     AS RoleName,
+                au.Status,
+                ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
+                au.CreatedOn,
+                CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
+                ISNULL(au.IsFromGroup, 0) AS IsFromGroup,
+                ROW_NUMBER() OVER (
+                    PARTITION BY au.UserId 
+                    ORDER BY ISNULL(ar.Rank, 999999) ASC, au.CreatedOn ASC
+                ) AS rn
+            FROM meta.AppUser au
+            JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+            JOIN meta.App a ON a.Id = au.AppId
+            WHERE au.AppId    = @appId
+              AND au.IsDeleted = 0
+              AND au.Status    = 'Active'
+              AND ISNULL(au.ShowInUserPickers, 1) = 1
+        )
         SELECT
-            au.PublicId,
-            au.UserPublicId,
-            au.UserName,
-            au.UserEmail,
-            ar.PublicId AS RolePublicId,
-            ar.Name     AS RoleName,
-            au.Status,
-            ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
-            au.CreatedOn,
-            CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
-            ISNULL(au.IsFromGroup, 0) AS IsFromGroup
-        FROM meta.AppUser au
-        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
-        JOIN meta.App a ON a.Id = au.AppId
-        WHERE au.AppId    = @appId
-          AND au.IsDeleted = 0
-          AND au.Status    = 'Active'
-          AND ISNULL(au.ShowInUserPickers, 1) = 1
-        ORDER BY au.UserName
+            PublicId,
+            UserPublicId,
+            UserName,
+            UserEmail,
+            RolePublicId,
+            RoleName,
+            Status,
+            ShowInUserPickers,
+            CreatedOn,
+            IsOwner,
+            IsFromGroup
+        FROM RankedUsers
+        WHERE rn = 1
+        ORDER BY UserName
         """;
 
     private const string ListByAppPagedSqlTemplate = """
@@ -111,28 +131,26 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         """;
 
     private const string GetByAppAndUserSql = """
-        SELECT Id, PublicId, AppId, UserId, UserPublicId, AppRoleId, Status, ISNULL(ShowInUserPickers, 1) AS ShowInUserPickers, AddedBy, CreatedOn, UpdatedOn, IsDeleted, IsFromGroup, GroupId
+        SELECT TOP 1 Id, PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ISNULL(ShowInUserPickers, 1) AS ShowInUserPickers, AddedBy, CreatedOn, UpdatedOn, IsDeleted, IsFromGroup, GroupId
         FROM meta.AppUser
-        WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0 And Status = 'Active'
+        WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0 AND Status = 'Active'
+        """;
+
+    private const string GetByPublicIdSql = """
+        SELECT Id, PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ISNULL(ShowInUserPickers, 1) AS ShowInUserPickers, AddedBy, CreatedOn, UpdatedOn, IsDeleted, IsFromGroup, GroupId
+        FROM meta.AppUser
+        WHERE PublicId = @publicId AND IsDeleted = 0
+        """;
+
+    private const string GetByAppUserAndRoleSql = """
+        SELECT Id, PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ISNULL(ShowInUserPickers, 1) AS ShowInUserPickers, AddedBy, CreatedOn, UpdatedOn, IsDeleted, IsFromGroup, GroupId
+        FROM meta.AppUser
+        WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsDeleted = 0 AND Status = 'Active'
         """;
 
     private const string InsertSql = """
-        IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId)
-        BEGIN
-            UPDATE meta.AppUser
-            SET Status = 'Active',
-                IsDeleted = 0,
-                AppRoleId = @appRoleId,
-                IsFromGroup = @isFromGroup,
-                GroupId = @groupId,
-                UpdatedOn = SYSUTCDATETIME()
-            WHERE AppId = @appId AND UserId = @userId
-        END
-        ELSE
-        BEGIN
-            INSERT INTO meta.AppUser (AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
-            VALUES (@appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, 1, @addedBy, SYSUTCDATETIME(), @isFromGroup, @groupId)
-        END
+        INSERT INTO meta.AppUser (PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
+        VALUES (COALESCE(@publicId, NEWID()), @appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, @status, 1, @addedBy, SYSUTCDATETIME(), @isFromGroup, @groupId);
         """;
 
     private const string UpdateRoleSql = """
@@ -141,24 +159,38 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
         """;
 
+    private const string UpdateRoleByAssignmentSql = """
+        UPDATE meta.AppUser
+        SET AppRoleId = @appRoleId, UpdatedOn = SYSUTCDATETIME()
+        WHERE AppId = @appId AND PublicId = @appUserPublicId AND IsDeleted = 0
+        """;
+
     private const string UpdateShowInUserPickersSql = """
         UPDATE meta.AppUser
         SET ShowInUserPickers = @showInUserPickers, UpdatedOn = SYSUTCDATETIME()
         WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
         """;
 
+    private const string UpdateShowInUserPickersByAssignmentSql = """
+        UPDATE meta.AppUser
+        SET ShowInUserPickers = @showInUserPickers, UpdatedOn = SYSUTCDATETIME()
+        WHERE AppId = @appId AND PublicId = @appUserPublicId AND IsDeleted = 0
+        """;
+
     private const string GetUserRoleNameSql = """
-        SELECT ar.Name
+        SELECT TOP 1 ar.Name
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
         WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
+        ORDER BY ISNULL(ar.Rank, 999999) ASC
         """;
 
     private const string GetUserRolePublicIdSql = """
-        SELECT ar.PublicId
+        SELECT TOP 1 ar.PublicId
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
         WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
+        ORDER BY ISNULL(ar.Rank, 999999) ASC
         """;
 
     private const string GetPermissionFlagsSql = """
@@ -193,13 +225,13 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         """;
 
     private const string GetUserAppRoleIdsSql = """
-        SELECT au.AppRoleId
+        SELECT DISTINCT au.AppRoleId
         FROM meta.AppUser au
         WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
 
         UNION
 
-        SELECT ga.AppRoleId
+        SELECT DISTINCT ga.AppRoleId
         FROM meta.GroupMember gm
         JOIN meta.[Group] g ON g.Id = gm.GroupId
         JOIN meta.GroupApp ga ON ga.GroupId = g.Id
@@ -212,6 +244,12 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         UPDATE meta.AppUser
         SET IsDeleted = 1, Status = 'InActive', UpdatedOn = SYSUTCDATETIME()
         WHERE AppId = @appId AND UserId = @userId AND IsDeleted = 0
+        """;
+
+    private const string RemoveAssignmentSql = """
+        UPDATE meta.AppUser
+        SET IsDeleted = 1, Status = 'InActive', UpdatedOn = SYSUTCDATETIME()
+        WHERE AppId = @appId AND PublicId = @appUserPublicId AND IsDeleted = 0
         """;
 
     public AppUserRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -318,10 +356,25 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             new CommandDefinition(GetByAppAndUserSql, new { appId, userId }, cancellationToken: ct));
     }
 
+    public async Task<AppUser?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<AppUser>(
+            new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
+    }
+
+    public async Task<AppUser?> GetByAppUserAndRoleAsync(long appId, long userId, long appRoleId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<AppUser>(
+            new CommandDefinition(GetByAppUserAndRoleSql, new { appId, userId, appRoleId }, cancellationToken: ct));
+    }
+
     public async Task CreateAsync(AppUser appUser, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var parameters = new
         {
+            publicId   = appUser.PublicId == Guid.Empty ? (Guid?)null : appUser.PublicId,
             appId      = appUser.AppId,
             userId     = appUser.UserId,
             userPublicId = appUser.UserPublicId,
@@ -352,11 +405,25 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             new CommandDefinition(UpdateRoleSql, new { appId, userId, appRoleId = newRoleId }, cancellationToken: ct));
     }
 
+    public async Task UpdateRoleByAssignmentAsync(long appId, Guid appUserPublicId, long newRoleId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateRoleByAssignmentSql, new { appId, appUserPublicId, appRoleId = newRoleId }, cancellationToken: ct));
+    }
+
     public async Task UpdateShowInUserPickersAsync(long appId, long userId, bool showInUserPickers, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdateShowInUserPickersSql, new { appId, userId, showInUserPickers }, cancellationToken: ct));
+    }
+
+    public async Task UpdateShowInUserPickersByAssignmentAsync(long appId, Guid appUserPublicId, bool showInUserPickers, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateShowInUserPickersByAssignmentSql, new { appId, appUserPublicId, showInUserPickers }, cancellationToken: ct));
     }
 
     public async Task<string?> GetUserRoleNameAsync(long appId, long userId, CancellationToken ct = default)
@@ -386,6 +453,13 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(RemoveSql, new { appId, userId }, cancellationToken: ct));
+    }
+
+    public async Task RemoveAssignmentAsync(long appId, Guid appUserPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(RemoveAssignmentSql, new { appId, appUserPublicId }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<long>> GetUserAppRoleIdsAsync(long appId, long userId, CancellationToken ct = default)

@@ -167,10 +167,12 @@ public class InviteAppUserCommandHandler
                 }, ct);
             }
 
-            // 2. Check for duplicate app membership — already in app, nothing to do
-            var existing = await _appUserRepo.GetByAppAndUserAsync(appId, user.Id, ct);
-            if (existing is not null)
-                return; // already has access, silently succeed
+            // 2. Check if user already has this exact role in this app
+            var existingSameRole = await _appUserRepo.GetByAppUserAndRoleAsync(appId, user.Id, appRoleId, ct);
+            if (existingSameRole is not null)
+            {
+                throw new DuplicateException("AppUser", $"User '{command.Email}' already has the '{appRoleName}' role in this application.");
+            }
 
             // 3. Add directly to the app
             await _appUserRepo.CreateAsync(new AppUser
