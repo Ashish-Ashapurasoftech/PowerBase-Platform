@@ -15,16 +15,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 {
     private readonly IMessagePublisher _messagePublisher;
     private readonly IEncryptionService _encryptionService;
+    private readonly IControlConnectionFactory _controlConnectionFactory;
 
     public RecordRepository(
         ITenantConnectionFactory connectionFactory, 
         IQueryContext queryContext,
         IMessagePublisher messagePublisher,
-        IEncryptionService encryptionService)
+        IEncryptionService encryptionService,
+        IControlConnectionFactory controlConnectionFactory)
         : base(connectionFactory, queryContext) 
     { 
         _messagePublisher = messagePublisher;
         _encryptionService = encryptionService;
+        _controlConnectionFactory = controlConnectionFactory;
     }
 
     private Task<Services.FieldEncryptionContext> GetEncryptionContextAsync(
@@ -38,13 +41,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // Find the table that contains this record
         var tableSql = @"SELECT t.Id, t.AppId, t.Name 
                          FROM RecordMetadata rm 
-                         JOIN AppTables t ON rm.TableId = t.Id 
+                         JOIN meta.AppTable t ON rm.TableId = t.Id 
                          WHERE rm.PublicId = @publicId AND rm.TenantId = @tenantId";
         var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { publicId = recordPublicId, tenantId = QueryContext.TenantId });
         if (tableInfo == null) return new Dictionary<long, object?>();
 
         // Get fields for this table
-        var fieldsSql = "SELECT Id, AppTableId, Name, TypeCode, Settings, PhysicalColumnName, Fid, IsSystem, IsSearchable, IsFilterable, IsEncrypted FROM AppFields WHERE AppTableId = @tableId";
+        var fieldsSql = "SELECT Id, AppTableId, Name, TypeCode, Settings, PhysicalColumnName, Fid, IsSystem, IsSearchable, IsFilterable, IsEncrypted FROM meta.AppField WHERE AppTableId = @tableId";
         var fields = (await connection.QueryAsync<AppField>(fieldsSql, new { tableId = (long)tableInfo.Id })).ToList();
         
         var searchableFields = fields.Where(f => f.IsSearchable || f.IsFilterable).ToList();
@@ -1443,29 +1446,32 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<IReadOnlyList<PowerBase.Application.Common.Interfaces.SearchIndexDocument>> GetFieldBackfillBatchAsync(long tenantId, long appId, long tableId, long fieldId, bool isNullify, int page, int pageSize, CancellationToken ct = default)
     {
         var result = new List<PowerBase.Application.Common.Interfaces.SearchIndexDocument>();
+        if (tenantId > 0)
+        {
+            QueryContext.SetTenantId(tenantId);
+        }
         await using var connection = await ConnectionFactory.CreateAsync(ct);
 
-        var tableSql = "SELECT Name FROM AppTables WHERE Id = @tableId";
+        var tableSql = "SELECT Name FROM meta.AppTable WHERE Id = @tableId";
         var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { tableId });
         if (tableInfo == null) return result;
 
-        var fieldSql = "SELECT Id, AppTableId, Name, TypeCode, Settings, PhysicalColumnName, Fid, IsSystem, IsSearchable, IsFilterable, IsEncrypted FROM AppFields WHERE Fid = @fieldId AND AppTableId = @tableId";
+        var fieldSql = "SELECT Id, AppTableId, Name, PhysicalColumnName, Fid, IsSystem, IsSearchable, IsFilterable, IsEncrypted FROM meta.AppField WHERE Fid = @fieldId AND AppTableId = @tableId";
         var field = await connection.QueryFirstOrDefaultAsync<AppField>(fieldSql, new { fieldId, tableId });
         if (field == null || !field.Fid.HasValue) return result;
 
         var colName = field.IsSystem ? field.PhysicalColumnName! : PhysicalNaming.ColumnName(field.Fid.Value);
 
         var selectSql = $"""
-            SELECT m.PublicId, t.{colName}
-            FROM {PhysicalNaming.TableName(tableId)} t
-            JOIN RecordMetadata m ON t.Id = m.RecordId
-            WHERE t.IsDeleted = 0 AND m.TenantId = @tenantId
+            SELECT t.PublicId, t.{colName}
+            FROM {PhysicalNaming.FullTableName(tableId)} t
+            WHERE t.IsDeleted = 0
             ORDER BY t.Id
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;
 
         var offset = (page - 1) * pageSize;
-        var rows = (await connection.QueryAsync<dynamic>(selectSql, new { tenantId, offset, pageSize })).ToList();
+        var rows = (await connection.QueryAsync<dynamic>(selectSql, new { offset, pageSize })).ToList();
         
         if (rows.Count == 0) return result;
 
@@ -1486,11 +1492,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             {
                 if (rowDict.TryGetValue(colName, out var val))
                 {
-                    if (field.IsEncrypted && val is string cipherHex)
+                    if (field.IsEncrypted && val is string cipherStr)
                     {
                         try
                         {
-                            documentValues[field.Fid.Value] = await enc.DecryptValueAsync(cipherHex, ct);
+                            documentValues[field.Fid.Value] = await enc.DecryptValueAsync(cipherStr, ct);
                         }
                         catch
                         {

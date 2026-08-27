@@ -11,47 +11,65 @@ namespace PowerBase.Infrastructure.Services;
 
 public class AzureSearchService : IAzureSearchService
 {
-    private readonly SearchClient _searchClient;
-    private readonly SearchIndexClient _searchIndexClient;
-    private readonly HashSet<string> _knownFields = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SearchIndexClient? _searchIndexClient;
+    private readonly ConcurrentDictionary<string, SearchClient> _searchClients = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, HashSet<string>> _knownFieldsPerIndex = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _indexCreationLock = new(1, 1);
     
     private readonly string _endpoint;
-    private readonly AzureKeyCredential _credential;
-    private readonly string _indexName;
+    private readonly AzureKeyCredential? _credential;
+    private readonly string _defaultIndexName;
+    private readonly bool _isMultipleIndex;
     private readonly bool _isEnabled;
 
     public AzureSearchService(IConfiguration configuration)
     {
         _endpoint = configuration["AzureAiSearch:Endpoint"] ?? string.Empty;
         var apiKey = configuration["AzureAiSearch:ApiKey"] ?? string.Empty;
-        _indexName = configuration["AzureAiSearch:IndexName"] ?? "powerbase-records-index";
+        _defaultIndexName = configuration["AzureAiSearch:IndexName"] ?? "powerbase-records-index";
 
-        _isEnabled = !string.IsNullOrEmpty(_endpoint) && !string.IsNullOrEmpty(apiKey) && !string.IsNullOrEmpty(_indexName);
+        var isMultiStr = configuration["AzureAiSearch:IsMultipleIndex"];
+        _isMultipleIndex = bool.TryParse(isMultiStr, out var multi) && multi;
+
+        _isEnabled = !string.IsNullOrEmpty(_endpoint) && !string.IsNullOrEmpty(apiKey) && !string.IsNullOrEmpty(_defaultIndexName);
 
         if (_isEnabled)
         {
             _credential = new AzureKeyCredential(apiKey);
-            _searchClient = new SearchClient(new Uri(_endpoint), _indexName, _credential);
             _searchIndexClient = new SearchIndexClient(new Uri(_endpoint), _credential);
         }
         else
         {
-            _credential = null!;
-            _searchClient = null!;
-            _searchIndexClient = null!;
+            _credential = null;
+            _searchIndexClient = null;
         }
         
-        IsGridSearchEnabled = bool.TryParse(configuration["UseAzureAiForGridSearch"], out var b) && b;
+        IsGridSearchEnabled = (bool.TryParse(configuration["UseAzureAiForGridSearch"], out var b1) && b1)
+                           || (bool.TryParse(configuration["AzureAiSearch:UseAzureAiForGridSearch"], out var b2) && b2);
     }
 
     public bool IsGridSearchEnabled { get; }
 
-    private async Task EnsureIndexAndFieldsExistAsync(IEnumerable<string> fieldNames, CancellationToken ct)
+    private string GetIndexNameForTenant(long tenantId)
     {
-        if (!_isEnabled) return;
+        if (_isMultipleIndex && tenantId > 0)
+        {
+            return $"pb-tenant-{tenantId}";
+        }
+        return _defaultIndexName;
+    }
+
+    private SearchClient GetSearchClient(string indexName)
+    {
+        return _searchClients.GetOrAdd(indexName, name => new SearchClient(new Uri(_endpoint), name, _credential));
+    }
+
+    private async Task EnsureIndexAndFieldsExistAsync(string indexName, IEnumerable<string> fieldNames, CancellationToken ct)
+    {
+        if (!_isEnabled || _searchIndexClient == null) return;
         
         var requiredFields = fieldNames.Where(f => f.StartsWith("f_")).Distinct().ToList();
+        var knownFields = _knownFieldsPerIndex.GetOrAdd(indexName, _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase));
 
         await _indexCreationLock.WaitAsync(ct);
         try
@@ -59,12 +77,12 @@ public class AzureSearchService : IAzureSearchService
             SearchIndex index;
             try
             {
-                var indexResponse = await _searchIndexClient.GetIndexAsync(_indexName, ct);
+                var indexResponse = await _searchIndexClient.GetIndexAsync(indexName, ct);
                 index = indexResponse.Value;
             }
             catch (RequestFailedException ex) when (ex.Status == 404)
             {
-                index = new SearchIndex(_indexName)
+                index = new SearchIndex(indexName)
                 {
                     Fields = {
                         new SimpleField("id", SearchFieldDataType.String) { IsKey = true, IsFilterable = true },
@@ -78,13 +96,13 @@ public class AzureSearchService : IAzureSearchService
 
             foreach (var existingField in index.Fields)
             {
-                _knownFields.Add(existingField.Name);
+                knownFields.Add(existingField.Name);
             }
 
             var updated = false;
             foreach (var fieldName in requiredFields)
             {
-                if (!_knownFields.Contains(fieldName))
+                if (!knownFields.Contains(fieldName))
                 {
                     if (!index.Fields.Any(x => x.Name.Equals(fieldName, StringComparison.OrdinalIgnoreCase)))
                     {
@@ -96,7 +114,7 @@ public class AzureSearchService : IAzureSearchService
                         });
                         updated = true;
                     }
-                    _knownFields.Add(fieldName);
+                    knownFields.Add(fieldName);
                 }
             }
 
@@ -115,7 +133,8 @@ public class AzureSearchService : IAzureSearchService
     {
         if (!_isEnabled) return;
         
-        await EnsureIndexAndFieldsExistAsync(values.Keys.Select(k => $"f_{k}"), ct);
+        var indexName = GetIndexNameForTenant(tenantId);
+        await EnsureIndexAndFieldsExistAsync(indexName, values.Keys.Select(k => $"f_{k}"), ct);
 
         var document = new Dictionary<string, object>
         {
@@ -135,11 +154,12 @@ public class AzureSearchService : IAzureSearchService
         
         try
         {
-            await _searchClient.IndexDocumentsAsync(batch, cancellationToken: ct);
+            var searchClient = GetSearchClient(indexName);
+            await searchClient.IndexDocumentsAsync(batch, cancellationToken: ct);
         }
         catch (RequestFailedException ex)
         {
-            throw new InvalidOperationException($"Failed to index record {publicId} in Azure AI Search.", ex);
+            throw new InvalidOperationException($"Failed to index record {publicId} in Azure AI Search (Index: {indexName}).", ex);
         }
     }
 
@@ -147,39 +167,51 @@ public class AzureSearchService : IAzureSearchService
     {
         if (!_isEnabled) return;
 
-        var allFields = documents.SelectMany(d => d.Values.Keys).Select(k => $"f_{k}");
-        await EnsureIndexAndFieldsExistAsync(allFields, ct);
+        var docList = documents.ToList();
+        if (docList.Count == 0) return;
 
-        var searchDocs = documents.Select(doc => 
-        {
-            var searchDoc = new Dictionary<string, object>
-            {
-                { "id", doc.PublicId.ToString() },
-                { "tenantId", doc.TenantId.ToString() },
-                { "appId", doc.AppId },
-                { "tableId", doc.TableId }
-            };
-            foreach (var kvp in doc.Values)
-            {
-                var fieldName = $"f_{kvp.Key}";
-                searchDoc[fieldName] = ConvertValueToString(kvp.Value);
-            }
-            return searchDoc;
-        });
+        var groups = docList.GroupBy(d => GetIndexNameForTenant(d.TenantId));
 
-        var batches = searchDocs.Chunk(1000);
-        
-        try
+        foreach (var group in groups)
         {
-            foreach (var batchDocs in batches)
+            var indexName = group.Key;
+            var groupDocs = group.ToList();
+
+            var allFields = groupDocs.SelectMany(d => d.Values.Keys).Select(k => $"f_{k}");
+            await EnsureIndexAndFieldsExistAsync(indexName, allFields, ct);
+
+            var searchDocs = groupDocs.Select(doc => 
             {
-                var batch = IndexDocumentsBatch.MergeOrUpload(batchDocs);
-                await _searchClient.IndexDocumentsAsync(batch, cancellationToken: ct);
+                var searchDoc = new Dictionary<string, object>
+                {
+                    { "id", doc.PublicId.ToString() },
+                    { "tenantId", doc.TenantId.ToString() },
+                    { "appId", doc.AppId },
+                    { "tableId", doc.TableId }
+                };
+                foreach (var kvp in doc.Values)
+                {
+                    var fieldName = $"f_{kvp.Key}";
+                    searchDoc[fieldName] = ConvertValueToString(kvp.Value);
+                }
+                return searchDoc;
+            });
+
+            var batches = searchDocs.Chunk(1000);
+            var searchClient = GetSearchClient(indexName);
+
+            try
+            {
+                foreach (var batchDocs in batches)
+                {
+                    var batch = IndexDocumentsBatch.MergeOrUpload(batchDocs);
+                    await searchClient.IndexDocumentsAsync(batch, cancellationToken: ct);
+                }
             }
-        }
-        catch (RequestFailedException ex)
-        {
-            throw new InvalidOperationException("Failed to bulk index records in Azure AI Search.", ex);
+            catch (RequestFailedException ex)
+            {
+                throw new InvalidOperationException($"Failed to bulk index records in Azure AI Search (Index: {indexName}).", ex);
+            }
         }
     }
 
@@ -187,13 +219,18 @@ public class AzureSearchService : IAzureSearchService
     {
         if (!_isEnabled || publicIds.Count == 0) return;
         
+        var indexName = GetIndexNameForTenant(tenantId);
         var batch = IndexDocumentsBatch.Delete("id", publicIds.Select(id => id.ToString()));
-        await _searchClient.IndexDocumentsAsync(batch, cancellationToken: ct);
+        var searchClient = GetSearchClient(indexName);
+        await searchClient.IndexDocumentsAsync(batch, cancellationToken: ct);
     }
 
     public async Task<IReadOnlyList<Guid>> SearchRecordsAsync(long tenantId, long tableId, string searchText, CancellationToken ct = default)
     {
         if (!_isEnabled || string.IsNullOrWhiteSpace(searchText)) return [];
+
+        var indexName = GetIndexNameForTenant(tenantId);
+        var searchClient = GetSearchClient(indexName);
 
         var options = new SearchOptions
         {
@@ -204,11 +241,11 @@ public class AzureSearchService : IAzureSearchService
 
         try
         {
-            var response = await _searchClient.SearchAsync<SearchDocument>(searchText, options, cancellationToken: ct);
+            var response = await searchClient.SearchAsync<SearchDocument>(searchText, options, cancellationToken: ct);
             var results = new List<Guid>();
             await foreach (var result in response.Value.GetResultsAsync())
             {
-                if (Guid.TryParse(result.Document["id"].ToString(), out var id))
+                if (Guid.TryParse(result.Document["id"]?.ToString(), out var id))
                 {
                     results.Add(id);
                 }
@@ -217,13 +254,16 @@ public class AzureSearchService : IAzureSearchService
         }
         catch (RequestFailedException ex)
         {
-            throw new InvalidOperationException($"Failed to search records for table {tableId} in Azure AI Search.", ex);
+            throw new InvalidOperationException($"Failed to search records for table {tableId} in Azure AI Search (Index: {indexName}).", ex);
         }
     }
 
     public async Task<IReadOnlyList<Guid>> SearchRecordsByFilterAsync(long tenantId, long tableId, string odataFilter, CancellationToken ct = default)
     {
         if (!_isEnabled || string.IsNullOrWhiteSpace(odataFilter)) return [];
+
+        var indexName = GetIndexNameForTenant(tenantId);
+        var searchClient = GetSearchClient(indexName);
 
         var options = new SearchOptions
         {
@@ -235,11 +275,11 @@ public class AzureSearchService : IAzureSearchService
 
         try
         {
-            var response = await _searchClient.SearchAsync<SearchDocument>("*", options, cancellationToken: ct);
+            var response = await searchClient.SearchAsync<SearchDocument>("*", options, cancellationToken: ct);
             var results = new List<Guid>();
             await foreach (var result in response.Value.GetResultsAsync())
             {
-                if (Guid.TryParse(result.Document["id"].ToString(), out var id))
+                if (Guid.TryParse(result.Document["id"]?.ToString(), out var id))
                 {
                     results.Add(id);
                 }
@@ -248,13 +288,16 @@ public class AzureSearchService : IAzureSearchService
         }
         catch (RequestFailedException ex)
         {
-            throw new InvalidOperationException($"Failed to search records by filter for table {tableId} in Azure AI Search.", ex);
+            throw new InvalidOperationException($"Failed to search records by filter for table {tableId} in Azure AI Search (Index: {indexName}).", ex);
         }
     }
 
     public async Task<(IReadOnlyList<GlobalSearchResult> Items, long? TotalCount)> SearchGlobalAsync(long tenantId, string searchText, long? appId = null, int page = 1, int pageSize = 50, CancellationToken ct = default)
     {
         if (!_isEnabled || string.IsNullOrWhiteSpace(searchText)) return ([], 0);
+
+        var indexName = GetIndexNameForTenant(tenantId);
+        var searchClient = GetSearchClient(indexName);
 
         var filter = $"tenantId eq '{tenantId}'";
         if (appId.HasValue)
@@ -272,7 +315,7 @@ public class AzureSearchService : IAzureSearchService
 
         try
         {
-            var response = await _searchClient.SearchAsync<SearchDocument>(searchText, options, cancellationToken: ct);
+            var response = await searchClient.SearchAsync<SearchDocument>(searchText, options, cancellationToken: ct);
             var results = new List<GlobalSearchResult>();
             await foreach (var result in response.Value.GetResultsAsync())
             {
@@ -297,23 +340,24 @@ public class AzureSearchService : IAzureSearchService
         }
         catch (RequestFailedException ex)
         {
-            throw new InvalidOperationException($"Failed to search global records for tenant {tenantId} in Azure AI Search.", ex);
+            throw new InvalidOperationException($"Failed to search global records for tenant {tenantId} in Azure AI Search (Index: {indexName}).", ex);
         }
     }
 
     public async Task EnsureTableSchemaAsync(long tenantId, long tableId, IEnumerable<(int Fid, bool IsSearchable, bool IsFilterable)> fields, CancellationToken ct = default)
     {
         if (!_isEnabled) return;
-        await EnsureIndexAndFieldsExistAsync(fields.Select(f => $"f_{f.Fid}"), ct);
+        var indexName = GetIndexNameForTenant(tenantId);
+        await EnsureIndexAndFieldsExistAsync(indexName, fields.Select(f => $"f_{f.Fid}"), ct);
     }
 
-    private static string ConvertValueToString(object? val)
+    private static object? ConvertValueToString(object? val)
     {
-        if (val is null) return string.Empty;
+        if (val is null) return null;
         if (val is System.Text.Json.JsonElement je)
         {
-            return je.ValueKind == System.Text.Json.JsonValueKind.String ? je.GetString() ?? string.Empty : je.GetRawText();
+            return je.ValueKind == System.Text.Json.JsonValueKind.String ? je.GetString() : je.GetRawText();
         }
-        return val.ToString() ?? string.Empty;
+        return val.ToString();
     }
 }

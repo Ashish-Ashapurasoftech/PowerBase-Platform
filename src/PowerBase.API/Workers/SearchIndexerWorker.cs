@@ -70,9 +70,8 @@ public class SearchIndexerWorker : BackgroundService
 
     private async Task ProcessMessageBatchAsync(IReadOnlyList<ServiceBusReceivedMessage> messages, CancellationToken stoppingToken)
     {
-        using var scope = _serviceProvider.CreateScope();
-        var searchService = scope.ServiceProvider.GetRequiredService<IAzureSearchService>();
-        var recordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
+        using var batchScope = _serviceProvider.CreateScope();
+        var searchService = batchScope.ServiceProvider.GetRequiredService<IAzureSearchService>();
 
         var documentsToIndex = new List<SearchIndexDocument>();
         var recordsToDelete = new List<(long TenantId, long TableId, Guid RecordPublicId)>();
@@ -117,6 +116,11 @@ public class SearchIndexerWorker : BackgroundService
                     }
                     else
                     {
+                        using var scope = _serviceProvider.CreateScope();
+                        var queryContext = scope.ServiceProvider.GetRequiredService<IQueryContext>();
+                        queryContext.SetTenantId(message.TenantId);
+                        var recordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
+                        
                         recordData = await recordRepo.GetSearchableFieldsAsync(message.RecordPublicId, stoppingToken);
                     }
 
@@ -137,6 +141,11 @@ public class SearchIndexerWorker : BackgroundService
                 }
                 else if (message.Action == IndexAction.BackfillField || message.Action == IndexAction.NullifyField)
                 {
+                    using var scope = _serviceProvider.CreateScope();
+                    var queryContext = scope.ServiceProvider.GetRequiredService<IQueryContext>();
+                    queryContext.SetTenantId(message.TenantId);
+                    var recordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
+
                     var isNullify = message.Action == IndexAction.NullifyField;
                     if (message.FieldId.HasValue)
                     {
