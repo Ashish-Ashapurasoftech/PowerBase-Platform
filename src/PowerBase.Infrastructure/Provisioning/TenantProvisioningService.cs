@@ -189,7 +189,7 @@ public class TenantProvisioningService : ITenantProvisioningService
 
             if (isAzureSql)
             {
-                await CreateAzureDatabaseWithFallbackAsync(connection, databaseName, ct);
+                await CreateAzureDatabaseAsync(connection, databaseName, ct);
             }
             else
             {
@@ -208,41 +208,25 @@ public class TenantProvisioningService : ITenantProvisioningService
         return result is int edition && edition == 5; // 5 = Azure SQL Database
     }
 
-    private static async Task CreateAzureDatabaseWithFallbackAsync(SqlConnection connection, string databaseName, CancellationToken ct)
+    private static async Task CreateAzureDatabaseAsync(SqlConnection connection, string databaseName, CancellationToken ct)
     {
-        // --- Attempt 1: Free tier ---
+        // Basic tier: ~$5/month, 2 GB storage, 5 DTUs. Cheapest paid option on Azure SQL.
         try
         {
-            var freeSql = $"CREATE DATABASE [{databaseName}] (EDITION = 'Free', SERVICE_OBJECTIVE = 'Free')";
-            await using var freeCmd = new SqlCommand(freeSql, connection);
-            freeCmd.CommandTimeout = 120;
-            await freeCmd.ExecuteNonQueryAsync(ct);
-            return; // success — done
+            var basicSql = $"CREATE DATABASE [{databaseName}] (EDITION = 'Basic', SERVICE_OBJECTIVE = 'Basic')";
+            await using var basicCmd = new SqlCommand(basicSql, connection);
+            basicCmd.CommandTimeout = 120;
+            await basicCmd.ExecuteNonQueryAsync(ct);
         }
-        catch (SqlException ex) when (IsFreeQuotaExceeded(ex))
+        catch (SqlException)
         {
-            // Free quota exhausted — fall through to Basic tier below.
+            // Fallback to standard CREATE DATABASE using server's default configuration
+            var defaultSql = $"CREATE DATABASE [{databaseName}]";
+            await using var defaultCmd = new SqlCommand(defaultSql, connection);
+            defaultCmd.CommandTimeout = 120;
+            await defaultCmd.ExecuteNonQueryAsync(ct);
         }
-
-        // --- Attempt 2: Basic tier (fallback) ---
-        // Basic: ~$5/month, 2 GB storage, 5 DTUs. Cheapest paid option on Azure SQL.
-        var basicSql = $"CREATE DATABASE [{databaseName}] (EDITION = 'Basic', SERVICE_OBJECTIVE = 'Basic')";
-        await using var basicCmd = new SqlCommand(basicSql, connection);
-        basicCmd.CommandTimeout = 120;
-        await basicCmd.ExecuteNonQueryAsync(ct);
     }
-
-    /// <summary>
-    /// Returns true when Azure SQL rejects database creation because the subscription's
-    /// Free offer quota (10 databases) has been exhausted.
-    /// Error 40866 is the documented Azure SQL quota error for the Free offer.
-    /// We also check the message text as a belt-and-suspenders guard.
-    /// </summary>
-    private static bool IsFreeQuotaExceeded(SqlException ex)
-        => ex.Number == 40866
-           || ex.Message.Contains("free offer", StringComparison.OrdinalIgnoreCase)
-           || ex.Message.Contains("Free edition", StringComparison.OrdinalIgnoreCase)
-           || ex.Message.Contains("quota", StringComparison.OrdinalIgnoreCase);
 
     private static string BuildConnectionString(string baseConnectionString, string databaseName)
         => new SqlConnectionStringBuilder(baseConnectionString)
