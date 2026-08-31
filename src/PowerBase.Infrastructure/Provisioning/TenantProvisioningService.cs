@@ -180,51 +180,10 @@ public class TenantProvisioningService : ITenantProvisioningService
 
         if (!exists)
         {
-            // On Azure SQL, first attempt to create the database on the Free tier (no cost).
-            // If the subscription's Free quota (10 databases) is exhausted, Azure SQL returns
-            // error 40866 or a message referencing "free offer" — in that case we fall back
-            // to the Basic tier (~$5/month) so provisioning always succeeds.
-            // On non-Azure SQL (e.g. local dev), no edition clause is added at all.
-            bool isAzureSql = await IsAzureSqlAsync(connection, ct);
-
-            if (isAzureSql)
-            {
-                await CreateAzureDatabaseAsync(connection, databaseName, ct);
-            }
-            else
-            {
-                var createSql = $"CREATE DATABASE [{databaseName}]";
-                await using var createCmd = new SqlCommand(createSql, connection);
-                createCmd.CommandTimeout = 120;
-                await createCmd.ExecuteNonQueryAsync(ct);
-            }
-        }
-    }
-
-    private static async Task<bool> IsAzureSqlAsync(SqlConnection connection, CancellationToken ct)
-    {
-        await using var cmd = new SqlCommand("SELECT SERVERPROPERTY('EngineEdition')", connection);
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result is int edition && edition == 5; // 5 = Azure SQL Database
-    }
-
-    private static async Task CreateAzureDatabaseAsync(SqlConnection connection, string databaseName, CancellationToken ct)
-    {
-        // Basic tier: ~$5/month, 2 GB storage, 5 DTUs. Cheapest paid option on Azure SQL.
-        try
-        {
-            var basicSql = $"CREATE DATABASE [{databaseName}] (EDITION = 'Basic', SERVICE_OBJECTIVE = 'Basic')";
-            await using var basicCmd = new SqlCommand(basicSql, connection);
-            basicCmd.CommandTimeout = 120;
-            await basicCmd.ExecuteNonQueryAsync(ct);
-        }
-        catch (SqlException)
-        {
-            // Fallback to standard CREATE DATABASE using server's default configuration
-            var defaultSql = $"CREATE DATABASE [{databaseName}]";
-            await using var defaultCmd = new SqlCommand(defaultSql, connection);
-            defaultCmd.CommandTimeout = 120;
-            await defaultCmd.ExecuteNonQueryAsync(ct);
+            var createSql = $"CREATE DATABASE [{databaseName}]";
+            await using var createCmd = new SqlCommand(createSql, connection);
+            createCmd.CommandTimeout = 120;
+            await createCmd.ExecuteNonQueryAsync(ct);
         }
     }
 
