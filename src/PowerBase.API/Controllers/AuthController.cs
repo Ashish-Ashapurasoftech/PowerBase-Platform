@@ -7,6 +7,7 @@ using PowerBase.Application.Auth.Commands.SelectTenant;
 using PowerBase.Application.Auth.Commands.RefreshToken;
 using PowerBase.Application.Auth.Commands.Signup;
 using PowerBase.Application.Auth.Commands.UpdateMyPreferences;
+using PowerBase.Application.Auth.Commands.UpdateUserProfile;
 using PowerBase.Application.Auth.Queries.GetMe;
 using PowerBase.Application.Auth.Queries.GetMyPreferences;
 using PowerBase.Application.Auth.Queries.Login;
@@ -32,6 +33,7 @@ public class AuthController : ControllerBase
     private readonly RefreshTokenCommandHandler _refreshTokenHandler;
     private readonly GetMyPreferencesQueryHandler _getMyPreferencesHandler;
     private readonly UpdateMyPreferencesCommandHandler _updateMyPreferencesHandler;
+    private readonly UpdateUserProfileCommandHandler _updateProfileHandler;
 
     public AuthController(
         SignupCommandHandler signupHandler,
@@ -43,7 +45,8 @@ public class AuthController : ControllerBase
         ResetPasswordCommandHandler resetPasswordHandler,
         RefreshTokenCommandHandler refreshTokenHandler,
         GetMyPreferencesQueryHandler getMyPreferencesHandler,
-        UpdateMyPreferencesCommandHandler updateMyPreferencesHandler)
+        UpdateMyPreferencesCommandHandler updateMyPreferencesHandler,
+        UpdateUserProfileCommandHandler updateProfileHandler)
     {
         _signupHandler = signupHandler;
         _loginHandler = loginHandler;
@@ -55,6 +58,7 @@ public class AuthController : ControllerBase
         _refreshTokenHandler = refreshTokenHandler;
         _getMyPreferencesHandler = getMyPreferencesHandler;
         _updateMyPreferencesHandler = updateMyPreferencesHandler;
+        _updateProfileHandler = updateProfileHandler;
     }
 
     private static readonly JsonSerializerOptions PreferencesJsonOptions = new() { PropertyNameCaseInsensitive = true };
@@ -94,13 +98,13 @@ public class AuthController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Signup([FromBody] SignupRequest request, CancellationToken ct)
     {
-        var command = new SignupCommand(request.Email, request.Password, request.Name);
+        var command = new SignupCommand(request.Email, request.Password, request.Name, request.FirstName, request.LastName);
         var result = await _signupHandler.HandleAsync(command, ct);
         var response = new IdentityResponse
         {
             IdentityToken = result.IdentityToken,
             ExpiresAt = result.ExpiresAt.ToString("o"),
-            User = new UserResponse { PublicId = result.UserPublicId, Email = result.Email, Name = result.Name },
+            User = new UserResponse { PublicId = result.UserPublicId, Email = result.Email, Name = result.Name, FirstName = result.FirstName, LastName = result.LastName },
             Tenants = [],
         };
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<IdentityResponse>(response));
@@ -119,7 +123,7 @@ public class AuthController : ControllerBase
         {
             IdentityToken = result.IdentityToken,
             ExpiresAt = result.ExpiresAt.ToString("o"),
-            User = new UserResponse { PublicId = result.UserPublicId, Email = result.Email, Name = result.Name },
+            User = new UserResponse { PublicId = result.UserPublicId, Email = result.Email, Name = result.Name, FirstName = result.FirstName, LastName = result.LastName },
             Tenants = result.Tenants.Select(t => new TenantListItem
             {
                 PublicId = t.PublicId,
@@ -142,7 +146,7 @@ public class AuthController : ControllerBase
     {
         var result = await _selectTenantHandler.HandleAsync(new SelectTenantCommand(request.TenantPublicId), ct);
         return Ok(new ApiResponse<AuthResponse>(MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId,
-            result.Email, result.Name, result.TenantPublicId, result.TenantName)));
+            result.Email, result.Name, result.TenantPublicId, result.TenantName, result.FirstName, result.LastName)));
     }
 
     /// <summary>Refresh the current tenant token.</summary>
@@ -154,7 +158,7 @@ public class AuthController : ControllerBase
     {
         var result = await _refreshTokenHandler.HandleAsync(new RefreshTokenCommand(), ct);
         return Ok(new ApiResponse<AuthResponse>(MapToAuthResponse(result.Token, result.ExpiresAt, result.UserPublicId,
-            result.Email, result.Name, result.TenantPublicId, result.TenantName)));
+            result.Email, result.Name, result.TenantPublicId, result.TenantName, result.FirstName, result.LastName)));
     }
 
     /// <summary>Accept an invitation and complete account setup (name + password). Returns an identity token.</summary>
@@ -165,12 +169,12 @@ public class AuthController : ControllerBase
     public async Task<IActionResult> AcceptInvite([FromBody] AcceptInviteRequest request, CancellationToken ct)
     {
         var result = await _acceptInviteHandler.HandleAsync(
-            new AcceptInviteCommand(request.Token, request.Name, request.Password), ct);
+            new AcceptInviteCommand(request.Token, request.FirstName, request.LastName, request.Name, request.Password), ct);
         var response = new IdentityResponse
         {
             IdentityToken = result.IdentityToken,
             ExpiresAt = result.ExpiresAt.ToString("o"),
-            User = new UserResponse { PublicId = result.UserPublicId, Email = result.Email, Name = result.Name },
+            User = new UserResponse { PublicId = result.UserPublicId, Email = result.Email, Name = result.Name, FirstName = result.FirstName, LastName = result.LastName },
             Tenants = result.Tenants.Select(t => new TenantListItem
             {
                 PublicId = t.PublicId,
@@ -195,6 +199,27 @@ public class AuthController : ControllerBase
             PublicId = user.PublicId,
             Email = user.Email,
             Name = user.Name,
+            FirstName = user.FirstName,
+            LastName = user.LastName,
+        }));
+    }
+
+    /// <summary>Update the current user's profile information (First Name and Last Name).</summary>
+    [HttpPut("me/profile")]
+    [RequireAuth]
+    [ProducesResponseType(typeof(ApiResponse<UserResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> UpdateProfile([FromBody] UpdateUserProfileRequest request, CancellationToken ct)
+    {
+        var user = await _updateProfileHandler.HandleAsync(new UpdateUserProfileCommand(request.FirstName, request.LastName), ct);
+        return Ok(new ApiResponse<UserResponse>(new UserResponse
+        {
+            PublicId = user.PublicId,
+            Email = user.Email,
+            Name = user.Name,
+            FirstName = user.FirstName,
+            LastName = user.LastName,
         }));
     }
 
@@ -240,12 +265,12 @@ public class AuthController : ControllerBase
     public record ResetPasswordRequest(string Token, string NewPassword);
 
     private static AuthResponse MapToAuthResponse(string token, DateTime expiresAt, Guid publicId,
-        string email, string name, Guid tenantPublicId, string tenantName)
+        string email, string name, Guid tenantPublicId, string tenantName, string? firstName = null, string? lastName = null)
         => new()
         {
             Token = token,
             ExpiresAt = expiresAt.ToString("o"),
-            User = new UserResponse { PublicId = publicId, Email = email, Name = name },
+            User = new UserResponse { PublicId = publicId, Email = email, Name = name, FirstName = firstName, LastName = lastName },
             TenantPublicId = tenantPublicId,
             TenantName = tenantName,
         };

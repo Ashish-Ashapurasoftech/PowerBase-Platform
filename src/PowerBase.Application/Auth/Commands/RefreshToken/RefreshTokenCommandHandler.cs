@@ -10,6 +10,8 @@ public class RefreshTokenResult
     public Guid UserPublicId { get; init; }
     public string Email { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
+    public string? FirstName { get; init; }
+    public string? LastName { get; init; }
     public Guid TenantPublicId { get; init; }
     public string TenantName { get; init; } = string.Empty;
 }
@@ -54,6 +56,8 @@ public class RefreshTokenCommandHandler
             UserPublicId = user.PublicId,
             Email = user.Email,
             Name = user.Name,
+            FirstName = user.FirstName,
+            LastName = user.LastName,
             TenantPublicId = tenant.PublicId,
             TenantName = tenant.Name,
         };

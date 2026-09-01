@@ -17,6 +17,7 @@ using PowerBase.Application.Groups.Queries.ListGroupMembers;
 using PowerBase.Application.Groups.Queries.ListGroups;
 using PowerBase.Application.Groups.Queries.GetUserEffectivePermissions;
 using PowerBase.Application.Groups.Queries.GetSharedApps;
+using PowerBase.Application.Groups.Queries.GetMyGroups;
 using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.API.Controllers;
@@ -30,6 +31,7 @@ public class GroupsController : ControllerBase
     private readonly UpdateGroupCommandHandler _updateHandler;
     private readonly DeleteGroupCommandHandler _deleteHandler;
     private readonly ListGroupsQueryHandler _listHandler;
+    private readonly GetMyGroupsQueryHandler _getMyGroupsHandler;
     private readonly GetGroupQueryHandler _getHandler;
     private readonly AddGroupMembersCommandHandler _addMembersHandler;
     private readonly RemoveGroupMemberCommandHandler _removeMemberHandler;
@@ -44,6 +46,7 @@ public class GroupsController : ControllerBase
         UpdateGroupCommandHandler updateHandler,
         DeleteGroupCommandHandler deleteHandler,
         ListGroupsQueryHandler listHandler,
+        GetMyGroupsQueryHandler getMyGroupsHandler,
         GetGroupQueryHandler getHandler,
         AddGroupMembersCommandHandler addMembersHandler,
         RemoveGroupMemberCommandHandler removeMemberHandler,
@@ -57,6 +60,7 @@ public class GroupsController : ControllerBase
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _listHandler = listHandler;
+        _getMyGroupsHandler = getMyGroupsHandler;
         _getHandler = getHandler;
         _addMembersHandler = addMembersHandler;
         _removeMemberHandler = removeMemberHandler;
@@ -99,6 +103,14 @@ public class GroupsController : ControllerBase
         };
         var result = await _listHandler.HandleAsync(query, ct);
         return Ok(new ApiListResponse<GroupDto>(result.Items, result.Total, result.Page, result.PageSize));
+    }
+
+    /// <summary>Get groups the current logged-in user is a member of</summary>
+    [HttpGet("my")]
+    public async Task<IActionResult> GetMyGroups(CancellationToken ct = default)
+    {
+        var result = await _getMyGroupsHandler.HandleAsync(new GetMyGroupsQuery(), ct);
+        return Ok(new { data = result });
     }
 
     /// <summary>Get a single group</summary>
