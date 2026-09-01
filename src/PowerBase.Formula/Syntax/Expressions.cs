@@ -50,6 +50,11 @@ public sealed class FieldRefExpr : Expr
     public long Fid { get; internal set; }
 
     public bool IsBound { get; internal set; }
+
+    /// <summary>Set by the binder when this bracket token resolved as a table alias
+    /// (<c>[_DBID_FILE_TYPES]</c>) rather than a field — the target table's id, to be evaluated as
+    /// a Text literal. Null for an ordinary field reference. See <see cref="Binding.ITableAliasSchema"/>.</summary>
+    public string? TableAliasId { get; internal set; }
 }
 
 public sealed class UnaryExpr : Expr

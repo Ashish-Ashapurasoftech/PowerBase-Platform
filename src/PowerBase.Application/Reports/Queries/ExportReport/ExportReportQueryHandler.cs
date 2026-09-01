@@ -209,16 +209,19 @@ public class ExportReportQueryHandler
             filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy,
             seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
 
-        // Build alias→fieldId map and percent set (same logic as RunSummaryAsync)
-        var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Build alias→unique-key map and percent set (same logic as RunSummaryAsync — see its
+        // comment: a user can aggregate the SAME field with several different functions, e.g.
+        // Sum and Avg of Amount, so keying by FieldId alone collapses those columns together).
+        var aggAliasToKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var percentAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var columnTotals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var agg in visibleAggregations)
+        for (var i = 0; i < visibleAggregations.Count; i++)
         {
+            var agg = visibleAggregations[i];
             if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
             var alias = $"{agg.Function}_{aggField.Name.Replace(" ", "_")}";
-            aggAliasToFieldId[alias] = agg.FieldId.ToString();
+            aggAliasToKey[alias] = $"agg{i}_{agg.FieldId}";
             if (agg.DisplayAs == "PercentOfColumnTotal")
             {
                 percentAliases.Add(alias);
@@ -227,41 +230,44 @@ public class ExportReportQueryHandler
             }
         }
 
+        var groupKey = (groupByField.Fid ?? groupByField.Id).ToString();
+        var seriesKey = seriesField is not null ? (seriesField.Fid ?? seriesField.Id).ToString() : null;
         var columns = new List<ColumnInfo>
         {
-            new((groupByField.Fid ?? groupByField.Id).ToString(), string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label),
+            new(groupKey, string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label),
             new("0", "Count"),
         };
-        if (seriesField is not null)
+        if (seriesKey is not null)
         {
-            columns.Add(new ColumnInfo((seriesField.Fid ?? seriesField.Id).ToString(), string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label));
+            columns.Add(new ColumnInfo(seriesKey, string.IsNullOrWhiteSpace(seriesField!.Label) ? seriesField.Name : seriesField.Label));
         }
-        foreach (var agg in visibleAggregations)
+        for (var i = 0; i < visibleAggregations.Count; i++)
         {
+            var agg = visibleAggregations[i];
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
             {
                 var fieldName = string.IsNullOrWhiteSpace(aggField.Label) ? aggField.Name : aggField.Label;
                 var label = agg.DisplayAs == "PercentOfColumnTotal"
                     ? $"{agg.Function} of {fieldName} (%)"
                     : $"{agg.Function} of {fieldName}";
-                columns.Add(new ColumnInfo((aggField.Fid ?? aggField.Id).ToString(), label));
+                columns.Add(new ColumnInfo($"agg{i}_{agg.FieldId}", label));
             }
         }
 
         var dataRows = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
-            fields[(groupByField.Fid ?? groupByField.Id).ToString()] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
+            fields[groupKey] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
-            if (seriesField is not null)
-                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = row.TryGetValue("SeriesValue", out var sv) ? sv : null;
-            foreach (var (alias, fieldId) in aggAliasToFieldId)
+            if (seriesKey is not null)
+                fields[seriesKey] = row.TryGetValue("SeriesValue", out var sv) ? sv : null;
+            foreach (var (alias, key) in aggAliasToKey)
             {
                 if (!row.TryGetValue(alias, out var val)) continue;
                 if (percentAliases.Contains(alias) && columnTotals.TryGetValue(alias, out var total) && total != 0)
-                    fields[fieldId] = Math.Round(Convert.ToDouble(val ?? 0) / total * 100, 2);
+                    fields[key] = Math.Round(Convert.ToDouble(val ?? 0) / total * 100, 2);
                 else
-                    fields[fieldId] = val;
+                    fields[key] = val;
             }
             return fields;
         }).ToList();

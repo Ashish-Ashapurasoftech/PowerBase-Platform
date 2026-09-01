@@ -90,7 +90,12 @@ public class GetParentOptionsQueryHandler
         // Fall back to the first non-system, non-computed field with a physical column.
         var fallback = parentFields.FirstOrDefault(f => !f.IsSystem && f.Fid.HasValue
             && !Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode));
-            
-        return fallback != null ? [fallback] : [];
+        if (fallback != null) return [fallback];
+
+        // Ultimate fallback: Record ID# (Fid 3), so a table with zero business fields still shows
+        // something in the picker instead of blank headers/options.
+        var recordId = parentFields.FirstOrDefault(f => f.IsSystem && f.Fid == 3)
+            ?? parentFields.FirstOrDefault(f => f.IsSystem);
+        return recordId != null ? [recordId] : [];
     }
 }

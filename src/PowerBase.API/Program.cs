@@ -440,6 +440,7 @@ builder.Services.AddScoped<UpdateFieldCommandHandler>();
 builder.Services.AddScoped<DeleteFieldCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.BulkDeleteFields.BulkDeleteFieldsCommandHandler>();
 builder.Services.AddScoped<ListFieldsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.Queries.ListFields.ListAllFieldsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.GetField.GetFieldQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.ListFieldTypes.ListFieldTypesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.GetFieldUsage.GetFieldUsageQueryHandler>();

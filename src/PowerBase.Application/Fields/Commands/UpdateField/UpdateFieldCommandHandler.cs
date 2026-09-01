@@ -71,17 +71,36 @@ public class UpdateFieldCommandHandler
         if (existing.AppTableId != table.Id)
             throw new NotFoundException("Field", command.FieldPublicId);
 
-        if (await _fieldRepo.LabelExistsInTableAsync(table.Id, command.Label, excludeFieldId: existing.Id, ct: ct))
-            throw new DuplicateException("Field", "label", command.Label);
+        // System fields (Record ID#, Date Created/Modified, Record Owner, Last Modified By) only
+        // expose a reduced settings surface on the Field Detail page — Label stays read-only, only
+        // Searchable/Reportable stay togglable, and each type's Behavior Settings collapse to a
+        // fixed allow-list (see SystemFieldSettingsPolicy). Coerced here, before every check below,
+        // so the request body is never trusted for anything beyond what the UI actually offers —
+        // this is the authoritative enforcement; the frontend hiding these controls is only UX.
+        var label = existing.IsSystem ? existing.Label : command.Label;
+        var description = existing.IsSystem ? existing.Description : command.Description;
+        var isRequired = existing.IsSystem ? false : command.IsRequired;
+        var defaultValue = existing.IsSystem ? null : command.DefaultValue;
+        var isUnique = existing.IsSystem ? false : command.IsUnique;
+        var isSortable = existing.IsSystem ? false : command.IsSortable;
+        var isFilterable = existing.IsSystem ? false : command.IsFilterable;
+        var isAuditable = existing.IsSystem ? false : command.IsAuditable;
+        var isEncrypted = existing.IsSystem ? false : command.IsEncrypted;
+        var settings = existing.IsSystem
+            ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
+            : command.Settings;
+
+        if (await _fieldRepo.LabelExistsInTableAsync(table.Id, label, excludeFieldId: existing.Id, ct: ct))
+            throw new DuplicateException("Field", "label", label);
 
         // Validate per-type Settings JSON against the field's current type.
-        var settingsErrors = _settingsRegistry.Validate(existing.TypeCode, command.Settings);
+        var settingsErrors = _settingsRegistry.Validate(existing.TypeCode, settings);
         if (settingsErrors.Count > 0)
             throw new ValidationException(settingsErrors.AsReadOnly());
 
         var capErrors = FieldGeneralSettingsCapability.Validate(
-            existing.TypeCode, command.Settings ?? existing.Settings, command.Label,
-            command.IsRequired, command.IsUnique, command.DefaultValue);
+            existing.TypeCode, settings ?? existing.Settings, label,
+            isRequired, isUnique, defaultValue);
         if (capErrors.Count > 0)
             throw new ValidationException(capErrors.AsReadOnly());
 
@@ -94,16 +113,19 @@ public class UpdateFieldCommandHandler
         // except for the one narrow, always-lossless INT-to-DECIMAL widening below (only ever
         // needed for a legacy Rating field created before Rating's catalog type became
         // DECIMAL(18,4) — see database/migrations/tenant/045_alter_fieldtype_rating_decimal.sql).
-        if (NumericFamilyTypeCodes.Contains(existing.TypeCode) && !string.IsNullOrWhiteSpace(command.Settings))
+        if (NumericFamilyTypeCodes.Contains(existing.TypeCode) && !string.IsNullOrWhiteSpace(settings))
         {
             NumericSettings? numericSettings = null;
             try
             {
                 numericSettings = JsonSerializer.Deserialize<NumericSettings>(
-                    command.Settings, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    settings, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             }
             catch (JsonException) { /* already rejected above by _settingsRegistry.Validate */ }
 
+            // A system field's DisplayAs was already stripped by SystemFieldSettingsPolicy above,
+            // so this branch is naturally a no-op for Record ID# — the type-switch feature only
+            // ever applies to custom Numeric-family fields.
             if (numericSettings?.DisplayAs is string displayAs
                 && NumericFamilyTypeCodes.Contains(displayAs)
                 && !string.Equals(displayAs, existing.TypeCode, StringComparison.OrdinalIgnoreCase))
@@ -116,13 +138,13 @@ public class UpdateFieldCommandHandler
                 // Percent/Rating all already share that physical type.
                 await _schemaEngine.WidenIntColumnToDecimalIfNeededAsync(table, existing, ct);
 
-                await _fieldRepo.UpdateFieldTypeAsync(existing.Id, targetFieldType.Id, command.Settings, command.IsRequired, ct);
+                await _fieldRepo.UpdateFieldTypeAsync(existing.Id, targetFieldType.Id, settings, isRequired, ct);
             }
         }
 
         // Invariant: a required field with no default value cannot be made required while some role has
         // it set to None — those users would never be able to create a record.
-        if (command.IsRequired && string.IsNullOrWhiteSpace(command.DefaultValue))
+        if (isRequired && string.IsNullOrWhiteSpace(defaultValue))
         {
             var rolesWithNone = await _permRepo.CountRolesWithNoneAccessForFieldAsync(existing.Id, ct);
             if (rolesWithNone > 0)
@@ -131,8 +153,8 @@ public class UpdateFieldCommandHandler
                 {
                     ["DefaultValue"] =
                     [
-                        $"'{command.Label}' is required but does not have a default value. Because some users are not " +
-                        $"allowed to modify '{command.Label}', those users will not be able to add new records. " +
+                        $"'{label}' is required but does not have a default value. Because some users are not " +
+                        $"allowed to modify '{label}', those users will not be able to add new records. " +
                         "Supply a default value or uncheck Required."
                     ],
                 });
@@ -140,14 +162,14 @@ public class UpdateFieldCommandHandler
         }
 
         // ── Unique index ────────────────────────────────────────────────────────
-        if (command.IsUnique && !existing.IsUnique)
+        if (isUnique && !existing.IsUnique)
         {
             // Pre-flight: reject if duplicates already exist.
             if (await _recordRepo.HasDuplicatesAsync(table, existing, ct))
             {
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
-                    ["IsUnique"] = [$"Cannot make '{command.Label}' unique — duplicate values already exist. Remove duplicates first."]
+                    ["IsUnique"] = [$"Cannot make '{label}' unique — duplicate values already exist. Remove duplicates first."]
                 });
             }
         }
@@ -155,15 +177,15 @@ public class UpdateFieldCommandHandler
         // ── Encryption lock ─────────────────────────────────────────────────────
         // We only allow toggling encryption (ON or OFF) for an existing field if the table has zero records.
         // Otherwise, existing plaintext/ciphertext data would become unreadable.
-        if (existing.IsEncrypted != command.IsEncrypted)
+        if (existing.IsEncrypted != isEncrypted)
         {
             var recordCount = await _recordRepo.CountAsync(table, Array.Empty<AppField>(), ct: ct);
             if (recordCount > 0)
             {
-                var errorMsg = existing.IsEncrypted 
-                    ? "A field that has been encrypted cannot be un-encrypted if the table has existing records." 
+                var errorMsg = existing.IsEncrypted
+                    ? "A field that has been encrypted cannot be un-encrypted if the table has existing records."
                     : "Encryption can only be enabled when creating a new field or if the table has no records.";
-                
+
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
                     ["IsEncrypted"] = [errorMsg]
@@ -176,29 +198,29 @@ public class UpdateFieldCommandHandler
 
         var affected = await _fieldRepo.UpdateAsync(
             existing.PublicId, table.Id,
-            command.Label, command.Description,
-            command.IsRequired, command.DefaultValue,
-            command.IsSearchable, command.IsSortable,
-            command.IsFilterable, command.IsReportable, command.IsAuditable,
-            command.IsUnique, command.IsEncrypted, command.Settings, ct);
+            label, description,
+            isRequired, defaultValue,
+            command.IsSearchable, isSortable,
+            isFilterable, command.IsReportable, isAuditable,
+            isUnique, isEncrypted, settings, ct);
 
         if (affected == 0)
             throw new NotFoundException("Field", command.FieldPublicId);
 
         // Unique index: create or drop after the metadata row is committed.
-        if (command.IsUnique != existing.IsUnique)
+        if (isUnique != existing.IsUnique)
         {
-            existing.IsUnique = command.IsUnique;
-            await _schemaEngine.SetUniqueAsync(table, existing, command.IsUnique, ct);
+            existing.IsUnique = isUnique;
+            await _schemaEngine.SetUniqueAsync(table, existing, isUnique, ct);
         }
 
         // Backfill: when an optional field becomes required and a default is supplied, fill existing
         // rows whose value is NULL/empty so they remain valid.
-        if (command.IsRequired && !string.IsNullOrWhiteSpace(command.DefaultValue) && !existing.IsRequired)
+        if (isRequired && !string.IsNullOrWhiteSpace(defaultValue) && !existing.IsRequired)
         {
-            existing.IsRequired = command.IsRequired;
-            existing.DefaultValue = command.DefaultValue;
-            await _recordRepo.BackfillDefaultAsync(table, existing, command.DefaultValue!, ct);
+            existing.IsRequired = isRequired;
+            existing.DefaultValue = defaultValue;
+            await _recordRepo.BackfillDefaultAsync(table, existing, defaultValue!, ct);
         }
 
         // Search Index Sync: when IsSearchable changes, trigger a backfill or nullify
@@ -227,6 +249,6 @@ public class UpdateFieldCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
-            $"Field modified: {command.Label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+            $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
     }
 }

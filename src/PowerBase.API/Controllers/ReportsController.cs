@@ -379,6 +379,7 @@ public class ReportsController : ControllerBase
         Columns = result.Columns.Select(c => new ReportColumnDto
         {
             FieldId = c.FieldId,
+            Key = c.Key,
             Name = c.Name,
             TypeCode = c.TypeCode,
         }).ToList(),
