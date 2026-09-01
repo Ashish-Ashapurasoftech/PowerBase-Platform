@@ -27,6 +27,7 @@ public class GetReportPreviewMetadataQueryHandlerTests
     private readonly IAzureSearchService _searchService = Substitute.For<IAzureSearchService>();
     private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly ILogger<RunReportQueryHandler> _logger = Substitute.For<ILogger<RunReportQueryHandler>>();
 
     [Fact]
     public async Task WhenReportNotFound_ThrowsNotFoundException()
@@ -38,8 +39,7 @@ public class GetReportPreviewMetadataQueryHandlerTests
 
         var runHandler = new RunReportQueryHandler(
             _reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer,
-            _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext,
-            Substitute.For<ILogger<RunReportQueryHandler>>());
+            _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, _logger);
 
         var handler = new GetReportPreviewMetadataQueryHandler(_reportRepo, _tableRepo, _fieldRepo, runHandler);
 
@@ -99,8 +99,7 @@ public class GetReportPreviewMetadataQueryHandlerTests
 
         var runHandler = new RunReportQueryHandler(
             _reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer,
-            _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext,
-            Substitute.For<ILogger<RunReportQueryHandler>>());
+            _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, _logger);
 
         var handler = new GetReportPreviewMetadataQueryHandler(_reportRepo, _tableRepo, _fieldRepo, runHandler);
 
