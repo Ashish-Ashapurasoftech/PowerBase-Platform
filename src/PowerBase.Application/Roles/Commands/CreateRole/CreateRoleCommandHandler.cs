@@ -34,6 +34,16 @@ public class CreateRoleCommandHandler
         if (invalidCodes.Count > 0)
             throw new ValidationException(new Dictionary<string, string[]> { ["PermissionCodes"] = [$"Unknown permission codes: {string.Join(", ", invalidCodes)}"] });
 
+        if (!_queryContext.IsSuperAdmin && !_queryContext.IsTenantAdmin)
+        {
+            var unauthorizedCodes = command.PermissionCodes
+                .Where(c => !_queryContext.Permissions.Contains(c))
+                .ToList();
+
+            if (unauthorizedCodes.Count > 0)
+                throw new ValidationException(new Dictionary<string, string[]> { ["PermissionCodes"] = [$"You cannot assign permissions that your own role does not possess: {string.Join(", ", unauthorizedCodes)}"] });
+        }
+
         var role = new TenantRole
         {
             TenantId = _queryContext.TenantId,

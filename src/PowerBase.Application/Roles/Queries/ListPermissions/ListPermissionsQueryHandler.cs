@@ -6,9 +6,16 @@ namespace PowerBase.Application.Roles.Queries.ListPermissions;
 public class ListPermissionsQueryHandler
 {
     private readonly IPermissionRepository _permissionRepo;
+    private readonly IQueryContext _queryContext;
 
-    public ListPermissionsQueryHandler(IPermissionRepository permissionRepo) => _permissionRepo = permissionRepo;
+    public ListPermissionsQueryHandler(IPermissionRepository permissionRepo, IQueryContext queryContext)
+    {
+        _permissionRepo = permissionRepo;
+        _queryContext = queryContext;
+    }
 
     public async Task<IReadOnlyList<Permission>> HandleAsync(ListPermissionsQuery query, CancellationToken ct = default)
-        => await _permissionRepo.GetAllAsync(ct);
+    {
+        return await _permissionRepo.GetAllAsync(ct);
+    }
 }

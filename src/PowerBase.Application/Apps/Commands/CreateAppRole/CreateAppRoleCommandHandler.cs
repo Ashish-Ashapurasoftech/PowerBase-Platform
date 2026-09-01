@@ -56,7 +56,7 @@ public class CreateAppRoleCommandHandler
         if (await _appRoleRepo.NameExistsInAppAsync(appId, command.Name, ct: ct))
             throw new DuplicateException("AppRole", "name", command.Name);
 
-        bool isAuthorizedToConfigure = _queryContext.IsSuperAdmin || _queryContext.UserId == app.OwnerId;
+        bool isAuthorizedToConfigure = _queryContext.IsSuperAdmin || _queryContext.IsTenantAdmin || _queryContext.UserId == app.OwnerId;
         int? actorRank = null;
 
         if (!isAuthorizedToConfigure)
@@ -72,18 +72,23 @@ public class CreateAppRoleCommandHandler
                     {
                         isAuthorizedToConfigure = true;
                     }
+                    else if (actorRole.ManageableRolesType == "None")
+                    {
+                        throw new UnauthorizedActionException("Your role is not allowed to manage or create roles.");
+                    }
                 }
             }
         }
 
         if (!isAuthorizedToConfigure && 
-            (command.ManageableRolesType != null || command.Rank != null || command.ManageableRolePublicIds != null))
+            ((command.ManageableRolesType != null && command.ManageableRolesType != "None") || 
+             (command.ManageableRolePublicIds != null && command.ManageableRolePublicIds.Any())))
         {
-            throw new UnauthorizedActionException("Only platform Super Admins, App Owners, or App Administrators can configure role hierarchy settings.");
+            throw new UnauthorizedActionException("Only platform Super Admins, Tenant Administrators, App Owners, or App Administrators can configure role hierarchy settings.");
         }
 
-        int targetRank = command.Rank ?? 3;
-        string targetType = command.ManageableRolesType ?? "None";
+        int targetRank = command.Rank ?? (actorRank.HasValue ? actorRank.Value + 1 : 3);
+        string targetType = (isAuthorizedToConfigure ? command.ManageableRolesType : null) ?? "None";
 
         // Hard system rule: actor cannot create/assign a role equal to or superior to their own rank
         if (actorRank.HasValue && targetRank <= actorRank.Value)

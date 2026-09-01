@@ -36,9 +36,9 @@ public class SetDefaultAppRoleCommandHandler
         if (role is null || role.AppId != app.Id)
             throw new NotFoundException("AppRole", command.RolePublicId);
 
-        // Only Super Admins, the App Owner, or an Administrator-role member may change
+        // Only Super Admins, Tenant Administrators, the App Owner, or an Administrator-role member may change
         // which role new members are auto-assigned to — same tier as role hierarchy config.
-        bool isAuthorizedToConfigure = _queryContext.IsSuperAdmin || _queryContext.UserId == app.OwnerId;
+        bool isAuthorizedToConfigure = _queryContext.IsSuperAdmin || _queryContext.IsTenantAdmin || _queryContext.UserId == app.OwnerId;
         if (!isAuthorizedToConfigure)
         {
             var actorRolePublicId = await _appUserRepo.GetUserRolePublicIdAsync(app.Id, _queryContext.UserId, ct);
@@ -51,7 +51,7 @@ public class SetDefaultAppRoleCommandHandler
         }
 
         if (!isAuthorizedToConfigure)
-            throw new UnauthorizedActionException("Only platform Super Admins, App Owners, or App Administrators can set the default role.");
+            throw new UnauthorizedActionException("Only platform Super Admins, Tenant Administrators, App Owners, or App Administrators can set the default role.");
 
         await _appRoleRepo.SetDefaultAsync(app.Id, role.Id, ct);
         await _appRepo.SetDefaultRoleAsync(app.Id, role.Id, ct: ct);

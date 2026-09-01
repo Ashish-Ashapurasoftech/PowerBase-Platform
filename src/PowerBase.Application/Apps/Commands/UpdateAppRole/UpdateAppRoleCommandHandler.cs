@@ -56,20 +56,20 @@ public class UpdateAppRoleCommandHandler
         }
 
         bool isAdministrator = actorRole?.Name == "Administrator";
-        bool isAuthorizedToConfigure = _queryContext.IsSuperAdmin || _queryContext.UserId == app.OwnerId || isAdministrator;
+        bool isAuthorizedToConfigure = _queryContext.IsSuperAdmin || _queryContext.IsTenantAdmin || _queryContext.UserId == app.OwnerId || isAdministrator;
         int? actorRank = actorRole?.Rank;
 
-        if (!_queryContext.IsSuperAdmin && _queryContext.UserId != app.OwnerId && !isAdministrator && currentUserRolePublicId == command.RolePublicId)
+        if (!_queryContext.IsSuperAdmin && !_queryContext.IsTenantAdmin && _queryContext.UserId != app.OwnerId && !isAdministrator && currentUserRolePublicId == command.RolePublicId)
         {
             throw new UnauthorizedActionException("modify your own app role");
         }
 
-        if (actorRole == null && !_queryContext.IsSuperAdmin)
+        if (actorRole == null && !_queryContext.IsSuperAdmin && !_queryContext.IsTenantAdmin)
         {
             throw new UnauthorizedActionException("You are not a member of this application.");
         }
 
-        if (!_queryContext.IsSuperAdmin && _queryContext.UserId != app.OwnerId)
+        if (!_queryContext.IsSuperAdmin && !_queryContext.IsTenantAdmin && _queryContext.UserId != app.OwnerId)
         {
             if (actorRole == null)
             {
@@ -100,14 +100,15 @@ public class UpdateAppRoleCommandHandler
         }
 
         if (!isAuthorizedToConfigure &&
-            (command.ManageableRolesType != null || command.Rank.HasValue || command.ManageableRolePublicIds != null))
+            ((command.ManageableRolesType != null && command.ManageableRolesType != role.ManageableRolesType) ||
+             (command.ManageableRolePublicIds != null && !command.ManageableRolePublicIds.SequenceEqual(await _appRoleRepo.GetManageableRolePublicIdsAsync(role.Id, ct) ?? Array.Empty<Guid>()))))
         {
-            throw new UnauthorizedActionException("Only platform Super Admins, App Owners, or App Administrators can configure role hierarchy settings.");
+            throw new UnauthorizedActionException("Only platform Super Admins, Tenant Administrators, App Owners, or App Administrators can configure role hierarchy settings.");
         }
 
-        if (!isAuthorizedToConfigure && command.Name != null)
+        if (!isAuthorizedToConfigure && command.Name != null && command.Name != role.Name)
         {
-            throw new UnauthorizedActionException("Only platform Super Admins, App Owners, or App Administrators can rename a role.");
+            throw new UnauthorizedActionException("Only platform Super Admins, Tenant Administrators, App Owners, or App Administrators can rename a role.");
         }
 
         if (command.Rank.HasValue && !(_queryContext.IsSuperAdmin || _queryContext.UserId == app.OwnerId))
@@ -121,6 +122,23 @@ public class UpdateAppRoleCommandHandler
 
         if (command.Permissions != null)
         {
+            if (!isAuthorizedToConfigure)
+            {
+                var actorPermissions = await _appUserRepo.GetUserAppPermissionsAsync(app.Id, _queryContext.UserId, ct);
+
+                var unauthorizedCodes = command.Permissions
+                    .Where(p => !actorPermissions.Contains(p))
+                    .ToList();
+
+                if (unauthorizedCodes.Count > 0)
+                {
+                    throw new ValidationException(new Dictionary<string, string[]>
+                    {
+                        ["Permissions"] = [$"You cannot assign permissions that your own role does not possess: {string.Join(", ", unauthorizedCodes)}"]
+                    });
+                }
+            }
+
             await _appRoleRepo.SetPermissionsAsync(role.Id, command.Permissions, null, ct);
         }
 
