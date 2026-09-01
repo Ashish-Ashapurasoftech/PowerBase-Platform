@@ -121,6 +121,11 @@ public class CreateTenantCommandHandler
                 TenantSlug = slug,
             };
         }
+        catch (Exception ex) when (ex is not DomainException)
+        {
+            await _uow.RollbackAsync(ct);
+            throw new InternalServerException($"Tenant provisioning failed: {ex.Message}");
+        }
         catch
         {
             await _uow.RollbackAsync(ct);

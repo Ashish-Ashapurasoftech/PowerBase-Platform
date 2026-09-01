@@ -11,6 +11,8 @@ public class SignupCommandResult
     public Guid UserPublicId { get; init; }
     public string Email { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
+    public string? FirstName { get; init; }
+    public string? LastName { get; init; }
 }
 
 public class SignupCommandHandler
@@ -39,12 +41,22 @@ public class SignupCommandHandler
         if (await _userRepo.GetByEmailAsync(command.Email, ct) is not null)
             throw new DuplicateException("User", "email", command.Email);
 
+        var firstName = !string.IsNullOrWhiteSpace(command.FirstName)
+            ? command.FirstName.Trim()
+            : (command.Name?.Split(' ').FirstOrDefault() ?? string.Empty);
+        var lastName = !string.IsNullOrWhiteSpace(command.LastName)
+            ? command.LastName.Trim()
+            : (command.Name != null && command.Name.Contains(' ') ? command.Name[(command.Name.IndexOf(' ') + 1)..].Trim() : string.Empty);
+        var name = string.IsNullOrWhiteSpace(command.Name) ? $"{firstName} {lastName}".Trim() : command.Name.Trim();
+
         var hashedPassword = _passwordService.Hash(command.Password);
         var userId = await _userRepo.CreateAsync(new User
         {
             Email = command.Email,
             HashedPassword = hashedPassword,
-            Name = command.Name,
+            Name = name,
+            FirstName = firstName,
+            LastName = lastName,
             IsActive = true,
         }, ct: ct);
 
@@ -58,6 +70,8 @@ public class SignupCommandHandler
             UserPublicId = created.PublicId,
             Email = created.Email,
             Name = created.Name,
+            FirstName = created.FirstName,
+            LastName = created.LastName,
         };
     }
 }

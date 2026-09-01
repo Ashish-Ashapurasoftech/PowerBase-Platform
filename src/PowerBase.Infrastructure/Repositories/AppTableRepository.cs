@@ -11,9 +11,9 @@ namespace PowerBase.Infrastructure.Repositories;
 public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 {
     private const string SelectColumns = """
-        Id, PublicId, AppId, Name, SingularLabel, PluralLabel, Description,
+        Id, PublicId, AppId, Name, Alias, SingularLabel, PluralLabel, Description,
         PhysicalTableName, DefaultReportSettings, DisplayFieldId, KeyFieldId, DefaultRecordPickerField1Id, DefaultRecordPickerField2Id, DefaultRecordPickerField3Id, RecordCount, IsShowInBar, IsSystem, DisplayOrder,
-        IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion, Icon
+        IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion, Icon, CustomDataRule, IsCustomDataRuleEnabled
         """;
 
     private const string GetByIdSql = $"""
@@ -36,9 +36,9 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         """;
 
     private const string ListByAppSql = """
-        SELECT t.Id, t.PublicId, t.AppId, t.Name, t.SingularLabel, t.PluralLabel, t.Description,
+        SELECT t.Id, t.PublicId, t.AppId, t.Name, t.Alias, t.SingularLabel, t.PluralLabel, t.Description,
                t.PhysicalTableName, t.DisplayFieldId, t.KeyFieldId, t.DefaultRecordPickerField1Id, t.DefaultRecordPickerField2Id, t.DefaultRecordPickerField3Id, t.RecordCount, t.IsShowInBar, t.IsSystem, t.DisplayOrder,
-               t.IsDeleted, t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy, t.RowVersion, t.Icon,
+               t.IsDeleted, t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy, t.RowVersion, t.Icon, t.CustomDataRule, t.IsCustomDataRuleEnabled,
                f.Id, f.PublicId, f.AppTableId, f.FieldTypeId,
                f.Name, f.Label, f.Description, f.PhysicalColumnName, f.DefaultValue,
                f.IsRequired, f.IsSearchable, f.IsSortable, f.IsFilterable, f.IsReportable,
@@ -73,6 +73,16 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         ORDER BY t.DisplayOrder, t.CreatedOn
         """;
 
+    // No field JOIN, unlike ListByAppSql — AppTableAliasSchema only ever reads PublicId/Alias off
+    // each table row, so pulling every table's fields along with it (as ListByAppAsync does) is
+    // pure waste, and gets expensive on tables with hundreds/thousands of fields.
+    private const string ListAliasesByAppSql = """
+        SELECT t.PublicId, t.Alias
+        FROM meta.AppTable t
+        WHERE t.AppId = @appId
+          AND t.IsDeleted = 0
+        """;
+
     private const string CountByAppSql = """
         SELECT COUNT(1)
         FROM meta.AppTable t
@@ -89,10 +99,17 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         ) THEN 1 ELSE 0 END AS BIT)
         """;
 
+    private const string AliasExistsSql = """
+        SELECT CAST(CASE WHEN EXISTS (
+            SELECT 1 FROM meta.AppTable
+            WHERE AppId = @appId AND Alias = @alias AND IsDeleted = 0
+        ) THEN 1 ELSE 0 END AS BIT)
+        """;
+
     private const string InsertSql = """
-        INSERT INTO meta.AppTable (AppId, Name, SingularLabel, PluralLabel, Description, Icon, IsDeleted, CreatedOn, CreatedBy)
+        INSERT INTO meta.AppTable (AppId, Name, Alias, SingularLabel, PluralLabel, Description, Icon, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
-        VALUES (@appId, @name, @singularLabel, @pluralLabel, @description, @icon, 0, SYSUTCDATETIME(), @createdBy)
+        VALUES (@appId, @name, @alias, @singularLabel, @pluralLabel, @description, @icon, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string UpdatePhysicalNameSql = """
@@ -123,11 +140,30 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         WHERE Id = @tableId AND IsDeleted = 0
         """;
 
+    private const string SetDefaultRecordPickerFieldsSql = """
+        UPDATE meta.AppTable
+        SET DefaultRecordPickerField1Id = @field1Id,
+            DefaultRecordPickerField2Id = @field2Id,
+            DefaultRecordPickerField3Id = @field3Id,
+            ModifiedOn = SYSUTCDATETIME(),
+            ModifiedBy = @modifiedBy
+        WHERE Id = @tableId AND IsDeleted = 0
+        """;
+
     private const string UpdateDefaultReportSettingsSql = """
         UPDATE meta.AppTable
         SET DefaultReportSettings = @defaultReportSettings,
             ModifiedOn            = SYSUTCDATETIME(),
             ModifiedBy            = @modifiedBy
+        WHERE PublicId = @publicId AND IsDeleted = 0
+        """;
+
+    private const string UpdateCustomDataRuleSql = """
+        UPDATE meta.AppTable
+        SET CustomDataRule           = @customDataRule,
+            IsCustomDataRuleEnabled  = @isEnabled,
+            ModifiedOn     = SYSUTCDATETIME(),
+            ModifiedBy     = @modifiedBy
         WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
@@ -240,6 +276,14 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         return rows.ToList();
     }
 
+    public async Task<IReadOnlyList<AppTableAliasDto>> ListAliasesByAppAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<AppTableAliasDto>(
+            new CommandDefinition(ListAliasesByAppSql, new { appId }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
     public async Task<int> CountByAppAsync(long appId, string? search, bool? isShowInBar = null, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -259,6 +303,13 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             new CommandDefinition(NameExistsSql, new { appId, name }, cancellationToken: ct));
     }
 
+    public async Task<bool> AliasExistsInAppAsync(long appId, string alias, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(
+            new CommandDefinition(AliasExistsSql, new { appId, alias }, cancellationToken: ct));
+    }
+
     public async Task<(long Id, Guid PublicId)> CreateAsync(AppTable table, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -267,6 +318,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             {
                 appId = table.AppId,
                 name = table.Name,
+                alias = table.Alias,
                 singularLabel = table.SingularLabel,
                 pluralLabel = table.PluralLabel,
                 description = table.Description,
@@ -303,6 +355,13 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             new CommandDefinition(SetKeyFieldSql, new { tableId, keyFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
+    public async Task SetDefaultRecordPickerFieldsAsync(long tableId, long? field1Id, long? field2Id, long? field3Id, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(SetDefaultRecordPickerFieldsSql, new { tableId, field1Id, field2Id, field3Id, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
     public async Task UpdateDefaultReportSettingsAsync(Guid publicId, string defaultReportSettings, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -310,6 +369,19 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             new CommandDefinition(UpdateDefaultReportSettingsSql, new
             {
                 publicId, defaultReportSettings,
+                modifiedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
+        if (affected == 0)
+            throw new NotFoundException("Table", publicId);
+    }
+
+    public async Task UpdateCustomDataRuleAsync(Guid publicId, string? customDataRule, bool isEnabled, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var affected = await connection.ExecuteAsync(
+            new CommandDefinition(UpdateCustomDataRuleSql, new
+            {
+                publicId, customDataRule, isEnabled,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
         if (affected == 0)

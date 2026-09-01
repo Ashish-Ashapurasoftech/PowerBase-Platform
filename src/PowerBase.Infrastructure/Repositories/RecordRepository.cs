@@ -102,15 +102,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         parameters.Add("offset", (page - 1) * pageSize);
         parameters.Add("pageSize", pageSize);
 
-        var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var fieldLookup = BuildFieldLookup(fields);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var orderBy = sortFields?.Count > 0
             ? string.Join(", ", sortFields
                 .Where(s => !fieldLookup.TryGetValue(s.FieldId, out var sf2) || !PhysicalNaming.IsComputedTypeCode(sf2.TypeCode))
                 .Select(s =>
                 {
-                    var colName = fieldLookup.TryGetValue(s.FieldId, out var sf) && sf.IsSystem
-                        ? sf.PhysicalColumnName!
+                    var colName = fieldLookup.TryGetValue(s.FieldId, out var sf)
+                        ? ResolveColumnName(sf, s.FieldId)
                         : PhysicalNaming.ColumnName((int)s.FieldId);
                     return $"{colName} {(s.Desc ? "DESC" : "ASC")}";
                 })
@@ -140,7 +140,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
     {
         var parameters = new DynamicParameters();
-        var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var fieldLookup = BuildFieldLookup(fields);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -932,13 +932,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var fieldMap = allFields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
 
         string? seriesExpr = null;
+        string? seriesCol = null;
         if (seriesField is not null)
         {
-            var seriesCol = seriesField.IsSystem && !string.IsNullOrEmpty(seriesField.PhysicalColumnName)
+            seriesCol = seriesField.IsSystem && !string.IsNullOrEmpty(seriesField.PhysicalColumnName)
                 ? seriesField.PhysicalColumnName!
                 : PhysicalNaming.ColumnName(seriesField.Fid!.Value);
             seriesExpr = BuildGroupByExpr(seriesCol, seriesMode, seriesField.TypeCode);
         }
+
+        var parameters = new DynamicParameters();
+        var ownerWhere = BuildOwnerWhere(restrictToCreatedBy, parameters);
+        // fieldMap guards against computed/Formula-type conditions reaching SQL as a reference
+        // to a nonexistent f_{fid} column — see BuildConditionClause's IsComputedTypeCode check.
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldMap);
+
+        // Median needs a table alias to correlate a per-group scalar subquery back to this
+        // outer query's row (PERCENTILE_CONT is a T-SQL window function — it always requires
+        // OVER, and can't sit directly in a GROUP BY select list alongside SUM/COUNT/etc.).
+        // Only reached (aliased) when at least one aggregation actually uses Median.
+        const string outerAlias = "rpt_o";
+        const string medianAlias = "rpt_m";
+        var tableName = PhysicalNaming.FullTableName(table.Id);
 
         var aggClauses = new List<string> { "COUNT(*) AS [Count]" };
         foreach (var agg in aggregations)
@@ -952,16 +967,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 "Avg" => $"AVG(CAST({col} AS DECIMAL(18,4))) AS {alias}",
                 "Min" => $"MIN({col}) AS {alias}",
                 "Max" => $"MAX({col}) AS {alias}",
+                "DistinctCount" => $"COUNT(DISTINCT {col}) AS {alias}",
+                "StdDev" => $"STDEV(CAST({col} AS DECIMAL(18,4))) AS {alias}",
+                "Median" => BuildMedianClause(tableName, outerAlias, medianAlias, col, alias, ownerWhere, filterWhere,
+                    groupCol, groupByMode, groupByField.TypeCode, seriesCol, seriesMode, seriesField?.TypeCode),
                 _ => null,
             };
             if (clause is not null) aggClauses.Add(clause);
         }
-
-        var parameters = new DynamicParameters();
-        var ownerWhere = BuildOwnerWhere(restrictToCreatedBy, parameters);
-        // fieldMap guards against computed/Formula-type conditions reaching SQL as a reference
-        // to a nonexistent f_{fid} column — see BuildConditionClause's IsComputedTypeCode check.
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldMap);
 
         var selectList = seriesExpr is null
             ? $"{groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}"
@@ -970,8 +983,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         var sql = $"""
             SELECT {selectList}
-            FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE IsDeleted = 0{ownerWhere}{filterWhere}
+            FROM {tableName} AS {outerAlias}
+            WHERE {outerAlias}.IsDeleted = 0{ownerWhere}{filterWhere}
             GROUP BY {groupByList}
             ORDER BY {groupByList}
             """;
@@ -979,6 +992,42 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
         return rows.Select(ToDictionary).ToList();
+    }
+
+    /// <summary>
+    /// Median for a summarized aggregation column. SQL Server's PERCENTILE_CONT is an ordered-
+    /// set window function — it always requires OVER, and (unlike SUM/AVG/COUNT) can't sit
+    /// directly in the same GROUP BY select list as the rest of <see cref="SummarizeAsync"/>'s
+    /// aggregates. Instead this builds a correlated scalar subquery: it re-scans the same table
+    /// under a second alias, re-applies the exact same owner/filter restrictions plus a
+    /// correlation predicate that recomputes the group (and series, if any) bucket expression
+    /// and matches it back to the outer query's row, then takes PERCENTILE_CONT(0.5) OVER() —
+    /// which returns the same median value for every row in that bucket — via TOP(1).
+    /// NULL-vs-NULL is matched explicitly since `NULL = NULL` is unknown, not true, in SQL.
+    /// </summary>
+    private static string BuildMedianClause(
+        string tableName, string outerAlias, string medianAlias,
+        string col, string alias, string ownerWhere, string filterWhere,
+        string groupCol, string groupByMode, string groupTypeCode,
+        string? seriesCol, string? seriesMode, string? seriesTypeCode)
+    {
+        var groupOuter = BuildGroupByExpr($"{outerAlias}.{groupCol}", groupByMode, groupTypeCode);
+        var groupInner = BuildGroupByExpr($"{medianAlias}.{groupCol}", groupByMode, groupTypeCode);
+        var correlation = $"(({groupInner} = {groupOuter}) OR ({groupInner} IS NULL AND {groupOuter} IS NULL))";
+
+        if (seriesCol is not null)
+        {
+            var seriesOuter = BuildGroupByExpr($"{outerAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
+            var seriesInner = BuildGroupByExpr($"{medianAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
+            correlation += $" AND (({seriesInner} = {seriesOuter}) OR ({seriesInner} IS NULL AND {seriesOuter} IS NULL))";
+        }
+
+        return $"""
+            (SELECT TOP (1) PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST({medianAlias}.{col} AS DECIMAL(18,4))) OVER ()
+             FROM {tableName} AS {medianAlias}
+             WHERE {medianAlias}.IsDeleted = 0{ownerWhere}{filterWhere}
+               AND {correlation}) AS {alias}
+            """;
     }
 
     /// <summary>Builds the GROUP BY / SELECT expression for a group-by or series field,
@@ -1126,15 +1175,58 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return (value, null);
     }
 
+    private static Dictionary<long, AppField> BuildFieldLookup(IEnumerable<AppField> fields)
+    {
+        var lookup = new Dictionary<long, AppField>();
+        foreach (var f in fields)
+        {
+            lookup[f.Id] = f;
+        }
+        foreach (var f in fields)
+        {
+            if (f.Fid.HasValue) lookup[(long)f.Fid.Value] = f;
+        }
+        return lookup;
+    }
+
+    private static string ResolveColumnName(AppField f, long fallbackFieldId)
+    {
+        if (!string.IsNullOrWhiteSpace(f.PhysicalColumnName))
+            return f.PhysicalColumnName;
+
+        if (f.IsSystem || (f.Fid.HasValue && f.Fid.Value is >= 1 and <= 5) || fallbackFieldId is >= 1 and <= 5)
+        {
+            var fid = f.Fid ?? fallbackFieldId;
+            return fid switch
+            {
+                1 => "CreatedOn",
+                2 => "ModifiedOn",
+                3 => "Id",
+                4 => "CreatedBy",
+                5 => "ModifiedBy",
+                _ => f.Fid.HasValue ? PhysicalNaming.ColumnName(f.Fid.Value) : PhysicalNaming.ColumnName((int)fallbackFieldId)
+            };
+        }
+
+        if (f.Fid.HasValue)
+            return PhysicalNaming.ColumnName(f.Fid.Value);
+
+        return PhysicalNaming.ColumnName((int)fallbackFieldId);
+    }
+
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
         IReadOnlyDictionary<long, AppField>? fieldLookup = null)
     {
+        // Skip empty filter values for operators that require a value
+        if (cond.Operator is not ("isEmpty" or "isNotEmpty") && string.IsNullOrEmpty(cond.Value))
+            return null;
+
         // Skip formula/computed fields — they have no physical column; filtered in-memory instead.
         if (fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var checkField)
             && PhysicalNaming.IsComputedTypeCode(checkField.TypeCode))
             return null;
 
-        // Use the physical column name for system fields (Id, CreatedOn, etc.) rather than f_{fid}
+        // Use physical column name or resolved Fid/Id column name
         AppField? resolvedField = null;
         string col;
         if (cond.FieldId == -1)
@@ -1144,11 +1236,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         else if (fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var f))
         {
             resolvedField = f;
-            col = f.IsSystem ? f.PhysicalColumnName! : PhysicalNaming.ColumnName((int)cond.FieldId);
+            col = ResolveColumnName(f, cond.FieldId);
         }
         else
         {
-            col = PhysicalNaming.ColumnName((int)cond.FieldId);
+            col = cond.FieldId switch
+            {
+                1 => "CreatedOn",
+                2 => "ModifiedOn",
+                3 => "Id",
+                4 => "CreatedBy",
+                5 => "ModifiedBy",
+                _ => PhysicalNaming.ColumnName((int)cond.FieldId)
+            };
         }
 
         // Range field: SubField "start" targets f_{fid}, "end" targets f_{fid}_e
@@ -1173,19 +1273,93 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             colExpr = col;
         }
         
+        var isNumericCol = col.Equals("Id", StringComparison.OrdinalIgnoreCase) ||
+                           col.Equals("CreatedBy", StringComparison.OrdinalIgnoreCase) ||
+                           col.Equals("ModifiedBy", StringComparison.OrdinalIgnoreCase) ||
+                           (resolvedField != null && (
+                               resolvedField.TypeCode.Equals("Number", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Numeric", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Currency", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Percent", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Rating", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Duration", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("RecordId", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Integer", StringComparison.OrdinalIgnoreCase) ||
+                               (resolvedField.IsSystem && resolvedField.PhysicalColumnName is "Id" or "CreatedBy" or "ModifiedBy")
+                           ));
+
+        Func<string?, object?> formatVal = rawVal =>
+        {
+            if (rawVal == null) return null;
+            if (isNumericCol)
+            {
+                if (long.TryParse(rawVal, out var l)) return l;
+                if (decimal.TryParse(rawVal, out var d)) return d;
+            }
+            return rawVal;
+        };
+
+        var isStringCol = resolvedField != null && (
+            resolvedField.TypeCode.Equals("Text", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("MultiLineText", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("Email", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("Phone", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("SingleSelect", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("MultiSelect", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("Address", StringComparison.OrdinalIgnoreCase)
+        );
+
+        var stringColExpr = isStringCol ? colExpr : $"CAST({colExpr} AS NVARCHAR(MAX))";
+
         switch (cond.Operator)
         {
-            case "eq":             p.Add(pname, cond.Value);        return $"{colExpr} = @{pname}";
-            case "ne":             p.Add(pname, cond.Value);        return $"{colExpr} <> @{pname}";
-            case "gt":              p.Add(pname, cond.Value);        return $"{colExpr} > @{pname}";
-            case "gte":            p.Add(pname, cond.Value);        return $"{colExpr} >= @{pname}";
-            case "lt":              p.Add(pname, cond.Value);        return $"{colExpr} < @{pname}";
-            case "lte":            p.Add(pname, cond.Value);        return $"{colExpr} <= @{pname}";
+            case "eq":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} = @{pname}";
+            }
+            case "ne":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} <> @{pname}";
+            }
+            case "gt":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} > @{pname}";
+            }
+            case "gte":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} >= @{pname}";
+            }
+            case "lt":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} < @{pname}";
+            }
+            case "lte":
+            {
+                var val = formatVal(cond.Value);
+                p.Add(pname, val);
+                var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
+                return $"{targetExpr} <= @{pname}";
+            }
             case "date_eq":        p.Add(pname, cond.Value);        return $"CAST({colExpr} AS DATE) = @{pname}";
-            case "contains":       p.Add(pname, $"%{cond.Value}%"); return $"{colExpr} LIKE @{pname}";
-            case "notContains":    p.Add(pname, $"%{cond.Value}%"); return $"{colExpr} NOT LIKE @{pname}";
-            case "startsWith":     p.Add(pname, $"{cond.Value}%");  return $"{colExpr} LIKE @{pname}";
-            case "notStartsWith":  p.Add(pname, $"{cond.Value}%");  return $"{colExpr} NOT LIKE @{pname}";
+            case "contains":       p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) LIKE @{pname}";
+            case "notContains":    p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
+            case "startsWith":     p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) LIKE @{pname}";
+            case "notStartsWith":  p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
             case "isEmpty":    i--; return $"({colExpr} IS NULL OR {colExpr} = '')";
             case "isNotEmpty": i--; return $"({colExpr} IS NOT NULL AND {colExpr} <> '')";
             case "in":
@@ -1194,14 +1368,24 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 var values = ParseValueList(cond.Value);
                 if (values.Count == 0) { i--; return null; }
                 var names = new List<string>(values.Count);
+                var hasNonNumeric = false;
+                var formattedValues = new List<object?>(values.Count);
                 foreach (var v in values)
                 {
+                    var fv = formatVal(v);
+                    if (fv is string) hasNonNumeric = true;
+                    formattedValues.Add(fv);
+                }
+
+                for (var idx = 0; idx < formattedValues.Count; idx++)
+                {
                     var pn = $"fv{i++}";
-                    p.Add(pn, v);
+                    p.Add(pn, formattedValues[idx]);
                     names.Add($"@{pn}");
                 }
                 var op = cond.Operator == "in" ? "IN" : "NOT IN";
-                return $"{colExpr} {op} ({string.Join(",", names)})";
+                var targetExpr = (isNumericCol && hasNonNumeric) ? stringColExpr : colExpr;
+                return $"{targetExpr} {op} ({string.Join(",", names)})";
             }
             default: i--; return null;
         }
@@ -1218,8 +1402,17 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (string.IsNullOrWhiteSpace(raw)) return [];
         try
         {
-            var arr = JsonSerializer.Deserialize<List<string>>(raw);
-            if (arr != null) return arr.Where(v => !string.IsNullOrEmpty(v)).ToList();
+            using var doc = JsonDocument.Parse(raw);
+            if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                var list = new List<string>();
+                foreach (var el in doc.RootElement.EnumerateArray())
+                {
+                    var str = el.ValueKind == JsonValueKind.String ? el.GetString() : el.GetRawText();
+                    if (!string.IsNullOrWhiteSpace(str)) list.Add(str.Trim('"'));
+                }
+                return list;
+            }
         }
         catch (JsonException) { /* not JSON — fall through to comma split */ }
         return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();

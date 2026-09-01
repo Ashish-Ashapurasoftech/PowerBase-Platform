@@ -14,6 +14,8 @@ public class AcceptInviteResult
     public Guid UserPublicId { get; init; }
     public string Email { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
+    public string? FirstName { get; init; }
+    public string? LastName { get; init; }
     public IReadOnlyList<TenantItem> Tenants { get; init; } = [];
 }
 
@@ -47,8 +49,15 @@ public class AcceptInviteCommandHandler
 
     public async Task<AcceptInviteResult> HandleAsync(AcceptInviteCommand command, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(command.Name))
-            throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name is required."] });
+        var firstName = !string.IsNullOrWhiteSpace(command.FirstName) 
+            ? command.FirstName.Trim() 
+            : (command.Name?.Split(' ').FirstOrDefault() ?? string.Empty);
+        var lastName = !string.IsNullOrWhiteSpace(command.LastName) 
+            ? command.LastName.Trim() 
+            : (command.Name != null && command.Name.Contains(' ') ? command.Name[(command.Name.IndexOf(' ') + 1)..].Trim() : string.Empty);
+
+        if (string.IsNullOrWhiteSpace(firstName) && string.IsNullOrWhiteSpace(command.Name))
+            throw new ValidationException(new Dictionary<string, string[]> { ["FirstName"] = ["First Name is required."] });
         if (string.IsNullOrWhiteSpace(command.Password) || command.Password.Length < 8)
             throw new ValidationException(new Dictionary<string, string[]> { ["Password"] = ["Password must be at least 8 characters."] });
 
@@ -62,7 +71,7 @@ public class AcceptInviteCommandHandler
             throw new ValidationException(new Dictionary<string, string[]> { ["Token"] = ["This invite link has expired."] });
 
         var hashedPassword = _passwordService.Hash(command.Password);
-        await _userRepo.ActivateAsync(tokenRecord.UserId, command.Name, hashedPassword, ct);
+        await _userRepo.ActivateAsync(tokenRecord.UserId, firstName, lastName, hashedPassword, ct);
         // TenantId is null for platform-level invites (no tenant pre-assigned)
         if (tokenRecord.TenantId.HasValue)
             await _tenantRepo.ActivateTenantUserAsync(tokenRecord.UserId, tokenRecord.TenantId.Value, ct);
@@ -103,6 +112,8 @@ public class AcceptInviteCommandHandler
             UserPublicId = user.PublicId,
             Email = user.Email,
             Name = user.Name,
+            FirstName = user.FirstName,
+            LastName = user.LastName,
             Tenants = tenants,
         };
     }

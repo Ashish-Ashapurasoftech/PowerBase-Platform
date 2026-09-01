@@ -59,7 +59,8 @@ public sealed class EvaluateFormulaQueryHandler
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         var schema = new AppFieldSchema(fields);
 
-        var compiled = _engine.Compile(query.Expression ?? string.Empty, schema, FormulaTypeMap.ParseExpected(query.ExpectedType));
+        var aliasSchema = await AppTableAliasSchema.BuildAsync(_tableRepo, table.AppId, ct);
+        var compiled = _engine.Compile(query.Expression ?? string.Empty, schema, FormulaTypeMap.ParseExpected(query.ExpectedType), aliasSchema);
         var diagnostics = compiled.Diagnostics.Select(FormulaDiagnosticDto.From).ToList();
 
         if (compiled.HasErrors)

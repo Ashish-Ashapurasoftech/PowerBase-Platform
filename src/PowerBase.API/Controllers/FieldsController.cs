@@ -25,6 +25,7 @@ public class FieldsController : ControllerBase
     private readonly UpdateFieldCommandHandler _updateHandler;
     private readonly DeleteFieldCommandHandler _deleteHandler;
     private readonly ListFieldsQueryHandler _listHandler;
+    private readonly ListAllFieldsQueryHandler _listAllHandler;
     private readonly ListFieldTypesQueryHandler _listFieldTypesHandler;
     private readonly GetFieldQueryHandler _getHandler;
 
@@ -34,6 +35,7 @@ public class FieldsController : ControllerBase
         UpdateFieldCommandHandler updateHandler,
         DeleteFieldCommandHandler deleteHandler,
         ListFieldsQueryHandler listHandler,
+        ListAllFieldsQueryHandler listAllHandler,
         ListFieldTypesQueryHandler listFieldTypesHandler,
         GetFieldQueryHandler getHandler)
     {
@@ -42,6 +44,7 @@ public class FieldsController : ControllerBase
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _listHandler = listHandler;
+        _listAllHandler = listAllHandler;
         _listFieldTypesHandler = listFieldTypesHandler;
         _getHandler = getHandler;
     }
@@ -101,6 +104,28 @@ public class FieldsController : ControllerBase
         var result = await _listHandler.HandleAsync(new ListFieldsQuery(tableId, pageNumber, pageSize, search, sortBy, sortDesc, filter), ct);
         var items = result.Items.Select(MapToListItemResponse).ToList();
         return Ok(new ApiListResponse<FieldListItemResponse>(items, result.Total, result.Page, result.PageSize));
+    }
+
+    /// <summary>Every field on a table in one call — same search/sort/filter as <see cref="List"/>,
+    /// but genuinely unpaginated (no page/pageSize at all). Backs the Fields settings grid (which
+    /// no longer paginates) and Field Detail's Prev/Next.</summary>
+    [HttpGet("tables/{tableId:guid}/fields/all")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiListResponse<FieldListItemResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListAll(
+        Guid tableId,
+        [FromQuery] string? search = null,
+        [FromQuery] string sortBy = "label",
+        [FromQuery] string sortDirection = "asc",
+        [FromQuery] string? filter = null,
+        CancellationToken ct = default)
+    {
+        var sortDesc = string.Equals(sortDirection, "desc", StringComparison.OrdinalIgnoreCase);
+        var result = await _listAllHandler.HandleAsync(new ListAllFieldsQuery(tableId, search, sortBy, sortDesc, filter), ct);
+        var items = result.Items.Select(MapToListItemResponse).ToList();
+        return Ok(new ApiListResponse<FieldListItemResponse>(items, items.Count, 1, items.Count));
     }
 
     /// <summary>Get a single field's full details by its public ID.</summary>

@@ -4,16 +4,19 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Tables.Commands.UpdateTable;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Formula;
 
 namespace PowerBase.UnitTests.Tables;
 
 public class UpdateTableCommandHandlerTests
 {
     private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
+    private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
     private readonly IAppAccessService _appAccessService = Substitute.For<IAppAccessService>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
+    private readonly FormulaEngine _engine = new();
 
-    private UpdateTableCommandHandler CreateSut() => new(_tableRepo, _appAccessService, _auditRepo);
+    private UpdateTableCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _appAccessService, _auditRepo, _engine);
 
     [Fact]
     public async Task HandleAsync_ValidCommand_CallsUpdate()
