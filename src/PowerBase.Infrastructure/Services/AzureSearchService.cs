@@ -50,6 +50,44 @@ public class AzureSearchService : IAzureSearchService
 
     public bool IsGridSearchEnabled { get; }
 
+    private DateTime _lastHealthCheckTime = DateTime.MinValue;
+    private bool _cachedHealthState = false;
+    private readonly SemaphoreSlim _healthLock = new(1, 1);
+
+    public async Task<bool> IsHealthyAsync(CancellationToken ct = default)
+    {
+        if (!_isEnabled || _searchIndexClient == null) return false;
+
+        if ((DateTime.UtcNow - _lastHealthCheckTime).TotalSeconds < 30)
+        {
+            return _cachedHealthState;
+        }
+
+        await _healthLock.WaitAsync(ct);
+        try
+        {
+            if ((DateTime.UtcNow - _lastHealthCheckTime).TotalSeconds < 30)
+            {
+                return _cachedHealthState;
+            }
+
+            var stats = await _searchIndexClient.GetServiceStatisticsAsync(ct);
+            _cachedHealthState = stats?.Value != null;
+            _lastHealthCheckTime = DateTime.UtcNow;
+            return _cachedHealthState;
+        }
+        catch
+        {
+            _cachedHealthState = false;
+            _lastHealthCheckTime = DateTime.UtcNow;
+            return false;
+        }
+        finally
+        {
+            _healthLock.Release();
+        }
+    }
+
     private string GetIndexNameForTenant(long tenantId)
     {
         if (_isMultipleIndex && tenantId > 0)
@@ -244,16 +282,19 @@ public class AzureSearchService : IAzureSearchService
         var indexName = GetIndexNameForTenant(tenantId);
         var searchClient = GetSearchClient(indexName);
 
+        var query = FormatSearchQuery(searchText);
+
         var options = new SearchOptions
         {
             Filter = $"tenantId eq '{tenantId}' and tableId eq {tableId}",
-            Size = 1000
+            Size = 1000,
+            QueryType = SearchQueryType.Full
         };
         options.Select.Add("id");
 
         try
         {
-            var response = await searchClient.SearchAsync<SearchDocument>(searchText, options, cancellationToken: ct);
+            var response = await searchClient.SearchAsync<SearchDocument>(query, options, cancellationToken: ct);
             var results = new List<Guid>();
             await foreach (var result in response.Value.GetResultsAsync())
             {
@@ -317,17 +358,20 @@ public class AzureSearchService : IAzureSearchService
             filter += $" and appId eq {appId.Value}";
         }
 
+        var query = FormatSearchQuery(searchText);
+
         var options = new SearchOptions
         {
             Filter = filter,
             Skip = (page - 1) * pageSize,
             Size = pageSize,
-            IncludeTotalCount = true
+            IncludeTotalCount = true,
+            QueryType = SearchQueryType.Full
         };
 
         try
         {
-            var response = await searchClient.SearchAsync<SearchDocument>(searchText, options, cancellationToken: ct);
+            var response = await searchClient.SearchAsync<SearchDocument>(query, options, cancellationToken: ct);
             var results = new List<GlobalSearchResult>();
             await foreach (var result in response.Value.GetResultsAsync())
             {
@@ -354,6 +398,25 @@ public class AzureSearchService : IAzureSearchService
         {
             throw new InvalidOperationException($"Failed to search global records for tenant {tenantId} in Azure AI Search (Index: {indexName}).", ex);
         }
+    }
+
+    private static string FormatSearchQuery(string searchText)
+    {
+        if (string.IsNullOrWhiteSpace(searchText)) return "*";
+
+        var trimmed = searchText.Trim();
+        if (trimmed.StartsWith("\"") && trimmed.EndsWith("\""))
+            return trimmed;
+
+        var sanitized = System.Text.RegularExpressions.Regex.Replace(trimmed, @"[\+\-\&\|\!\(\)\{\}\[\]\^\""\~\*\?\:\\\/]", " ").Trim();
+        if (string.IsNullOrWhiteSpace(sanitized)) return "*";
+
+        var terms = sanitized.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (terms.Length == 0) return "*";
+
+        var formattedTerms = terms.Select(t => $"({t}* OR {t})");
+
+        return string.Join(" AND ", formattedTerms);
     }
 
     public async Task EnsureTableSchemaAsync(long tenantId, long tableId, IEnumerable<(int Fid, bool IsSearchable, bool IsFilterable)> fields, CancellationToken ct = default)
