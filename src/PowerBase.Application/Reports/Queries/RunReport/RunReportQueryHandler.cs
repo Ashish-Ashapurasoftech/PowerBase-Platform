@@ -407,6 +407,7 @@ public class RunReportQueryHandler
                     Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = access.ViewFilter }]
                 };
         }
+
         // Determine which field IDs are formula (compute-on-read, no physical column)
         // OR are encrypted, so we must filter/sort them in memory instead of SQL.
         var formulaFids = allFields
