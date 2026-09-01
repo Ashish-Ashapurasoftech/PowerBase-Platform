@@ -407,6 +407,7 @@ builder.Services.AddScoped<ListAppRolesQueryHandler>();
 builder.Services.AddScoped<CreateAppRoleCommandHandler>();
 builder.Services.AddScoped<DeleteAppRoleCommandHandler>();
 builder.Services.AddScoped<UpdateAppRoleCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Commands.SetDefaultAppRole.SetDefaultAppRoleCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetTablePermissions.GetTablePermissionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Commands.UpdateTablePermissions.UpdateTablePermissionsCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetFieldPermissions.GetFieldPermissionsQueryHandler>();

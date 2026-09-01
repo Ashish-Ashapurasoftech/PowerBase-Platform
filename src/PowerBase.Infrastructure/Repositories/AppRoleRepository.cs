@@ -45,6 +45,7 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
         SELECT CASE WHEN EXISTS (
             SELECT 1 FROM meta.AppRole
             WHERE AppId = @appId AND Name = @name AND IsDeleted = 0
+              AND (@excludeRoleId IS NULL OR Id <> @excludeRoleId)
         ) THEN 1 ELSE 0 END
         """;
 
@@ -52,6 +53,24 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
         INSERT INTO meta.AppRole (AppId, Name, IsDefault, IsSystem, CreatedBy, ManageableRolesType, Rank)
         OUTPUT inserted.Id, inserted.PublicId
         VALUES (@appId, @name, @isDefault, @isSystem, @createdBy, @manageableRolesType, @rank)
+        """;
+
+    private const string UpdateNameSql = """
+        UPDATE meta.AppRole
+        SET Name = @name
+        WHERE Id = @roleId AND IsDeleted = 0
+        """;
+
+    private const string UnsetDefaultSql = """
+        UPDATE meta.AppRole
+        SET IsDefault = 0
+        WHERE AppId = @appId AND IsDeleted = 0 AND IsDefault = 1
+        """;
+
+    private const string SetRoleDefaultSql = """
+        UPDATE meta.AppRole
+        SET IsDefault = 1
+        WHERE Id = @roleId AND IsDeleted = 0
         """;
 
     public AppRoleRepository(ITenantConnectionFactory connectionFactory, IQueryContext queryContext)
@@ -103,11 +122,38 @@ public class AppRoleRepository : TenantRepositoryBase, IAppRoleRepository
             new CommandDefinition(GetByPublicIdSql, new { publicId }, cancellationToken: ct));
     }
 
-    public async Task<bool> NameExistsInAppAsync(long appId, string name, CancellationToken ct = default)
+    public async Task<bool> NameExistsInAppAsync(long appId, string name, long? excludeRoleId = null, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<bool>(
-            new CommandDefinition(NameExistsSql, new { appId, name }, cancellationToken: ct));
+            new CommandDefinition(NameExistsSql, new { appId, name, excludeRoleId }, cancellationToken: ct));
+    }
+
+    public async Task UpdateNameAsync(long roleId, string name, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateNameSql, new { roleId, name }, cancellationToken: ct));
+    }
+
+    public async Task SetDefaultAsync(long appId, long roleId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            await connection.ExecuteAsync(
+                new CommandDefinition(UnsetDefaultSql, new { appId }, transaction: transaction, cancellationToken: ct));
+            await connection.ExecuteAsync(
+                new CommandDefinition(SetRoleDefaultSql, new { roleId }, transaction: transaction, cancellationToken: ct));
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
     }
 
     public async Task<(long Id, Guid PublicId)> CreateAsync(AppRole role, IDbTransaction? transaction = null, CancellationToken ct = default)

@@ -5,6 +5,7 @@ using PowerBase.API.Models.Apps;
 using PowerBase.Application.Apps.Commands.CreateAppRole;
 using PowerBase.Application.Apps.Commands.DeleteAppRole;
 using PowerBase.Application.Apps.Commands.UpdateAppRole;
+using PowerBase.Application.Apps.Commands.SetDefaultAppRole;
 using PowerBase.Application.Apps.Commands.UpdateTablePermissions;
 using PowerBase.Application.Apps.Commands.UpdateFieldPermissions;
 using PowerBase.Application.Apps.Commands.UpdateRecordFilters;
@@ -28,6 +29,7 @@ public class AppRolesController : ControllerBase
     private readonly CreateAppRoleCommandHandler _createHandler;
     private readonly UpdateAppRoleCommandHandler _updateHandler;
     private readonly DeleteAppRoleCommandHandler _deleteHandler;
+    private readonly SetDefaultAppRoleCommandHandler _setDefaultHandler;
     private readonly GetTablePermissionsQueryHandler _getTablePermsHandler;
     private readonly UpdateTablePermissionsCommandHandler _updateTablePermsHandler;
     private readonly GetFieldPermissionsQueryHandler _getFieldPermsHandler;
@@ -40,6 +42,7 @@ public class AppRolesController : ControllerBase
         CreateAppRoleCommandHandler createHandler,
         UpdateAppRoleCommandHandler updateHandler,
         DeleteAppRoleCommandHandler deleteHandler,
+        SetDefaultAppRoleCommandHandler setDefaultHandler,
         GetTablePermissionsQueryHandler getTablePermsHandler,
         UpdateTablePermissionsCommandHandler updateTablePermsHandler,
         GetFieldPermissionsQueryHandler getFieldPermsHandler,
@@ -51,6 +54,7 @@ public class AppRolesController : ControllerBase
         _createHandler = createHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
+        _setDefaultHandler = setDefaultHandler;
         _getTablePermsHandler = getTablePermsHandler;
         _updateTablePermsHandler = updateTablePermsHandler;
         _getFieldPermsHandler = getFieldPermsHandler;
@@ -122,12 +126,13 @@ public class AppRolesController : ControllerBase
         CancellationToken ct)
     {
         await _updateHandler.HandleAsync(new UpdateAppRoleCommand(
-            appId, 
-            rolePublicId, 
+            appId,
+            rolePublicId,
             request.Permissions,
             request.ManageableRolesType,
             request.Rank,
-            request.ManageableRolePublicIds), ct);
+            request.ManageableRolePublicIds,
+            request.Name), ct);
         return NoContent();
     }
 
@@ -139,6 +144,17 @@ public class AppRolesController : ControllerBase
     public async Task<IActionResult> Delete([FromRoute] Guid appId, [FromRoute] Guid rolePublicId, CancellationToken ct)
     {
         await _deleteHandler.HandleAsync(new DeleteAppRoleCommand(appId, rolePublicId), ct);
+        return NoContent();
+    }
+
+    /// <summary>Mark an existing role as the default role auto-assigned to new app members.</summary>
+    [HttpPatch("{rolePublicId:guid}/set-default")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SetDefault([FromRoute] Guid appId, [FromRoute] Guid rolePublicId, CancellationToken ct)
+    {
+        await _setDefaultHandler.HandleAsync(new SetDefaultAppRoleCommand(appId, rolePublicId), ct);
         return NoContent();
     }
 

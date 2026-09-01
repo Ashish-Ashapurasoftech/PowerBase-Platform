@@ -53,7 +53,7 @@ public class CreateAppRoleCommandHandler
             throw new NotFoundException("App", command.AppPublicId);
         var appId = app.Id;
 
-        if (await _appRoleRepo.NameExistsInAppAsync(appId, command.Name, ct))
+        if (await _appRoleRepo.NameExistsInAppAsync(appId, command.Name, ct: ct))
             throw new DuplicateException("AppRole", "name", command.Name);
 
         bool isAuthorizedToConfigure = _queryContext.IsSuperAdmin || _queryContext.UserId == app.OwnerId;

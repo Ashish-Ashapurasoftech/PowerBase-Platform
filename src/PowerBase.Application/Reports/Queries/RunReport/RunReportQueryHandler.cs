@@ -265,20 +265,17 @@ public class RunReportQueryHandler
             selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
 
-        // Merge role record filter into the report's filter tree
-        if (access.ViewFilter != null)
-        {
-            filterTree = filterTree == null
-                ? access.ViewFilter
-                : new FilterGroup
-                {
-                    Logic = "and",
-                    Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = access.ViewFilter }]
-                };
-        }
+        // Merge role record filter into the report's filter tree.
+        // NOTE: ViewFilter is intentionally merged BEFORE runtime filters but we must track it
+        // separately so the AI Search path (OData filter below) only receives user-applied filters —
+        // not role-enforcement conditions. Role filters always go through SQL to guarantee correctness
+        // regardless of AI Search index freshness.
+        // We keep the merged filterTree for OData path (user filters only) and merge ViewFilter into
+        // the final SQL tree after AI Search resolves its ID set.
+        var userFilterTree = filterTree; // filterTree at this point = report save + runtime, no ViewFilter yet
 
-        // Merge runtime filters (dynamic/quick-search) into the filter tree
-        filterTree = MergeRuntimeFilters(filterTree, allFields, runtimeFilters);
+        // Merge runtime filters (dynamic/quick-search) into the user filter tree
+        userFilterTree = MergeRuntimeFilters(userFilterTree, allFields, runtimeFilters);
 
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
@@ -313,10 +310,13 @@ public class RunReportQueryHandler
                     if (cappedMatches.Count > 0)
                     {
                         // GAP #2: Use direct chunked IN query instead of OR FilterGroup nodes.
-                        filterTree = await BuildAiIdFilterAsync(table, cappedMatches, filterTree, ct);
+                        userFilterTree = await BuildAiIdFilterAsync(table, cappedMatches, userFilterTree, ct);
                     }
                     else
                     {
+                        // Quick search matched nothing. The intersection of zero AI matches with
+                        // any ViewFilter subset is always zero, so return empty regardless of
+                        // whether the role has a ViewFilter — same reasoning as the OData path below.
                         return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
                     }
 
@@ -348,18 +348,20 @@ public class RunReportQueryHandler
                         Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = searchOperator, Value = quickSearch }
                     }).ToList();
                     var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
-                    filterTree = filterTree == null
+                    userFilterTree = userFilterTree == null
                         ? qsGroup
-                        : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = qsGroup }] };
+                        : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = userFilterTree }, new FilterNode { Group = qsGroup }] };
                 }
             }
         }
 
-        // Apply OData-based filter via Azure AI Search when the table has any AI-indexed fields.
+        // Apply OData-based filter via Azure AI Search for user-applied filters only.
+        // Role ViewFilter is intentionally excluded from OData/AI Search routing — it is always
+        // enforced via SQL below to guarantee correctness regardless of AI Search index freshness.
         // GAP #3: Only when IsGridSearchEnabled. GAP #4: Falls back to raw SQL tree on AI failure.
-        if (_searchService.IsGridSearchEnabled && filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
+        if (_searchService.IsGridSearchEnabled && userFilterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
         {
-            var odata = OData.ODataFilterBuilder.Build(filterTree, allFields);
+            var odata = OData.ODataFilterBuilder.Build(userFilterTree, allFields);
             if (!string.IsNullOrWhiteSpace(odata))
             {
                 try
@@ -372,12 +374,15 @@ public class RunReportQueryHandler
 
                     if (cappedMatches.Count == 0)
                     {
+                        // User-applied filters matched nothing in AI Search.
+                        // If there is also a role ViewFilter, still return empty — the intersection
+                        // of zero AI matches with any ViewFilter subset is always zero.
                         return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
                     }
 
-                    // Rebuild filterTree: AND with matched IDs only (replaces original tree —
-                    // AI Search has already applied the filter, so we just restrict to its results).
-                    filterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
+                    // Rebuild userFilterTree: AND with matched IDs only (replaces original tree —
+                    // AI Search has already applied the user filter, so we just restrict to its results).
+                    userFilterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -385,6 +390,19 @@ public class RunReportQueryHandler
                     _logger.LogWarning(ex, "[ODataFilter] Azure AI Search unavailable for table {TableId}. Executing filter via SQL.", table.Id);
                 }
             }
+        }
+
+        // NOW merge role ViewFilter into the final SQL filter tree — always via SQL, never AI Search.
+        filterTree = userFilterTree;
+        if (access.ViewFilter != null)
+        {
+            filterTree = filterTree == null
+                ? access.ViewFilter
+                : new FilterGroup
+                {
+                    Logic = "and",
+                    Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = access.ViewFilter }]
+                };
         }
 
         // Determine which field IDs are formula (compute-on-read, no physical column)

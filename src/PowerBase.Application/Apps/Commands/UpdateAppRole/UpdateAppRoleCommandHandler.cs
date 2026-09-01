@@ -99,10 +99,15 @@ public class UpdateAppRoleCommandHandler
             }
         }
 
-        if (!isAuthorizedToConfigure && 
+        if (!isAuthorizedToConfigure &&
             (command.ManageableRolesType != null || command.Rank.HasValue || command.ManageableRolePublicIds != null))
         {
             throw new UnauthorizedActionException("Only platform Super Admins, App Owners, or App Administrators can configure role hierarchy settings.");
+        }
+
+        if (!isAuthorizedToConfigure && command.Name != null)
+        {
+            throw new UnauthorizedActionException("Only platform Super Admins, App Owners, or App Administrators can rename a role.");
         }
 
         if (command.Rank.HasValue && !(_queryContext.IsSuperAdmin || _queryContext.UserId == app.OwnerId))
@@ -117,6 +122,19 @@ public class UpdateAppRoleCommandHandler
         if (command.Permissions != null)
         {
             await _appRoleRepo.SetPermissionsAsync(role.Id, command.Permissions, null, ct);
+        }
+
+        string? renamedTo = null;
+        if (command.Name != null && command.Name != role.Name)
+        {
+            if (role.IsSystem)
+                throw new UnauthorizedActionException("System roles cannot be renamed.");
+
+            if (await _appRoleRepo.NameExistsInAppAsync(role.AppId, command.Name, excludeRoleId: role.Id, ct: ct))
+                throw new DuplicateException("AppRole", "name", command.Name);
+
+            await _appRoleRepo.UpdateNameAsync(role.Id, command.Name, ct);
+            renamedTo = command.Name;
         }
 
         if (isAuthorizedToConfigure && 
@@ -154,7 +172,10 @@ public class UpdateAppRoleCommandHandler
             await _appRoleRepo.UpdateRoleHierarchyAsync(role.PublicId, manageableRolesType, rank, allowedIds, ct);
         }
 
+        var auditMessage = renamedTo != null
+            ? $"App role renamed: {role.Name} -> {renamedTo}"
+            : $"App role permissions modified: {role.Name}";
         await _auditRepo.LogActivityAsync(
-            AuditActions.Updated, AuditEntityTypes.AppRole, role.Id.ToString(), $"App role permissions modified: {role.Name}", appId: role.AppId, ct: ct);
+            AuditActions.Updated, AuditEntityTypes.AppRole, role.Id.ToString(), auditMessage, appId: role.AppId, ct: ct);
     }
 }
