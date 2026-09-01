@@ -9,6 +9,20 @@ public interface IRecordRepository
     /// <summary>True if a non-deleted record with the given row Id exists (used to validate Reference values).</summary>
     Task<bool> ExistsAsync(AppTable table, long recordId, CancellationToken ct = default);
 
+    /// <summary>
+    /// Returns true if the non-deleted record identified by <paramref name="publicId"/> exists AND passes
+    /// all role-level record-level permission constraints (<paramref name="viewFilter"/> AND/OR
+    /// <paramref name="restrictToCreatedBy"/>). Used by <c>GetRecordQueryHandler</c> to enforce
+    /// ViewFilter on direct record-ID access so a restricted record cannot be fetched by knowing its URL.
+    /// </summary>
+    Task<bool> ExistsWithViewFilterAsync(
+        AppTable table,
+        IReadOnlyList<AppField> fields,
+        Guid publicId,
+        FilterGroup? viewFilter,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default);
+
     /// <summary>Resolve record PublicIds to their internal row Ids (used by parent-delete restrict).</summary>
     Task<IReadOnlyList<long>> GetIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default);
 

@@ -12,5 +12,9 @@ public class UpdateAppRoleCommandValidator : AbstractValidator<UpdateAppRoleComm
         RuleFor(x => x.Rank)
             .Must(x => x == null || x > 0)
             .WithMessage("Rank must be a positive integer.");
+        RuleFor(x => x.Name)
+            .NotEmpty().WithMessage("Name cannot be empty.")
+            .MaximumLength(100)
+            .When(x => x.Name != null);
     }
 }

@@ -158,6 +158,43 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, new { recordId }, cancellationToken: ct));
     }
 
+    /// <inheritdoc />
+    public async Task<bool> ExistsWithViewFilterAsync(
+        AppTable table,
+        IReadOnlyList<AppField> fields,
+        Guid publicId,
+        FilterGroup? viewFilter,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default)
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("publicId", publicId);
+
+        // Build the same WHERE fragments used by CountAsync/ListAsync so ViewFilter
+        // conditions are always resolved identically (field Fid mapping, operators, etc.).
+        // Both helpers return strings that start with " AND ..." (or empty string),
+        // so they can be appended directly after "IsDeleted = 0".
+        var fieldLookup = fields
+            .Where(f => f.Fid.HasValue)
+            .GroupBy(f => (long)f.Fid!.Value)
+            .ToDictionary(g => g.Key, g => g.First());
+
+        var filterWhere = BuildFilterTreeWhere(viewFilter, parameters, fieldLookup)
+                        + BuildOwnerWhere(restrictToCreatedBy, parameters);
+
+        var sql = $"""
+            SELECT CAST(CASE WHEN EXISTS (
+                SELECT 1
+                FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE PublicId = @publicId
+                  AND IsDeleted = 0{filterWhere}
+            ) THEN 1 ELSE 0 END AS BIT)
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+    }
+
     public async Task<IReadOnlyList<long>> GetIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default)
     {
         if (publicIds.Count == 0) return [];

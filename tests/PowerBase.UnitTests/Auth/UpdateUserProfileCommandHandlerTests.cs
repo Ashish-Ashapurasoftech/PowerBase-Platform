@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using PowerBase.Application.Auth.Commands.UpdateUserProfile;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
@@ -25,20 +26,10 @@ public class UpdateUserProfileCommandHandlerTests
         const long userId = 10L;
         _queryContext.UserId.Returns(userId);
 
-        var existingUser = new User
-        {
-            Id = userId,
-            PublicId = Guid.NewGuid(),
-            Email = "john.doe@example.com",
-            Name = "Old Name",
-            FirstName = "Old",
-            LastName = "Name"
-        };
-
         var updatedUser = new User
         {
             Id = userId,
-            PublicId = existingUser.PublicId,
+            PublicId = Guid.NewGuid(),
             Email = "john.doe@example.com",
             Name = "John Doe",
             FirstName = "John",
@@ -46,17 +37,13 @@ public class UpdateUserProfileCommandHandlerTests
         };
 
         _userRepo.GetByIdAsync(userId, Arg.Any<CancellationToken>())
-            .Returns(existingUser, updatedUser);
+            .Returns(updatedUser);
 
         _userRepo.UpdateProfileAsync(userId, "John", "Doe", Arg.Any<CancellationToken>())
-            .Returns(true);
+            .Returns(Task.CompletedTask);
 
         var sut = CreateSut();
-        var command = new UpdateUserProfileCommand
-        {
-            FirstName = "  John  ",
-            LastName = "  Doe  "
-        };
+        var command = new UpdateUserProfileCommand("  John  ", "  Doe  ");
 
         // Act
         var result = await sut.HandleAsync(command);
@@ -76,11 +63,7 @@ public class UpdateUserProfileCommandHandlerTests
         _queryContext.UserId.Returns(0L);
         var sut = CreateSut();
 
-        var command = new UpdateUserProfileCommand
-        {
-            FirstName = "John",
-            LastName = "Doe"
-        };
+        var command = new UpdateUserProfileCommand("John", "Doe");
 
         // Act & Assert
         await sut.Invoking(s => s.HandleAsync(command))
@@ -95,14 +78,10 @@ public class UpdateUserProfileCommandHandlerTests
         _queryContext.UserId.Returns(userId);
 
         _userRepo.GetByIdAsync(userId, Arg.Any<CancellationToken>())
-            .Returns((User?)null);
+            .ThrowsAsync(new NotFoundException("User", userId));
 
         var sut = CreateSut();
-        var command = new UpdateUserProfileCommand
-        {
-            FirstName = "Jane",
-            LastName = "Smith"
-        };
+        var command = new UpdateUserProfileCommand("Jane", "Smith");
 
         // Act & Assert
         await sut.Invoking(s => s.HandleAsync(command))

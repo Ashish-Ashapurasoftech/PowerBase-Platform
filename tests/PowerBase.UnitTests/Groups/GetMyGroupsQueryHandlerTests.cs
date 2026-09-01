@@ -27,8 +27,8 @@ public class GetMyGroupsQueryHandlerTests
 
         var myGroups = new List<GroupDto>
         {
-            new() { Id = 1, PublicId = Guid.NewGuid(), Name = "Engineering", Description = "Dev Team", MemberCount = 5 },
-            new() { Id = 2, PublicId = Guid.NewGuid(), Name = "Leadership", Description = "Lead Team", MemberCount = 2 }
+            new() { PublicId = Guid.NewGuid(), Name = "Engineering", Description = "Dev Team", MemberCount = 5 },
+            new() { PublicId = Guid.NewGuid(), Name = "Leadership", Description = "Lead Team", MemberCount = 2 }
         };
 
         _groupRepository.GetMyGroupsAsync(userId, Arg.Any<CancellationToken>())
@@ -78,7 +78,7 @@ public class GetMyGroupsQueryHandlerTests
 
         var groups = new List<GroupDto>
         {
-            new() { Id = 5, PublicId = Guid.NewGuid(), Name = "Designers", MemberCount = 3 }
+            new() { PublicId = Guid.NewGuid(), Name = "Designers", MemberCount = 3 }
         };
 
         _groupRepository.GetMyGroupsAsync(explicitUserId, Arg.Any<CancellationToken>())

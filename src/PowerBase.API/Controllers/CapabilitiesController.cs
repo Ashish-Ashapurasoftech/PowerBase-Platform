@@ -7,6 +7,7 @@ using PowerBase.Application.Capabilities.Commands.UpdateRoleCapability;
 using PowerBase.Application.Capabilities.Dtos;
 using PowerBase.Application.Capabilities.Queries.GetRoleCapabilities;
 using PowerBase.Application.Capabilities.Queries.ListCapabilities;
+using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
 
@@ -37,6 +38,7 @@ public class CapabilitiesController : ControllerBase
     [HttpGet]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<CapabilityDto>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [RequirePermission(PermissionCodes.RolesManage)]
     public async Task<IActionResult> List(CancellationToken ct)
     {
         var capabilities = await _listHandler.HandleAsync(new ListCapabilitiesQuery(), ct);
@@ -49,6 +51,7 @@ public class CapabilitiesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [RequirePermission(PermissionCodes.RolesManage)]
     public async Task<IActionResult> Save([FromBody] SaveRoleCapabilitiesRequest request, CancellationToken ct)
     {
         await _saveRoleCapabilitiesHandler.HandleAsync(
@@ -61,6 +64,7 @@ public class CapabilitiesController : ControllerBase
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<RoleCapabilityDto>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [RequirePermission(PermissionCodes.RolesManage)]
     public async Task<IActionResult> GetByRole(Guid roleId, CancellationToken ct)
     {
         var capabilities = await _getRoleCapabilitiesHandler.HandleAsync(
@@ -74,6 +78,7 @@ public class CapabilitiesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [RequirePermission(PermissionCodes.RolesManage)]
     public async Task<IActionResult> UpdateCapability(
         Guid roleId,
         [FromBody] UpdateRoleCapabilityRequest request,
