@@ -63,6 +63,7 @@ public class CreateFormCommandHandler
         Id               = f.PublicId,
         Name             = f.Name,
         IsDefault        = f.IsDefault,
+        IsQuickPeekForm  = f.IsQuickPeekForm,
         AutoAddNewFields = f.AutoAddNewFields,
         ShowBuiltInFields = f.ShowBuiltInFields,
         SaveOptions      = f.SaveOptions,

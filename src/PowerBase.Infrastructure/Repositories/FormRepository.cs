@@ -20,7 +20,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     }
 
     private const string SelectColumns = """
-        Id, PublicId, AppTableId, Name, IsDefault, AutoAddNewFields,
+        Id, PublicId, AppTableId, Name, IsDefault, IsQuickPeekForm, AutoAddNewFields,
         ShowBuiltInFields, SaveOptions, DisplayOrder, IsDeleted,
         CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion,
         PageNavMode, AlwaysTabsOnView, ThemeJson
@@ -89,6 +89,27 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         UPDATE meta.Form
         SET IsDefault = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @formPublicId AND IsDeleted = 0
+        """;
+
+    private const string UnsetQuickPeekFormSql = """
+        UPDATE meta.Form
+        SET IsQuickPeekForm = 0, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
+          AND IsDeleted = 0
+        """;
+
+    private const string SetQuickPeekFormSql = """
+        UPDATE meta.Form
+        SET IsQuickPeekForm = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        WHERE PublicId = @formPublicId AND IsDeleted = 0
+        """;
+
+    private const string GetQuickPeekFormSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.Form
+        WHERE AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
+          AND IsQuickPeekForm = 1
+          AND IsDeleted = 0
         """;
 
     private const string GetRoleFormOverridesSql = """
@@ -671,6 +692,30 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
             await transaction.CommitAsync(ct);
         }
         catch { await transaction.RollbackAsync(ct); throw; }
+    }
+
+    public async Task SetQuickPeekFormAsync(Guid tablePublicId, Guid? formPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition(UnsetQuickPeekFormSql, new { tablePublicId, modifiedBy = QueryContext.UserId }, transaction: transaction, cancellationToken: ct));
+            if (formPublicId.HasValue)
+            {
+                await connection.ExecuteAsync(new CommandDefinition(SetQuickPeekFormSql, new { formPublicId = formPublicId.Value, modifiedBy = QueryContext.UserId }, transaction: transaction, cancellationToken: ct));
+            }
+            await transaction.CommitAsync(ct);
+        }
+        catch { await transaction.RollbackAsync(ct); throw; }
+    }
+
+    public async Task<Form?> GetQuickPeekFormAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<Form?>(
+            new CommandDefinition(GetQuickPeekFormSql, new { tablePublicId }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)>> GetRoleFormOverridesAsync(Guid tablePublicId, CancellationToken ct = default)

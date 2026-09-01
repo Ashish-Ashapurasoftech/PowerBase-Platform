@@ -504,6 +504,7 @@ builder.Services.AddScoped<SaveFormLayoutCommandHandler>();
 builder.Services.AddScoped<DeleteFormCommandHandler>();
 builder.Services.AddScoped<DuplicateFormCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Forms.Commands.SetDefaultForm.SetDefaultFormCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Forms.Commands.SetQuickPeekForm.SetQuickPeekFormCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Forms.Commands.UpdateRoleFormOverrides.UpdateRoleFormOverridesCommandHandler>();
 builder.Services.AddScoped<CreateFormRuleCommandHandler>();
 builder.Services.AddScoped<SaveFormRuleCommandHandler>();
@@ -516,6 +517,7 @@ builder.Services.AddScoped<ListFormsQueryHandler>();
 builder.Services.AddScoped<GetFormLayoutQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Forms.Queries.GetRoleFormOverrides.GetRoleFormOverridesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Forms.Queries.ResolveForm.ResolveFormQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Forms.Queries.GetQuickPeekForm.GetQuickPeekFormQueryHandler>();
 builder.Services.AddScoped<ListFormRulesQueryHandler>();
 builder.Services.AddScoped<GetFormRuleQueryHandler>();
 

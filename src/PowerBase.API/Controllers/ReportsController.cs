@@ -509,6 +509,7 @@ public class ReportsController : ControllerBase
                 ColumnHeaderText = r.Definition.Options.ColumnHeaderText,
                 ShowEditIcon = r.Definition.Options.ShowEditIcon,
                 ShowViewIcon = r.Definition.Options.ShowViewIcon,
+                ShowQuickPeekIcon = r.Definition.Options.ShowQuickPeekIcon,
                 DisableBulkDelete = r.Definition.Options.DisableBulkDelete,
             },
         },
@@ -584,7 +585,7 @@ public class ReportsController : ControllerBase
     // ── Table Options mapping helper ──────────────────────────────────────────
 
     private static ReportOptionsCommand? MapOptions(ReportOptionsRequest? req) =>
-        req is null ? null : new ReportOptionsCommand(req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.DisableBulkDelete);
+        req is null ? null : new ReportOptionsCommand(req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.ShowQuickPeekIcon, req.DisableBulkDelete);
 
     // ── Chart config mapping helpers ──────────────────────────────────────────
 

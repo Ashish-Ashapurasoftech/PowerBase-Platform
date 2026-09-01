@@ -5,6 +5,7 @@ public class FormDetail
     public Guid Id { get; init; }
     public string Name { get; init; } = string.Empty;
     public bool IsDefault { get; init; }
+    public bool IsQuickPeekForm { get; init; }
     public bool AutoAddNewFields { get; init; }
     public bool ShowBuiltInFields { get; init; }
     public string SaveOptions { get; init; } = string.Empty;

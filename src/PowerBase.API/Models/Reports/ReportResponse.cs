@@ -67,6 +67,7 @@ public class ReportOptionsDto
     public string ColumnHeaderText { get; init; } = "Default";
     public bool ShowEditIcon { get; init; } = true;
     public bool ShowViewIcon { get; init; } = true;
+    public bool ShowQuickPeekIcon { get; init; } = true;
     public bool DisableBulkDelete { get; init; }
 }
 
