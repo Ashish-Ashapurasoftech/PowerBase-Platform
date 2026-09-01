@@ -9,6 +9,7 @@ public class CreateTableResult
 {
     public Guid PublicId { get; init; }
     public string Name { get; init; } = string.Empty;
+    public string Alias { get; init; } = string.Empty;
     public string? SingularLabel { get; init; }
     public string? PluralLabel { get; init; }
     public string? Description { get; init; }
@@ -56,10 +57,13 @@ public class CreateTableCommandHandler
         if (await _tableRepo.NameExistsInAppAsync(app.Id, command.Name, ct))
             throw new DuplicateException("Table", "name", command.Name);
 
+        var alias = await GenerateUniqueAliasAsync(app.Id, command.Name, ct);
+
         var table = new AppTable
         {
             AppId = app.Id,
             Name = command.Name,
+            Alias = alias,
             SingularLabel = command.SingularLabel,
             PluralLabel = command.PluralLabel,
             Description = command.Description,
@@ -76,6 +80,7 @@ public class CreateTableCommandHandler
         {
             PublicId = table.PublicId,
             Name = table.Name,
+            Alias = table.Alias,
             SingularLabel = table.SingularLabel,
             PluralLabel = table.PluralLabel,
             Description = table.Description,
@@ -85,5 +90,22 @@ public class CreateTableCommandHandler
             IsShowInBar = table.IsShowInBar,
             CreatedOn = DateTime.UtcNow,
         };
+    }
+
+    /// <summary>Generates this table's stable formula alias from its name (see
+    /// <see cref="TableAliasNaming.Generate"/>), appending _2, _3, ... on collision with another
+    /// table already in the app. The alias is immutable after creation — a later rename never
+    /// regenerates it, so existing Custom Data Rules referencing it keep working.</summary>
+    private async Task<string> GenerateUniqueAliasAsync(long appId, string name, CancellationToken ct)
+    {
+        var baseAlias = TableAliasNaming.Generate(name);
+        var alias = baseAlias;
+        var suffix = 2;
+        while (await _tableRepo.AliasExistsInAppAsync(appId, alias, ct))
+        {
+            alias = $"{baseAlias}_{suffix}";
+            suffix++;
+        }
+        return alias;
     }
 }

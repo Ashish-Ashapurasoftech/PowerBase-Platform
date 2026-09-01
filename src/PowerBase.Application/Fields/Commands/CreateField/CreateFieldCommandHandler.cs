@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Fields.Commands;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -82,6 +83,10 @@ public class CreateFieldCommandHandler
         if (await _fieldRepo.LabelExistsInTableAsync(table.Id, command.Label, ct: ct))
             throw new DuplicateException("Field", "label", command.Label);
 
+        // Snapshot the table's existing fields before adding this one — used below to auto-advance
+        // the Identifying Records picker slots (see AutoAdvanceRecordPickerAsync).
+        var existingFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
+
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(command.TypeCode, ct)
             ?? throw new NotFoundException("FieldType", command.TypeCode);
 
@@ -115,6 +120,13 @@ public class CreateFieldCommandHandler
         var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
         field.Id = id;
         field.PublicId = publicId;
+
+        var nextPickerSlots = RecordPickerAutoAdvancer.NextSlots(table, existingFields, field.Id);
+        if (nextPickerSlots is not null)
+        {
+            var (f1, f2, f3) = nextPickerSlots.Value;
+            await _tableRepo.SetDefaultRecordPickerFieldsAsync(table.Id, f1, f2, f3, ct);
+        }
 
         // Computed fields (Formula) have no physical column — skip column naming and DDL.
         var physicalColumn = string.Empty;

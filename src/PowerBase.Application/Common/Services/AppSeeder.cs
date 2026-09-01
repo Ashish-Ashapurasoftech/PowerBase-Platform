@@ -57,17 +57,18 @@ public class AppSeeder : IAppSeeder
         // Fid values match Quickbase conventions: Record ID# = 3, system fields occupy 1–5.
         // "Label" here is the human-readable display value; Name is auto-generated from it
         // (S_<slug>, since these are system fields) and never shown to users.
-        (string Label, int TypeId, string PhysCol, bool Sortable, bool Filterable, int Order, int Fid)[] systemFieldDefs =
+        (string Label, int TypeId, string PhysCol, int Order, int Fid)[] systemFieldDefs =
         [
-            ("Record ID#",       numberTypeId,   "Id",         true,  false, 1, 3),
-            ("Date Created",     dateTimeTypeId, "CreatedOn",  true,  true,  2, 1),
-            ("Date Modified",    dateTimeTypeId, "ModifiedOn", true,  true,  3, 2),
-            ("Record Owner",     userTypeId,     "CreatedBy",  false, false, 4, 4),
-            ("Last Modified By", userTypeId,     "ModifiedBy", false, false, 5, 5),
+            ("Record ID#",       numberTypeId,   "Id",         1, 3),
+            ("Date Created",     dateTimeTypeId, "CreatedOn",  2, 1),
+            ("Date Modified",    dateTimeTypeId, "ModifiedOn", 3, 2),
+            ("Record Owner",     userTypeId,     "CreatedBy",  4, 4),
+            ("Last Modified By", userTypeId,     "ModifiedBy", 5, 5),
         ];
 
         var seededFids = new Dictionary<string, int>();
-        foreach (var (label, typeId, physCol, sortable, filterable, order, fid) in systemFieldDefs)
+        long? recordIdFieldId = null;
+        foreach (var (label, typeId, physCol, order, fid) in systemFieldDefs)
         {
             var f = new AppField
             {
@@ -77,15 +78,35 @@ public class AppSeeder : IAppSeeder
                 Label = label,
                 PhysicalColumnName = physCol,
                 IsSystem = true,
+                // Only Searchable/Reportable are meaningful (and user-togglable) for a system field
+                // on the Field Detail page — everything else starts off, matching what
+                // UpdateFieldCommandHandler now enforces on every subsequent save (see
+                // SystemFieldSettingsPolicy and the system-field coercion block there). Previously
+                // Sortable/Filterable varied per field and IsAuditable inherited AppField's `= true`
+                // entity default — a table created before that policy existed had those flags fixed
+                // by migration 052; this keeps newly-created tables consistent with it from the start.
                 IsReportable = true,
-                IsSortable = sortable,
-                IsFilterable = filterable,
                 IsSearchable = false,
+                IsRequired = false,
+                IsUnique = false,
+                IsSortable = false,
+                IsFilterable = false,
+                IsAuditable = false,
+                IsEncrypted = false,
                 DisplayOrder = order,
                 Fid = fid,
             };
-            await _fieldRepo.CreateAsync(f, ct);
+            var (fieldId, _) = await _fieldRepo.CreateAsync(f, ct);
             seededFids[label] = fid;
+            if (label == "Record ID#") recordIdFieldId = fieldId;
+        }
+
+        // Identifying Records starts out pointing at Record ID# — the first real field the user
+        // adds takes over slot 1 automatically (see CreateFieldCommandHandler), same as Quickbase.
+        if (recordIdFieldId.HasValue)
+        {
+            await _tableRepo.SetDefaultRecordPickerFieldsAsync(table.Id, recordIdFieldId.Value, null, null, ct);
+            table.DefaultRecordPickerField1Id = recordIdFieldId;
         }
 
         // Default reports and Main Form are skipped when the caller is supplying its own (import) —

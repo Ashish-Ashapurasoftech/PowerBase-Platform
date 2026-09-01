@@ -12,6 +12,13 @@ namespace PowerBase.Application.Reports.Queries.RunReport;
 public class ReportColumnInfo
 {
     public long FieldId { get; init; }
+    /// <summary>Unique per-column key for reading this column's value out of a row's Fields
+    /// dictionary — always use this, never FieldId, to look up a row's value for this column.
+    /// For Table reports this is just FieldId.ToString() (one column per real field, naturally
+    /// unique). Summary/Chart reports let a user aggregate the SAME field with several
+    /// different functions (e.g. Sum and Avg of Amount) — those columns share FieldId, so Key
+    /// disambiguates them (e.g. "agg0_5", "agg1_5").</summary>
+    public string Key { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public string TypeCode { get; init; } = string.Empty;
 }
@@ -283,6 +290,7 @@ public class RunReportQueryHandler
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
             FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id,
+            Key = (f.Fid.HasValue ? (long)f.Fid.Value : f.Id).ToString(),
             Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label,
             TypeCode = f.TypeCode,
         }).ToList();
@@ -741,16 +749,22 @@ public class RunReportQueryHandler
             }
         }
 
-        // Build alias→fieldId map. Identify columns displayed as percent-of-total and compute their totals.
-        var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Build alias→unique-key map — NOT alias→fieldId. A user can aggregate the SAME field
+        // with several different functions (e.g. Sum and Avg of Amount), and those columns
+        // share a FieldId — keying by FieldId alone collapses them onto the same row/column
+        // slot, so every one of them silently displays whichever aggregation's value happened
+        // to be written last. Key is a synthetic, always-unique-per-column identifier instead.
+        // Identify columns displayed as percent-of-total and compute their totals.
+        var aggAliasToKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var percentAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var columnTotals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var agg in visibleAggregations)
+        for (var i = 0; i < visibleAggregations.Count; i++)
         {
+            var agg = visibleAggregations[i];
             if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
             var alias = $"{agg.Function}_{aggField.Name.Replace(" ", "_")}";
-            aggAliasToFieldId[alias] = agg.FieldId.ToString();
+            aggAliasToKey[alias] = $"agg{i}_{agg.FieldId}";
             if (agg.DisplayAs == "PercentOfColumnTotal")
             {
                 percentAliases.Add(alias);
@@ -759,48 +773,56 @@ public class RunReportQueryHandler
             }
         }
 
-        // Remap SQL alias keys to field-ID string keys; apply percent transform where configured
+        // Remap SQL alias keys to unique row keys; apply percent transform where configured
+        var groupKey = (groupByField.Fid ?? groupByField.Id).ToString();
+        var seriesKey = seriesField is not null ? (seriesField.Fid ?? seriesField.Id).ToString() : null;
         var items = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
-            fields[(groupByField.Fid ?? groupByField.Id).ToString()] = ResolveGroupOrSeriesValue(
+            fields[groupKey] = ResolveGroupOrSeriesValue(
                 row.TryGetValue("GroupValue", out var gv) ? gv : null, groupUserNames);
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
-            if (seriesField is not null)
-                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = ResolveGroupOrSeriesValue(
+            if (seriesKey is not null)
+                fields[seriesKey] = ResolveGroupOrSeriesValue(
                     row.TryGetValue("SeriesValue", out var sv) ? sv : null, seriesUserNames);
-            foreach (var (alias, fieldId) in aggAliasToFieldId)
+            foreach (var (alias, key) in aggAliasToKey)
             {
                 if (!row.TryGetValue(alias, out var val)) continue;
                 if (percentAliases.Contains(alias) && columnTotals.TryGetValue(alias, out var total) && total != 0)
-                    fields[fieldId] = Math.Round(Convert.ToDouble(val ?? 0) / total * 100, 2);
+                    fields[key] = Math.Round(Convert.ToDouble(val ?? 0) / total * 100, 2);
                 else
-                    fields[fieldId] = val;
+                    fields[key] = val;
             }
             return new RecordResult { Id = Guid.Empty, CreatedOn = DateTime.UtcNow, Fields = fields };
         }).ToList();
 
-        // Synthetic columns: group-by field + Count + (Chart-only) series field + one per visible aggregation.
-        // FieldId must match the keys used in `fields` above (Fid when present, else Id) or the frontend can't
-        // look up the values by column.
+        // Synthetic columns: group-by field + Count + (Chart-only) series field + one per visible
+        // aggregation. Key must match the keys used in `fields` above, or the frontend can't look
+        // up the values by column — FieldId alone is NOT sufficient here (see aggAliasToKey above).
         var columns = new List<ReportColumnInfo>
         {
-            new() { FieldId = groupByField.Fid ?? groupByField.Id, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
-            new() { FieldId = 0, Name = "Count", TypeCode = "Number" },
+            new() { FieldId = groupByField.Fid ?? groupByField.Id, Key = groupKey, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
+            new() { FieldId = 0, Key = "0", Name = "Count", TypeCode = "Number" },
         };
         if (seriesField is not null)
         {
-            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
+            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Key = seriesKey!, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
         }
-        foreach (var agg in visibleAggregations)
+        for (var i = 0; i < visibleAggregations.Count; i++)
         {
+            var agg = visibleAggregations[i];
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
             {
                 var fieldName = string.IsNullOrWhiteSpace(aggField.Label) ? aggField.Name : aggField.Label;
                 var label = agg.DisplayAs == "PercentOfColumnTotal"
                     ? $"{agg.Function} of {fieldName} (%)"
                     : $"{agg.Function} of {fieldName}";
-                columns.Add(new ReportColumnInfo { FieldId = aggField.Fid ?? aggField.Id, Name = label, TypeCode = "Number" });
+                // Max/Min return a value from the source field's own domain (e.g. Max of a Date
+                // field is a date, not a count/sum) — the frontend needs the real TypeCode to
+                // render it correctly (formatDate vs formatNumber), not the generic "Number"
+                // every other aggregation function actually produces.
+                var columnTypeCode = agg.Function is "Max" or "Min" ? aggField.TypeCode : "Number";
+                columns.Add(new ReportColumnInfo { FieldId = aggField.Fid ?? aggField.Id, Key = $"agg{i}_{agg.FieldId}", Name = label, TypeCode = columnTypeCode });
             }
         }
 

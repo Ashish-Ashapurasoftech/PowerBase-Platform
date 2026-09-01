@@ -895,13 +895,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var fieldMap = allFields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
 
         string? seriesExpr = null;
+        string? seriesCol = null;
         if (seriesField is not null)
         {
-            var seriesCol = seriesField.IsSystem && !string.IsNullOrEmpty(seriesField.PhysicalColumnName)
+            seriesCol = seriesField.IsSystem && !string.IsNullOrEmpty(seriesField.PhysicalColumnName)
                 ? seriesField.PhysicalColumnName!
                 : PhysicalNaming.ColumnName(seriesField.Fid!.Value);
             seriesExpr = BuildGroupByExpr(seriesCol, seriesMode, seriesField.TypeCode);
         }
+
+        var parameters = new DynamicParameters();
+        var ownerWhere = BuildOwnerWhere(restrictToCreatedBy, parameters);
+        // fieldMap guards against computed/Formula-type conditions reaching SQL as a reference
+        // to a nonexistent f_{fid} column — see BuildConditionClause's IsComputedTypeCode check.
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldMap);
+
+        // Median needs a table alias to correlate a per-group scalar subquery back to this
+        // outer query's row (PERCENTILE_CONT is a T-SQL window function — it always requires
+        // OVER, and can't sit directly in a GROUP BY select list alongside SUM/COUNT/etc.).
+        // Only reached (aliased) when at least one aggregation actually uses Median.
+        const string outerAlias = "rpt_o";
+        const string medianAlias = "rpt_m";
+        var tableName = PhysicalNaming.FullTableName(table.Id);
 
         var aggClauses = new List<string> { "COUNT(*) AS [Count]" };
         foreach (var agg in aggregations)
@@ -915,16 +930,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 "Avg" => $"AVG(CAST({col} AS DECIMAL(18,4))) AS {alias}",
                 "Min" => $"MIN({col}) AS {alias}",
                 "Max" => $"MAX({col}) AS {alias}",
+                "DistinctCount" => $"COUNT(DISTINCT {col}) AS {alias}",
+                "StdDev" => $"STDEV(CAST({col} AS DECIMAL(18,4))) AS {alias}",
+                "Median" => BuildMedianClause(tableName, outerAlias, medianAlias, col, alias, ownerWhere, filterWhere,
+                    groupCol, groupByMode, groupByField.TypeCode, seriesCol, seriesMode, seriesField?.TypeCode),
                 _ => null,
             };
             if (clause is not null) aggClauses.Add(clause);
         }
-
-        var parameters = new DynamicParameters();
-        var ownerWhere = BuildOwnerWhere(restrictToCreatedBy, parameters);
-        // fieldMap guards against computed/Formula-type conditions reaching SQL as a reference
-        // to a nonexistent f_{fid} column — see BuildConditionClause's IsComputedTypeCode check.
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldMap);
 
         var selectList = seriesExpr is null
             ? $"{groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}"
@@ -933,8 +946,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         var sql = $"""
             SELECT {selectList}
-            FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE IsDeleted = 0{ownerWhere}{filterWhere}
+            FROM {tableName} AS {outerAlias}
+            WHERE {outerAlias}.IsDeleted = 0{ownerWhere}{filterWhere}
             GROUP BY {groupByList}
             ORDER BY {groupByList}
             """;
@@ -942,6 +955,42 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
         return rows.Select(ToDictionary).ToList();
+    }
+
+    /// <summary>
+    /// Median for a summarized aggregation column. SQL Server's PERCENTILE_CONT is an ordered-
+    /// set window function — it always requires OVER, and (unlike SUM/AVG/COUNT) can't sit
+    /// directly in the same GROUP BY select list as the rest of <see cref="SummarizeAsync"/>'s
+    /// aggregates. Instead this builds a correlated scalar subquery: it re-scans the same table
+    /// under a second alias, re-applies the exact same owner/filter restrictions plus a
+    /// correlation predicate that recomputes the group (and series, if any) bucket expression
+    /// and matches it back to the outer query's row, then takes PERCENTILE_CONT(0.5) OVER() —
+    /// which returns the same median value for every row in that bucket — via TOP(1).
+    /// NULL-vs-NULL is matched explicitly since `NULL = NULL` is unknown, not true, in SQL.
+    /// </summary>
+    private static string BuildMedianClause(
+        string tableName, string outerAlias, string medianAlias,
+        string col, string alias, string ownerWhere, string filterWhere,
+        string groupCol, string groupByMode, string groupTypeCode,
+        string? seriesCol, string? seriesMode, string? seriesTypeCode)
+    {
+        var groupOuter = BuildGroupByExpr($"{outerAlias}.{groupCol}", groupByMode, groupTypeCode);
+        var groupInner = BuildGroupByExpr($"{medianAlias}.{groupCol}", groupByMode, groupTypeCode);
+        var correlation = $"(({groupInner} = {groupOuter}) OR ({groupInner} IS NULL AND {groupOuter} IS NULL))";
+
+        if (seriesCol is not null)
+        {
+            var seriesOuter = BuildGroupByExpr($"{outerAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
+            var seriesInner = BuildGroupByExpr($"{medianAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
+            correlation += $" AND (({seriesInner} = {seriesOuter}) OR ({seriesInner} IS NULL AND {seriesOuter} IS NULL))";
+        }
+
+        return $"""
+            (SELECT TOP (1) PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST({medianAlias}.{col} AS DECIMAL(18,4))) OVER ()
+             FROM {tableName} AS {medianAlias}
+             WHERE {medianAlias}.IsDeleted = 0{ownerWhere}{filterWhere}
+               AND {correlation}) AS {alias}
+            """;
     }
 
     /// <summary>Builds the GROUP BY / SELECT expression for a group-by or series field,

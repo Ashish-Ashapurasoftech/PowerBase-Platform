@@ -16,6 +16,11 @@ public interface IAppFieldRepository
     Task<IReadOnlyList<AppFieldListItemDto>> ListByTablePagedAsync(
         long tableId, int page, int pageSize, string? search, string sortBy, bool sortDesc, string? filter, CancellationToken ct = default);
     Task<int> CountByTableAsync(long tableId, string? search, string? filter, CancellationToken ct = default);
+    /// <summary>Same shape/filtering as <see cref="ListByTablePagedAsync"/> (search/sort/filter) but
+    /// genuinely unpaginated — every matching field in one call, no page/pageSize/OFFSET at all.
+    /// Backs the Fields settings grid (which no longer paginates) and Field Detail's Prev/Next.</summary>
+    Task<IReadOnlyList<AppFieldListItemDto>> ListByTableFilteredAsync(
+        long tableId, string? search, string sortBy, bool sortDesc, string? filter, CancellationToken ct = default);
     /// <summary>Internal collision check used only by IFieldNameResolver when generating a new Name. Not a user-facing duplicate check.</summary>
     Task<bool> NameExistsInTableAsync(long tableId, string name, CancellationToken ct = default);
     /// <summary>User-facing duplicate check — Label is the value users edit and must be unique per table.</summary>

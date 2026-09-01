@@ -4,6 +4,7 @@ using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Formula;
 
 namespace PowerBase.Application.Records.Commands.CreateRecord;
 
@@ -20,6 +21,7 @@ public class CreateRecordCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IUserRepository _userRepo;
     private readonly IMessagePublisher _messagePublisher;
+    private readonly FormulaEngine _engine;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -32,7 +34,8 @@ public class CreateRecordCommandHandler
         ITenantUnitOfWork uow,
         IQueryContext queryContext,
         IUserRepository userRepo,
-        IMessagePublisher messagePublisher)
+        IMessagePublisher messagePublisher,
+        FormulaEngine engine)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -45,6 +48,7 @@ public class CreateRecordCommandHandler
         _queryContext = queryContext;
         _userRepo = userRepo;
         _messagePublisher = messagePublisher;
+        _engine = engine;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -99,6 +103,11 @@ public class CreateRecordCommandHandler
         // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
         // values about to be persisted, after defaults and reference-override resolution.
         await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: true, excludeRecordId: null, ct);
+
+        // Custom Data Rule — the table's own formula-based save gate (Add/Update only, never
+        // Delete or other tables' writes). Runs after the built-in constraints above so a plain
+        // Required/Unique violation is reported first.
+        await CustomDataRuleValidator.ValidateAsync(table, fields, effectiveValues, _tableRepo, _fieldRepo, _recordRepo, _engine, ct);
 
         Guid publicId;
         PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;

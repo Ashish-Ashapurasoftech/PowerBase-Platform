@@ -143,7 +143,7 @@ public class TablesController : ControllerBase
         var result = await _updateHandler.HandleAsync(new UpdateTableCommand(
             publicId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon,
             request.DefaultRecordPickerField1Id, request.DefaultRecordPickerField2Id, request.DefaultRecordPickerField3Id,
-            request.IsShowInBar), ct);
+            request.IsShowInBar, request.CustomDataRule, request.CustomDataRuleEnabled), ct);
         return Ok(new ApiResponse<TableSummaryResponse>(MapToSummaryResponse(result)));
     }
 
@@ -177,6 +177,7 @@ public class TablesController : ControllerBase
     {
         PublicId = r.PublicId,
         Name = r.Name,
+        Alias = r.Alias,
         SingularLabel = r.SingularLabel,
         PluralLabel = r.PluralLabel,
         Description = r.Description,
@@ -192,6 +193,7 @@ public class TablesController : ControllerBase
     {
         PublicId = t.PublicId,
         Name = t.Name,
+        Alias = t.Alias,
         SingularLabel = t.SingularLabel,
         PluralLabel = t.PluralLabel,
         Description = t.Description,
@@ -211,6 +213,7 @@ public class TablesController : ControllerBase
     {
         PublicId = r.Table.PublicId,
         Name = r.Table.Name,
+        Alias = r.Table.Alias,
         SingularLabel = r.Table.SingularLabel,
         PluralLabel = r.Table.PluralLabel,
         Description = r.Table.Description,
@@ -271,6 +274,7 @@ public class TablesController : ControllerBase
     {
         PublicId = r.Table.PublicId,
         Name = r.Table.Name,
+        Alias = r.Table.Alias,
         SingularLabel = r.Table.SingularLabel,
         PluralLabel = r.Table.PluralLabel,
         Description = r.Table.Description,
@@ -278,6 +282,8 @@ public class TablesController : ControllerBase
         DefaultRecordPickerField1Id = r.Table.DefaultRecordPickerField1Id,
         DefaultRecordPickerField2Id = r.Table.DefaultRecordPickerField2Id,
         DefaultRecordPickerField3Id = r.Table.DefaultRecordPickerField3Id,
+        CustomDataRule = r.Table.CustomDataRule,
+        IsCustomDataRuleEnabled = r.Table.IsCustomDataRuleEnabled,
         Fields = r.Fields.Select(f => new TableAdvancedSettingsFieldResponse
         {
             Id = f.Id,

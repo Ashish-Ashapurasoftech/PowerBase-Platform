@@ -53,6 +53,20 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
         """;
 
+    // Same shape as ListByTablePagedSqlTemplate minus the OFFSET/FETCH — every matching row, one call.
+    private const string ListByTableFilteredSqlTemplate = """
+        SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
+               af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
+               af.IsUnique, af.IsSystem, af.Fid, af.CreatedOn
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+          AND af.IsDeleted = 0
+          AND (@search IS NULL OR af.Label LIKE @search)
+          {1}
+        ORDER BY {0}
+        """;
+
     private const string CountByTableFilteredSqlTemplate = """
         SELECT COUNT(1)
         FROM meta.AppField af
@@ -124,6 +138,12 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE af.PublicId = @publicId AND af.IsDeleted = 0
         """;
 
+    // No "AND IsSystem = 0" here (deliberately removed) — system fields now legitimately reach
+    // this path too, with their persisted values already coerced to the restricted allow-list by
+    // UpdateFieldCommandHandler before this SQL ever runs (Label/Description pinned, most flags
+    // forced false, Settings stripped). Excluding IsSystem rows here used to be redundant
+    // defense-in-depth for a save path system fields never took; now it just silently matches zero
+    // rows and the handler reports a false "Field not found" for every system-field save.
     private const string UpdateFieldSql = """
         UPDATE meta.AppField
         SET Label = @label, Description = @description,
@@ -134,7 +154,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             IsEncrypted = @isEncrypted,
             Settings = @settings,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
-        WHERE PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
+        WHERE PublicId = @publicId AND AppTableId = @tableId AND IsDeleted = 0
         """;
 
     private const string SoftDeleteFieldSql = """
@@ -213,6 +233,24 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 categoryFilter,
                 offset = (page - 1) * pageSize,
                 pageSize
+            }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<IReadOnlyList<AppFieldListItemDto>> ListByTableFilteredAsync(
+        long tableId, string? search, string sortBy, bool sortDesc, string? filter, CancellationToken ct = default)
+    {
+        var column = ResolveSortColumn(sortBy);
+        var (filterFragment, categoryFilter) = ResolveFilterFragment(filter);
+        var sql = string.Format(ListByTableFilteredSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}, af.Id", filterFragment);
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<AppFieldListItemDto>(
+            new CommandDefinition(sql, new
+            {
+                tableId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                categoryFilter,
             }, cancellationToken: ct));
         return rows.ToList();
     }

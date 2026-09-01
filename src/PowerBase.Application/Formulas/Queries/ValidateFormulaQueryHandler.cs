@@ -31,8 +31,9 @@ public sealed class ValidateFormulaQueryHandler
         var table = await _tableRepo.GetByPublicIdAsync(query.TablePublicId, ct);
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         var schema = new AppFieldSchema(fields);
+        var aliasSchema = await AppTableAliasSchema.BuildAsync(_tableRepo, table.AppId, ct);
 
-        var compiled = _engine.Compile(query.Expression ?? string.Empty, schema, FormulaTypeMap.ParseExpected(query.ExpectedType));
+        var compiled = _engine.Compile(query.Expression ?? string.Empty, schema, FormulaTypeMap.ParseExpected(query.ExpectedType), aliasSchema);
 
         return new ValidateFormulaResult
         {
