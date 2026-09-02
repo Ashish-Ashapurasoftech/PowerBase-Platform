@@ -6,7 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace PowerBase.API.Attributes;
 
-public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId, ByPagePublicId, ByPipelinePublicId }
+public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId, ByPagePublicId, ByPipelinePublicId, ByRoleId }
 
 /// <summary>
 /// Requires the caller to be an app member (any role). Does NOT require a specific permission code.
@@ -158,6 +158,11 @@ internal class AppPermissionFilter : IAsyncActionFilter
                 case AppAccessResolver.ByPipelinePublicId:
                     var pipelinePubId = Guid.Parse(route["publicId"]!.ToString()!);
                     await _accessService.RequirePermissionByPipelinePublicIdAsync(pipelinePubId, _permissionCode, context.HttpContext.RequestAborted);
+                    break;
+
+                case AppAccessResolver.ByRoleId:
+                    var roleId = Guid.Parse(route["roleId"]!.ToString()!);
+                    await _accessService.RequirePermissionByRolePublicIdAsync(roleId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
             }
         }
