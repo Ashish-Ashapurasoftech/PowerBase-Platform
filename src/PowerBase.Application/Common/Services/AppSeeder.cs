@@ -39,6 +39,16 @@ public class AppSeeder : IAppSeeder
 
     public async Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, bool seedDefaultViews = true, CancellationToken ct = default)
     {
+        // Generated here rather than by each caller — this is the one place that actually inserts
+        // an AppTable row (IAppTableRepository.CreateAsync has no other caller in the codebase), so
+        // it's the only spot guaranteed to run for every table-creation path (single "add table",
+        // the "create app with tables" wizard, …). It used to be computed only by
+        // CreateTableCommandHandler; CreateAppCommandHandler's own table-seeding path never set it
+        // at all, so every table created via that wizard got the entity default (empty string) —
+        // fine for the first table in an app, but the second one collided on
+        // UX_AppTable_AppId_Alias since both had the same (AppId, '') key.
+        table.Alias = await GenerateUniqueAliasAsync(table.AppId, table.Name, ct);
+
         var (id, publicId) = await _tableRepo.CreateAsync(table, ct);
         table.Id = id;
         table.PublicId = publicId;
@@ -181,5 +191,22 @@ public class AppSeeder : IAppSeeder
         await _permRepo.SeedDefaultsForTableAsync(table.Id, table.AppId, ct);
 
         return table;
+    }
+
+    /// <summary>Generates a table's stable formula alias from its name (see
+    /// <see cref="TableAliasNaming.Generate"/>), appending _2, _3, ... on collision with another
+    /// table already in the app. The alias is immutable after creation — a later rename never
+    /// regenerates it, so existing Custom Data Rules referencing it keep working.</summary>
+    private async Task<string> GenerateUniqueAliasAsync(long appId, string name, CancellationToken ct)
+    {
+        var baseAlias = TableAliasNaming.Generate(name);
+        var alias = baseAlias;
+        var suffix = 2;
+        while (await _tableRepo.AliasExistsInAppAsync(appId, alias, ct))
+        {
+            alias = $"{baseAlias}_{suffix}";
+            suffix++;
+        }
+        return alias;
     }
 }
