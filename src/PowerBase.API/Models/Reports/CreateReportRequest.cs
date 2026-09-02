@@ -53,6 +53,7 @@ public class ReportOptionsRequest
     public string ColumnHeaderText { get; set; } = "Default";
     public bool ShowEditIcon { get; set; } = true;
     public bool ShowViewIcon { get; set; } = true;
+    public bool ShowQuickPeekIcon { get; set; } = true;
     public bool DisableBulkDelete { get; set; }
 }
 

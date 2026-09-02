@@ -78,6 +78,9 @@ public class ReportOptions
     public string ColumnHeaderText { get; set; } = "Default";
     public bool ShowEditIcon { get; set; } = true;
     public bool ShowViewIcon { get; set; } = true;
+    /// <summary>Only meaningful when the table has a Quick Peek form configured (Form.
+    /// IsQuickPeekForm) — otherwise the icon never shows regardless of this flag.</summary>
+    public bool ShowQuickPeekIcon { get; set; } = true;
     public bool DisableBulkDelete { get; set; }
 }
 

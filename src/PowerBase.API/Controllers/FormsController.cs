@@ -21,7 +21,9 @@ using PowerBase.Application.Forms.Queries.GetFormRule;
 using PowerBase.Application.Forms.Queries.ListFormRules;
 using PowerBase.Application.Forms.Queries.ListForms;
 using PowerBase.Application.Forms.Commands.SetDefaultForm;
+using PowerBase.Application.Forms.Commands.SetQuickPeekForm;
 using PowerBase.Application.Forms.Commands.UpdateRoleFormOverrides;
+using PowerBase.Application.Forms.Queries.GetQuickPeekForm;
 using PowerBase.Application.Forms.Queries.GetRoleFormOverrides;
 using PowerBase.Application.Forms.Queries.ResolveForm;
 using PowerBase.Domain.Constants;
@@ -51,6 +53,8 @@ public class FormsController : ControllerBase
     private readonly GetRoleFormOverridesQueryHandler _getRoleFormOverridesHandler;
     private readonly UpdateRoleFormOverridesCommandHandler _updateRoleFormOverridesHandler;
     private readonly ResolveFormQueryHandler _resolveFormHandler;
+    private readonly SetQuickPeekFormCommandHandler _setQuickPeekFormHandler;
+    private readonly GetQuickPeekFormQueryHandler _getQuickPeekFormHandler;
 
     public FormsController(
         CreateFormCommandHandler createFormHandler,
@@ -72,7 +76,9 @@ public class FormsController : ControllerBase
         SetDefaultFormCommandHandler setDefaultFormHandler,
         GetRoleFormOverridesQueryHandler getRoleFormOverridesHandler,
         UpdateRoleFormOverridesCommandHandler updateRoleFormOverridesHandler,
-        ResolveFormQueryHandler resolveFormHandler)
+        ResolveFormQueryHandler resolveFormHandler,
+        SetQuickPeekFormCommandHandler setQuickPeekFormHandler,
+        GetQuickPeekFormQueryHandler getQuickPeekFormHandler)
     {
         _createFormHandler = createFormHandler;
         _updateSettingsHandler = updateSettingsHandler;
@@ -94,6 +100,8 @@ public class FormsController : ControllerBase
         _getRoleFormOverridesHandler = getRoleFormOverridesHandler;
         _updateRoleFormOverridesHandler = updateRoleFormOverridesHandler;
         _resolveFormHandler = resolveFormHandler;
+        _setQuickPeekFormHandler = setQuickPeekFormHandler;
+        _getQuickPeekFormHandler = getQuickPeekFormHandler;
     }
 
     // ── Forms ────────────────────────────────────────────────────────────────
@@ -173,6 +181,29 @@ public class FormsController : ControllerBase
     public async Task<IActionResult> SetDefaultForm(Guid publicId, [FromQuery] Guid tableId, CancellationToken ct)
     {
         await _setDefaultFormHandler.HandleAsync(new SetDefaultFormCommand(tableId, publicId), ct);
+        return NoContent();
+    }
+
+    /// <summary>Get the table's Quick Peek form, if one is configured. 404 if none is set.</summary>
+    [HttpGet("tables/{tableId:guid}/forms/quick-peek")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<FormDetailResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetQuickPeekForm(Guid tableId, CancellationToken ct)
+    {
+        var form = await _getQuickPeekFormHandler.HandleAsync(new GetQuickPeekFormQuery(tableId), ct);
+        if (form == null) return NotFound();
+        return Ok(new ApiResponse<FormDetailResponse>(MapToDetail(form)));
+    }
+
+    /// <summary>Set (or clear, when FormId is null) which form is used for Quick Peek across
+    /// every report on this table.</summary>
+    [HttpPut("tables/{tableId:guid}/forms/quick-peek")]
+    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> SetQuickPeekForm(Guid tableId, [FromBody] SetQuickPeekFormRequest request, CancellationToken ct)
+    {
+        await _setQuickPeekFormHandler.HandleAsync(new SetQuickPeekFormCommand(tableId, request.FormId), ct);
         return NoContent();
     }
 
@@ -427,11 +458,12 @@ public class FormsController : ControllerBase
 
     private static FormListItemResponse MapToListItem(FormDetail f) => new()
     {
-        Id           = f.Id,
-        Name         = f.Name,
-        IsDefault    = f.IsDefault,
-        DisplayOrder = f.DisplayOrder,
-        CreatedOn    = f.CreatedOn,
+        Id              = f.Id,
+        Name            = f.Name,
+        IsDefault       = f.IsDefault,
+        IsQuickPeekForm = f.IsQuickPeekForm,
+        DisplayOrder    = f.DisplayOrder,
+        CreatedOn       = f.CreatedOn,
     };
 
     private static FormDetailResponse MapToDetail(FormDetail f) => new()
@@ -439,6 +471,7 @@ public class FormsController : ControllerBase
         Id                = f.Id,
         Name              = f.Name,
         IsDefault         = f.IsDefault,
+        IsQuickPeekForm   = f.IsQuickPeekForm,
         AutoAddNewFields  = f.AutoAddNewFields,
         ShowBuiltInFields = f.ShowBuiltInFields,
         SaveOptions       = f.SaveOptions.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList(),

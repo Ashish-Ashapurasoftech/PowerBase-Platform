@@ -86,6 +86,7 @@ public class UpdateReportCommandHandler
                 ColumnHeaderText = string.IsNullOrWhiteSpace(command.Options.ColumnHeaderText) ? "Default" : command.Options.ColumnHeaderText,
                 ShowEditIcon = command.Options.ShowEditIcon,
                 ShowViewIcon = command.Options.ShowViewIcon,
+                ShowQuickPeekIcon = command.Options.ShowQuickPeekIcon,
                 DisableBulkDelete = command.Options.DisableBulkDelete,
             },
             Aggregations = command.Aggregations.Select(a => new SummaryAggregation
