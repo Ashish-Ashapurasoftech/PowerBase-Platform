@@ -28,4 +28,13 @@ public class RunReportRequest
     public bool GroupByDesc { get; set; }
     /// <summary>Explicitly clears grouping for this run even if the saved report has one.</summary>
     public bool ClearGrouping { get; set; }
+
+    /// <summary>Answers to this report's saved "&lt;ask the user&gt;" filter conditions, never
+    /// persisted. Keyed by the condition's tree-path (root-to-leaf node indices, joined with "-"
+    /// — see table-report-view.component.ts's askConditionKey/collectAskConditions), NOT by
+    /// fieldId, since two ask-conditions can target the same field with different operators (a
+    /// date range). Substituted directly into the saved filter tree in place, preserving its
+    /// exact AND/OR structure — this is NOT merged as a separate AND'd-on-top group, because a
+    /// flat AND merge can't correctly represent an ask-condition that lives inside an OR group.</summary>
+    public Dictionary<string, string>? AskAnswers { get; set; }
 }

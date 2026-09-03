@@ -370,7 +370,8 @@ public class ReportsController : ControllerBase
             request.SortDesc,
             request.GroupByFieldId,
             request.GroupByDesc,
-            request.ClearGrouping), ct);
+            request.ClearGrouping,
+            request.AskAnswers), ct);
         return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
     }
 
@@ -511,6 +512,7 @@ public class ReportsController : ControllerBase
                 ShowViewIcon = r.Definition.Options.ShowViewIcon,
                 ShowQuickPeekIcon = r.Definition.Options.ShowQuickPeekIcon,
                 DisableBulkDelete = r.Definition.Options.DisableBulkDelete,
+                ShowDescriptionOnReportPage = r.Definition.Options.ShowDescriptionOnReportPage,
             },
         },
         IsDefault = r.IsDefault,
@@ -589,7 +591,8 @@ public class ReportsController : ControllerBase
     // ── Table Options mapping helper ──────────────────────────────────────────
 
     private static ReportOptionsCommand? MapOptions(ReportOptionsRequest? req) =>
-        req is null ? null : new ReportOptionsCommand(req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.ShowQuickPeekIcon, req.DisableBulkDelete);
+        req is null ? null : new ReportOptionsCommand(
+            req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.ShowQuickPeekIcon, req.DisableBulkDelete, req.ShowDescriptionOnReportPage);
 
     // ── Chart config mapping helpers ──────────────────────────────────────────
 

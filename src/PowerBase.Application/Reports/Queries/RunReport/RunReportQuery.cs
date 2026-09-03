@@ -23,4 +23,9 @@ public record RunReportQuery(
     long? RuntimeGroupByFieldId = null,
     bool RuntimeGroupByDesc = false,
     /// <summary>Explicitly clears grouping for this run even if the saved report has GroupByFieldId set.</summary>
-    bool ClearGrouping = false);
+    bool ClearGrouping = false,
+    /// <summary>Answers to this report's saved "&lt;ask the user&gt;" filter conditions, not
+    /// persisted — keyed by tree-path (see RunReportRequest.AskAnswers), substituted directly
+    /// into the saved FilterTree in place before it's resolved, preserving its exact AND/OR
+    /// structure.</summary>
+    IReadOnlyDictionary<string, string>? AskAnswers = null);

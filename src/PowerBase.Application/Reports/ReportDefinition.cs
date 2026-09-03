@@ -82,6 +82,10 @@ public class ReportOptions
     /// IsQuickPeekForm) — otherwise the icon never shows regardless of this flag.</summary>
     public bool ShowQuickPeekIcon { get; set; } = true;
     public bool DisableBulkDelete { get; set; }
+    /// <summary>Whether the report's Description (Basics tab) renders on the report view page,
+    /// above the toolbar. A long description is clamped with a Show more/Show less toggle there —
+    /// this flag only controls whether the block appears at all. Defaults to false (opt-in).</summary>
+    public bool ShowDescriptionOnReportPage { get; set; }
 }
 
 // ── Filter tree ──────────────────────────────────────────────────────────────

@@ -149,6 +149,13 @@ public class RunReportQueryHandler
             };
         }
 
+        // "<ask the user>" answers are substituted directly into the saved tree's own leaf
+        // positions FIRST — before the User/Date resolvers below, so an answer that's itself a
+        // picked user's Guid or a relative date tier gets picked up by them exactly like any other
+        // literal value. Preserves the saved tree's exact AND/OR structure (see
+        // ResolveAskAnswers's doc comment for why this can't be a separate AND'd-on-top group).
+        filterTree = ResolveAskAnswers(filterTree, query.AskAnswers, []);
+
         // "is the current user" AND literal User/MultiUser picker values both need resolving to
         // the plain long core.[User].Id the column actually stores before this tree reaches the
         // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
@@ -203,21 +210,27 @@ public class RunReportQueryHandler
             }
         }
 
-        // Runtime filter tree (Advanced builder / per-column filters), AND'd on top of the
-        // saved tree — role ViewFilter and dynamic/quick-search filters are merged in further
-        // down (RunTableAsync) / below (RunSummaryAsync).
+        // Runtime filter tree (Advanced builder / per-column filters / the "ask the user"
+        // prompt's answers — see table-report-view.component.ts's buildRuntimeFilterTree()),
+        // AND'd on top of the saved tree — role ViewFilter and dynamic/quick-search filters are
+        // merged in further down (RunTableAsync) / below (RunSummaryAsync). Needs the SAME
+        // User-field-Guid and Date-relative-tier resolution as the saved tree above, for the same
+        // reason: an "ask the user" answer for a User field arrives here, not in `filterTree`.
         //
-        // REVERTED (was: also running ResolveUserFieldValuesAsync/ResolveDateValueModeConditions
-        // on this tree, matching the saved tree above). That change broke a working "ask the
-        // user" User-field filter — confirmed by direct before/after testing — and the actual
-        // reason isn't understood yet. Left as the original, unresolved merge until that's
-        // diagnosed properly; do not re-apply the resolvers here without figuring out why the
-        // unresolved (raw Guid) value was matching correctly in the first place.
+        // This was reverted once before, when it appeared to "break" a working ask-flow test —
+        // that was because the underlying record data itself held the wrong (Guid) value at the
+        // time (the write-path bug fixed in RecordWriteService/CreateRecordCommandHandler), so
+        // the *unresolved* raw Guid from the picker was accidentally matching the *also-wrong*
+        // stored Guid. Now that the write path stores the correct long id, leaving this
+        // unresolved is what's actually broken (confirmed: identical saved-vs-ask-prompt filters
+        // against the same now-correct data — saved matches, ask doesn't, until this runs).
         if (query.RuntimeFilterTree is { Nodes.Count: > 0 })
         {
+            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), ct);
+            resolvedRuntimeTree = ResolveDateValueModeConditions(resolvedRuntimeTree);
             filterTree = filterTree == null
-                ? query.RuntimeFilterTree
-                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = query.RuntimeFilterTree }] };
+                ? resolvedRuntimeTree
+                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = resolvedRuntimeTree }] };
         }
 
         if (report.ReportType is "Summary" or "Chart")
@@ -588,6 +601,46 @@ public class RunReportQueryHandler
     /// path is unproven (mock-only unit test, its UI is disabled) and writes the wrong id space.
     /// Returns a new tree (never mutates the input) so callers holding onto the original
     /// `definition.FilterTree` reference elsewhere aren't affected.</summary>
+    /// <summary>Substitutes each "&lt;ask the user&gt;" condition's value with the caller-supplied
+    /// answer, keyed by the condition's tree-path (root-to-leaf node indices joined with "-" —
+    /// must match table-report-view.component.ts's askConditionKey exactly). Preserves the tree's
+    /// exact AND/OR structure — this is why ask-answers are resolved this way instead of merged
+    /// as a separate flat group AND'd on top of everything else: a flat AND merge can't correctly
+    /// represent an ask-condition that lives inside an OR group (confirmed by direct testing — it
+    /// silently narrowed a saved "A or B" filter into "A and B"). An unanswered ask-condition (no
+    /// matching key, or a blank answer — e.g. the report's saved definition was run directly,
+    /// bypassing the prompt entirely) is left with ValueMode "ask" and an empty Value, which
+    /// BuildConditionClause's existing empty-value guard already treats as a no-op.</summary>
+    internal static FilterGroup? ResolveAskAnswers(FilterGroup? group, IReadOnlyDictionary<string, string>? answers, List<int> path)
+    {
+        if (group is null) return null;
+        var nodes = new List<FilterNode>();
+        for (var i = 0; i < group.Nodes.Count; i++)
+        {
+            var n = group.Nodes[i];
+            var childPath = new List<int>(path) { i };
+            FilterCondition? newCondition = n.Condition;
+            if (n.Condition is { } cond && string.Equals(cond.ValueMode, "ask", StringComparison.OrdinalIgnoreCase))
+            {
+                var key = string.Join("-", childPath);
+                if (answers != null && answers.TryGetValue(key, out var answer) && !string.IsNullOrEmpty(answer))
+                {
+                    newCondition = new FilterCondition
+                    {
+                        FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
+                        Value = answer, ValueMode = "literal", ValueFieldId = null,
+                    };
+                }
+            }
+            nodes.Add(new FilterNode
+            {
+                Condition = newCondition,
+                Group = ResolveAskAnswers(n.Group, answers, childPath),
+            });
+        }
+        return new FilterGroup { Logic = group.Logic, Nodes = nodes };
+    }
+
     /// <summary>Resolves the Date-group's relative value-mode tiers (today/yesterday/tomorrow/
     /// pastDays/futureDays — the "day(s) in the past/future" tiers carry the day count in
     /// cond.Value) into a literal date string, matching the same "resolve one layer above the SQL

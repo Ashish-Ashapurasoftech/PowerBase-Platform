@@ -69,6 +69,7 @@ public class ReportOptionsDto
     public bool ShowViewIcon { get; init; } = true;
     public bool ShowQuickPeekIcon { get; init; } = true;
     public bool DisableBulkDelete { get; init; }
+    public bool ShowDescriptionOnReportPage { get; init; }
 }
 
 public class CustomDynamicFilterItemDto
