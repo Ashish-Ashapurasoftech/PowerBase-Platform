@@ -100,6 +100,11 @@ public class CreateRecordCommandHandler
                 effectiveValues[(long)field.Fid.Value] = value;
         }
 
+        // User/MultiUser values submitted from the record form's picker arrive as userPublicId
+        // Guid(s) — resolve to the long id the column actually stores. See
+        // UserFieldValueResolver's doc comment for why.
+        await UserFieldValueResolver.ResolveAsync(_userRepo, fields, effectiveValues, ct);
+
         // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
         // values about to be persisted, after defaults and reference-override resolution.
         await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: true, excludeRecordId: null, ct);
@@ -200,10 +205,17 @@ public class CreateRecordCommandHandler
         }
         catch (JsonException) { return (false, null); }
 
+        // User/MultiUser columns store the plain long core.[User].Id, never a Guid PublicId —
+        // confirmed against every read/filter path (see RunReportQueryHandler.
+        // ResolveUserFieldValuesAsync's doc comment for the full chain of evidence). This
+        // previously wrote .PublicId.ToString() for "CurrentUser" (a live bug — _queryContext.
+        // UserId already IS that long id, no lookup needed) and the raw settings-configured Guid
+        // as-is for "SpecificUser" (needs resolving via GetByPublicIdAsync first).
         string? resolvedId = mode switch
         {
-            "CurrentUser" => (await _userRepo.GetByIdAsync(_queryContext.UserId, ct)).PublicId.ToString(),
-            "SpecificUser" => userPublicId,
+            "CurrentUser" => _queryContext.UserId.ToString(),
+            "SpecificUser" when Guid.TryParse(userPublicId, out var specificGuid) =>
+                (await UserFieldValueResolver.TryResolveLongIdAsync(_userRepo, specificGuid, ct))?.ToString(),
             _ => null, // "None" or an unrecognized mode — apply no default.
         };
 

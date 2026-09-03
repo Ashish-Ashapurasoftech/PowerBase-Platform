@@ -8,10 +8,13 @@ using PowerBase.Application.Fields.Commands.BulkCreateFields;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Commands.DeleteField;
 using PowerBase.Application.Fields.Commands.UpdateField;
+using PowerBase.Application.Fields.Commands.RestoreFieldVersion;
 using PowerBase.Application.Fields.Queries.GetField;
 using PowerBase.Application.Fields.Queries.ListFields;
 using PowerBase.Application.Fields.Queries.ListFieldTypes;
 using PowerBase.Application.Fields.Queries.GetFieldUsage;
+using PowerBase.Application.Fields.Queries.ListFieldVersions;
+using PowerBase.Application.Fields.Queries.GetFieldVersionDetail;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
@@ -28,6 +31,9 @@ public class FieldsController : ControllerBase
     private readonly ListAllFieldsQueryHandler _listAllHandler;
     private readonly ListFieldTypesQueryHandler _listFieldTypesHandler;
     private readonly GetFieldQueryHandler _getHandler;
+    private readonly RestoreFieldVersionCommandHandler _restoreVersionHandler;
+    private readonly ListFieldVersionsQueryHandler _listVersionsHandler;
+    private readonly GetFieldVersionDetailQueryHandler _getVersionDetailHandler;
 
     public FieldsController(
         CreateFieldCommandHandler createHandler,
@@ -37,7 +43,10 @@ public class FieldsController : ControllerBase
         ListFieldsQueryHandler listHandler,
         ListAllFieldsQueryHandler listAllHandler,
         ListFieldTypesQueryHandler listFieldTypesHandler,
-        GetFieldQueryHandler getHandler)
+        GetFieldQueryHandler getHandler,
+        RestoreFieldVersionCommandHandler restoreVersionHandler,
+        ListFieldVersionsQueryHandler listVersionsHandler,
+        GetFieldVersionDetailQueryHandler getVersionDetailHandler)
     {
         _createHandler = createHandler;
         _bulkCreateHandler = bulkCreateHandler;
@@ -47,6 +56,9 @@ public class FieldsController : ControllerBase
         _listAllHandler = listAllHandler;
         _listFieldTypesHandler = listFieldTypesHandler;
         _getHandler = getHandler;
+        _restoreVersionHandler = restoreVersionHandler;
+        _listVersionsHandler = listVersionsHandler;
+        _getVersionDetailHandler = getVersionDetailHandler;
     }
 
     /// <summary>Add a field to a table (also runs ALTER TABLE on the physical data table).</summary>
@@ -168,7 +180,49 @@ public class FieldsController : ControllerBase
             request.IsRequired, request.DefaultValue,
             request.IsSearchable, request.IsSortable,
             request.IsFilterable, request.IsReportable, request.IsAuditable,
-            request.IsUnique, request.IsEncrypted, request.Settings), ct);
+            request.IsUnique, request.IsEncrypted, request.Settings, request.CommitMessage), ct);
+        return NoContent();
+    }
+
+    /// <summary>Paginated audit/version history for a field, newest first.</summary>
+    [HttpGet("tables/{tableId:guid}/fields/{publicId:guid}/versions")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiListResponse<FieldVersionListItemResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListVersions(
+        Guid tableId, Guid publicId,
+        [FromQuery] int pageNumber = 1, [FromQuery] int pageSize = 20, CancellationToken ct = default)
+    {
+        var result = await _listVersionsHandler.HandleAsync(new ListFieldVersionsQuery(tableId, publicId, pageNumber, pageSize), ct);
+        var items = result.Items.Select(v => MapToVersionListItemResponse(v, result.CurrentVersion)).ToList();
+        return Ok(new ApiListResponse<FieldVersionListItemResponse>(items, result.Total, result.Page, result.PageSize));
+    }
+
+    /// <summary>Full per-property before/after for one version (Audit History's "View Details").</summary>
+    [HttpGet("tables/{tableId:guid}/fields/{publicId:guid}/versions/{version:int}")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<FieldVersionDetailResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetVersionDetail(Guid tableId, Guid publicId, int version, CancellationToken ct)
+    {
+        var result = await _getVersionDetailHandler.HandleAsync(new GetFieldVersionDetailQuery(tableId, publicId, version), ct);
+        return Ok(new ApiResponse<FieldVersionDetailResponse>(MapToVersionDetailResponse(result)));
+    }
+
+    /// <summary>Restores a field's settings to a prior version. Creates a brand-new version
+    /// recording the restore rather than modifying the version being restored from — see
+    /// RestoreFieldVersionCommandHandler.</summary>
+    [HttpPost("tables/{tableId:guid}/fields/{publicId:guid}/versions/{version:int}/restore")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> RestoreVersion(Guid tableId, Guid publicId, int version, [FromBody] RestoreFieldVersionRequest request, CancellationToken ct)
+    {
+        await _restoreVersionHandler.HandleAsync(new RestoreFieldVersionCommand(tableId, publicId, version, request.CommitMessage), ct);
         return NoContent();
     }
 
@@ -292,6 +346,42 @@ public class FieldsController : ControllerBase
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,
         HasRecords = hasRecords,
+    };
+
+    private static FieldVersionListItemResponse MapToVersionListItemResponse(
+        PowerBase.Application.Common.Interfaces.FieldVersionListItem v, int currentVersion) => new()
+    {
+        Version = v.Version,
+        ChangeType = v.ChangeType.ToString(),
+        RestoredFromVersion = v.RestoredFromVersion,
+        CommitMessage = v.CommitMessage,
+        ChangedByName = v.ChangedByName,
+        ChangedOn = v.ChangedOn,
+        ChangedPropertiesSummary = v.ChangedPropertiesSummary,
+        IsCurrent = v.Version == currentVersion,
+    };
+
+    private static FieldVersionDetailResponse MapToVersionDetailResponse(FieldVersionDetailResult r) => new()
+    {
+        Version = r.Version,
+        CommitMessage = r.CommitMessage,
+        ChangedByName = r.ChangedByName,
+        ChangedOn = r.ChangedOn,
+        RestoredFromVersion = r.RestoredFromVersion,
+        IsCurrent = r.IsCurrent,
+        CurrentVersion = r.CurrentVersion,
+        Changes = r.Changes.Select(c => new FieldChangeResponse
+        {
+            PropertyName = c.PropertyName,
+            OldValue = c.OldValue,
+            NewValue = c.NewValue,
+        }).ToList(),
+        ChangesFromCurrent = r.ChangesFromCurrent.Select(c => new FieldChangeResponse
+        {
+            PropertyName = c.PropertyName,
+            OldValue = c.OldValue,
+            NewValue = c.NewValue,
+        }).ToList(),
     };
 
     private static FieldTypeResponse MapToResponse(FieldType ft) => new()

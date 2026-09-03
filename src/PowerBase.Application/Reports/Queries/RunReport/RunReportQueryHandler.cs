@@ -149,6 +149,18 @@ public class RunReportQueryHandler
             };
         }
 
+        // "is the current user" AND literal User/MultiUser picker values both need resolving to
+        // the plain long core.[User].Id the column actually stores before this tree reaches the
+        // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
+        var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
+        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), ct);
+
+        // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
+        // future) must resolve to an actual date freshly EVERY time the report runs, not once at
+        // save time — so this can't be done client-side when the filter is saved. See
+        // ResolveDateValueModeConditions's doc comment for the "today" anchor caveat.
+        filterTree = ResolveDateValueModeConditions(filterTree);
+
         // Table reports: TableSortGroup (Phase 1's unified Sort+Group list) supersedes the legacy
         // single-field GroupByFieldId + SortFields when non-empty — derive both the sort order
         // and the effective group field from it. Reports saved before this existed have an empty
@@ -194,6 +206,13 @@ public class RunReportQueryHandler
         // Runtime filter tree (Advanced builder / per-column filters), AND'd on top of the
         // saved tree — role ViewFilter and dynamic/quick-search filters are merged in further
         // down (RunTableAsync) / below (RunSummaryAsync).
+        //
+        // REVERTED (was: also running ResolveUserFieldValuesAsync/ResolveDateValueModeConditions
+        // on this tree, matching the saved tree above). That change broke a working "ask the
+        // user" User-field filter — confirmed by direct before/after testing — and the actual
+        // reason isn't understood yet. Left as the original, unresolved merge until that's
+        // diagnosed properly; do not re-apply the resolvers here without figuring out why the
+        // unresolved (raw Guid) value was matching correctly in the first place.
         if (query.RuntimeFilterTree is { Nodes.Count: > 0 })
         {
             filterTree = filterTree == null
@@ -550,6 +569,129 @@ public class RunReportQueryHandler
                 allowedFieldIds.Contains(rf.FieldId) ||
                 allowedFieldSubFieldPairs.Contains((rf.FieldId, rf.SubField ?? string.Empty)))
             .ToList();
+    }
+
+    /// <summary>Recursively resolves two kinds of User-field filter values that can't be
+    /// evaluated as literal SQL text as-is:
+    /// (1) "isCurrentUser" conditions rewrite to a literal "eq" against the caller's own user id.
+    /// (2) Literal User/MultiUser condition VALUES arrive from the frontend's user picker as
+    ///     userPublicId Guid string(s) (comma-joined for MultiUser) — AppUserPickerResponse's own
+    ///     wire shape — but the column itself stores the plain long core.[User].Id (confirmed
+    ///     against every other User-field read path — see ResolveUserNamesAsync below,
+    ///     RecordResult.ResolveUserValue, GetDistinctFieldValuesQueryHandler, and
+    ///     RecordRepository's filter-SQL builder, which compares the stored column verbatim with
+    ///     no Guid conversion). Left unresolved, a picked user would never match. Each Guid part
+    ///     is resolved via IUserRepository.GetByPublicIdAsync and cached per call so the same
+    ///     picked user referenced by several conditions only costs one lookup; a part that isn't
+    ///     a parseable Guid (already numeric, or free text) passes through unchanged.
+    /// Do not copy RolePermissionEnforcer's appUser.UserPublicId.ToString() pattern for (1) — that
+    /// path is unproven (mock-only unit test, its UI is disabled) and writes the wrong id space.
+    /// Returns a new tree (never mutates the input) so callers holding onto the original
+    /// `definition.FilterTree` reference elsewhere aren't affected.</summary>
+    /// <summary>Resolves the Date-group's relative value-mode tiers (today/yesterday/tomorrow/
+    /// pastDays/futureDays — the "day(s) in the past/future" tiers carry the day count in
+    /// cond.Value) into a literal date string, matching the same "resolve one layer above the SQL
+    /// builder" shape as the other resolvers in this file. Anchored to UTC "now" — a known
+    /// simplification, since no per-tenant/app timezone is tracked anywhere else in this codebase
+    /// either. Non-Date-group conditions and any other ValueMode pass through unchanged.</summary>
+    internal static FilterGroup? ResolveDateValueModeConditions(FilterGroup? group)
+    {
+        if (group is null) return null;
+        var today = DateTime.UtcNow.Date;
+        return new FilterGroup
+        {
+            Logic = group.Logic,
+            Nodes = group.Nodes.Select(n => new FilterNode
+            {
+                Condition = n.Condition is null ? null : ResolveDateCondition(n.Condition, today),
+                Group = ResolveDateValueModeConditions(n.Group),
+            }).ToList(),
+        };
+    }
+
+    private static FilterCondition ResolveDateCondition(FilterCondition cond, DateTime today)
+    {
+        const string isoFormat = "yyyy-MM-dd";
+        string? resolved = cond.ValueMode switch
+        {
+            "today" => today.ToString(isoFormat),
+            "yesterday" => today.AddDays(-1).ToString(isoFormat),
+            "tomorrow" => today.AddDays(1).ToString(isoFormat),
+            "pastDays" => int.TryParse(cond.Value, out var pd) ? today.AddDays(-pd).ToString(isoFormat) : null,
+            "futureDays" => int.TryParse(cond.Value, out var fd) ? today.AddDays(fd).ToString(isoFormat) : null,
+            _ => null,
+        };
+        if (resolved is null) return cond;
+        return new FilterCondition
+        {
+            FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
+            Value = resolved, ValueMode = "literal", ValueFieldId = null,
+        };
+    }
+
+    internal async Task<FilterGroup?> ResolveUserFieldValuesAsync(
+        FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
+        Dictionary<Guid, long> guidCache, CancellationToken ct)
+    {
+        if (group is null) return null;
+        var nodes = new List<FilterNode>();
+        foreach (var n in group.Nodes)
+        {
+            FilterCondition? newCondition = n.Condition;
+            if (n.Condition is { } cond)
+            {
+                if (string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase))
+                {
+                    newCondition = new FilterCondition { FieldId = cond.FieldId, Operator = "eq", Value = currentUserId.ToString() };
+                }
+                else if (!string.IsNullOrEmpty(cond.Value)
+                    && (cond.ValueMode is null || string.Equals(cond.ValueMode, "literal", StringComparison.OrdinalIgnoreCase))
+                    && fieldLookup.TryGetValue(cond.FieldId, out var field)
+                    && (field.TypeCode is "User" or "MultiUser"))
+                {
+                    var parts = cond.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    var resolvedParts = new List<string>(parts.Length);
+                    foreach (var part in parts)
+                    {
+                        if (Guid.TryParse(part, out var guid))
+                        {
+                            if (!guidCache.TryGetValue(guid, out var longId))
+                            {
+                                try
+                                {
+                                    var user = await _userRepo.GetByPublicIdAsync(guid, ct);
+                                    longId = user.Id;
+                                }
+                                catch (Exception)
+                                {
+                                    // Unresolvable (deleted/unknown user) — leave the Guid text as-is;
+                                    // it simply won't match anything, which is the safe failure mode.
+                                    longId = -1;
+                                }
+                                guidCache[guid] = longId;
+                            }
+                            resolvedParts.Add(longId == -1 ? part : longId.ToString());
+                        }
+                        else
+                        {
+                            resolvedParts.Add(part);
+                        }
+                    }
+                    newCondition = new FilterCondition
+                    {
+                        FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
+                        ValueMode = cond.ValueMode, ValueFieldId = cond.ValueFieldId,
+                        Value = string.Join(",", resolvedParts),
+                    };
+                }
+            }
+            nodes.Add(new FilterNode
+            {
+                Condition = newCondition,
+                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, ct),
+            });
+        }
+        return new FilterGroup { Logic = group.Logic, Nodes = nodes };
     }
 
     internal static FilterGroup? MergeRuntimeFilters(

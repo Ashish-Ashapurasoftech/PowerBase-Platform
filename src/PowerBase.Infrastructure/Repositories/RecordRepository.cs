@@ -1214,11 +1214,32 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return PhysicalNaming.ColumnName((int)fallbackFieldId);
     }
 
+    /// <summary>Translates a user-facing wildcard pattern (* = any run of characters, ? = any
+    /// single character — the Quickbase-style convention this report filter's "wildcard match"
+    /// operator uses) into a SQL Server LIKE pattern. Literal '%'/'_'/'[' the user typed are
+    /// bracket-escaped first (native T-SQL, no ESCAPE clause needed) so they're never misread as
+    /// SQL wildcards, only THEN are '*'/'?' substituted for '%'/'_'.</summary>
+    private static string TranslateWildcardPattern(string raw)
+    {
+        var escaped = raw
+            .Replace("[", "[[]")
+            .Replace("%", "[%]")
+            .Replace("_", "[_]");
+        return escaped.Replace("*", "%").Replace("?", "_");
+    }
+
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
         IReadOnlyDictionary<long, AppField>? fieldLookup = null)
     {
+        // "the value in the field" conditions legitimately carry no Value at all (ValueFieldId
+        // is the comparison target instead) — don't let the empty-value skip below drop them.
+        // "ask the user" conditions DO still fall through this skip when left unresolved (no
+        // Value AND no ValueFieldId) — that's the intended no-op behavior documented at the call
+        // site in RunReportQueryHandler.
+        var isFieldToFieldComparison = string.Equals(cond.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && cond.ValueFieldId.HasValue;
+
         // Skip empty filter values for operators that require a value
-        if (cond.Operator is not ("isEmpty" or "isNotEmpty") && string.IsNullOrEmpty(cond.Value))
+        if (cond.Operator is not ("isEmpty" or "isNotEmpty") && string.IsNullOrEmpty(cond.Value) && !isFieldToFieldComparison)
             return null;
 
         // Skip formula/computed fields — they have no physical column; filtered in-memory instead.
@@ -1272,7 +1293,32 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             colExpr = col;
         }
-        
+
+        // "the value in the field" — compare this field's column to another field's column on
+        // the same row instead of a literal. Only eq/ne/gt/gte/lt/lte/date_eq are meaningful here
+        // (enforced at save time by CommonReportValidationHelpers.FieldComparableOperators; an
+        // operator outside that set just falls through to "not supported" below, same handling
+        // as an unrecognized operator elsewhere in this method). No SubField-on-target support
+        // (Address-subfield-vs-Address-subfield is out of scope) — the target always resolves to
+        // its own plain column. Native SQL NULL semantics apply with no special-casing: a NULL on
+        // either side makes the comparison false, same as every other operator in this method.
+        if (isFieldToFieldComparison)
+        {
+            i--; // no @pname needed for a column-vs-column comparison — release the reserved slot
+            if (fieldLookup == null || !fieldLookup.TryGetValue(cond.ValueFieldId!.Value, out var targetField)
+                || PhysicalNaming.IsComputedTypeCode(targetField.TypeCode))
+                return null;
+            var colExpr2 = ResolveColumnName(targetField, cond.ValueFieldId.Value);
+            if (cond.Operator == "date_eq")
+                return $"CAST({colExpr} AS DATE) = CAST({colExpr2} AS DATE)";
+            var sqlOp = cond.Operator switch
+            {
+                "eq" => "=", "ne" => "<>", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=",
+                _ => null,
+            };
+            return sqlOp is null ? null : $"{colExpr} {sqlOp} {colExpr2}";
+        }
+
         var isNumericCol = col.Equals("Id", StringComparison.OrdinalIgnoreCase) ||
                            col.Equals("CreatedBy", StringComparison.OrdinalIgnoreCase) ||
                            col.Equals("ModifiedBy", StringComparison.OrdinalIgnoreCase) ||
@@ -1360,6 +1406,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             case "notContains":    p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
             case "startsWith":     p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) LIKE @{pname}";
             case "notStartsWith":  p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
+            case "wildcard":
+            {
+                p.Add(pname, TranslateWildcardPattern(cond.Value ?? "").ToLower());
+                return $"LOWER({stringColExpr}) LIKE @{pname}";
+            }
+            case "notWildcard":
+            {
+                p.Add(pname, TranslateWildcardPattern(cond.Value ?? "").ToLower());
+                return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
+            }
+            case "includes":
+            case "notIncludes":
+            {
+                // MultiSelect/MultiUser columns store either a JSON array ("["Red","Blue"]") or a
+                // comma list ("Red,Blue") — normalize both into one comma-delimited, comma-wrapped
+                // form so a boundary-anchored LIKE can't false-positive-match a substring of a
+                // different element (e.g. "includes Red" must not match a stored "Bred").
+                var normalizedExpr = $"(',' + REPLACE(REPLACE(REPLACE({stringColExpr}, '[', ','), ']', ','), '\"', ',') + ',')";
+                p.Add(pname, $"%,{cond.Value?.ToLower()},%");
+                var op = cond.Operator == "includes" ? "LIKE" : "NOT LIKE";
+                return $"LOWER({normalizedExpr}) {op} @{pname}";
+            }
             case "isEmpty":    i--; return $"({colExpr} IS NULL OR {colExpr} = '')";
             case "isNotEmpty": i--; return $"({colExpr} IS NOT NULL AND {colExpr} <> '')";
             case "in":

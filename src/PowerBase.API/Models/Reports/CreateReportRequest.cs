@@ -117,6 +117,10 @@ public class FilterConditionRequest
     public string? Value { get; set; }
     /// <summary>Optional JSON sub-field for complex types (e.g. Address street/city, DateRange start/end).</summary>
     public string? SubField { get; set; }
+    /// <summary>"literal" (default/null), "field", or "ask".</summary>
+    public string? ValueMode { get; set; }
+    /// <summary>Only meaningful when ValueMode == "field".</summary>
+    public long? ValueFieldId { get; set; }
 }
 
 // ── Sort request model ────────────────────────────────────────────────────────

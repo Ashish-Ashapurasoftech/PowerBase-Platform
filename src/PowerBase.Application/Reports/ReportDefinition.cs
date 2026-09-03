@@ -103,11 +103,16 @@ public class FilterNode
 public class FilterCondition
 {
     public long FieldId { get; set; }
-    /// <summary>eq, ne, contains, startsWith, gt, gte, lt, lte</summary>
+    /// <summary>eq, ne, contains, startsWith, gt, gte, lt, lte, wildcard, notWildcard, isCurrentUser, ...</summary>
     public string Operator { get; set; } = "eq";
     public string? Value { get; set; }
     /// <summary>Optional JSON sub-field for complex types (e.g. Address). When set, SQL uses JSON_VALUE(col,'$.subfield').</summary>
     public string? SubField { get; set; }
+    /// <summary>"literal" (default/null), "field" (compare to ValueFieldId on the same record), or "ask"
+    /// (unresolved until the report is run — the viewer is prompted; a condition left unresolved is a no-op).</summary>
+    public string? ValueMode { get; set; }
+    /// <summary>Only meaningful when ValueMode == "field" — the other field on this table to compare against.</summary>
+    public long? ValueFieldId { get; set; }
 }
 
 // ── Sort ─────────────────────────────────────────────────────────────────────
