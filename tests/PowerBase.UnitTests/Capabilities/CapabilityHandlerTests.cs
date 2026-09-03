@@ -16,6 +16,7 @@ public class CapabilityHandlerTests
     private readonly ICapabilityRepository _capabilityRepo = Substitute.For<ICapabilityRepository>();
     private readonly IAppRoleRepository _appRoleRepo = Substitute.For<IAppRoleRepository>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
+    private readonly IAppAccessService _appAccessService = Substitute.For<IAppAccessService>();
 
     [Fact]
     public async Task GetRoleCapabilities_ReturnsExpectedCapabilities()
@@ -52,7 +53,7 @@ public class CapabilityHandlerTests
         _appRoleRepo.GetByPublicIdAsync(roleId, Arg.Any<CancellationToken>())
             .Returns((AppRole?)null);
 
-        var handler = new SaveRoleCapabilitiesCommandHandler(_capabilityRepo, _appRoleRepo, _auditRepo);
+        var handler = new SaveRoleCapabilitiesCommandHandler(_capabilityRepo, _appRoleRepo, _auditRepo, _appAccessService);
 
         // Act & Assert
         await Assert.ThrowsAsync<NotFoundException>(() =>
@@ -68,12 +69,13 @@ public class CapabilityHandlerTests
         _appRoleRepo.GetByPublicIdAsync(roleId, Arg.Any<CancellationToken>())
             .Returns(role);
 
-        var handler = new SaveRoleCapabilitiesCommandHandler(_capabilityRepo, _appRoleRepo, _auditRepo);
+        var handler = new SaveRoleCapabilitiesCommandHandler(_capabilityRepo, _appRoleRepo, _auditRepo, _appAccessService);
 
         // Act
         await handler.HandleAsync(new SaveRoleCapabilitiesCommand(roleId, new[] { "schema", "form" }));
 
         // Assert
+        await _appAccessService.Received(1).RequirePermissionByAppIdAsync(role.AppId, Domain.Constants.PermissionCodes.RolesManage, Arg.Any<CancellationToken>());
         await _capabilityRepo.Received(1).SaveRoleCapabilitiesAsync(roleId, Arg.Is<IReadOnlyList<string>>(l => l.Contains("schema") && l.Contains("form")), Arg.Any<CancellationToken>());
         await _auditRepo.Received(1).LogActivityAsync(
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(),
@@ -88,7 +90,7 @@ public class CapabilityHandlerTests
         _appRoleRepo.GetByPublicIdAsync(roleId, Arg.Any<CancellationToken>())
             .Returns((AppRole?)null);
 
-        var handler = new UpdateRoleCapabilityCommandHandler(_capabilityRepo, _appRoleRepo, _auditRepo);
+        var handler = new UpdateRoleCapabilityCommandHandler(_capabilityRepo, _appRoleRepo, _auditRepo, _appAccessService);
 
         // Act & Assert
         await Assert.ThrowsAsync<NotFoundException>(() =>
@@ -104,12 +106,13 @@ public class CapabilityHandlerTests
         _appRoleRepo.GetByPublicIdAsync(roleId, Arg.Any<CancellationToken>())
             .Returns(role);
 
-        var handler = new UpdateRoleCapabilityCommandHandler(_capabilityRepo, _appRoleRepo, _auditRepo);
+        var handler = new UpdateRoleCapabilityCommandHandler(_capabilityRepo, _appRoleRepo, _auditRepo, _appAccessService);
 
         // Act
         await handler.HandleAsync(new UpdateRoleCapabilityCommand(roleId, "report", true));
 
         // Assert
+        await _appAccessService.Received(1).RequirePermissionByAppIdAsync(role.AppId, Domain.Constants.PermissionCodes.RolesManage, Arg.Any<CancellationToken>());
         await _capabilityRepo.Received(1).UpdateRoleCapabilityAsync(roleId, "report", true, Arg.Any<CancellationToken>());
         await _auditRepo.Received(1).LogActivityAsync(
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(),
