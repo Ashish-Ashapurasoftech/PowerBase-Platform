@@ -1,6 +1,7 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Application.Fields.Commands;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -87,6 +88,11 @@ public class BulkCreateFieldsCommandHandler
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
         var formsForTable = await _formRepo.ListByTableAsync(table.PublicId, ct);
 
+        // Snapshot of fields on the table so far — grows as each item in this batch is created, so
+        // e.g. a first-ever bulk add of 3 fields fills Primary/Secondary/Tertiary in order just like
+        // adding them one at a time would (see RecordPickerAutoAdvancer).
+        var fieldsSoFar = (await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>()).ToList();
+
         var results = new List<CreateFieldResult>();
 
         foreach (var item in command.Fields)
@@ -114,6 +120,12 @@ public class BulkCreateFieldsCommandHandler
 
             var nextFid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
 
+            // Searchable/Sortable/Reportable/Filterable start from the field type's own defaults
+            // (see FieldAdvancedSettingsCapability) rather than one fixed set for every type. Types
+            // outside the matrix keep the old fixed defaults, unchanged.
+            var advancedDefaults = FieldAdvancedSettingsCapability.Resolve(fieldType.Code, item.Settings)
+                ?? new FieldAdvancedSettingsCapability.Defaults(Searchable: false, Sortable: true, Reportable: true, Filterable: true, Auditable: false);
+
             var field = new AppField
             {
                 AppTableId = table.Id,
@@ -127,10 +139,10 @@ public class BulkCreateFieldsCommandHandler
                 Fid = nextFid,
                 Settings = item.Settings,
                 CreatedBy = _queryContext.UserId,
-                IsSearchable = false,
-                IsSortable = true,
-                IsFilterable = true,
-                IsReportable = true,
+                IsSearchable = advancedDefaults.Searchable,
+                IsSortable = advancedDefaults.Sortable,
+                IsFilterable = advancedDefaults.Filterable,
+                IsReportable = advancedDefaults.Reportable,
                 IsAuditable = item.IsAuditable,
                 IsEncrypted = item.IsEncrypted,
             };
@@ -138,6 +150,17 @@ public class BulkCreateFieldsCommandHandler
             var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
             field.Id = id;
             field.PublicId = publicId;
+
+            var nextPickerSlots = RecordPickerAutoAdvancer.NextSlots(table, fieldsSoFar, field.Id);
+            if (nextPickerSlots is not null)
+            {
+                var (f1, f2, f3) = nextPickerSlots.Value;
+                await _tableRepo.SetDefaultRecordPickerFieldsAsync(table.Id, f1, f2, f3, ct);
+                table.DefaultRecordPickerField1Id = f1;
+                table.DefaultRecordPickerField2Id = f2;
+                table.DefaultRecordPickerField3Id = f3;
+            }
+            fieldsSoFar.Add(field);
 
             // Physical column for non-computed types
             var physicalColumn = string.Empty;

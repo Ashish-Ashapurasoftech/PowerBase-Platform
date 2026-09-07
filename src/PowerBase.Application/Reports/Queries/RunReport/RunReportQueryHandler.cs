@@ -4,6 +4,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -12,6 +13,13 @@ namespace PowerBase.Application.Reports.Queries.RunReport;
 public class ReportColumnInfo
 {
     public long FieldId { get; init; }
+    /// <summary>Unique per-column key for reading this column's value out of a row's Fields
+    /// dictionary — always use this, never FieldId, to look up a row's value for this column.
+    /// For Table reports this is just FieldId.ToString() (one column per real field, naturally
+    /// unique). Summary/Chart reports let a user aggregate the SAME field with several
+    /// different functions (e.g. Sum and Avg of Amount) — those columns share FieldId, so Key
+    /// disambiguates them (e.g. "agg0_5", "agg1_5").</summary>
+    public string Key { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public string TypeCode { get; init; } = string.Empty;
 }
@@ -141,6 +149,25 @@ public class RunReportQueryHandler
             };
         }
 
+        // "<ask the user>" answers are substituted directly into the saved tree's own leaf
+        // positions FIRST — before the User/Date resolvers below, so an answer that's itself a
+        // picked user's Guid or a relative date tier gets picked up by them exactly like any other
+        // literal value. Preserves the saved tree's exact AND/OR structure (see
+        // ResolveAskAnswers's doc comment for why this can't be a separate AND'd-on-top group).
+        filterTree = ResolveAskAnswers(filterTree, query.AskAnswers, []);
+
+        // "is the current user" AND literal User/MultiUser picker values both need resolving to
+        // the plain long core.[User].Id the column actually stores before this tree reaches the
+        // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
+        var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
+        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), ct);
+
+        // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
+        // future) must resolve to an actual date freshly EVERY time the report runs, not once at
+        // save time — so this can't be done client-side when the filter is saved. See
+        // ResolveDateValueModeConditions's doc comment for the "today" anchor caveat.
+        filterTree = ResolveDateValueModeConditions(filterTree);
+
         // Table reports: TableSortGroup (Phase 1's unified Sort+Group list) supersedes the legacy
         // single-field GroupByFieldId + SortFields when non-empty — derive both the sort order
         // and the effective group field from it. Reports saved before this existed have an empty
@@ -183,14 +210,27 @@ public class RunReportQueryHandler
             }
         }
 
-        // Runtime filter tree (Advanced builder / per-column filters), AND'd on top of the
-        // saved tree — role ViewFilter and dynamic/quick-search filters are merged in further
-        // down (RunTableAsync) / below (RunSummaryAsync).
+        // Runtime filter tree (Advanced builder / per-column filters / the "ask the user"
+        // prompt's answers — see table-report-view.component.ts's buildRuntimeFilterTree()),
+        // AND'd on top of the saved tree — role ViewFilter and dynamic/quick-search filters are
+        // merged in further down (RunTableAsync) / below (RunSummaryAsync). Needs the SAME
+        // User-field-Guid and Date-relative-tier resolution as the saved tree above, for the same
+        // reason: an "ask the user" answer for a User field arrives here, not in `filterTree`.
+        //
+        // This was reverted once before, when it appeared to "break" a working ask-flow test —
+        // that was because the underlying record data itself held the wrong (Guid) value at the
+        // time (the write-path bug fixed in RecordWriteService/CreateRecordCommandHandler), so
+        // the *unresolved* raw Guid from the picker was accidentally matching the *also-wrong*
+        // stored Guid. Now that the write path stores the correct long id, leaving this
+        // unresolved is what's actually broken (confirmed: identical saved-vs-ask-prompt filters
+        // against the same now-correct data — saved matches, ask doesn't, until this runs).
         if (query.RuntimeFilterTree is { Nodes.Count: > 0 })
         {
+            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), ct);
+            resolvedRuntimeTree = ResolveDateValueModeConditions(resolvedRuntimeTree);
             filterTree = filterTree == null
-                ? query.RuntimeFilterTree
-                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = query.RuntimeFilterTree }] };
+                ? resolvedRuntimeTree
+                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = resolvedRuntimeTree }] };
         }
 
         if (report.ReportType is "Summary" or "Chart")
@@ -217,7 +257,7 @@ public class RunReportQueryHandler
     {
         // Intersect report columns with fields the role can see (drop None-access fields)
         var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
-        IReadOnlyList<AppField> selectedFields;
+        IReadOnlyList<AppField> selectedFields = [];
         if (definition.Columns.Count > 0)
         {
             var fieldMap = allFields
@@ -229,13 +269,9 @@ public class RunReportQueryHandler
                 .Select(id => fieldMap[id])
                 .ToList();
         }
-        else if (definition.ColumnsMode == "Default")
+
+        if (selectedFields.Count == 0 && definition.ColumnsMode == "Default")
         {
-            // "Default columns" means the table's Default Report Settings columns, not literally
-            // every reportable field — resolve them from that table's actual default Report row.
-            // Falls back to all-reportable when the default report has no columns configured
-            // either (including when THIS report IS the default report and its own Columns is
-            // empty — GetDefaultByTableAsync then just returns itself, terminating in one hop).
             var defaultReport = await _reportRepo.GetDefaultByTableAsync(table.PublicId, ct);
             var defaultColumnIds = defaultReport is null
                 ? []
@@ -252,37 +288,33 @@ public class RunReportQueryHandler
                     .Select(id => fieldMap[id])
                     .ToList();
             }
-            else
-            {
-                selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
-            }
         }
-        else
+
+        if (selectedFields.Count == 0)
         {
-            // Columns empty but ColumnsMode isn't (or predates) "Default" — e.g. a report saved
-            // before Phase 1 whose empty Columns always meant "show all reportable fields" under
-            // the old implicit convention. Preserved unchanged for backward compatibility.
             selectedFields = allFields.Where(f => f.Fid.HasValue && f.IsReportable && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
-
-        // Merge role record filter into the report's filter tree
-        if (access.ViewFilter != null)
+        if (selectedFields.Count == 0)
         {
-            filterTree = filterTree == null
-                ? access.ViewFilter
-                : new FilterGroup
-                {
-                    Logic = "and",
-                    Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = access.ViewFilter }]
-                };
+            selectedFields = allFields.Where(f => f.Fid.HasValue && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
 
-        // Merge runtime filters (dynamic/quick-search) into the filter tree
-        filterTree = MergeRuntimeFilters(filterTree, allFields, runtimeFilters);
+        // Merge role record filter into the report's filter tree.
+        // NOTE: ViewFilter is intentionally merged BEFORE runtime filters but we must track it
+        // separately so the AI Search path (OData filter below) only receives user-applied filters —
+        // not role-enforcement conditions. Role filters always go through SQL to guarantee correctness
+        // regardless of AI Search index freshness.
+        // We keep the merged filterTree for OData path (user filters only) and merge ViewFilter into
+        // the final SQL tree after AI Search resolves its ID set.
+        var userFilterTree = filterTree; // filterTree at this point = report save + runtime, no ViewFilter yet
+
+        // Merge runtime filters (dynamic/quick-search) into the user filter tree
+        userFilterTree = MergeRuntimeFilters(userFilterTree, allFields, runtimeFilters);
 
         var columns = selectedFields.Select(f => new ReportColumnInfo
         {
             FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id,
+            Key = (f.Fid.HasValue ? (long)f.Fid.Value : f.Id).ToString(),
             Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label,
             TypeCode = f.TypeCode,
         }).ToList();
@@ -294,9 +326,7 @@ public class RunReportQueryHandler
         {
             var hasSearchable = allFields.Any(f => f.IsSearchable);
 
-            // GAP #3: Only use AI Search when the feature flag is enabled.
-            // GAP #4: Fallback to SQL LIKE if Azure AI Search is unavailable.
-            var useAiSearch = _searchService.IsGridSearchEnabled && hasSearchable;
+            var useAiSearch = _searchService.IsGridSearchEnabled && hasSearchable && await _searchService.IsHealthyAsync(ct);
             var aiSearchSucceeded = false;
 
             if (useAiSearch)
@@ -304,36 +334,41 @@ public class RunReportQueryHandler
                 try
                 {
                     // Route query to Azure AI Search to bypass SQL encryption limitations.
-                    // GAP #2: Cap results at AiSearchMaxResults to prevent SQL parameter explosion.
                     var aiMatches = await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, ct);
-                    var cappedMatches = aiMatches.Count > AiSearchMaxResults
-                        ? aiMatches.Take(AiSearchMaxResults).ToList()
-                        : aiMatches;
-
-                    if (cappedMatches.Count > 0)
+                    if (aiMatches.Count > 0)
                     {
+                        var cappedMatches = aiMatches.Count > AiSearchMaxResults
+                            ? aiMatches.Take(AiSearchMaxResults).ToList()
+                            : aiMatches;
+
                         // GAP #2: Use direct chunked IN query instead of OR FilterGroup nodes.
-                        filterTree = await BuildAiIdFilterAsync(table, cappedMatches, filterTree, ct);
+                        userFilterTree = await BuildAiIdFilterAsync(table, cappedMatches, userFilterTree, ct);
+                        aiSearchSucceeded = true;
                     }
                     else
                     {
+                        // Quick search matched nothing. The intersection of zero AI matches with
+                        // any ViewFilter subset is always zero, so return empty regardless of
+                        // whether the role has a ViewFilter — same reasoning as the OData path below.
                         return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
                     }
-
-                    aiSearchSucceeded = true;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    // GAP #4: AI Search is unavailable — fall through to SQL LIKE path.
                     _logger.LogWarning(ex, "[QuickSearch] Azure AI Search unavailable for table {TableId}. Falling back to SQL LIKE.", table.Id);
                 }
             }
 
             if (!aiSearchSucceeded)
             {
-                // Standard SQL LIKE fallback (also used when IsGridSearchEnabled=false).
+                // Standard SQL LIKE fallback (used when AI Search is disabled, unhealthy, or returns 0 matches).
                 var textFields = allFields
-                    .Where(f => f.IsSearchable && f.TypeCode is "Text" or "TextMultiLine" or "Email" or "Phone" or "Url" or "SingleSelect" or "MultiSelect")
+                    .Where(f => !PhysicalNaming.IsComputedTypeCode(f.TypeCode) &&
+                                !f.TypeCode.Equals("File", StringComparison.OrdinalIgnoreCase) &&
+                                !f.TypeCode.Equals("Attachment", StringComparison.OrdinalIgnoreCase) &&
+                                !f.TypeCode.Equals("Signature", StringComparison.OrdinalIgnoreCase) &&
+                                !f.TypeCode.Equals("DateRange", StringComparison.OrdinalIgnoreCase) &&
+                                !f.TypeCode.Equals("NumericRange", StringComparison.OrdinalIgnoreCase))
                     .ToList();
                 if (quickSearchFieldIds is { Count: > 0 })
                 {
@@ -348,18 +383,20 @@ public class RunReportQueryHandler
                         Condition = new FilterCondition { FieldId = f.Fid.HasValue ? (long)f.Fid.Value : f.Id, Operator = searchOperator, Value = quickSearch }
                     }).ToList();
                     var qsGroup = new FilterGroup { Logic = "or", Nodes = qsNodes };
-                    filterTree = filterTree == null
+                    userFilterTree = userFilterTree == null
                         ? qsGroup
-                        : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = qsGroup }] };
+                        : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = userFilterTree }, new FilterNode { Group = qsGroup }] };
                 }
             }
         }
 
-        // Apply OData-based filter via Azure AI Search when the table has any AI-indexed fields.
+        // Apply OData-based filter via Azure AI Search for user-applied filters only.
+        // Role ViewFilter is intentionally excluded from OData/AI Search routing — it is always
+        // enforced via SQL below to guarantee correctness regardless of AI Search index freshness.
         // GAP #3: Only when IsGridSearchEnabled. GAP #4: Falls back to raw SQL tree on AI failure.
-        if (_searchService.IsGridSearchEnabled && filterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
+        if (_searchService.IsGridSearchEnabled && userFilterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
         {
-            var odata = OData.ODataFilterBuilder.Build(filterTree, allFields);
+            var odata = OData.ODataFilterBuilder.Build(userFilterTree, allFields);
             if (!string.IsNullOrWhiteSpace(odata))
             {
                 try
@@ -372,12 +409,15 @@ public class RunReportQueryHandler
 
                     if (cappedMatches.Count == 0)
                     {
+                        // User-applied filters matched nothing in AI Search.
+                        // If there is also a role ViewFilter, still return empty — the intersection
+                        // of zero AI matches with any ViewFilter subset is always zero.
                         return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
                     }
 
-                    // Rebuild filterTree: AND with matched IDs only (replaces original tree —
-                    // AI Search has already applied the filter, so we just restrict to its results).
-                    filterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
+                    // Rebuild userFilterTree: AND with matched IDs only (replaces original tree —
+                    // AI Search has already applied the user filter, so we just restrict to its results).
+                    userFilterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -385,6 +425,19 @@ public class RunReportQueryHandler
                     _logger.LogWarning(ex, "[ODataFilter] Azure AI Search unavailable for table {TableId}. Executing filter via SQL.", table.Id);
                 }
             }
+        }
+
+        // NOW merge role ViewFilter into the final SQL filter tree — always via SQL, never AI Search.
+        filterTree = userFilterTree;
+        if (access.ViewFilter != null)
+        {
+            filterTree = filterTree == null
+                ? access.ViewFilter
+                : new FilterGroup
+                {
+                    Logic = "and",
+                    Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = access.ViewFilter }]
+                };
         }
 
         // Determine which field IDs are formula (compute-on-read, no physical column)
@@ -531,6 +584,169 @@ public class RunReportQueryHandler
             .ToList();
     }
 
+    /// <summary>Recursively resolves two kinds of User-field filter values that can't be
+    /// evaluated as literal SQL text as-is:
+    /// (1) "isCurrentUser" conditions rewrite to a literal "eq" against the caller's own user id.
+    /// (2) Literal User/MultiUser condition VALUES arrive from the frontend's user picker as
+    ///     userPublicId Guid string(s) (comma-joined for MultiUser) — AppUserPickerResponse's own
+    ///     wire shape — but the column itself stores the plain long core.[User].Id (confirmed
+    ///     against every other User-field read path — see ResolveUserNamesAsync below,
+    ///     RecordResult.ResolveUserValue, GetDistinctFieldValuesQueryHandler, and
+    ///     RecordRepository's filter-SQL builder, which compares the stored column verbatim with
+    ///     no Guid conversion). Left unresolved, a picked user would never match. Each Guid part
+    ///     is resolved via IUserRepository.GetByPublicIdAsync and cached per call so the same
+    ///     picked user referenced by several conditions only costs one lookup; a part that isn't
+    ///     a parseable Guid (already numeric, or free text) passes through unchanged.
+    /// Do not copy RolePermissionEnforcer's appUser.UserPublicId.ToString() pattern for (1) — that
+    /// path is unproven (mock-only unit test, its UI is disabled) and writes the wrong id space.
+    /// Returns a new tree (never mutates the input) so callers holding onto the original
+    /// `definition.FilterTree` reference elsewhere aren't affected.</summary>
+    /// <summary>Substitutes each "&lt;ask the user&gt;" condition's value with the caller-supplied
+    /// answer, keyed by the condition's tree-path (root-to-leaf node indices joined with "-" —
+    /// must match table-report-view.component.ts's askConditionKey exactly). Preserves the tree's
+    /// exact AND/OR structure — this is why ask-answers are resolved this way instead of merged
+    /// as a separate flat group AND'd on top of everything else: a flat AND merge can't correctly
+    /// represent an ask-condition that lives inside an OR group (confirmed by direct testing — it
+    /// silently narrowed a saved "A or B" filter into "A and B"). An unanswered ask-condition (no
+    /// matching key, or a blank answer — e.g. the report's saved definition was run directly,
+    /// bypassing the prompt entirely) is left with ValueMode "ask" and an empty Value, which
+    /// BuildConditionClause's existing empty-value guard already treats as a no-op.</summary>
+    internal static FilterGroup? ResolveAskAnswers(FilterGroup? group, IReadOnlyDictionary<string, string>? answers, List<int> path)
+    {
+        if (group is null) return null;
+        var nodes = new List<FilterNode>();
+        for (var i = 0; i < group.Nodes.Count; i++)
+        {
+            var n = group.Nodes[i];
+            var childPath = new List<int>(path) { i };
+            FilterCondition? newCondition = n.Condition;
+            if (n.Condition is { } cond && string.Equals(cond.ValueMode, "ask", StringComparison.OrdinalIgnoreCase))
+            {
+                var key = string.Join("-", childPath);
+                if (answers != null && answers.TryGetValue(key, out var answer) && !string.IsNullOrEmpty(answer))
+                {
+                    newCondition = new FilterCondition
+                    {
+                        FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
+                        Value = answer, ValueMode = "literal", ValueFieldId = null,
+                    };
+                }
+            }
+            nodes.Add(new FilterNode
+            {
+                Condition = newCondition,
+                Group = ResolveAskAnswers(n.Group, answers, childPath),
+            });
+        }
+        return new FilterGroup { Logic = group.Logic, Nodes = nodes };
+    }
+
+    /// <summary>Resolves the Date-group's relative value-mode tiers (today/yesterday/tomorrow/
+    /// pastDays/futureDays — the "day(s) in the past/future" tiers carry the day count in
+    /// cond.Value) into a literal date string, matching the same "resolve one layer above the SQL
+    /// builder" shape as the other resolvers in this file. Anchored to UTC "now" — a known
+    /// simplification, since no per-tenant/app timezone is tracked anywhere else in this codebase
+    /// either. Non-Date-group conditions and any other ValueMode pass through unchanged.</summary>
+    internal static FilterGroup? ResolveDateValueModeConditions(FilterGroup? group)
+    {
+        if (group is null) return null;
+        var today = DateTime.UtcNow.Date;
+        return new FilterGroup
+        {
+            Logic = group.Logic,
+            Nodes = group.Nodes.Select(n => new FilterNode
+            {
+                Condition = n.Condition is null ? null : ResolveDateCondition(n.Condition, today),
+                Group = ResolveDateValueModeConditions(n.Group),
+            }).ToList(),
+        };
+    }
+
+    private static FilterCondition ResolveDateCondition(FilterCondition cond, DateTime today)
+    {
+        const string isoFormat = "yyyy-MM-dd";
+        string? resolved = cond.ValueMode switch
+        {
+            "today" => today.ToString(isoFormat),
+            "yesterday" => today.AddDays(-1).ToString(isoFormat),
+            "tomorrow" => today.AddDays(1).ToString(isoFormat),
+            "pastDays" => int.TryParse(cond.Value, out var pd) ? today.AddDays(-pd).ToString(isoFormat) : null,
+            "futureDays" => int.TryParse(cond.Value, out var fd) ? today.AddDays(fd).ToString(isoFormat) : null,
+            _ => null,
+        };
+        if (resolved is null) return cond;
+        return new FilterCondition
+        {
+            FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
+            Value = resolved, ValueMode = "literal", ValueFieldId = null,
+        };
+    }
+
+    internal async Task<FilterGroup?> ResolveUserFieldValuesAsync(
+        FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
+        Dictionary<Guid, long> guidCache, CancellationToken ct)
+    {
+        if (group is null) return null;
+        var nodes = new List<FilterNode>();
+        foreach (var n in group.Nodes)
+        {
+            FilterCondition? newCondition = n.Condition;
+            if (n.Condition is { } cond)
+            {
+                if (string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase))
+                {
+                    newCondition = new FilterCondition { FieldId = cond.FieldId, Operator = "eq", Value = currentUserId.ToString() };
+                }
+                else if (!string.IsNullOrEmpty(cond.Value)
+                    && (cond.ValueMode is null || string.Equals(cond.ValueMode, "literal", StringComparison.OrdinalIgnoreCase))
+                    && fieldLookup.TryGetValue(cond.FieldId, out var field)
+                    && (field.TypeCode is "User" or "MultiUser"))
+                {
+                    var parts = cond.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    var resolvedParts = new List<string>(parts.Length);
+                    foreach (var part in parts)
+                    {
+                        if (Guid.TryParse(part, out var guid))
+                        {
+                            if (!guidCache.TryGetValue(guid, out var longId))
+                            {
+                                try
+                                {
+                                    var user = await _userRepo.GetByPublicIdAsync(guid, ct);
+                                    longId = user.Id;
+                                }
+                                catch (Exception)
+                                {
+                                    // Unresolvable (deleted/unknown user) — leave the Guid text as-is;
+                                    // it simply won't match anything, which is the safe failure mode.
+                                    longId = -1;
+                                }
+                                guidCache[guid] = longId;
+                            }
+                            resolvedParts.Add(longId == -1 ? part : longId.ToString());
+                        }
+                        else
+                        {
+                            resolvedParts.Add(part);
+                        }
+                    }
+                    newCondition = new FilterCondition
+                    {
+                        FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
+                        ValueMode = cond.ValueMode, ValueFieldId = cond.ValueFieldId,
+                        Value = string.Join(",", resolvedParts),
+                    };
+                }
+            }
+            nodes.Add(new FilterNode
+            {
+                Condition = newCondition,
+                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, ct),
+            });
+        }
+        return new FilterGroup { Logic = group.Logic, Nodes = nodes };
+    }
+
     internal static FilterGroup? MergeRuntimeFilters(
         FilterGroup? filterTree,
         IReadOnlyList<AppField> allFields,
@@ -540,7 +756,12 @@ public class RunReportQueryHandler
 
         var runtimeNodes = new List<FilterNode>();
 
-        var fieldDict = allFields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var fieldDict = new Dictionary<long, AppField>();
+        foreach (var f in allFields)
+        {
+            if (f.Fid.HasValue) fieldDict[(long)f.Fid.Value] = f;
+            fieldDict[f.Id] = f;
+        }
 
         // Group by (FieldId, SubField) to support:
         //  - Same-field multi-select → OR'd together
@@ -741,16 +962,22 @@ public class RunReportQueryHandler
             }
         }
 
-        // Build alias→fieldId map. Identify columns displayed as percent-of-total and compute their totals.
-        var aggAliasToFieldId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Build alias→unique-key map — NOT alias→fieldId. A user can aggregate the SAME field
+        // with several different functions (e.g. Sum and Avg of Amount), and those columns
+        // share a FieldId — keying by FieldId alone collapses them onto the same row/column
+        // slot, so every one of them silently displays whichever aggregation's value happened
+        // to be written last. Key is a synthetic, always-unique-per-column identifier instead.
+        // Identify columns displayed as percent-of-total and compute their totals.
+        var aggAliasToKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var percentAliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var columnTotals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var agg in visibleAggregations)
+        for (var i = 0; i < visibleAggregations.Count; i++)
         {
+            var agg = visibleAggregations[i];
             if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
             var alias = $"{agg.Function}_{aggField.Name.Replace(" ", "_")}";
-            aggAliasToFieldId[alias] = agg.FieldId.ToString();
+            aggAliasToKey[alias] = $"agg{i}_{agg.FieldId}";
             if (agg.DisplayAs == "PercentOfColumnTotal")
             {
                 percentAliases.Add(alias);
@@ -759,48 +986,56 @@ public class RunReportQueryHandler
             }
         }
 
-        // Remap SQL alias keys to field-ID string keys; apply percent transform where configured
+        // Remap SQL alias keys to unique row keys; apply percent transform where configured
+        var groupKey = (groupByField.Fid ?? groupByField.Id).ToString();
+        var seriesKey = seriesField is not null ? (seriesField.Fid ?? seriesField.Id).ToString() : null;
         var items = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
-            fields[(groupByField.Fid ?? groupByField.Id).ToString()] = ResolveGroupOrSeriesValue(
+            fields[groupKey] = ResolveGroupOrSeriesValue(
                 row.TryGetValue("GroupValue", out var gv) ? gv : null, groupUserNames);
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
-            if (seriesField is not null)
-                fields[(seriesField.Fid ?? seriesField.Id).ToString()] = ResolveGroupOrSeriesValue(
+            if (seriesKey is not null)
+                fields[seriesKey] = ResolveGroupOrSeriesValue(
                     row.TryGetValue("SeriesValue", out var sv) ? sv : null, seriesUserNames);
-            foreach (var (alias, fieldId) in aggAliasToFieldId)
+            foreach (var (alias, key) in aggAliasToKey)
             {
                 if (!row.TryGetValue(alias, out var val)) continue;
                 if (percentAliases.Contains(alias) && columnTotals.TryGetValue(alias, out var total) && total != 0)
-                    fields[fieldId] = Math.Round(Convert.ToDouble(val ?? 0) / total * 100, 2);
+                    fields[key] = Math.Round(Convert.ToDouble(val ?? 0) / total * 100, 2);
                 else
-                    fields[fieldId] = val;
+                    fields[key] = val;
             }
             return new RecordResult { Id = Guid.Empty, CreatedOn = DateTime.UtcNow, Fields = fields };
         }).ToList();
 
-        // Synthetic columns: group-by field + Count + (Chart-only) series field + one per visible aggregation.
-        // FieldId must match the keys used in `fields` above (Fid when present, else Id) or the frontend can't
-        // look up the values by column.
+        // Synthetic columns: group-by field + Count + (Chart-only) series field + one per visible
+        // aggregation. Key must match the keys used in `fields` above, or the frontend can't look
+        // up the values by column — FieldId alone is NOT sufficient here (see aggAliasToKey above).
         var columns = new List<ReportColumnInfo>
         {
-            new() { FieldId = groupByField.Fid ?? groupByField.Id, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
-            new() { FieldId = 0, Name = "Count", TypeCode = "Number" },
+            new() { FieldId = groupByField.Fid ?? groupByField.Id, Key = groupKey, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
+            new() { FieldId = 0, Key = "0", Name = "Count", TypeCode = "Number" },
         };
         if (seriesField is not null)
         {
-            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
+            columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Key = seriesKey!, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
         }
-        foreach (var agg in visibleAggregations)
+        for (var i = 0; i < visibleAggregations.Count; i++)
         {
+            var agg = visibleAggregations[i];
             if (fieldMap.TryGetValue(agg.FieldId, out var aggField))
             {
                 var fieldName = string.IsNullOrWhiteSpace(aggField.Label) ? aggField.Name : aggField.Label;
                 var label = agg.DisplayAs == "PercentOfColumnTotal"
                     ? $"{agg.Function} of {fieldName} (%)"
                     : $"{agg.Function} of {fieldName}";
-                columns.Add(new ReportColumnInfo { FieldId = aggField.Fid ?? aggField.Id, Name = label, TypeCode = "Number" });
+                // Max/Min return a value from the source field's own domain (e.g. Max of a Date
+                // field is a date, not a count/sum) — the frontend needs the real TypeCode to
+                // render it correctly (formatDate vs formatNumber), not the generic "Number"
+                // every other aggregation function actually produces.
+                var columnTypeCode = agg.Function is "Max" or "Min" ? aggField.TypeCode : "Number";
+                columns.Add(new ReportColumnInfo { FieldId = aggField.Fid ?? aggField.Id, Key = $"agg{i}_{agg.FieldId}", Name = label, TypeCode = columnTypeCode });
             }
         }
 

@@ -35,6 +35,11 @@ public interface IFormRepository
     Task AppendFieldToLastSectionAsync(long formId, int fieldFid, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default);
     Task SetDefaultAsync(Guid tablePublicId, Guid formPublicId, CancellationToken ct = default);
+    /// <summary>Sets the table's Quick Peek form (unsetting any prior one first, mirroring
+    /// SetDefaultAsync's exclusivity). <paramref name="formPublicId"/> null just clears it.</summary>
+    Task SetQuickPeekFormAsync(Guid tablePublicId, Guid? formPublicId, CancellationToken ct = default);
+    /// <summary>The form flagged as this table's Quick Peek form, or null if none is set.</summary>
+    Task<Form?> GetQuickPeekFormAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<IReadOnlyList<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)>> GetRoleFormOverridesAsync(Guid tablePublicId, CancellationToken ct = default);
     Task UpdateRoleFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)> overrides, CancellationToken ct = default);
 }

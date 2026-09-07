@@ -118,7 +118,6 @@ SELECT c.Id, p.Id
 FROM meta.Capability c
 JOIN meta.Permission p ON p.Code IN (
     'apps:read',
-    'tables:read',
     'roles:manage', 'users:manage', 'users:invite'
 )
 WHERE c.Code = 'security'

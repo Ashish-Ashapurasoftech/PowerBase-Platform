@@ -16,6 +16,16 @@ public static class CommonReportValidationHelpers
     {
         "eq", "ne", "contains", "notContains", "startsWith", "notStartsWith",
         "gt", "gte", "lt", "lte", "in", "notIn", "isEmpty", "isNotEmpty", "date_eq",
+        "wildcard", "notWildcard", "isCurrentUser", "includes", "notIncludes",
+    };
+
+    /// <summary>Operators for which "compare to another field on this table" (ValueMode ==
+    /// "field") is a meaningful SQL comparison — see RecordRepository.BuildConditionClause's
+    /// field-vs-field branch. Pattern/substring-style operators against another field's live
+    /// value aren't supported (semantically odd, not requested).</summary>
+    public static readonly HashSet<string> FieldComparableOperators = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "eq", "ne", "gt", "gte", "lt", "lte", "date_eq",
     };
 
     /// <summary>Base aggregate functions valid everywhere; Summary/Chart validators layer the
@@ -67,6 +77,14 @@ public static class CommonReportValidationHelpers
                     AddError(errors, "filterTree", $"Invalid operator '{cond.Operator}'. Allowed: {string.Join(", ", AllowedOperators)}");
                 if (!validFieldIds.Contains(cond.FieldId))
                     AddError(errors, "filterTree", $"Unknown field ID in filter: {cond.FieldId}");
+
+                if (string.Equals(cond.ValueMode, "field", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!cond.ValueFieldId.HasValue || !validFieldIds.Contains(cond.ValueFieldId.Value))
+                        AddError(errors, "filterTree", $"'valueMode: field' requires a valid valueFieldId on this table (got: {cond.ValueFieldId?.ToString() ?? "null"}).");
+                    if (!FieldComparableOperators.Contains(cond.Operator))
+                        AddError(errors, "filterTree", $"Operator '{cond.Operator}' does not support comparing to another field.");
+                }
             }
 
             if (node.Group is { } sub)

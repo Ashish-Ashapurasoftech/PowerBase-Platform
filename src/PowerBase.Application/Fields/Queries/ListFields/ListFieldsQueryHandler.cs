@@ -13,14 +13,17 @@ public class ListFieldsResult
 
 public class ListFieldsQueryHandler
 {
-    private static readonly HashSet<string> AllowedSortFields = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>Shared with <see cref="ListAllFieldsQueryHandler"/> — both validate a caller-supplied
+    /// sortBy against the same grid columns.</summary>
+    internal static readonly HashSet<string> AllowedSortFields = new(StringComparer.OrdinalIgnoreCase)
     {
         "id", "name", "label", "description", "typeCode", "isRequired", "isSearchable", "isSortable",
         "isFilterable", "isReportable", "isAuditable", "isUnique", "isSystem", "fid", "createdOn",
     };
 
     /// <summary>Fid of the built-in Record ID# field — the implicit key when the table has no
-    /// explicit KeyFieldId set. Mirrors SetKeyCommandHandler.RecordIdFid.</summary>
+    /// explicit KeyFieldId set. Mirrors SetKeyCommandHandler.RecordIdFid and
+    /// <see cref="ListAllFieldsQueryHandler"/>'s copy of the same constant.</summary>
     private const int RecordIdFid = 3;
 
     private readonly IAppTableRepository _tableRepo;

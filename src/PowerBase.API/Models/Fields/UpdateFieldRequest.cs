@@ -12,4 +12,8 @@ public record UpdateFieldRequest(
     bool IsAuditable,
     bool IsUnique,
     bool IsEncrypted,
-    string? Settings);
+    string? Settings,
+    /// <summary>Required reason for this change — every field-settings update creates a new,
+    /// immutable version (see meta.AppFieldVersion), and the commit message is the human-readable
+    /// "why" attached to that version.</summary>
+    string CommitMessage);

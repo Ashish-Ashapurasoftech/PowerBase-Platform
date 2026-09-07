@@ -7,6 +7,7 @@ using PowerBase.Application.Capabilities.Commands.UpdateRoleCapability;
 using PowerBase.Application.Capabilities.Dtos;
 using PowerBase.Application.Capabilities.Queries.GetRoleCapabilities;
 using PowerBase.Application.Capabilities.Queries.ListCapabilities;
+using PowerBase.Domain.Constants;
 
 namespace PowerBase.API.Controllers;
 
@@ -58,6 +59,7 @@ public class CapabilitiesController : ControllerBase
 
     /// <summary>API 1.2: Get Builder Capabilities — Fetch which powers a role currently has.</summary>
     [HttpGet("{roleId:guid}")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByRoleId)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<RoleCapabilityDto>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -70,6 +72,7 @@ public class CapabilitiesController : ControllerBase
 
     /// <summary>API 1.3: Update/Revoke Capability — Turn a specific power on or off for a role.</summary>
     [HttpPatch("{roleId:guid}")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByRoleId)]
     [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

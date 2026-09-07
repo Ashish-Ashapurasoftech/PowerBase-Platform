@@ -1,5 +1,6 @@
 using System.Data;
 using Dapper;
+using Microsoft.Data.SqlClient;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
@@ -51,6 +52,20 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
           {1}
         ORDER BY {0}
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+        """;
+
+    // Same shape as ListByTablePagedSqlTemplate minus the OFFSET/FETCH — every matching row, one call.
+    private const string ListByTableFilteredSqlTemplate = """
+        SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
+               af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
+               af.IsUnique, af.IsSystem, af.Fid, af.CreatedOn
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+          AND af.IsDeleted = 0
+          AND (@search IS NULL OR af.Label LIKE @search)
+          {1}
+        ORDER BY {0}
         """;
 
     private const string CountByTableFilteredSqlTemplate = """
@@ -124,6 +139,12 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE af.PublicId = @publicId AND af.IsDeleted = 0
         """;
 
+    // No "AND IsSystem = 0" here (deliberately removed) — system fields now legitimately reach
+    // this path too, with their persisted values already coerced to the restricted allow-list by
+    // UpdateFieldCommandHandler before this SQL ever runs (Label/Description pinned, most flags
+    // forced false, Settings stripped). Excluding IsSystem rows here used to be redundant
+    // defense-in-depth for a save path system fields never took; now it just silently matches zero
+    // rows and the handler reports a false "Field not found" for every system-field save.
     private const string UpdateFieldSql = """
         UPDATE meta.AppField
         SET Label = @label, Description = @description,
@@ -134,7 +155,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             IsEncrypted = @isEncrypted,
             Settings = @settings,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
-        WHERE PublicId = @publicId AND AppTableId = @tableId AND IsSystem = 0 AND IsDeleted = 0
+        WHERE PublicId = @publicId AND AppTableId = @tableId AND IsDeleted = 0
         """;
 
     private const string SoftDeleteFieldSql = """
@@ -213,6 +234,24 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 categoryFilter,
                 offset = (page - 1) * pageSize,
                 pageSize
+            }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<IReadOnlyList<AppFieldListItemDto>> ListByTableFilteredAsync(
+        long tableId, string? search, string sortBy, bool sortDesc, string? filter, CancellationToken ct = default)
+    {
+        var column = ResolveSortColumn(sortBy);
+        var (filterFragment, categoryFilter) = ResolveFilterFragment(filter);
+        var sql = string.Format(ListByTableFilteredSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}, af.Id", filterFragment);
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<AppFieldListItemDto>(
+            new CommandDefinition(sql, new
+            {
+                tableId,
+                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
+                categoryFilter,
             }, cancellationToken: ct));
         return rows.ToList();
     }
@@ -431,24 +470,46 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<int> UpdateAsync(Guid publicId, long tableId, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
-        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, string? settings, CancellationToken ct = default)
+        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, string? settings,
+        CancellationToken ct = default, IDbTransaction? transaction = null)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var affected = await connection.ExecuteAsync(
-            new CommandDefinition(UpdateFieldSql, new
-            {
-                publicId, tableId, label, description,
-                isRequired, defaultValue, isSearchable, isSortable,
-                isFilterable, isReportable, isAuditable, isUnique, isEncrypted, settings,
-                modifiedBy = QueryContext.UserId,
-            }, cancellationToken: ct));
-
-        if (affected > 0)
+        var parameters = new
         {
-            var fid = await connection.ExecuteScalarAsync<int>(
-                new CommandDefinition("SELECT Fid FROM meta.AppField WHERE PublicId = @publicId AND AppTableId = @tableId", new { publicId, tableId }, cancellationToken: ct));
-            var tenantId = QueryContext.TenantId;
-            _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tenantId, tableId, new[] { (fid, isSearchable, isFilterable) }, default));
+            publicId, tableId, label, description,
+            isRequired, defaultValue, isSearchable, isSortable,
+            isFilterable, isReportable, isAuditable, isUnique, isEncrypted, settings,
+            modifiedBy = QueryContext.UserId,
+        };
+
+        int affected;
+        IDbConnection connection;
+        SqlConnection? ownConnection = null;
+        if (transaction is not null)
+        {
+            connection = transaction.Connection!;
+            affected = await connection.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, transaction, cancellationToken: ct));
+        }
+        else
+        {
+            ownConnection = await ConnectionFactory.CreateAsync(ct);
+            connection = ownConnection;
+            affected = await connection.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, cancellationToken: ct));
+        }
+
+        try
+        {
+            if (affected > 0)
+            {
+                var fid = await connection.ExecuteScalarAsync<int>(
+                    new CommandDefinition("SELECT Fid FROM meta.AppField WHERE PublicId = @publicId AND AppTableId = @tableId", new { publicId, tableId }, transaction, cancellationToken: ct));
+                var tenantId = QueryContext.TenantId;
+                _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tenantId, tableId, new[] { (fid, isSearchable, isFilterable) }, default));
+            }
+        }
+        finally
+        {
+            if (ownConnection is not null)
+                await ownConnection.DisposeAsync();
         }
 
         return affected;

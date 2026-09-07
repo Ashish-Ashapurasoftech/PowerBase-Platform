@@ -14,4 +14,5 @@ public record UpdateFieldCommand(
     bool IsAuditable,
     bool IsUnique,
     bool IsEncrypted,
-    string? Settings);
+    string? Settings,
+    string CommitMessage);

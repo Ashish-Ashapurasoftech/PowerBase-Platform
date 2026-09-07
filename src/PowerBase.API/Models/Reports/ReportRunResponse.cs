@@ -21,6 +21,10 @@ public class ReportRunResponse
 public class ReportColumnDto
 {
     public long FieldId { get; init; }
+    /// <summary>Unique per-column key for reading this column's value out of a row's fields —
+    /// use this, not FieldId, to look up a row's value for this column (Summary/Chart reports
+    /// can have several columns sharing the same FieldId, e.g. Sum and Avg of the same field).</summary>
+    public string Key { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public string TypeCode { get; init; } = string.Empty;
 }

@@ -6,6 +6,9 @@ public class TableResponse
 {
     public Guid PublicId { get; init; }
     public string Name { get; init; } = string.Empty;
+    /// <summary>Stable formula reference for this table (<c>_DBID_{TABLE_NAME}</c>) — read-only,
+    /// generated once at creation and never changed by a rename.</summary>
+    public string Alias { get; init; } = string.Empty;
     public string? SingularLabel { get; init; }
     public string? PluralLabel { get; init; }
     public string? Description { get; init; }

@@ -370,7 +370,8 @@ public class ReportsController : ControllerBase
             request.SortDesc,
             request.GroupByFieldId,
             request.GroupByDesc,
-            request.ClearGrouping), ct);
+            request.ClearGrouping,
+            request.AskAnswers), ct);
         return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
     }
 
@@ -379,6 +380,7 @@ public class ReportsController : ControllerBase
         Columns = result.Columns.Select(c => new ReportColumnDto
         {
             FieldId = c.FieldId,
+            Key = c.Key,
             Name = c.Name,
             TypeCode = c.TypeCode,
         }).ToList(),
@@ -508,7 +510,9 @@ public class ReportsController : ControllerBase
                 ColumnHeaderText = r.Definition.Options.ColumnHeaderText,
                 ShowEditIcon = r.Definition.Options.ShowEditIcon,
                 ShowViewIcon = r.Definition.Options.ShowViewIcon,
+                ShowQuickPeekIcon = r.Definition.Options.ShowQuickPeekIcon,
                 DisableBulkDelete = r.Definition.Options.DisableBulkDelete,
+                ShowDescriptionOnReportPage = r.Definition.Options.ShowDescriptionOnReportPage,
             },
         },
         IsDefault = r.IsDefault,
@@ -554,6 +558,8 @@ public class ReportsController : ControllerBase
                     Operator = n.Condition.Operator,
                     Value = n.Condition.Value,
                     SubField = n.Condition.SubField,
+                    ValueMode = n.Condition.ValueMode,
+                    ValueFieldId = n.Condition.ValueFieldId,
                 },
                 Group = MapFilterGroup(n.Group),
             }).ToList(),
@@ -574,6 +580,8 @@ public class ReportsController : ControllerBase
                     Operator = n.Condition.Operator,
                     Value = n.Condition.Value,
                     SubField = n.Condition.SubField,
+                    ValueMode = n.Condition.ValueMode,
+                    ValueFieldId = n.Condition.ValueFieldId,
                 },
                 Group = MapFilterGroupDto(n.Group),
             }).ToList(),
@@ -583,7 +591,8 @@ public class ReportsController : ControllerBase
     // ── Table Options mapping helper ──────────────────────────────────────────
 
     private static ReportOptionsCommand? MapOptions(ReportOptionsRequest? req) =>
-        req is null ? null : new ReportOptionsCommand(req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.DisableBulkDelete);
+        req is null ? null : new ReportOptionsCommand(
+            req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.ShowQuickPeekIcon, req.DisableBulkDelete, req.ShowDescriptionOnReportPage);
 
     // ── Chart config mapping helpers ──────────────────────────────────────────
 

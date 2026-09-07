@@ -22,15 +22,18 @@ public sealed class FormulaEngine
     /// <summary>
     /// Compile an expression against a field schema. When <paramref name="expectedType"/>
     /// is supplied (e.g. a formula field's declared result type), a mismatch is
-    /// reported as a diagnostic. Always returns a <see cref="CompiledFormula"/>;
-    /// inspect <see cref="CompiledFormula.HasErrors"/> before evaluating.
+    /// reported as a diagnostic. <paramref name="aliasSchema"/> lets <c>[_DBID_*]</c> bracket
+    /// tokens resolve as table-alias references (see <see cref="ITableAliasSchema"/>) instead of
+    /// unknown fields — omit it for callers with no table-alias concept to offer. Always returns
+    /// a <see cref="CompiledFormula"/>; inspect <see cref="CompiledFormula.HasErrors"/> before
+    /// evaluating.
     /// </summary>
-    public CompiledFormula Compile(string expression, IFieldSchema schema, FormulaType? expectedType = null)
+    public CompiledFormula Compile(string expression, IFieldSchema schema, FormulaType? expectedType = null, ITableAliasSchema? aliasSchema = null)
     {
         var parse = Parser.Parse(expression);
         var diagnostics = new List<FormulaDiagnostic>(parse.Diagnostics);
 
-        var referencedFids = Binder.Bind(parse.Root, schema, diagnostics);
+        var referencedFids = Binder.Bind(parse.Root, schema, diagnostics, aliasSchema);
         var resultType = new TypeChecker(_functions, diagnostics).Check(parse.Root);
 
         if (expectedType is { } expected && resultType != FormulaType.Null && resultType != expected)
@@ -45,8 +48,8 @@ public sealed class FormulaEngine
     }
 
     /// <summary>Compile and return only the diagnostics — drives the authoring UI's inline errors.</summary>
-    public IReadOnlyList<FormulaDiagnostic> Validate(string expression, IFieldSchema schema, FormulaType? expectedType = null)
-        => Compile(expression, schema, expectedType).Diagnostics;
+    public IReadOnlyList<FormulaDiagnostic> Validate(string expression, IFieldSchema schema, FormulaType? expectedType = null, ITableAliasSchema? aliasSchema = null)
+        => Compile(expression, schema, expectedType, aliasSchema).Diagnostics;
 
     /// <summary>Evaluate a previously compiled formula against one record's values.</summary>
     /// <exception cref="Evaluation.FormulaEvaluationException">If the formula has compile errors.</exception>

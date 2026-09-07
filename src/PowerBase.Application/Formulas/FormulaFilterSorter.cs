@@ -101,10 +101,20 @@ public static class FormulaFilterSorter
             {
                 if (field != null && FormulaTypeMap.IsComputedField(field.TypeCode, field.Settings))
                     return p.Computed.TryGetValue(fid, out var cv) ? cv : null;
-                if (field?.IsSystem == true && field.PhysicalColumnName != null)
-                    return p.Row.TryGetValue(field.PhysicalColumnName, out var sv) ? sv : null;
-                var col = PhysicalNaming.ColumnName((int)fid);
-                return p.Row.TryGetValue(col, out var v) ? v : null;
+                if (fid == -1)
+                    return p.Row.TryGetValue("PublicId", out var pv) ? pv : null;
+                var colName = field != null && !string.IsNullOrWhiteSpace(field.PhysicalColumnName)
+                    ? field.PhysicalColumnName
+                    : (fid switch
+                    {
+                        1 => "CreatedOn",
+                        2 => "ModifiedOn",
+                        3 => "Id",
+                        4 => "CreatedBy",
+                        5 => "ModifiedBy",
+                        _ => field?.Fid.HasValue == true ? PhysicalNaming.ColumnName(field.Fid.Value) : PhysicalNaming.ColumnName((int)fid)
+                    });
+                return p.Row.TryGetValue(colName, out var v) ? v : null;
             }
 
             if (ordered == null)
@@ -184,14 +194,24 @@ public static class FormulaFilterSorter
         {
             p.Computed.TryGetValue(c.FieldId, out val);
         }
-        else if (field?.IsSystem == true && field.PhysicalColumnName != null)
+        else if (c.FieldId == -1)
         {
-            p.Row.TryGetValue(field.PhysicalColumnName, out val);
+            p.Row.TryGetValue("PublicId", out val);
         }
         else
         {
-            var col = PhysicalNaming.ColumnName((int)c.FieldId);
-            p.Row.TryGetValue(col, out val);
+            var colName = field != null && !string.IsNullOrWhiteSpace(field.PhysicalColumnName)
+                ? field.PhysicalColumnName
+                : (c.FieldId switch
+                {
+                    1 => "CreatedOn",
+                    2 => "ModifiedOn",
+                    3 => "Id",
+                    4 => "CreatedBy",
+                    5 => "ModifiedBy",
+                    _ => field?.Fid.HasValue == true ? PhysicalNaming.ColumnName(field.Fid.Value) : PhysicalNaming.ColumnName((int)c.FieldId)
+                });
+            p.Row.TryGetValue(colName, out val);
         }
 
         return c.Operator switch
@@ -222,8 +242,17 @@ public static class FormulaFilterSorter
         if (string.IsNullOrWhiteSpace(raw)) return [];
         try
         {
-            var arr = JsonSerializer.Deserialize<List<string>>(raw);
-            if (arr != null) return arr.Where(v => !string.IsNullOrEmpty(v)).ToList();
+            using var doc = JsonDocument.Parse(raw);
+            if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                var list = new List<string>();
+                foreach (var el in doc.RootElement.EnumerateArray())
+                {
+                    var str = el.ValueKind == JsonValueKind.String ? el.GetString() : el.GetRawText();
+                    if (!string.IsNullOrWhiteSpace(str)) list.Add(str.Trim('"'));
+                }
+                return list;
+            }
         }
         catch (JsonException) { /* not JSON — fall through to comma split */ }
         return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();

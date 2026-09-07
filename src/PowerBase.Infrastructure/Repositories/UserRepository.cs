@@ -9,7 +9,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class UserRepository : ControlRepositoryBase, IUserRepository
 {
-    private const string SelectColumns = "u.Id, u.PublicId, u.Email, u.EmailNormalized, u.HashedPassword, u.Name, u.SystemRoleId, sr.Code AS SystemRoleCode, u.IsEmailVerified, u.IsActive, u.Preferences, u.IsDeleted, u.LastLoginOn, u.CreatedOn, u.CreatedBy, u.ModifiedOn, u.ModifiedBy, u.DeletedOn, u.DeletedBy, u.RowVersion";
+    private const string SelectColumns = "u.Id, u.PublicId, u.Email, u.EmailNormalized, u.HashedPassword, u.Name, u.FirstName, u.LastName, u.SystemRoleId, sr.Code AS SystemRoleCode, u.IsEmailVerified, u.IsActive, u.Preferences, u.IsDeleted, u.LastLoginOn, u.CreatedOn, u.CreatedBy, u.ModifiedOn, u.ModifiedBy, u.DeletedOn, u.DeletedBy, u.RowVersion";
 
     private const string GetByEmailSql = $"""
         SELECT {SelectColumns}
@@ -36,15 +36,21 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
         """;
 
     private const string InsertSql = """
-        INSERT INTO core.[User] (Email, EmailNormalized, HashedPassword, Name, IsEmailVerified, IsActive, IsDeleted, CreatedOn, CreatedBy)
+        INSERT INTO core.[User] (Email, EmailNormalized, HashedPassword, Name, FirstName, LastName, IsEmailVerified, IsActive, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id
-        VALUES (@email, @emailNormalized, @hashedPassword, @name, 0, @isActive, 0, SYSUTCDATETIME(), 0)
+        VALUES (@email, @emailNormalized, @hashedPassword, @name, @firstName, @lastName, 0, @isActive, 0, SYSUTCDATETIME(), 0)
         """;
 
     private const string ActivateSql = """
         UPDATE core.[User]
-        SET Name = @name, HashedPassword = @hashedPassword, IsActive = 1, ModifiedOn = SYSUTCDATETIME()
+        SET FirstName = @firstName, LastName = @lastName, Name = @name, HashedPassword = @hashedPassword, IsActive = 1, ModifiedOn = SYSUTCDATETIME()
         WHERE Id = @userId AND IsActive = 0 AND IsDeleted = 0
+        """;
+
+    private const string UpdateProfileSql = """
+        UPDATE core.[User]
+        SET FirstName = @firstName, LastName = @lastName, Name = @name, ModifiedOn = SYSUTCDATETIME()
+        WHERE Id = @userId AND IsDeleted = 0
         """;
 
     private const string UpdatePasswordSql = """
@@ -97,7 +103,9 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
                     email = user.Email,
                     emailNormalized = user.Email.ToUpperInvariant(),
                     hashedPassword = user.HashedPassword,
-                    name = user.Name,
+                    name = string.IsNullOrWhiteSpace(user.Name) ? $"{user.FirstName} {user.LastName}".Trim() : user.Name,
+                    firstName = user.FirstName ?? string.Empty,
+                    lastName = user.LastName ?? string.Empty,
                     isActive = user.IsActive,
                 }, transaction, cancellationToken: ct));
         }
@@ -119,11 +127,20 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
         return rows.ToDictionary(r => r.Id, r => r.Name);
     }
 
-    public async Task ActivateAsync(long userId, string name, string hashedPassword, CancellationToken ct = default)
+    public async Task ActivateAsync(long userId, string firstName, string lastName, string hashedPassword, CancellationToken ct = default)
     {
+        var name = $"{firstName} {lastName}".Trim();
         await using var connection = ConnectionFactory.Create();
         await connection.ExecuteAsync(
-            new CommandDefinition(ActivateSql, new { userId, name, hashedPassword }, cancellationToken: ct));
+            new CommandDefinition(ActivateSql, new { userId, firstName, lastName, name, hashedPassword }, cancellationToken: ct));
+    }
+
+    public async Task UpdateProfileAsync(long userId, string firstName, string lastName, CancellationToken ct = default)
+    {
+        var name = $"{firstName} {lastName}".Trim();
+        await using var connection = ConnectionFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(UpdateProfileSql, new { userId, firstName, lastName, name }, cancellationToken: ct));
     }
 
     public async Task UpdatePasswordAsync(long userId, string hashedPassword, CancellationToken ct = default)

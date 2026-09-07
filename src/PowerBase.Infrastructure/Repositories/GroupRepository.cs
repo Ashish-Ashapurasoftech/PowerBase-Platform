@@ -377,6 +377,21 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
         return (items, total);
     }
 
+    private const string GetMyGroupsSql = @"
+        SELECT g.Id, g.PublicId, g.Name, g.Description, g.CreatedOn,
+               (SELECT COUNT(1) FROM meta.GroupMember gm2 WHERE gm2.GroupId = g.Id AND gm2.IsDeleted = 0) AS MemberCount
+        FROM meta.[Group] g
+        INNER JOIN meta.GroupMember gm ON gm.GroupId = g.Id AND gm.IsDeleted = 0
+        WHERE gm.UserId = @userId AND g.IsDeleted = 0
+        ORDER BY g.Name;";
+
+    public async Task<IEnumerable<GroupDto>> GetMyGroupsAsync(long userId, CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(ct);
+        return await conn.QueryAsync<GroupDto>(new CommandDefinition(
+            GetMyGroupsSql, new { userId }, cancellationToken: ct));
+    }
+
     public async Task<bool> ShareWithAppsAsync(Guid groupPublicId, IEnumerable<Guid> appPublicIds, long createdBy, Guid? appRolePublicId = null, CancellationToken ct = default)
     {
         await using var conn = await OpenConnectionAsync(ct);

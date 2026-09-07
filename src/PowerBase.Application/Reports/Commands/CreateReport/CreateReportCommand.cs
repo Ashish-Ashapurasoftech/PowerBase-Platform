@@ -33,7 +33,9 @@ public record ReportOptionsCommand(
     string ColumnHeaderText = "Default",
     bool ShowEditIcon = true,
     bool ShowViewIcon = true,
-    bool DisableBulkDelete = false);
+    bool ShowQuickPeekIcon = true,
+    bool DisableBulkDelete = false,
+    bool ShowDescriptionOnReportPage = false);
 
 public record ChartConfigCommand(
     string ChartType,

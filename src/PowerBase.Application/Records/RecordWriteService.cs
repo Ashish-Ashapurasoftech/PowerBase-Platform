@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
+using PowerBase.Formula;
 
 namespace PowerBase.Application.Records;
 
@@ -36,23 +37,29 @@ public sealed class RecordWriteService : IRecordWriteService
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IAppUserRepository _appUserRepo;
+    private readonly IUserRepository _userRepo;
     private readonly IAuditRepository _auditRepo;
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
+    private readonly FormulaEngine _engine;
 
     public RecordWriteService(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IAppUserRepository appUserRepo,
+        IUserRepository userRepo,
         IAuditRepository auditRepo,
-        IPipelineTriggerInterceptor triggerInterceptor)
+        IPipelineTriggerInterceptor triggerInterceptor,
+        FormulaEngine engine)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _appUserRepo = appUserRepo;
+        _userRepo = userRepo;
         _auditRepo = auditRepo;
         _triggerInterceptor = triggerInterceptor;
+        _engine = engine;
     }
 
     private static bool AreValuesEqual(object? val1, object? val2, string? typeCode)
@@ -112,10 +119,20 @@ public sealed class RecordWriteService : IRecordWriteService
         foreach (var kvp in refOverrides)
             effectiveValues[kvp.Key] = kvp.Value;
 
+        // User/MultiUser values submitted from the record form's picker (or an Action Button's
+        // "Add Data" values) arrive as userPublicId Guid(s) — resolve to the long id the column
+        // actually stores. See UserFieldValueResolver's doc comment for why.
+        await UserFieldValueResolver.ResolveAsync(_userRepo, fields, effectiveValues, ct);
+
         // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
         // values about to be persisted, excluding this record itself from the Unique collision check.
         var recordId = Convert.ToInt64(oldRecord["Id"]);
         await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct);
+
+        // Custom Data Rule — same formula-based save gate as record creation (see
+        // CreateRecordCommandHandler), covering both plain record edits and Action Button writes
+        // that go through this shared service.
+        await CustomDataRuleValidator.ValidateAsync(table, fields, effectiveValues, _tableRepo, _fieldRepo, _recordRepo, _engine, ct);
 
         await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct, onIndexMessageCreated);
 

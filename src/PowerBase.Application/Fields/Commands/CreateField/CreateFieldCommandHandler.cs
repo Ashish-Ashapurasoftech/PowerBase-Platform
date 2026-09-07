@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Fields.Commands;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -82,6 +83,10 @@ public class CreateFieldCommandHandler
         if (await _fieldRepo.LabelExistsInTableAsync(table.Id, command.Label, ct: ct))
             throw new DuplicateException("Field", "label", command.Label);
 
+        // Snapshot the table's existing fields before adding this one — used below to auto-advance
+        // the Identifying Records picker slots (see AutoAdvanceRecordPickerAsync).
+        var existingFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
+
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(command.TypeCode, ct)
             ?? throw new NotFoundException("FieldType", command.TypeCode);
 
@@ -90,6 +95,12 @@ public class CreateFieldCommandHandler
 
         var nextFid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
         var generatedName = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, command.Label, isSystem: false, ct);
+
+        // Searchable/Sortable/Reportable/Filterable start from the field type's own defaults (see
+        // FieldAdvancedSettingsCapability) rather than one fixed set for every type. Types outside
+        // the matrix keep the old fixed defaults, unchanged.
+        var advancedDefaults = FieldAdvancedSettingsCapability.Resolve(fieldType.Code, command.Settings)
+            ?? new FieldAdvancedSettingsCapability.Defaults(Searchable: false, Sortable: true, Reportable: true, Filterable: true, Auditable: false);
 
         var field = new AppField
         {
@@ -104,10 +115,10 @@ public class CreateFieldCommandHandler
             Fid = nextFid,
             Settings = command.Settings,
             CreatedBy = _queryContext.UserId,
-            IsSearchable = false,
-            IsSortable = true,
-            IsFilterable = true,
-            IsReportable = true,
+            IsSearchable = advancedDefaults.Searchable,
+            IsSortable = advancedDefaults.Sortable,
+            IsFilterable = advancedDefaults.Filterable,
+            IsReportable = advancedDefaults.Reportable,
             IsAuditable = command.IsAuditable,
             IsEncrypted = command.IsEncrypted,
         };
@@ -115,6 +126,13 @@ public class CreateFieldCommandHandler
         var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
         field.Id = id;
         field.PublicId = publicId;
+
+        var nextPickerSlots = RecordPickerAutoAdvancer.NextSlots(table, existingFields, field.Id);
+        if (nextPickerSlots is not null)
+        {
+            var (f1, f2, f3) = nextPickerSlots.Value;
+            await _tableRepo.SetDefaultRecordPickerFieldsAsync(table.Id, f1, f2, f3, ct);
+        }
 
         // Computed fields (Formula) have no physical column — skip column naming and DDL.
         var physicalColumn = string.Empty;

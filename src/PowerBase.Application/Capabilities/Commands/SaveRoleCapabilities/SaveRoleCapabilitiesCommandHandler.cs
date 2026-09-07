@@ -9,21 +9,26 @@ public class SaveRoleCapabilitiesCommandHandler
     private readonly ICapabilityRepository _capabilityRepo;
     private readonly IAppRoleRepository _appRoleRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IAppAccessService _appAccessService;
 
     public SaveRoleCapabilitiesCommandHandler(
         ICapabilityRepository capabilityRepo,
         IAppRoleRepository appRoleRepo,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IAppAccessService appAccessService)
     {
         _capabilityRepo = capabilityRepo;
         _appRoleRepo = appRoleRepo;
         _auditRepo = auditRepo;
+        _appAccessService = appAccessService;
     }
 
     public async Task HandleAsync(SaveRoleCapabilitiesCommand command, CancellationToken ct = default)
     {
         var role = await _appRoleRepo.GetByPublicIdAsync(command.RolePublicId, ct)
             ?? throw new NotFoundException("AppRole", command.RolePublicId);
+
+        await _appAccessService.RequirePermissionByAppIdAsync(role.AppId, PermissionCodes.RolesManage, ct);
 
         await _capabilityRepo.SaveRoleCapabilitiesAsync(command.RolePublicId, command.Capabilities, ct);
 

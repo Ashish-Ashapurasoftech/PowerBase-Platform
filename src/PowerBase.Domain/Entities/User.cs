@@ -8,6 +8,8 @@ public class User
     public string EmailNormalized { get; set; } = string.Empty;
     public string HashedPassword { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
     public bool IsEmailVerified { get; set; }
     public int? SystemRoleId { get; set; }
     public string? SystemRoleCode { get; set; }

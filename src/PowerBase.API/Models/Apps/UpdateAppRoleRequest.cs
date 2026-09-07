@@ -4,4 +4,5 @@ public record UpdateAppRoleRequest(
     IReadOnlyList<string>? Permissions = null,
     string? ManageableRolesType = null,
     int? Rank = null,
-    IReadOnlyList<Guid>? ManageableRolePublicIds = null);
+    IReadOnlyList<Guid>? ManageableRolePublicIds = null,
+    string? Name = null);

@@ -23,6 +23,7 @@ internal sealed class Evaluator
     public FormulaValue Eval(Expr expr, IRecordContext ctx, EvaluationOptions opt) => expr switch
     {
         LiteralExpr l => l.Value,
+        FieldRefExpr { TableAliasId: { } tableId } => FormulaValue.Text(tableId),
         FieldRefExpr f => ValueConvert.FromRaw(f.Type, ctx.GetValue(f.Fid)),
         UnaryExpr u => EvalUnary(u, ctx, opt),
         BinaryExpr b => EvalBinary(b, ctx, opt),

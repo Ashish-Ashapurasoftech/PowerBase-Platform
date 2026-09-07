@@ -314,6 +314,39 @@ public class ReportHandlerTests
     }
 
     [Fact]
+    public async Task RunReport_QuickSearch_FallbackToSql_IncludesNonComputedPhysicalFields()
+    {
+        var table = MakeTable();
+        var textfield = new AppField { Id = 1, Fid = 1, Name = "Name", TypeCode = "Text", IsReportable = true, IsSearchable = false };
+        var dateField = new AppField { Id = 2, Fid = 2, Name = "CreatedOn", TypeCode = "DateTime", IsSystem = true, IsReportable = true, IsSearchable = false };
+        var report = MakeReport(table.Id, []);
+        _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
+        _tableRepo.GetByIdAsync(table.Id).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { textfield, dateField });
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>>());
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>()).Returns(0);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult(new TableAccessContext
+            {
+                Unrestricted = true,
+                VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
+                EditableFieldIds = new HashSet<long>(),
+            }));
+        _searchService.IsGridSearchEnabled.Returns(false);
+
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
+
+        await sut.HandleAsync(new RunReportQuery(report.PublicId, 1, 20, QuickSearch: "nira"));
+
+        await _recordRepo.Received(1).ListAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20,
+            Arg.Is<FilterGroup?>(f => f != null && f.Logic == "or" && f.Nodes.Count == 2),
+            Arg.Any<IReadOnlyList<SortSpec>?>());
+    }
+
+    [Fact]
     public async Task RunReport_ReportBuilderWithoutTableAccess_MasksDataAndReturnsCountAndColumns()
     {
         var table = MakeTable();
