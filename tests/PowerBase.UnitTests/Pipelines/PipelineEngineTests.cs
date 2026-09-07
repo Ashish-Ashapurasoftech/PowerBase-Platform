@@ -360,6 +360,67 @@ public class PipelineEngineTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_ConditionFalse_CamelCaseElseChildrenBranch_RunsElseBranch()
+    {
+        // Arrange
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "RecordAdded", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 999, Type = "trigger", Subtype = "new-event", IsDeleted = false },
+            new()
+            {
+                Id = 1,
+                PublicId = Guid.NewGuid(),
+                RefId = "cond_1",
+                Label = "Condition False",
+                Type = "condition",
+                Subtype = "if-else",
+                ConfigJson = JsonSerializer.Serialize(new { LeftOperand = "2", Operator = "greater-than", RightOperand = "3" })
+            },
+            new()
+            {
+                Id = 2,
+                ParentStepId = 1,
+                ParentBranch = "children",
+                PublicId = Guid.NewGuid(),
+                RefId = "act_true",
+                Label = "Create Record True Branch",
+                Type = "action",
+                Subtype = "create-record",
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FieldMappings = new List<object>() })
+            },
+            new()
+            {
+                Id = 3,
+                ParentStepId = 1,
+                ParentBranch = "elseChildren", // Saved as camelCase
+                PublicId = Guid.NewGuid(),
+                RefId = "act_false",
+                Label = "Create Record False Branch",
+                Type = "action",
+                Subtype = "create-record",
+                ConfigJson = JsonSerializer.Serialize(new { TableId = Guid.NewGuid().ToString(), FieldMappings = new List<object>() })
+            }
+        };
+
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 10 });
+        _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Is<System.Data.IDbTransaction?>(x => true), Arg.Any<CancellationToken>())
+            .Returns(Guid.NewGuid());
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 3), Arg.Any<CancellationToken>());
+        await _pipelineRepo.DidNotReceive().CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 2), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public void EvaluateTokens_NestedJsonObjectLookup_ResolvesCorrectly()
     {
         var payload = JsonSerializer.Serialize(new
@@ -510,7 +571,7 @@ public class PipelineEngineTests
     }
 
     [Fact]
-    public void EvaluateConditionGroup_GroupedRulesAndRecursiveLogic_EvaluatesCorrectly()
+    public async Task EvaluateConditionGroup_GroupedRulesAndRecursiveLogic_EvaluatesCorrectly()
     {
         var payload = JsonSerializer.Serialize(new
         {
@@ -551,8 +612,9 @@ public class PipelineEngineTests
 
         groupType.GetProperty("Rules")!.SetValue(groupInstance, rulesList);
 
-        var method = typeof(PipelineEngine).GetMethod("EvaluateConditionGroup", BindingFlags.NonPublic | BindingFlags.Instance);
-        var result = (bool)method!.Invoke(_engine, new[] { groupInstance, payload, null, null })!;
+        var method = typeof(PipelineEngine).GetMethod("EvaluateConditionGroupAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+        var task = (Task<bool>)method!.Invoke(_engine, new object?[] { groupInstance, payload, null, _fieldRepo, _tableRepo, null, new List<object>(), CancellationToken.None })!;
+        var result = await task;
 
         result.Should().BeTrue();
     }
@@ -2123,5 +2185,265 @@ public class PipelineEngineTests
         node.Condition!.FieldId.Should().Be(3); // Stable Fid = 3, not AppField.Id
         node.Condition!.Value.Should().Be("MergeKeyValue");
     }
+
+    [Fact]
+    public async Task Condition_ProductionIdentity_IfElseSubtype_DispatchesAndEvaluates()
+    {
+        // Arrange
+        var step = new PipelineStep
+        {
+            Id = 100,
+            Type = "condition",
+            Subtype = "if-else",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                leftOperand = "10",
+                @operator = "equals",
+                rightOperand = "10"
+            })
+        };
+
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        // Act
+        var resultJson = await (Task<string>)method!.Invoke(_engine, new object[] {
+            step, "{}", new Dictionary<string, object>(), new List<PipelineStep> { step }, new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "step_1",
+            _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, Substitute.For<IPipelineTriggerInterceptor>(), Substitute.For<ITenantUnitOfWork>(), Substitute.For<IPipelineStepIdempotencyRepository>(), Substitute.For<IFileStorageService>(), _pipelineRecordSearchService, CancellationToken.None
+        })!;
+
+        // Assert
+        resultJson.Should().Contain("\"Matched\":true");
+        resultJson.Should().Contain("\"EvaluatedBranch\":\"children\"");
+    }
+
+    [Fact]
+    public async Task Condition_ActionIfElse_DoesNotDispatchAsCondition()
+    {
+        // Arrange
+        var step = new PipelineStep
+        {
+            Id = 101,
+            Type = "action",
+            Subtype = "if-else",
+            ConfigJson = "{}"
+        };
+
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        // Act
+        Func<Task> act = async () =>
+        {
+            var task = (Task<string>)method!.Invoke(_engine, new object[] {
+                step, "{}", new Dictionary<string, object>(), new List<PipelineStep> { step }, new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "step_1",
+                _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, Substitute.For<IPipelineTriggerInterceptor>(), Substitute.For<ITenantUnitOfWork>(), Substitute.For<IPipelineStepIdempotencyRepository>(), Substitute.For<IFileStorageService>(), _pipelineRecordSearchService, CancellationToken.None
+            })!;
+            await task;
+        };
+
+        // Assert
+        await act.Should().ThrowAsync<NotSupportedException>().WithMessage("*not supported by the execution engine*");
+    }
+
+    [Fact]
+    public async Task Condition_InsideLoop_TypedOperands_ResolvesMetadataFromCollectionSource()
+    {
+        // Arrange: Search step -> Loop step -> Condition step inside Loop
+        var tableGuid = Guid.NewGuid();
+        var searchStep = new PipelineStep
+        {
+            Id = 1,
+            RefId = "ref_search",
+            Type = "query",
+            Subtype = "search-records",
+            ConfigJson = JsonSerializer.Serialize(new { tableId = tableGuid.ToString() })
+        };
+
+        var loopStep = new PipelineStep
+        {
+            Id = 2,
+            RefId = "ref_loop",
+            Type = "loop",
+            Subtype = "for-each",
+            ConfigJson = JsonSerializer.Serialize(new { loopOverStepId = "ref_search" })
+        };
+
+        var conditionStep = new PipelineStep
+        {
+            Id = 3,
+            RefId = "ref_condition",
+            Type = "condition",
+            Subtype = "if-else",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                leftOperand = "{{steps.ref_loop.item.fid_5}}",
+                @operator = "greater-than",
+                rightOperand = "2"
+            })
+        };
+
+        var allSteps = new List<PipelineStep> { searchStep, loopStep, conditionStep };
+
+        var table = new AppTable { Id = 10, PublicId = tableGuid, Name = "TestTable" };
+        var fields = new List<AppField>
+        {
+            new() { Id = 50, Fid = 5, Name = "Amount", TypeCode = "NUMERIC" }
+        };
+
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(fields);
+
+        // Payload has loop item with fid_5 = "10"
+        // Under string comparison, "10" < "2", but under NUMERIC category 10 > 2 (Matched = true)
+        var payloadJson = JsonSerializer.Serialize(new
+        {
+            steps = new Dictionary<string, object>
+            {
+                { "ref_loop", new Dictionary<string, object> { { "item", new Dictionary<string, object> { { "fid_5", "10" } } } } }
+            }
+        });
+
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        // Act
+        var resultJson = await (Task<string>)method!.Invoke(_engine, new object[] {
+            conditionStep, payloadJson, new Dictionary<string, object>(), allSteps, new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "step_root/ref_loop/loop_index_0",
+            _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, Substitute.For<IPipelineTriggerInterceptor>(), Substitute.For<ITenantUnitOfWork>(), Substitute.For<IPipelineStepIdempotencyRepository>(), Substitute.For<IFileStorageService>(), _pipelineRecordSearchService, CancellationToken.None
+        })!;
+
+        // Assert: 10 > 2 under NUMERIC category evaluates to Matched = true
+        resultJson.Should().Contain("\"Matched\":true");
+    }
+
+    [Fact]
+    public async Task Condition_UnresolvableToken_FailsClosedWithoutTextFallback()
+    {
+        // Arrange
+        var conditionStep = new PipelineStep
+        {
+            Id = 3,
+            RefId = "ref_condition",
+            Type = "condition",
+            Subtype = "if-else",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                leftOperand = "{{steps.ref_nonexistent.fid_1}}",
+                @operator = "equals",
+                rightOperand = "test"
+            })
+        };
+
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        // Act
+        Func<Task> act = async () =>
+        {
+            var task = (Task<string>)method!.Invoke(_engine, new object[] {
+                conditionStep, "{}", new Dictionary<string, object>(), new List<PipelineStep> { conditionStep }, new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "step_1",
+                _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, Substitute.For<IPipelineTriggerInterceptor>(), Substitute.For<ITenantUnitOfWork>(), Substitute.For<IPipelineStepIdempotencyRepository>(), Substitute.For<IFileStorageService>(), _pipelineRecordSearchService, CancellationToken.None
+            })!;
+            await task;
+        };
+
+        // Assert: Unresolvable token throws PipelineStepException (fails closed), does NOT fall back to TEXT
+        await act.Should().ThrowAsync<PowerBase.Domain.Exceptions.PipelineStepException>().WithMessage("*Failed to resolve dynamic token*");
+    }
+
+    [Fact]
+    public void EvaluateTokens_LoopTokenRewrite_ShouldProduceCanonicalStepsPrefix()
+    {
+        var allSteps = new List<PipelineStep>
+        {
+            new() { Id = 100, RefId = "ref_search", Type = "query", Subtype = "search-records" },
+            new() { Id = 200, RefId = "ref_loop", Type = "loop", Subtype = "for-each", ConfigJson = JsonSerializer.Serialize(new { loopOverStepId = "ref_search" }) }
+        };
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            steps = new
+            {
+                ref_loop = new
+                {
+                    item = new { fid_7 = 4 }
+                }
+            }
+        });
+
+        var method = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        // Test input without steps. prefix
+        var val1 = (string)method!.Invoke(_engine, new object?[] { "{{ref_search.fid_7}}", payload, "main/ref_search/ref_loop/loop_index_0", allSteps })!;
+        val1.Should().Be("4");
+
+        // Test input WITH steps. prefix
+        var val2 = (string)method!.Invoke(_engine, new object?[] { "{{steps.ref_search.fid_7}}", payload, "main/ref_search/ref_loop/loop_index_0", allSteps })!;
+        val2.Should().Be("4");
+    }
+
+    [Fact]
+    public async Task ResolveRuleTypeCategoryAsync_DynamicTokensWithOrWithoutStepsPrefix_ShouldResolveNumber()
+    {
+        var searchStep = new PipelineStep
+        {
+            Id = 100,
+            RefId = "ref_search",
+            Type = "query",
+            Subtype = "search-records",
+            ConfigJson = JsonSerializer.Serialize(new { tableId = Guid.NewGuid().ToString() })
+        };
+
+        var table = new AppTable { Id = 10 };
+        var field = new AppField { Id = 1, Fid = 7, Name = "price", TypeCode = "numeric" };
+
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField> { field });
+
+        var method = typeof(PipelineEngine).GetMethod("ResolveRuleTypeCategoryAsync", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        // Test token without steps. prefix
+        var cat1Task = (Task<string>)method!.Invoke(_engine, new object?[] { "{{ref_search.fid_7}}", "{}", new List<PipelineStep> { searchStep }, _fieldRepo, _tableRepo, CancellationToken.None })!;
+        var cat1 = await cat1Task;
+        cat1.Should().Be("NUMBER");
+
+        // Test token with steps. prefix
+        var cat2Task = (Task<string>)method!.Invoke(_engine, new object?[] { "{{steps.ref_search.fid_7}}", "{}", new List<PipelineStep> { searchStep }, _fieldRepo, _tableRepo, CancellationToken.None })!;
+        var cat2 = await cat2Task;
+        cat2.Should().Be("NUMBER");
+    }
+
+    [Fact]
+    public void EvaluateTokens_UnresolvedDynamicToken_ShouldThrowPipelineStepException()
+    {
+        var payload = JsonSerializer.Serialize(new { steps = new { ref_1 = new { fid_1 = 10 } } });
+        var method = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        Action act = () => method!.Invoke(_engine, new object?[] { "{{steps.ref_missing.fid_999}}", payload, null, null });
+        act.Should().Throw<TargetInvocationException>()
+           .WithInnerException<PowerBase.Domain.Exceptions.PipelineStepException>()
+           .WithMessage("*Failed to resolve dynamic token*");
+    }
+
+    [Fact]
+    public void EvaluateTokens_StaticText_ShouldRemainValid()
+    {
+        var payload = JsonSerializer.Serialize(new { steps = new { ref_1 = new { fid_1 = 10 } } });
+        var method = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        var res = (string)method!.Invoke(_engine, new object?[] { "Ronak", payload, null, null })!;
+        res.Should().Be("Ronak");
+    }
+
+    [Fact]
+    public void EvaluateConditionOperator_NumericSemanticsRegression_ShouldPass()
+    {
+        InvokeEvaluateConditionOperator("1", ">", "3").Should().BeFalse();
+        InvokeEvaluateConditionOperator("2", ">", "3").Should().BeFalse();
+        InvokeEvaluateConditionOperator("3", ">", "3").Should().BeFalse();
+        InvokeEvaluateConditionOperator("4", ">", "3").Should().BeTrue();
+        InvokeEvaluateConditionOperator("5", ">", "3").Should().BeTrue();
+        InvokeEvaluateConditionOperator("6", ">", "3").Should().BeTrue();
+        InvokeEvaluateConditionOperator("10", ">", "3").Should().BeTrue();
+        InvokeEvaluateConditionOperator("20", ">", "100").Should().BeFalse();
+    }
 }
+
 
