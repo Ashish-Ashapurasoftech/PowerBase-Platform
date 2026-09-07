@@ -1336,8 +1336,8 @@ public class PipelineEngine : IPipelineEngine
                 {
                     if (f.Fid.HasValue)
                     {
-                        var colName = PhysicalNaming.ColumnName(f.Fid.Value);
-                        if (record.TryGetValue(colName, out var val))
+                        var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
+                        if (record.TryGetValue(colKey, out var val))
                         {
                             norm[$"fid_{f.Fid.Value}"] = val;
                         }

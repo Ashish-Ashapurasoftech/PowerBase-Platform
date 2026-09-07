@@ -267,38 +267,41 @@ public static class PipelineFilterEvaluator
                         return false;
                     }
 
+                    var lDateOnly = lDate.Date;
+                    var rDateOnly = rDate.Date;
+
                     switch (normalizedOp)
                     {
                         case "equals":
                         case "=":
                         case "is":
-                            return lDate == rDate;
+                            return lDateOnly == rDateOnly;
                         case "not_equals":
                         case "<>":
                         case "!=":
                         case "is_not":
                         case "is-not":
-                            return lDate != rDate;
+                            return lDateOnly != rDateOnly;
                         case "greater_than":
                         case ">":
                         case "is-after":
                         case "after":
-                            return lDate > rDate;
+                            return lDateOnly > rDateOnly;
                         case "greater_than_or_equals":
                         case ">=":
                         case "is-on-or-after":
                         case "on-or-after":
-                            return lDate >= rDate;
+                            return lDateOnly >= rDateOnly;
                         case "less_than":
                         case "<":
                         case "is-before":
                         case "before":
-                            return lDate < rDate;
+                            return lDateOnly < rDateOnly;
                         case "less_than_or_equals":
                         case "<=":
                         case "is-on-or-before":
                         case "on-or-before":
-                            return lDate <= rDate;
+                            return lDateOnly <= rDateOnly;
                         default:
                             return false;
                     }
