@@ -483,6 +483,7 @@ builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();
 builder.Services.AddScoped<UpdateDefaultReportSettingsCommandHandler>();
 builder.Services.AddScoped<GetReportQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetOrCreateDefaultReportSettings.GetOrCreateDefaultReportSettingsQueryHandler>();
 builder.Services.AddScoped<GetDefaultReportSettingsQueryHandler>();
 builder.Services.AddScoped<ListReportsQueryHandler>();
 builder.Services.AddScoped<ListReportsByTableQueryHandler>();

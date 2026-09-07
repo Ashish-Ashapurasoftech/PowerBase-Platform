@@ -55,6 +55,8 @@ public class ReportOptionsRequest
     public bool ShowViewIcon { get; set; } = true;
     public bool ShowQuickPeekIcon { get; set; } = true;
     public bool DisableBulkDelete { get; set; }
+    public bool DisableBulkUpdate { get; set; }
+    public bool DisableGridEdit { get; set; }
     public bool ShowDescriptionOnReportPage { get; set; }
 }
 

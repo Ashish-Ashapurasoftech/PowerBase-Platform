@@ -264,6 +264,12 @@ public class RunReportQueryHandler
                 .Where(f => f.Fid.HasValue)
                 .GroupBy(f => (long)f.Fid!.Value)
                 .ToDictionary(g => g.Key, g => g.First());
+            // A report's own explicit Columns are never filtered by IsReportable here — Custom
+            // mode is deliberately allowed to keep or add a field that isn't reportable, and that
+            // holds even when this particular report is also the table's default report: what
+            // matters is THIS row's own ColumnsMode, not the IsDefault flag. (The reportable
+            // restriction only applies to what OTHER reports inherit from this row when they're
+            // in "Default columns" mode — see below.)
             selectedFields = definition.Columns
                 .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
                 .Select(id => fieldMap[id])
@@ -272,21 +278,37 @@ public class RunReportQueryHandler
 
         if (selectedFields.Count == 0 && definition.ColumnsMode == "Default")
         {
-            var defaultReport = await _reportRepo.GetDefaultByTableAsync(table.PublicId, ct);
-            var defaultColumnIds = defaultReport is null
-                ? []
-                : (JsonSerializer.Deserialize<ReportDefinition>(defaultReport.Definition) ?? new ReportDefinition()).Columns;
-
-            if (defaultColumnIds.Count > 0)
+            var defaultSettings = await _reportRepo.GetDefaultSettingsRecordAsync(table.PublicId, ct);
+            if (defaultSettings is not null)
             {
-                var fieldMap = allFields
-                    .Where(f => f.Fid.HasValue)
-                    .GroupBy(f => (long)f.Fid!.Value)
-                    .ToDictionary(g => g.Key, g => g.First());
-                selectedFields = defaultColumnIds
-                    .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
-                    .Select(id => fieldMap[id])
-                    .ToList();
+                var defaultColumnIds = (JsonSerializer.Deserialize<ReportDefinition>(defaultSettings.Definition) ?? new ReportDefinition()).Columns;
+
+                if (defaultColumnIds.Count > 0)
+                {
+                    var fieldMap = allFields
+                        .Where(f => f.Fid.HasValue)
+                        .GroupBy(f => (long)f.Fid!.Value)
+                        .ToDictionary(g => g.Key, g => g.First());
+                    selectedFields = defaultColumnIds
+                        // Same reasoning as above: the inherited-from list can only ever be reportable
+                        // fields, regardless of whatever stale ids the default report's own row still has.
+                        .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id) && fieldMap[id].IsReportable)
+                        .Select(id => fieldMap[id])
+                        .ToList();
+                }
+                else
+                {
+                    // The default report exists but has never been explicitly configured — same
+                    // "all non-system fields" inference the Default Report Settings columns picker
+                    // shows before its first save (table-default-report-settings.component.ts's
+                    // initState()). Without this, a report merely inheriting an *unconfigured*
+                    // default fell through to the generic "every reportable field" fallback below —
+                    // which also pulls in Record ID#/Date Created/etc — instead of matching what the
+                    // settings page visually promises until someone actually saves it once.
+                    selectedFields = allFields
+                        .Where(f => f.Fid.HasValue && f.IsReportable && !f.IsSystem && visibleFieldIds.Contains((long)f.Fid!.Value))
+                        .ToList();
+                }
             }
         }
 

@@ -12,6 +12,7 @@ using PowerBase.Application.Reports.Commands.UpdateDefaultReportSettings;
 using PowerBase.Application.Reports.Commands.UpdateReport;
 using PowerBase.Application.Reports.Queries.GetReport;
 using PowerBase.Application.Reports.Queries.GetDefaultReportSettings;
+using PowerBase.Application.Reports.Queries.GetOrCreateDefaultReportSettings;
 using PowerBase.Application.Reports.Queries.ListReports;
 using PowerBase.Application.Reports.Queries.ListReportsByTable;
 using PowerBase.Application.Reports.Queries.ListReportsByTablePaged;
@@ -40,6 +41,7 @@ public class ReportsController : ControllerBase
     private readonly RunReportQueryHandler _runHandler;
     private readonly ExportReportQueryHandler _exportHandler;
     private readonly GetDefaultReportSettingsQueryHandler _getDefaultSettingsHandler;
+    private readonly GetOrCreateDefaultReportSettingsQueryHandler _getOrCreateDefaultSettingsRecordHandler;
     private readonly UpdateDefaultReportSettingsCommandHandler _updateDefaultSettingsHandler;
     private readonly ResolveDefaultReportQueryHandler _resolveDefaultReportHandler;
     private readonly UpdateReportFormOverridesCommandHandler _updateReportFormOverridesHandler;
@@ -58,6 +60,7 @@ public class ReportsController : ControllerBase
         RunReportQueryHandler runHandler,
         ExportReportQueryHandler exportHandler,
         GetDefaultReportSettingsQueryHandler getDefaultSettingsHandler,
+        GetOrCreateDefaultReportSettingsQueryHandler getOrCreateDefaultSettingsRecordHandler,
         UpdateDefaultReportSettingsCommandHandler updateDefaultSettingsHandler,
         ResolveDefaultReportQueryHandler resolveDefaultReportHandler,
         UpdateReportFormOverridesCommandHandler updateReportFormOverridesHandler,
@@ -75,6 +78,7 @@ public class ReportsController : ControllerBase
         _runHandler = runHandler;
         _exportHandler = exportHandler;
         _getDefaultSettingsHandler = getDefaultSettingsHandler;
+        _getOrCreateDefaultSettingsRecordHandler = getOrCreateDefaultSettingsRecordHandler;
         _updateDefaultSettingsHandler = updateDefaultSettingsHandler;
         _resolveDefaultReportHandler = resolveDefaultReportHandler;
         _updateReportFormOverridesHandler = updateReportFormOverridesHandler;
@@ -281,6 +285,23 @@ public class ReportsController : ControllerBase
     public async Task<IActionResult> GetDefaultReport(Guid tableId, CancellationToken ct)
     {
         var result = await _resolveDefaultReportHandler.HandleAsync(new ResolveDefaultReportQuery(tableId), ct);
+        return Ok(new ApiResponse<ReportResponse>(MapToResponse(result)));
+    }
+
+    /// <summary>The table's hidden Default Report Settings record — the actual saved config that
+    /// other reports' "Default columns"/"Default dynamic filters" mode inherits (see
+    /// Report.IsDefaultSettingsRecord). Distinct from GET default-report above, which resolves
+    /// whichever report a *viewer* sees by default and never returns this hidden row. Created on
+    /// first call for a table that doesn't have one yet (pre-dates this endpoint). Editing it goes
+    /// through the normal PATCH /reports/{publicId} using the id returned here.</summary>
+    [HttpGet("tables/{tableId:guid}/default-report-settings-record")]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<ReportResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetOrCreateDefaultReportSettingsRecord(Guid tableId, CancellationToken ct)
+    {
+        var result = await _getOrCreateDefaultSettingsRecordHandler.HandleAsync(new GetOrCreateDefaultReportSettingsQuery(tableId), ct);
         return Ok(new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
 
@@ -512,6 +533,8 @@ public class ReportsController : ControllerBase
                 ShowViewIcon = r.Definition.Options.ShowViewIcon,
                 ShowQuickPeekIcon = r.Definition.Options.ShowQuickPeekIcon,
                 DisableBulkDelete = r.Definition.Options.DisableBulkDelete,
+                DisableBulkUpdate = r.Definition.Options.DisableBulkUpdate,
+                DisableGridEdit = r.Definition.Options.DisableGridEdit,
                 ShowDescriptionOnReportPage = r.Definition.Options.ShowDescriptionOnReportPage,
             },
         },
@@ -592,7 +615,8 @@ public class ReportsController : ControllerBase
 
     private static ReportOptionsCommand? MapOptions(ReportOptionsRequest? req) =>
         req is null ? null : new ReportOptionsCommand(
-            req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.ShowQuickPeekIcon, req.DisableBulkDelete, req.ShowDescriptionOnReportPage);
+            req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.ShowQuickPeekIcon, req.DisableBulkDelete,
+            req.DisableBulkUpdate, req.DisableGridEdit, req.ShowDescriptionOnReportPage);
 
     // ── Chart config mapping helpers ──────────────────────────────────────────
 

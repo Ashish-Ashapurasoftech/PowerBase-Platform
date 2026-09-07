@@ -82,6 +82,11 @@ public class ReportOptions
     /// IsQuickPeekForm) — otherwise the icon never shows regardless of this flag.</summary>
     public bool ShowQuickPeekIcon { get; set; } = true;
     public bool DisableBulkDelete { get; set; }
+    /// <summary>Hides the "Mass Update" bulk-edit action from the selection toolbar.</summary>
+    public bool DisableBulkUpdate { get; set; }
+    /// <summary>Hides the Grid Edit toggle (inline cell editing + bulk update) from the report
+    /// header entirely, regardless of the viewer's modify permission.</summary>
+    public bool DisableGridEdit { get; set; }
     /// <summary>Whether the report's Description (Basics tab) renders on the report view page,
     /// above the toolbar. A long description is clamped with a Show more/Show less toggle there —
     /// this flag only controls whether the block appears at all. Defaults to false (opt-in).</summary>

@@ -96,6 +96,8 @@ public class CreateReportCommandHandler
                 ShowViewIcon = command.Options.ShowViewIcon,
                 ShowQuickPeekIcon = command.Options.ShowQuickPeekIcon,
                 DisableBulkDelete = command.Options.DisableBulkDelete,
+                DisableBulkUpdate = command.Options.DisableBulkUpdate,
+                DisableGridEdit = command.Options.DisableGridEdit,
                 ShowDescriptionOnReportPage = command.Options.ShowDescriptionOnReportPage,
             },
             Aggregations = command.Aggregations.Select(a => new SummaryAggregation

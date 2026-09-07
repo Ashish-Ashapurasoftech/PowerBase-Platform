@@ -1,0 +1,3 @@
+namespace PowerBase.Application.Reports.Queries.GetOrCreateDefaultReportSettings;
+
+public record GetOrCreateDefaultReportSettingsQuery(Guid TablePublicId);

@@ -158,6 +158,23 @@ public class AppSeeder : IAppSeeder
             DisplayOrder = 2,
         }, ct);
 
+        // The hidden row backing "Default Report Settings" (see Report.IsDefaultSettingsRecord) —
+        // deliberately its own row, never "List All" above, so editing List All's own settings
+        // (or any other report's) never bleeds into what other reports' "Default columns"/"Default
+        // dynamic filters" mode inherits, and vice versa. Never shown in any reports list.
+        await _reportRepo.CreateAsync(new Report
+        {
+            AppTableId = table.Id,
+            OwnerId = userId,
+            Name = "Default Report Settings",
+            ReportType = "Table",
+            Visibility = "Shared",
+            Definition = JsonSerializer.Serialize(new ReportDefinition()),
+            IsDefault = false,
+            IsDefaultSettingsRecord = true,
+            DisplayOrder = 0,
+        }, ct);
+
         // Auto-create "Main Form" with all seeded system fields in a default section
         var mainForm = new Form
         {
