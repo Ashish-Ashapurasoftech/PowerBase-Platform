@@ -122,6 +122,7 @@ builder.Host.UseSerilog((ctx, cfg) => cfg.ReadFrom.Configuration(ctx.Configurati
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("Frontend", policy =>
