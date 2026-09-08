@@ -2444,6 +2444,120 @@ public class PipelineEngineTests
         InvokeEvaluateConditionOperator("10", ">", "3").Should().BeTrue();
         InvokeEvaluateConditionOperator("20", ">", "100").Should().BeFalse();
     }
+
+    [Fact]
+    public async Task ExecuteAsync_CanonicalFidContract_SearchRecords_Loop_Condition_ExecutesCorrectly()
+    {
+        // Tests the full canonical FID contract:
+        // 1. Record ID# (Fid 3, physical column "Id") -> output fid_3
+        // 2. User Number field Age (Fid 15, physical column "f_15") -> output fid_15
+        // 3. User Decimal field Amount (Fid 6, physical column "f_6") -> output fid_6
+        // 4. Loop iterates over Search Records
+        // 5. Condition compares {{steps.ref_search.fid_3}} == "5", {{steps.ref_search.fid_15}} == "25", {{steps.ref_search.fid_6}} == "100.5"
+        // 6. Action executes EXACTLY ONCE for Record ID 5
+
+        var task = new PipelineExecutionTask { PipelineId = 200, TenantId = 1, TriggerEvent = "RecordAdded", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(200, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 200, IsActive = true, IsDeleted = false });
+
+        var searchTableId = Guid.NewGuid();
+        var targetTableId = Guid.NewGuid();
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 1, Type = "trigger", Subtype = "new-event", RefId = "trg_1" },
+            new()
+            {
+                Id = 2,
+                RefId = "ref_search",
+                Label = "Search Records",
+                Type = "query",
+                Subtype = "search-records",
+                ConfigJson = JsonSerializer.Serialize(new { TableId = searchTableId.ToString() })
+            },
+            new()
+            {
+                Id = 3,
+                RefId = "ref_loop",
+                Label = "Loop Over Records",
+                Type = "loop",
+                Subtype = "for-each",
+                ConfigJson = JsonSerializer.Serialize(new { LoopOverStepId = "ref_search" })
+            },
+            new()
+            {
+                Id = 4,
+                ParentStepId = 3,
+                ParentBranch = "children",
+                RefId = "ref_cond",
+                Label = "Check if Record ID is 5 and Age is 25 and Amount is 100.5",
+                Type = "control",
+                Subtype = "condition",
+                ConfigJson = JsonSerializer.Serialize(new {
+                    RuleGroups = new[] {
+                        new {
+                            LogicalOp = "AND",
+                            Rules = new[] {
+                                new { Left = "{{steps.ref_search.fid_3}}", Op = "equals", Right = "5" },
+                                new { Left = "{{steps.ref_search.fid_15}}", Op = "equals", Right = "25" },
+                                new { Left = "{{steps.ref_search.fid_6}}", Op = "equals", Right = "100.5" }
+                            }
+                        }
+                    }
+                })
+            },
+            new()
+            {
+                Id = 5,
+                ParentStepId = 4,
+                ParentBranch = "children",
+                RefId = "ref_act_true",
+                Label = "Create Record Under True Branch",
+                Type = "action",
+                Subtype = "create-record",
+                ConfigJson = JsonSerializer.Serialize(new { TableId = targetTableId.ToString(), FieldMappings = new List<object>() })
+            }
+        };
+
+        _pipelineRepo.GetStepsByPipelineIdAsync(200, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var searchTable = new AppTable { Id = 10, PublicId = searchTableId, Name = "SourceTable" };
+        var targetTable = new AppTable { Id = 20, PublicId = targetTableId, Name = "TargetTable" };
+        _tableRepo.GetByPublicIdAsync(searchTableId, Arg.Any<CancellationToken>()).Returns(searchTable);
+        _tableRepo.GetByPublicIdAsync(targetTableId, Arg.Any<CancellationToken>()).Returns(targetTable);
+
+        var recordIdField = new AppField { Id = 30, AppTableId = 10, Fid = 3, Name = "s_record_id_", Label = "Record ID#", TypeCode = "INTEGER", IsSystem = true, PhysicalColumnName = "Id" };
+        var ageField = new AppField { Id = 31, AppTableId = 10, Fid = 15, Name = "age", Label = "Age", TypeCode = "NUMBER", IsSystem = false, PhysicalColumnName = "f_15" };
+        var amountField = new AppField { Id = 32, AppTableId = 10, Fid = 6, Name = "amount", Label = "Amount", TypeCode = "CURRENCY", IsSystem = false, PhysicalColumnName = "f_6" };
+        _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField> { recordIdField, ageField, amountField });
+        _fieldRepo.ListByTableAsync(20, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
+
+        var searchResultRecords = new List<IReadOnlyDictionary<string, object?>>
+        {
+            new Dictionary<string, object?> { ["Id"] = 3L, ["f_15"] = 20, ["f_6"] = 50.0m },
+            new Dictionary<string, object?> { ["Id"] = 5L, ["f_15"] = 25, ["f_6"] = 100.5m },
+            new Dictionary<string, object?> { ["Id"] = 8L, ["f_15"] = 30, ["f_6"] = 200.0m }
+        };
+
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup?>(), Arg.Any<CancellationToken>())
+            .Returns(searchResultRecords);
+
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+            .Returns(Guid.NewGuid());
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert
+        // Step 5 (Create Record) must have executed EXACTLY ONCE (for item with Record ID# = 5, Age = 25, Amount = 100.5)
+        await _recordRepo.Received(1).CreateAsync(
+            Arg.Is<AppTable>(t => t.Id == 20),
+            Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Any<IReadOnlyDictionary<long, object?>>(),
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>()
+        );
+    }
 }
 
 

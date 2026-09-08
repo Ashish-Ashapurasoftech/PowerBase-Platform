@@ -1230,7 +1230,7 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (f.Fid.HasValue)
                 {
-                    var colName = PhysicalNaming.ColumnName(f.Fid.Value);
+                    var colName = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                     if (record.TryGetValue(colName, out var val))
                     {
                         norm[$"fid_{f.Fid.Value}"] = val;
@@ -2887,30 +2887,7 @@ public class PipelineEngine : IPipelineEngine
                 throw new PipelineStepException($"Fields for table '{table.Name}' could not be retrieved.");
             }
 
-            int? searchFid = null;
-            if (fieldRef.StartsWith("fid_", StringComparison.OrdinalIgnoreCase) && int.TryParse(fieldRef.Substring(4), out var f1))
-            {
-                searchFid = f1;
-            }
-            else if (int.TryParse(fieldRef, out var f2))
-            {
-                searchFid = f2;
-            }
-
-            AppField? matchedField = null;
-            if (searchFid.HasValue)
-            {
-                matchedField = fields.FirstOrDefault(f => f.Fid == searchFid.Value);
-            }
-
-            if (matchedField == null)
-            {
-                matchedField = fields.FirstOrDefault(f =>
-                    f.Name.Equals(fieldRef, StringComparison.OrdinalIgnoreCase) ||
-                    f.Label.Equals(fieldRef, StringComparison.OrdinalIgnoreCase) ||
-                    $"fid_{f.Fid}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase) ||
-                    $"fid_{f.Id}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase));
-            }
+            AppField? matchedField = ResolvePipelineField(fieldRef, fields);
 
             if (matchedField == null)
             {
@@ -2923,6 +2900,30 @@ public class PipelineEngine : IPipelineEngine
         {
             scopeToDispose?.Dispose();
         }
+    }
+
+    public static AppField? ResolvePipelineField(string? fieldRef, IEnumerable<AppField>? fields)
+    {
+        if (string.IsNullOrWhiteSpace(fieldRef) || fields == null) return null;
+
+        // 1. Primary canonical format: fid_<FID> (e.g. fid_3, fid_15, fid_6)
+        if (fieldRef.StartsWith("fid_", StringComparison.OrdinalIgnoreCase) && int.TryParse(fieldRef.Substring(4), out var fidNum))
+        {
+            return fields.FirstOrDefault(f => f.Fid == fidNum);
+        }
+
+        // 2. Direct numeric FID
+        if (int.TryParse(fieldRef, out var directFid))
+        {
+            return fields.FirstOrDefault(f => f.Fid == directFid);
+        }
+
+        // 3. Fallback: match by Name, Label, PhysicalColumnName, or fid_<Id>
+        return fields.FirstOrDefault(f =>
+            string.Equals(f.Name, fieldRef, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(f.Label, fieldRef, StringComparison.OrdinalIgnoreCase) ||
+            (f.IsSystem && string.Equals(f.PhysicalColumnName, fieldRef, StringComparison.OrdinalIgnoreCase)) ||
+            $"fid_{f.Id}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase));
     }
 
     private string EvaluateTokens(string? input, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
