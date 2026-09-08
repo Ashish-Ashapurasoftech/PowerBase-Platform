@@ -1077,10 +1077,19 @@ public class RunReportQueryHandler
     /// looked up (User/MultiUser group-by or series fields in Summary/Chart reports) — returns
     /// the value unchanged for every other field type, or if the id wasn't in the lookup
     /// (e.g. a deleted user).</summary>
+    /// <summary>
+    /// Returns "{id}|{name}" for a resolved User/MultiUser group/series value — same composite
+    /// convention GetDistinctFieldValuesQueryHandler already uses for the filter dropdown — so
+    /// the frontend can display the name while still holding the raw id it needs to build a
+    /// correct drilldown filter. The physical column stores the plain numeric core.[User].Id
+    /// (see MergeRuntimeFilters/BuildConditionClause), not the display name; a drilldown click
+    /// that submitted the display name back as the filter value always matched zero rows.
+    /// </summary>
     private static object? ResolveGroupOrSeriesValue(object? rawValue, IReadOnlyDictionary<long, string>? names)
     {
         if (names is null || rawValue is null) return rawValue;
-        return long.TryParse(rawValue.ToString(), out var id) && names.TryGetValue(id, out var name) ? name : rawValue;
+        var raw = rawValue.ToString()!;
+        return long.TryParse(raw, out var id) && names.TryGetValue(id, out var name) ? $"{raw}|{name}" : rawValue;
     }
 
     internal static async Task<IReadOnlyDictionary<long, string>> ResolveUserNamesAsync(
