@@ -1730,26 +1730,29 @@ public class PipelineEngine : IPipelineEngine
 
                         stepsDict[step.RefId] = loopScope;
 
-                        // Create transaction for item-level checkpoint
-                        await _uow.BeginAsync(ct);
                         try
                         {
                             await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{r.Ordinal}", ct);
-                            
-                            // Mark item Processed = 1 (Success) in database
-                            await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 1, _uow.Transaction, ct);
-                            await _uow.CommitAsync(ct);
-                            processedCount++;
                         }
                         catch (Exception ex)
                         {
-                            await _uow.RollbackAsync(ct);
-                            
-                            // Mark item Processed = 2 (Failed) in database
-                            await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 2, null, ct);
+                            try
+                            {
+                                // Mark item Processed = 2 (Failed) in database using source tenant repository / fresh connection
+                                await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 2, transaction: null, ct);
+                            }
+                            catch (Exception markEx)
+                            {
+                                _logger.LogError(markEx, "Failed to update bulk event record status to Processed=2 for record {RecordId}", r.Id);
+                            }
+
                             _logger.LogError(ex, "Iteration failed for Ordinal {Ordinal} in bulk event Loop step {StepId}", r.Ordinal, step.Id);
                             throw; // Re-throw to cause pipeline execution to enter crash retry state, resuming from failure item
                         }
+
+                        // Mark item Processed = 1 (Success) in database using source tenant repository / fresh connection
+                        await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 1, transaction: null, ct);
+                        processedCount++;
                     }
                 }
 

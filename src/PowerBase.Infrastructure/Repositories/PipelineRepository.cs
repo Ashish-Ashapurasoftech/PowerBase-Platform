@@ -1601,7 +1601,11 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
 
         if (transaction != null)
         {
-            await transaction.Connection!.ExecuteAsync(new CommandDefinition(sql, new { ids, processedStatus }, transaction, cancellationToken: ct));
+            if (transaction.Connection == null)
+            {
+                throw new InvalidOperationException("Cannot mark bulk event records using a completed or disposed transaction.");
+            }
+            await transaction.Connection.ExecuteAsync(new CommandDefinition(sql, new { ids, processedStatus }, transaction, cancellationToken: ct));
             return;
         }
 
