@@ -14,15 +14,45 @@ public record AppUserDetail(
     bool ShowInUserPickers,
     DateTime CreatedOn,
     bool IsOwner,
-    bool IsFromGroup);
+    bool IsFromGroup,
+    string? GroupName);
 
 public interface IAppUserRepository
 {
     Task<IReadOnlyList<AppUserDetail>> ListByAppIdAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<AppUserDetail>> ListForUserPickerAsync(long appId, CancellationToken ct = default);
-    Task<IReadOnlyList<AppUserDetail>> ListByAppPagedAsync(long appId,int page,int pageSize,string? search,string? role,string sortBy,bool sortDesc,CancellationToken ct = default);
-    Task<IReadOnlyList<AppUserDetail>> ListByAppFilteredAsync(long appId,string? search,string? role,string sortBy,bool sortDesc,CancellationToken ct = default);
-    Task<int> CountByAppAsync(long appId,string? search,string? role,CancellationToken ct = default);
+    Task<IReadOnlyList<AppUserDetail>> ListByAppPagedAsync(
+        long appId,
+        int page,
+        int pageSize,
+        string? search,
+        IReadOnlyList<string>? roles,
+        IReadOnlyList<string>? accessTypes,
+        IReadOnlyList<string>? userPickerFilters,
+        IReadOnlyList<string>? groups,
+        string sortBy,
+        bool sortDesc,
+        CancellationToken ct = default);
+
+    Task<IReadOnlyList<AppUserDetail>> ListByAppFilteredAsync(
+        long appId,
+        string? search,
+        IReadOnlyList<string>? roles,
+        IReadOnlyList<string>? accessTypes,
+        IReadOnlyList<string>? userPickerFilters,
+        IReadOnlyList<string>? groups,
+        string sortBy,
+        bool sortDesc,
+        CancellationToken ct = default);
+
+    Task<int> CountByAppAsync(
+        long appId,
+        string? search,
+        IReadOnlyList<string>? roles,
+        IReadOnlyList<string>? accessTypes,
+        IReadOnlyList<string>? userPickerFilters,
+        IReadOnlyList<string>? groups,
+        CancellationToken ct = default);
     Task<AppUser?> GetByAppAndUserAsync(long appId, long userId, CancellationToken ct = default);
     Task<AppUser?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<AppUser?> GetByAppUserAndRoleAsync(long appId, long userId, long appRoleId, CancellationToken ct = default);

@@ -31,6 +31,7 @@ public class ListAppUsersForPickerQueryHandler
             u.ShowInUserPickers,
             u.CreatedOn,
             u.IsOwner,
-            u.IsFromGroup)).ToList();
+            u.IsFromGroup,
+            u.GroupName)).ToList();
     }
 }

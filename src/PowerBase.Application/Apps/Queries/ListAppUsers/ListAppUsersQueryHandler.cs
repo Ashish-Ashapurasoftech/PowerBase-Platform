@@ -14,7 +14,8 @@ public record AppUserResult(
     bool ShowInUserPickers,
     DateTime AddedOn,
     bool IsOwner,
-    bool IsFromGroup);
+    bool IsFromGroup,
+    string? GroupName);
 
 public class ListAppUsersResult
 {
@@ -46,18 +47,51 @@ public class ListAppUsersQueryHandler
         var pageSize = query.PageSize is < 1 or > 100 ? 20 : query.PageSize;
         var sortBy = AllowedSortFields.Contains(query.SortBy) ? query.SortBy : "userName";
 
+        var roles = query.Roles?.ToList() ?? new List<string>();
+        if (!string.IsNullOrWhiteSpace(query.Role) && !roles.Contains(query.Role, StringComparer.OrdinalIgnoreCase))
+        {
+            roles.Add(query.Role);
+        }
+
         IReadOnlyList<AppUserDetail> users;
         int total;
 
         if (query.IsExport)
         {
-            users = await _appUserRepo.ListByAppFilteredAsync(app.Id, query.Search, query.Role, sortBy, query.SortDesc, ct);
+            users = await _appUserRepo.ListByAppFilteredAsync(
+                app.Id,
+                query.Search,
+                roles,
+                query.AccessTypes,
+                query.UserPickerFilters,
+                query.Groups,
+                sortBy,
+                query.SortDesc,
+                ct);
             total = users.Count;
         }
         else
         {
-            users = await _appUserRepo.ListByAppPagedAsync(app.Id, page, pageSize, query.Search, query.Role, sortBy, query.SortDesc, ct);
-            total = await _appUserRepo.CountByAppAsync(app.Id, query.Search, query.Role, ct);
+            users = await _appUserRepo.ListByAppPagedAsync(
+                app.Id,
+                page,
+                pageSize,
+                query.Search,
+                roles,
+                query.AccessTypes,
+                query.UserPickerFilters,
+                query.Groups,
+                sortBy,
+                query.SortDesc,
+                ct);
+            total = await _appUserRepo.CountByAppAsync(
+                app.Id,
+                query.Search,
+                roles,
+                query.AccessTypes,
+                query.UserPickerFilters,
+                query.Groups,
+                ct);
         }
 
         var items = users.Select(u => new AppUserResult(
@@ -71,7 +105,8 @@ public class ListAppUsersQueryHandler
             u.ShowInUserPickers,
             u.CreatedOn,
             u.IsOwner,
-            u.IsFromGroup)).ToList();
+            u.IsFromGroup,
+            u.GroupName)).ToList();
 
         return new ListAppUsersResult
         {

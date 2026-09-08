@@ -194,29 +194,17 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
         const string upsertSql = @"
             IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId)
             BEGIN
-                IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsDeleted = 0 AND NOT (IsFromGroup = 1 AND GroupId = @groupId))
-                BEGIN
-                    UPDATE meta.AppUser
-                    SET IsDeleted = 1, Status = 'InActive', UpdatedOn = SYSUTCDATETIME()
-                    WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId
-                END
-                ELSE
-                BEGIN
-                    UPDATE meta.AppUser
-                    SET Status = 'Active',
-                        IsDeleted = 0,
-                        AppRoleId = @appRoleId,
-                        UpdatedOn = SYSUTCDATETIME()
-                    WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId
-                END
+                UPDATE meta.AppUser
+                SET Status = 'Active',
+                    IsDeleted = 0,
+                    AppRoleId = @appRoleId,
+                    UpdatedOn = SYSUTCDATETIME()
+                WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId;
             END
             ELSE
             BEGIN
-                IF NOT EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsDeleted = 0)
-                BEGIN
-                    INSERT INTO meta.AppUser (PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
-                    VALUES (NEWID(), @appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId)
-                END
+                INSERT INTO meta.AppUser (PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
+                VALUES (NEWID(), @appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId);
             END";
 
         foreach (var userId in userIds)
@@ -280,47 +268,14 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
                 
             if (groupId is not null)
             {
-                var sharedAppIds = (await conn.QueryAsync<long>(new CommandDefinition(
-                    "SELECT AppId FROM meta.GroupApp WHERE GroupId = @groupId AND IsDeleted = 0",
-                    new { groupId = groupId.Value }, cancellationToken: ct))).ToList();
-                    
-                foreach (var appId in sharedAppIds)
-                {
-                    const string otherGroupSql = @"
-                        SELECT TOP 1 ga.GroupId, ga.AppRoleId
-                        FROM meta.GroupMember gm
-                        JOIN meta.GroupApp ga ON ga.GroupId = gm.GroupId
-                        WHERE gm.UserId = @userId
-                          AND ga.AppId = @appId
-                          AND gm.GroupId <> @groupId
-                          AND gm.IsDeleted = 0 AND ga.IsDeleted = 0";
-                          
-                    var otherGroup = await conn.QueryFirstOrDefaultAsync<dynamic>(
-                        new CommandDefinition(otherGroupSql, new { userId = userId.Value, appId, groupId = groupId.Value }, cancellationToken: ct));
-                        
-                    if (otherGroup is not null)
-                    {
-                        await conn.ExecuteAsync(new CommandDefinition(
-                            @"UPDATE meta.AppUser
-                              SET GroupId = @otherGroupId,
-                                  AppRoleId = @otherAppRoleId,
-                                  UpdatedOn = SYSUTCDATETIME()
-                              WHERE AppId = @appId AND UserId = @userId AND GroupId = @groupId AND IsFromGroup = 1 AND IsDeleted = 0",
-                            new { appId, userId = userId.Value, groupId = groupId.Value, otherGroupId = (long)otherGroup.GroupId, otherAppRoleId = (long)otherGroup.AppRoleId },
-                            cancellationToken: ct));
-                    }
-                    else
-                    {
-                        await conn.ExecuteAsync(new CommandDefinition(
-                            @"UPDATE meta.AppUser
-                              SET IsDeleted = 1,
-                                  Status = 'InActive',
-                                  UpdatedOn = SYSUTCDATETIME()
-                              WHERE AppId = @appId AND UserId = @userId AND GroupId = @groupId AND IsFromGroup = 1 AND IsDeleted = 0",
-                            new { appId, userId = userId.Value, groupId = groupId.Value },
-                            cancellationToken: ct));
-                    }
-                }
+                await conn.ExecuteAsync(new CommandDefinition(
+                    @"UPDATE meta.AppUser
+                      SET IsDeleted = 1,
+                          Status = 'InActive',
+                          UpdatedOn = SYSUTCDATETIME()
+                      WHERE UserId = @userId AND GroupId = @groupId AND IsFromGroup = 1 AND IsDeleted = 0",
+                    new { userId = userId.Value, groupId = groupId.Value },
+                    cancellationToken: ct));
             }
             return true;
         }
@@ -509,29 +464,17 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
         const string upsertSql = @"
             IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId)
             BEGIN
-                IF EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsDeleted = 0 AND NOT (IsFromGroup = 1 AND GroupId = @groupId))
-                BEGIN
-                    UPDATE meta.AppUser
-                    SET IsDeleted = 1, Status = 'InActive', UpdatedOn = SYSUTCDATETIME()
-                    WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId
-                END
-                ELSE
-                BEGIN
-                    UPDATE meta.AppUser
-                    SET Status = 'Active',
-                        IsDeleted = 0,
-                        AppRoleId = @appRoleId,
-                        UpdatedOn = SYSUTCDATETIME()
-                    WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId
-                END
+                UPDATE meta.AppUser
+                SET Status = 'Active',
+                    IsDeleted = 0,
+                    AppRoleId = @appRoleId,
+                    UpdatedOn = SYSUTCDATETIME()
+                WHERE AppId = @appId AND UserId = @userId AND IsFromGroup = 1 AND GroupId = @groupId;
             END
             ELSE
             BEGIN
-                IF NOT EXISTS (SELECT 1 FROM meta.AppUser WHERE AppId = @appId AND UserId = @userId AND AppRoleId = @appRoleId AND IsDeleted = 0)
-                BEGIN
-                    INSERT INTO meta.AppUser (PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
-                    VALUES (NEWID(), @appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId)
-                END
+                INSERT INTO meta.AppUser (PublicId, AppId, UserId, UserPublicId, UserName, UserEmail, AppRoleId, Status, ShowInUserPickers, AddedBy, CreatedOn, IsFromGroup, GroupId)
+                VALUES (NEWID(), @appId, @userId, @userPublicId, @userName, @userEmail, @appRoleId, 'Active', 1, @addedBy, SYSUTCDATETIME(), 1, @groupId);
             END";
             
         foreach (var appId in appIds)
@@ -565,46 +508,13 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
     {
         await using var conn = await OpenConnectionAsync(ct);
         
-        var groupUsers = (await conn.QueryAsync<long>(new CommandDefinition(
-            "SELECT UserId FROM meta.AppUser WHERE AppId = @appId AND GroupId = @groupId AND IsFromGroup = 1 AND IsDeleted = 0",
-            new { appId, groupId }, cancellationToken: ct))).ToList();
-            
-        foreach (var userId in groupUsers)
-        {
-            const string otherGroupSql = @"
-                SELECT TOP 1 ga.GroupId, ga.AppRoleId
-                FROM meta.GroupMember gm
-                JOIN meta.GroupApp ga ON ga.GroupId = gm.GroupId
-                WHERE gm.UserId = @userId
-                  AND ga.AppId = @appId
-                  AND gm.GroupId <> @groupId
-                  AND gm.IsDeleted = 0 AND ga.IsDeleted = 0";
-                  
-            var otherGroup = await conn.QueryFirstOrDefaultAsync<dynamic>(
-                new CommandDefinition(otherGroupSql, new { userId, appId, groupId }, cancellationToken: ct));
-                
-            if (otherGroup is not null)
-            {
-                await conn.ExecuteAsync(new CommandDefinition(
-                    @"UPDATE meta.AppUser
-                      SET GroupId = @otherGroupId,
-                          AppRoleId = @otherAppRoleId,
-                          UpdatedOn = SYSUTCDATETIME()
-                      WHERE AppId = @appId AND UserId = @userId AND GroupId = @groupId AND IsFromGroup = 1 AND IsDeleted = 0",
-                    new { appId, userId, groupId, otherGroupId = (long)otherGroup.GroupId, otherAppRoleId = (long)otherGroup.AppRoleId },
-                    cancellationToken: ct));
-            }
-            else
-            {
-                await conn.ExecuteAsync(new CommandDefinition(
-                    @"UPDATE meta.AppUser
-                      SET IsDeleted = 1,
-                          Status = 'InActive',
-                          UpdatedOn = SYSUTCDATETIME()
-                      WHERE AppId = @appId AND UserId = @userId AND GroupId = @groupId AND IsFromGroup = 1 AND IsDeleted = 0",
-                    new { appId, userId, groupId },
-                    cancellationToken: ct));
-            }
-        }
+        await conn.ExecuteAsync(new CommandDefinition(
+            @"UPDATE meta.AppUser
+              SET IsDeleted = 1,
+                  Status = 'InActive',
+                  UpdatedOn = SYSUTCDATETIME()
+              WHERE AppId = @appId AND GroupId = @groupId AND IsFromGroup = 1 AND IsDeleted = 0",
+            new { appId, groupId },
+            cancellationToken: ct));
     }
 }
