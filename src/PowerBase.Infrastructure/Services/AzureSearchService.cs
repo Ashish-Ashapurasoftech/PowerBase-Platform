@@ -439,6 +439,9 @@ public class AzureSearchService : IAzureSearchService
             decimal d => d.ToString("0.####################", System.Globalization.CultureInfo.InvariantCulture),
             double d => d.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
             float f => f.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+            DateTime dt => (dt.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : dt.ToUniversalTime()).ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture),
+            DateTimeOffset dto => dto.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture),
+            DateOnly dateOnly => dateOnly.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
             _ => val.ToString() ?? string.Empty,
         };
     }

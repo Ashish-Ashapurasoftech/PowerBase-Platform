@@ -72,7 +72,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             
             if (rowDict.TryGetValue(colName, out var val))
             {
-                if (!f.IsSearchable)
+                if (!f.IsSearchable && !f.IsFilterable)
                 {
                     result[(long)f.Fid.Value] = null;
                 }

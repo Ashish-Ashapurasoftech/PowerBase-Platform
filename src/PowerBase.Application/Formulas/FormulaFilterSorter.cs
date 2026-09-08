@@ -228,11 +228,24 @@ public static class FormulaFilterSorter
             "notContains"   => val?.ToString()?.Contains(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
             "startsWith"    => val?.ToString()?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
             "notStartsWith" => val?.ToString()?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
-            "date_eq"       => val is DateTime dt && DateTime.TryParse(c.Value, out var dv) && dt.Date == dv.Date,
+            "date_eq"       => (val is DateTime dt ? dt : (DateTime.TryParse(val?.ToString(), out var parsed) ? parsed : (DateTime?)null)) is { } dateVal && DateTime.TryParse(c.Value, out var dv) && dateVal.Date == dv.Date,
+            "includes"      => CheckIncludes(val, c.Value),
+            "notIncludes"   => !CheckIncludes(val, c.Value),
             "in"            => ParseValueList(c.Value).Any(v => CompareValues(val, v) == 0),
             "notIn"         => !ParseValueList(c.Value).Any(v => CompareValues(val, v) == 0),
             _               => true,
         };
+    }
+
+    private static bool CheckIncludes(object? val, string? target)
+    {
+        if (val is null || string.IsNullOrWhiteSpace(target)) return false;
+        var raw = val.ToString();
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        var list = ParseValueList(raw);
+        if (list.Count > 0)
+            return list.Any(item => string.Equals(item, target, StringComparison.OrdinalIgnoreCase));
+        return raw.Contains(target, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Mirrors RecordRepository.ParseValueList — the "in"/"notIn" wire format is a JSON

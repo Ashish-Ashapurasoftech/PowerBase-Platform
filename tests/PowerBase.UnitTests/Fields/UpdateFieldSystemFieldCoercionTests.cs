@@ -5,6 +5,8 @@ using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Commands.UpdateField;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Application.Fields.Common;
+using PowerBase.Application.Fields.Versioning;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.UnitTests.Fields;
@@ -33,9 +35,14 @@ public class UpdateFieldSystemFieldCoercionTests
     // not per-type shape validation (that's covered by FieldSettingsValidators' own tests).
     private readonly FieldSettingsValidatorRegistry _settingsRegistry = new(Array.Empty<IFieldSettingsValidator>());
 
+    private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
+    private readonly IFieldVersionRepository _versionRepo = Substitute.For<IFieldVersionRepository>();
+
     private UpdateFieldCommandHandler MakeSut() => new(
-        _tableRepo, _fieldRepo, _permRepo, _recordRepo, _auditRepo,
-        _schemaEngine, _settingsRegistry, _fieldTypeRepo, _messagePublisher, _queryContext, _searchService);
+        _tableRepo, _fieldRepo, _recordRepo, _auditRepo,
+        _schemaEngine, new FieldSettingsGuard(_permRepo, _recordRepo, _settingsRegistry),
+        new FieldVersionService(_versionRepo, _queryContext),
+        _uow, _fieldTypeRepo, _messagePublisher, _queryContext, _searchService);
 
     private AppTable MakeTable(long id = 5)
     {
@@ -91,7 +98,8 @@ public class UpdateFieldSystemFieldCoercionTests
         IsAuditable: true,
         IsUnique: true,
         IsEncrypted: false,
-        Settings: settings);
+        Settings: settings,
+        CommitMessage: "test commit");
 
     [Fact]
     public async Task SystemField_LabelAndDescriptionAreForcedBackToExistingValues()

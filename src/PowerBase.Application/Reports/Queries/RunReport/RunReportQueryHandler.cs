@@ -437,9 +437,9 @@ public class RunReportQueryHandler
                         return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
                     }
 
-                    // Rebuild userFilterTree: AND with matched IDs only (replaces original tree —
-                    // AI Search has already applied the user filter, so we just restrict to its results).
-                    userFilterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
+                    // Combine AI Search matched IDs with userFilterTree so any unindexed fields, formula
+                    // fields, or numeric ranges are preserved and evaluated by SQL / in-memory polish.
+                    userFilterTree = await BuildAiIdFilterAsync(table, cappedMatches, userFilterTree, ct);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

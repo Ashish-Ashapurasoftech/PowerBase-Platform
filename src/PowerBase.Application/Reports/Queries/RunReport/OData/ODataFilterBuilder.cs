@@ -25,27 +25,38 @@ public static class ODataFilterBuilder
     {
         if (group.Nodes.Count == 0) return null;
 
+        var isOr = group.Logic?.ToLowerInvariant() == "or";
         var parts = new List<string>();
         foreach (var node in group.Nodes)
         {
+            string? part = null;
             if (node.Condition != null)
             {
-                var condStr = BuildCondition(node.Condition, fieldMap);
-                if (!string.IsNullOrEmpty(condStr))
-                    parts.Add(condStr);
+                part = BuildCondition(node.Condition, fieldMap);
             }
             else if (node.Group != null)
             {
                 var grpStr = BuildGroup(node.Group, fieldMap);
                 if (!string.IsNullOrEmpty(grpStr))
-                    parts.Add($"({grpStr})");
+                    part = $"({grpStr})";
+            }
+
+            if (string.IsNullOrEmpty(part))
+            {
+                // For OR logic: if ANY child node cannot be evaluated in Azure AI Search,
+                // the entire OR group cannot be safely pushed down without dropping valid matches.
+                if (isOr) return null;
+            }
+            else
+            {
+                parts.Add(part);
             }
         }
 
         if (parts.Count == 0) return null;
         if (parts.Count == 1) return parts[0];
 
-        var logic = group.Logic.ToLowerInvariant() == "or" ? " or " : " and ";
+        var logic = isOr ? " or " : " and ";
         return string.Join(logic, parts);
     }
 
@@ -54,10 +65,56 @@ public static class ODataFilterBuilder
         if (!fieldMap.TryGetValue(c.FieldId, out var field)) return null;
         if (!field.IsSearchable && !field.IsFilterable) return null; // Cannot filter on fields not in Azure AI Search
 
-        var fieldName = $"f_{c.FieldId}";
-        var val = FormatValue(c.Value, field);
+        // Field-to-field comparisons (ValueMode == "field") cannot be evaluated in Azure OData; leave for SQL
+        if (string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase)) return null;
 
+        if (c.Operator is not ("isEmpty" or "isNotEmpty") && string.IsNullOrEmpty(c.Value))
+            return null;
+
+        var fieldName = $"f_{c.FieldId}";
         var isMulti = field.TypeCode is "MultiSelect" or "MultiUser" or "CheckboxGroup";
+        var isNumeric = field.TypeCode is "Number" or "Numeric" or "Currency" or "Percent" or "Rating" or "Duration" or "Integer";
+        var isDate = field.TypeCode is "Date" or "DateTime";
+
+        // Numeric range comparisons (gt, gte, lt, lte) on string-typed Azure index fields produce
+        // lexicographic string comparisons ("10" < "9"), which drops valid records. Return null
+        // so that SQL Server / FormulaFilterSorter evaluates them with full mathematical precision.
+        if (isNumeric && c.Operator is "gt" or "gte" or "lt" or "lte")
+            return null;
+
+        if (isDate)
+        {
+            if (c.Operator == "date_eq")
+            {
+                if (DateTime.TryParse(c.Value, out var dt))
+                {
+                    var utc = dt.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : dt.ToUniversalTime();
+                    var dayStart = utc.Date.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+                    var dayEnd = utc.Date.AddDays(1).ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+                    return $"{fieldName} ge '{dayStart}' and {fieldName} lt '{dayEnd}'";
+                }
+                return null;
+            }
+
+            if (c.Operator is "gt" or "gte" or "lt" or "lte")
+            {
+                if (DateTime.TryParse(c.Value, out var dtVal))
+                {
+                    var utc = (dtVal.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(dtVal, DateTimeKind.Utc) : dtVal.ToUniversalTime()).ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+                    return c.Operator switch
+                    {
+                        "gt"  => $"{fieldName} gt '{utc}'",
+                        "gte" => $"{fieldName} ge '{utc}'",
+                        "lt"  => $"{fieldName} lt '{utc}'",
+                        "lte" => $"{fieldName} le '{utc}'",
+                        _     => null
+                    };
+                }
+                return null;
+            }
+        }
+
+        var val = FormatValue(c.Value, field);
 
         return c.Operator switch
         {
@@ -73,6 +130,8 @@ public static class ODataFilterBuilder
             "notContains"   => BuildRegexQuery(c.Value, fieldName, false, true),
             "startsWith"    => BuildRegexQuery(c.Value, fieldName, true, false),
             "notStartsWith" => BuildRegexQuery(c.Value, fieldName, true, true),
+            "includes"      => BuildPhraseQuery(c.Value, fieldName, false),
+            "notIncludes"   => BuildPhraseQuery(c.Value, fieldName, true),
             "in"            => BuildInClause(fieldName, c.Value, field, true),
             "notIn"         => BuildInClause(fieldName, c.Value, field, false),
             _               => null
@@ -129,19 +188,12 @@ public static class ODataFilterBuilder
     {
         if (string.IsNullOrEmpty(val)) return "''";
 
-        // Every f_{fid} field in the Azure Search index is created via AzureSearchService's
-        // SearchableField (see EnsureTableSchemaAsync) — which is always Edm.String, regardless
-        // of the PowerBase field's own type. There is no Edm.Double/Edm.Boolean field in this
-        // index for Number/Currency/Checkbox fields to map onto, so every value must be quoted
-        // as a string here. Emitting a bare numeric/boolean literal (as this used to for
-        // Number/Currency/Checkbox) produces a genuine OData type mismatch against the
-        // string-typed index field ("Found operand types 'Edm.String' and 'Edm.Int32'") — not
-        // just a cosmetic formatting difference.
-        //
-        // Known limitation this leaves in place: gt/gte/lt/lte comparisons against a Number/
-        // Currency field still compare as strings (lexicographic, not numeric) since the index
-        // has no numeric field to compare against — fixing that would mean adding real typed
-        // fields to the Azure index schema, out of scope here.
+        if ((field.TypeCode is "Date" or "DateTime") && DateTime.TryParse(val, out var dt))
+        {
+            var utc = (dt.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : dt.ToUniversalTime()).ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+            return $"'{utc}'";
+        }
+
         return $"'{val.Replace("'", "''")}'";
     }
 

@@ -176,7 +176,7 @@ public class RecordHandlerTests
         var recordId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
-        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo, _triggerInterceptor, _engine);
+        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _userRepo, _auditRepo, _triggerInterceptor, _engine);
         var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow, Substitute.For<IMessagePublisher>());
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, recordId,
@@ -191,7 +191,7 @@ public class RecordHandlerTests
     public async Task UpdateRecord_EmptyFieldValues_SkipsUpdate()
     {
         var table = MakeTable();
-        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _auditRepo, _triggerInterceptor, _engine);
+        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _appUserRepo, _userRepo, _auditRepo, _triggerInterceptor, _engine);
         var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow, Substitute.For<IMessagePublisher>());
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, Guid.NewGuid(),
