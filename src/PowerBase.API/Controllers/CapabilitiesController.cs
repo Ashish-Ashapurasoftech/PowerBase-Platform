@@ -38,7 +38,6 @@ public class CapabilitiesController : ControllerBase
     [HttpGet]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<CapabilityDto>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    [RequirePermission(PermissionCodes.RolesManage)]
     public async Task<IActionResult> List(CancellationToken ct)
     {
         var capabilities = await _listHandler.HandleAsync(new ListCapabilitiesQuery(), ct);
@@ -51,7 +50,6 @@ public class CapabilitiesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [RequirePermission(PermissionCodes.RolesManage)]
     public async Task<IActionResult> Save([FromBody] SaveRoleCapabilitiesRequest request, CancellationToken ct)
     {
         await _saveRoleCapabilitiesHandler.HandleAsync(
@@ -61,10 +59,10 @@ public class CapabilitiesController : ControllerBase
 
     /// <summary>API 1.2: Get Builder Capabilities — Fetch which powers a role currently has.</summary>
     [HttpGet("{roleId:guid}")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByRoleId)]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<RoleCapabilityDto>>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [RequirePermission(PermissionCodes.RolesManage)]
     public async Task<IActionResult> GetByRole(Guid roleId, CancellationToken ct)
     {
         var capabilities = await _getRoleCapabilitiesHandler.HandleAsync(
@@ -74,11 +72,11 @@ public class CapabilitiesController : ControllerBase
 
     /// <summary>API 1.3: Update/Revoke Capability — Turn a specific power on or off for a role.</summary>
     [HttpPatch("{roleId:guid}")]
+    [RequireAppPermission(PermissionCodes.RolesManage, AppAccessResolver.ByRoleId)]
     [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [RequirePermission(PermissionCodes.RolesManage)]
     public async Task<IActionResult> UpdateCapability(
         Guid roleId,
         [FromBody] UpdateRoleCapabilityRequest request,

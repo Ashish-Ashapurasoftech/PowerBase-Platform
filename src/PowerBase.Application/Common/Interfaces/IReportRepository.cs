@@ -16,6 +16,12 @@ public interface IReportRepository
         Guid tablePublicId, int page, int pageSize, string? search, string sortBy, bool sortDesc, CancellationToken ct = default);
     Task<int> CountByTableAsync(Guid tablePublicId, string? search, CancellationToken ct = default);
     Task<Report?> GetDefaultByTableAsync(Guid tablePublicId, CancellationToken ct = default);
+    /// <summary>The hidden, per-table row backing "Default Report Settings" — see
+    /// <see cref="Report.IsDefaultSettingsRecord"/>. Null only if migration
+    /// 055_add_report_default_settings_record.sql hasn't run yet for this tenant; callers should
+    /// lazily create one (see GetOrCreateDefaultReportSettingsQueryHandler) rather than assume
+    /// every table already has one.</summary>
+    Task<Report?> GetDefaultSettingsRecordAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<Report?> GetVisibleReportAsync(Guid publicId, CancellationToken ct = default);
     Task<Report?> GetFirstVisibleReportByTableAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<bool> BelongsToTableAsync(Guid tablePublicId, Guid reportPublicId, CancellationToken ct = default);

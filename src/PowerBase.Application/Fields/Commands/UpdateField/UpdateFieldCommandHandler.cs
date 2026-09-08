@@ -1,6 +1,8 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Application.Fields.Versioning;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -12,12 +14,13 @@ public class UpdateFieldCommandHandler
 {
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
-    private readonly IAppRolePermissionRepository _permRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IAuditRepository _auditRepo;
     private readonly ISchemaEngineService _schemaEngine;
     private readonly IFieldTypeRepository _fieldTypeRepo;
-    private readonly FieldSettingsValidatorRegistry _settingsRegistry;
+    private readonly FieldSettingsGuard _guard;
+    private readonly FieldVersionService _versionService;
+    private readonly ITenantUnitOfWork _uow;
     private readonly IMessagePublisher _messagePublisher;
     private readonly IQueryContext _queryContext;
     private readonly IAzureSearchService _searchService;
@@ -29,11 +32,12 @@ public class UpdateFieldCommandHandler
     public UpdateFieldCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
-        IAppRolePermissionRepository permRepo,
         IRecordRepository recordRepo,
         IAuditRepository auditRepo,
         ISchemaEngineService schemaEngine,
-        FieldSettingsValidatorRegistry settingsRegistry,
+        FieldSettingsGuard guard,
+        FieldVersionService versionService,
+        ITenantUnitOfWork uow,
         IFieldTypeRepository fieldTypeRepo,
         IMessagePublisher messagePublisher,
         IQueryContext queryContext,
@@ -41,12 +45,13 @@ public class UpdateFieldCommandHandler
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
-        _permRepo = permRepo;
         _recordRepo = recordRepo;
         _auditRepo = auditRepo;
         _schemaEngine = schemaEngine;
+        _guard = guard;
+        _versionService = versionService;
+        _uow = uow;
         _fieldTypeRepo = fieldTypeRepo;
-        _settingsRegistry = settingsRegistry;
         _messagePublisher = messagePublisher;
         _queryContext = queryContext;
         _searchService = searchService;
@@ -56,6 +61,9 @@ public class UpdateFieldCommandHandler
     {
         if (string.IsNullOrWhiteSpace(command.Label))
             throw new ValidationException(new Dictionary<string, string[]> { ["Label"] = ["Label is required."] });
+
+        if (string.IsNullOrWhiteSpace(command.CommitMessage))
+            throw new ValidationException(new Dictionary<string, string[]> { ["CommitMessage"] = ["A reason for this change is required."] });
 
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
@@ -71,13 +79,15 @@ public class UpdateFieldCommandHandler
         if (existing.AppTableId != table.Id)
             throw new NotFoundException("Field", command.FieldPublicId);
 
+        var before = FieldSnapshot.From(existing);
+
         // System fields (Record ID#, Date Created/Modified, Record Owner, Last Modified By) only
         // expose a reduced settings surface on the Field Detail page — Label stays read-only, only
         // Searchable/Reportable stay togglable, and each type's Behavior Settings collapse to a
         // fixed allow-list (see SystemFieldSettingsPolicy). Coerced here, before every check below,
         // so the request body is never trusted for anything beyond what the UI actually offers —
         // this is the authoritative enforcement; the frontend hiding these controls is only UX.
-        var label = existing.IsSystem ? existing.Label : command.Label;
+        var label = existing.IsSystem ? existing.Label! : command.Label;
         var description = existing.IsSystem ? existing.Description : command.Description;
         var isRequired = existing.IsSystem ? false : command.IsRequired;
         var defaultValue = existing.IsSystem ? null : command.DefaultValue;
@@ -93,16 +103,8 @@ public class UpdateFieldCommandHandler
         if (await _fieldRepo.LabelExistsInTableAsync(table.Id, label, excludeFieldId: existing.Id, ct: ct))
             throw new DuplicateException("Field", "label", label);
 
-        // Validate per-type Settings JSON against the field's current type.
-        var settingsErrors = _settingsRegistry.Validate(existing.TypeCode, settings);
-        if (settingsErrors.Count > 0)
-            throw new ValidationException(settingsErrors.AsReadOnly());
-
-        var capErrors = FieldGeneralSettingsCapability.Validate(
-            existing.TypeCode, settings ?? existing.Settings, label,
-            isRequired, isUnique, defaultValue);
-        if (capErrors.Count > 0)
-            throw new ValidationException(capErrors.AsReadOnly());
+        _guard.ValidateSettingsAndCapabilities(
+            existing.TypeCode, settings, settings ?? existing.Settings, label, isRequired, isUnique, defaultValue);
 
         // ── Numeric family "Display As" type switch ─────────────────────────────
         // Number/Currency/Percent/Rating share one settings shape (NumericSettings) with a
@@ -142,70 +144,45 @@ public class UpdateFieldCommandHandler
             }
         }
 
-        // Invariant: a required field with no default value cannot be made required while some role has
-        // it set to None — those users would never be able to create a record.
-        if (isRequired && string.IsNullOrWhiteSpace(defaultValue))
-        {
-            var rolesWithNone = await _permRepo.CountRolesWithNoneAccessForFieldAsync(existing.Id, ct);
-            if (rolesWithNone > 0)
-            {
-                throw new ValidationException(new Dictionary<string, string[]>
-                {
-                    ["DefaultValue"] =
-                    [
-                        $"'{label}' is required but does not have a default value. Because some users are not " +
-                        $"allowed to modify '{label}', those users will not be able to add new records. " +
-                        "Supply a default value or uncheck Required."
-                    ],
-                });
-            }
-        }
-
-        // ── Unique index ────────────────────────────────────────────────────────
-        if (isUnique && !existing.IsUnique)
-        {
-            // Pre-flight: reject if duplicates already exist.
-            if (await _recordRepo.HasDuplicatesAsync(table, existing, ct))
-            {
-                throw new ValidationException(new Dictionary<string, string[]>
-                {
-                    ["IsUnique"] = [$"Cannot make '{label}' unique — duplicate values already exist. Remove duplicates first."]
-                });
-            }
-        }
-
-        // ── Encryption lock ─────────────────────────────────────────────────────
-        // We only allow toggling encryption (ON or OFF) for an existing field if the table has zero records.
-        // Otherwise, existing plaintext/ciphertext data would become unreadable.
-        if (existing.IsEncrypted != isEncrypted)
-        {
-            var recordCount = await _recordRepo.CountAsync(table, Array.Empty<AppField>(), ct: ct);
-            if (recordCount > 0)
-            {
-                var errorMsg = existing.IsEncrypted
-                    ? "A field that has been encrypted cannot be un-encrypted if the table has existing records."
-                    : "Encryption can only be enabled when creating a new field or if the table has no records.";
-
-                throw new ValidationException(new Dictionary<string, string[]>
-                {
-                    ["IsEncrypted"] = [errorMsg]
-                });
-            }
-        }
+        await _guard.ValidateRequiredHasDefaultOrNoRestrictedRolesAsync(existing.Id, label, isRequired, defaultValue, ct);
+        await _guard.ValidateUniqueTransitionAsync(table, existing, label, isUnique, ct);
+        await _guard.ValidateEncryptionTransitionAsync(table, existing, isEncrypted, ct);
 
         // Save old IsSearchable state before UpdateAsync modifies metadata
         bool wasSearchable = existing.IsSearchable;
 
-        var affected = await _fieldRepo.UpdateAsync(
-            existing.PublicId, table.Id,
-            label, description,
-            isRequired, defaultValue,
-            command.IsSearchable, isSortable,
-            isFilterable, command.IsReportable, isAuditable,
-            isUnique, isEncrypted, settings, ct);
+        var after = new FieldSnapshot(
+            label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
+            isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, settings);
 
-        if (affected == 0)
-            throw new NotFoundException("Field", command.FieldPublicId);
+        // The field row itself and its new version are one atomic unit: either both land or
+        // neither does, so a version is never created for a field-settings change that didn't
+        // actually take effect (and vice versa).
+        await _uow.BeginAsync(ct);
+        try
+        {
+            var affected = await _fieldRepo.UpdateAsync(
+                existing.PublicId, table.Id,
+                label, description,
+                isRequired, defaultValue,
+                command.IsSearchable, isSortable,
+                isFilterable, command.IsReportable, isAuditable,
+                isUnique, isEncrypted, settings, ct, _uow.Transaction);
+
+            if (affected == 0)
+                throw new NotFoundException("Field", command.FieldPublicId);
+
+            await _versionService.CreateVersionIfChangedAsync(
+                existing.Id, before, after, command.CommitMessage,
+                FieldVersionChangeType.Update, restoredFromVersion: null, _uow.Transaction!, ct);
+
+            await _uow.CommitAsync(ct);
+        }
+        catch
+        {
+            await _uow.RollbackAsync(ct);
+            throw;
+        }
 
         // Unique index: create or drop after the metadata row is committed.
         if (isUnique != existing.IsUnique)

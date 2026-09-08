@@ -37,6 +37,7 @@ public sealed class RecordWriteService : IRecordWriteService
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IAppUserRepository _appUserRepo;
+    private readonly IUserRepository _userRepo;
     private readonly IAuditRepository _auditRepo;
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly FormulaEngine _engine;
@@ -46,6 +47,7 @@ public sealed class RecordWriteService : IRecordWriteService
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IAppUserRepository appUserRepo,
+        IUserRepository userRepo,
         IAuditRepository auditRepo,
         IPipelineTriggerInterceptor triggerInterceptor,
         FormulaEngine engine)
@@ -54,6 +56,7 @@ public sealed class RecordWriteService : IRecordWriteService
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _appUserRepo = appUserRepo;
+        _userRepo = userRepo;
         _auditRepo = auditRepo;
         _triggerInterceptor = triggerInterceptor;
         _engine = engine;
@@ -115,6 +118,11 @@ public sealed class RecordWriteService : IRecordWriteService
         var effectiveValues = new Dictionary<long, object?>(fieldValues);
         foreach (var kvp in refOverrides)
             effectiveValues[kvp.Key] = kvp.Value;
+
+        // User/MultiUser values submitted from the record form's picker (or an Action Button's
+        // "Add Data" values) arrive as userPublicId Guid(s) — resolve to the long id the column
+        // actually stores. See UserFieldValueResolver's doc comment for why.
+        await UserFieldValueResolver.ResolveAsync(_userRepo, fields, effectiveValues, ct);
 
         // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
         // values about to be persisted, excluding this record itself from the Unique collision check.

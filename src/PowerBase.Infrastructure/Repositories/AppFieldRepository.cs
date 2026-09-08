@@ -1,5 +1,6 @@
 using System.Data;
 using Dapper;
+using Microsoft.Data.SqlClient;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
@@ -469,24 +470,46 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     public async Task<int> UpdateAsync(Guid publicId, long tableId, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
-        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, string? settings, CancellationToken ct = default)
+        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, string? settings,
+        CancellationToken ct = default, IDbTransaction? transaction = null)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var affected = await connection.ExecuteAsync(
-            new CommandDefinition(UpdateFieldSql, new
-            {
-                publicId, tableId, label, description,
-                isRequired, defaultValue, isSearchable, isSortable,
-                isFilterable, isReportable, isAuditable, isUnique, isEncrypted, settings,
-                modifiedBy = QueryContext.UserId,
-            }, cancellationToken: ct));
-
-        if (affected > 0)
+        var parameters = new
         {
-            var fid = await connection.ExecuteScalarAsync<int>(
-                new CommandDefinition("SELECT Fid FROM meta.AppField WHERE PublicId = @publicId AND AppTableId = @tableId", new { publicId, tableId }, cancellationToken: ct));
-            var tenantId = QueryContext.TenantId;
-            _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tenantId, tableId, new[] { (fid, isSearchable, isFilterable) }, default));
+            publicId, tableId, label, description,
+            isRequired, defaultValue, isSearchable, isSortable,
+            isFilterable, isReportable, isAuditable, isUnique, isEncrypted, settings,
+            modifiedBy = QueryContext.UserId,
+        };
+
+        int affected;
+        IDbConnection connection;
+        SqlConnection? ownConnection = null;
+        if (transaction is not null)
+        {
+            connection = transaction.Connection!;
+            affected = await connection.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, transaction, cancellationToken: ct));
+        }
+        else
+        {
+            ownConnection = await ConnectionFactory.CreateAsync(ct);
+            connection = ownConnection;
+            affected = await connection.ExecuteAsync(new CommandDefinition(UpdateFieldSql, parameters, cancellationToken: ct));
+        }
+
+        try
+        {
+            if (affected > 0)
+            {
+                var fid = await connection.ExecuteScalarAsync<int>(
+                    new CommandDefinition("SELECT Fid FROM meta.AppField WHERE PublicId = @publicId AND AppTableId = @tableId", new { publicId, tableId }, transaction, cancellationToken: ct));
+                var tenantId = QueryContext.TenantId;
+                _ = Task.Run(() => _searchService.EnsureTableSchemaAsync(tenantId, tableId, new[] { (fid, isSearchable, isFilterable) }, default));
+            }
+        }
+        finally
+        {
+            if (ownConnection is not null)
+                await ownConnection.DisposeAsync();
         }
 
         return affected;

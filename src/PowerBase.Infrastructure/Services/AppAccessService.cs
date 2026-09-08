@@ -14,6 +14,7 @@ public class AppAccessService : IAppAccessService
     private readonly IAppUserRepository _appUserRepo;
     private readonly IQueryContext _queryContext;
     private readonly IPipelineRepository _pipelineRepo;
+    private readonly IAppRoleRepository? _appRoleRepo;
 
     public AppAccessService(
         IAppRepository appRepo,
@@ -24,7 +25,8 @@ public class AppAccessService : IAppAccessService
         IPageRepository pageRepo,
         IAppUserRepository appUserRepo,
         IQueryContext queryContext,
-        IPipelineRepository pipelineRepo)
+        IPipelineRepository pipelineRepo,
+        IAppRoleRepository? appRoleRepo = null)
     {
         _appRepo = appRepo;
         _tableRepo = tableRepo;
@@ -35,6 +37,7 @@ public class AppAccessService : IAppAccessService
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
         _pipelineRepo = pipelineRepo;
+        _appRoleRepo = appRoleRepo;
     }
 
     public async Task RequirePermissionByAppPublicIdAsync(Guid appPublicId, string permissionCode, CancellationToken ct = default)
@@ -83,6 +86,19 @@ public class AppAccessService : IAppAccessService
         }
         
         await RequirePermissionByAppIdAsync(pipeline.AppId, permissionCode, ct);
+    }
+
+    public async Task RequirePermissionByRolePublicIdAsync(Guid rolePublicId, string permissionCode, CancellationToken ct = default)
+    {
+        if (_appRoleRepo == null)
+        {
+            throw new InvalidOperationException("IAppRoleRepository is not configured.");
+        }
+
+        var role = await _appRoleRepo.GetByPublicIdAsync(rolePublicId, ct)
+            ?? throw new NotFoundException("AppRole", rolePublicId);
+
+        await RequirePermissionByAppIdAsync(role.AppId, permissionCode, ct);
     }
 
     public async Task RequirePermissionByAppIdAsync(long appId, string permissionCode, CancellationToken ct = default)

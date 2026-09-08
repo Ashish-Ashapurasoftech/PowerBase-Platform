@@ -46,7 +46,12 @@ using PowerBase.Application.Tenants.Commands.CreateTenant;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Commands.DeleteField;
 using PowerBase.Application.Fields.Commands.UpdateField;
+using PowerBase.Application.Fields.Commands.RestoreFieldVersion;
+using PowerBase.Application.Fields.Common;
+using PowerBase.Application.Fields.Versioning;
 using PowerBase.Application.Fields.Queries.ListFields;
+using PowerBase.Application.Fields.Queries.ListFieldVersions;
+using PowerBase.Application.Fields.Queries.GetFieldVersionDetail;
 using PowerBase.Application.Records.Commands.BulkDeleteRecords;
 using PowerBase.Application.Records.Commands.CreateRecord;
 using PowerBase.Application.Records.Commands.DeleteRecord;
@@ -116,6 +121,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Host.UseSerilog((ctx, cfg) => cfg.ReadFrom.Configuration(ctx.Configuration));
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+
 
 builder.Services.AddCors(options =>
 {
@@ -318,6 +324,7 @@ builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<ISystemRoleRepository, SystemRoleRepository>();
 builder.Services.AddScoped<IAuditRepository, AuditRepository>();
 builder.Services.AddScoped<IAppFieldRepository, AppFieldRepository>();
+builder.Services.AddScoped<IFieldVersionRepository, FieldVersionRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
 builder.Services.AddScoped<IReportRepository, ReportRepository>();
@@ -440,11 +447,16 @@ builder.Services.AddScoped<PowerBase.Application.Fields.Commands.BulkCreateField
 builder.Services.AddScoped<UpdateFieldCommandHandler>();
 builder.Services.AddScoped<DeleteFieldCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.BulkDeleteFields.BulkDeleteFieldsCommandHandler>();
+builder.Services.AddScoped<RestoreFieldVersionCommandHandler>();
+builder.Services.AddScoped<FieldSettingsGuard>();
+builder.Services.AddScoped<FieldVersionService>();
 builder.Services.AddScoped<ListFieldsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.ListFields.ListAllFieldsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.GetField.GetFieldQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.ListFieldTypes.ListFieldTypesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Queries.GetFieldUsage.GetFieldUsageQueryHandler>();
+builder.Services.AddScoped<ListFieldVersionsQueryHandler>();
+builder.Services.AddScoped<GetFieldVersionDetailQueryHandler>();
 builder.Services.AddScoped<CreateRecordCommandHandler>();
 builder.Services.AddScoped<UpdateRecordCommandHandler>();
 builder.Services.AddScoped<DeleteRecordCommandHandler>();
@@ -472,6 +484,7 @@ builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();
 builder.Services.AddScoped<UpdateDefaultReportSettingsCommandHandler>();
 builder.Services.AddScoped<GetReportQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetOrCreateDefaultReportSettings.GetOrCreateDefaultReportSettingsQueryHandler>();
 builder.Services.AddScoped<GetDefaultReportSettingsQueryHandler>();
 builder.Services.AddScoped<ListReportsQueryHandler>();
 builder.Services.AddScoped<ListReportsByTableQueryHandler>();

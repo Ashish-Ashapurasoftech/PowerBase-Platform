@@ -149,6 +149,25 @@ public class RunReportQueryHandler
             };
         }
 
+        // "<ask the user>" answers are substituted directly into the saved tree's own leaf
+        // positions FIRST — before the User/Date resolvers below, so an answer that's itself a
+        // picked user's Guid or a relative date tier gets picked up by them exactly like any other
+        // literal value. Preserves the saved tree's exact AND/OR structure (see
+        // ResolveAskAnswers's doc comment for why this can't be a separate AND'd-on-top group).
+        filterTree = ResolveAskAnswers(filterTree, query.AskAnswers, []);
+
+        // "is the current user" AND literal User/MultiUser picker values both need resolving to
+        // the plain long core.[User].Id the column actually stores before this tree reaches the
+        // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
+        var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
+        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), ct);
+
+        // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
+        // future) must resolve to an actual date freshly EVERY time the report runs, not once at
+        // save time — so this can't be done client-side when the filter is saved. See
+        // ResolveDateValueModeConditions's doc comment for the "today" anchor caveat.
+        filterTree = ResolveDateValueModeConditions(filterTree);
+
         // Table reports: TableSortGroup (Phase 1's unified Sort+Group list) supersedes the legacy
         // single-field GroupByFieldId + SortFields when non-empty — derive both the sort order
         // and the effective group field from it. Reports saved before this existed have an empty
@@ -191,14 +210,27 @@ public class RunReportQueryHandler
             }
         }
 
-        // Runtime filter tree (Advanced builder / per-column filters), AND'd on top of the
-        // saved tree — role ViewFilter and dynamic/quick-search filters are merged in further
-        // down (RunTableAsync) / below (RunSummaryAsync).
+        // Runtime filter tree (Advanced builder / per-column filters / the "ask the user"
+        // prompt's answers — see table-report-view.component.ts's buildRuntimeFilterTree()),
+        // AND'd on top of the saved tree — role ViewFilter and dynamic/quick-search filters are
+        // merged in further down (RunTableAsync) / below (RunSummaryAsync). Needs the SAME
+        // User-field-Guid and Date-relative-tier resolution as the saved tree above, for the same
+        // reason: an "ask the user" answer for a User field arrives here, not in `filterTree`.
+        //
+        // This was reverted once before, when it appeared to "break" a working ask-flow test —
+        // that was because the underlying record data itself held the wrong (Guid) value at the
+        // time (the write-path bug fixed in RecordWriteService/CreateRecordCommandHandler), so
+        // the *unresolved* raw Guid from the picker was accidentally matching the *also-wrong*
+        // stored Guid. Now that the write path stores the correct long id, leaving this
+        // unresolved is what's actually broken (confirmed: identical saved-vs-ask-prompt filters
+        // against the same now-correct data — saved matches, ask doesn't, until this runs).
         if (query.RuntimeFilterTree is { Nodes.Count: > 0 })
         {
+            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), ct);
+            resolvedRuntimeTree = ResolveDateValueModeConditions(resolvedRuntimeTree);
             filterTree = filterTree == null
-                ? query.RuntimeFilterTree
-                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = query.RuntimeFilterTree }] };
+                ? resolvedRuntimeTree
+                : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = resolvedRuntimeTree }] };
         }
 
         if (report.ReportType is "Summary" or "Chart")
@@ -232,6 +264,12 @@ public class RunReportQueryHandler
                 .Where(f => f.Fid.HasValue)
                 .GroupBy(f => (long)f.Fid!.Value)
                 .ToDictionary(g => g.Key, g => g.First());
+            // A report's own explicit Columns are never filtered by IsReportable here — Custom
+            // mode is deliberately allowed to keep or add a field that isn't reportable, and that
+            // holds even when this particular report is also the table's default report: what
+            // matters is THIS row's own ColumnsMode, not the IsDefault flag. (The reportable
+            // restriction only applies to what OTHER reports inherit from this row when they're
+            // in "Default columns" mode — see below.)
             selectedFields = definition.Columns
                 .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
                 .Select(id => fieldMap[id])
@@ -240,21 +278,37 @@ public class RunReportQueryHandler
 
         if (selectedFields.Count == 0 && definition.ColumnsMode == "Default")
         {
-            var defaultReport = await _reportRepo.GetDefaultByTableAsync(table.PublicId, ct);
-            var defaultColumnIds = defaultReport is null
-                ? []
-                : (JsonSerializer.Deserialize<ReportDefinition>(defaultReport.Definition) ?? new ReportDefinition()).Columns;
-
-            if (defaultColumnIds.Count > 0)
+            var defaultSettings = await _reportRepo.GetDefaultSettingsRecordAsync(table.PublicId, ct);
+            if (defaultSettings is not null)
             {
-                var fieldMap = allFields
-                    .Where(f => f.Fid.HasValue)
-                    .GroupBy(f => (long)f.Fid!.Value)
-                    .ToDictionary(g => g.Key, g => g.First());
-                selectedFields = defaultColumnIds
-                    .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
-                    .Select(id => fieldMap[id])
-                    .ToList();
+                var defaultColumnIds = (JsonSerializer.Deserialize<ReportDefinition>(defaultSettings.Definition) ?? new ReportDefinition()).Columns;
+
+                if (defaultColumnIds.Count > 0)
+                {
+                    var fieldMap = allFields
+                        .Where(f => f.Fid.HasValue)
+                        .GroupBy(f => (long)f.Fid!.Value)
+                        .ToDictionary(g => g.Key, g => g.First());
+                    selectedFields = defaultColumnIds
+                        // Same reasoning as above: the inherited-from list can only ever be reportable
+                        // fields, regardless of whatever stale ids the default report's own row still has.
+                        .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id) && fieldMap[id].IsReportable)
+                        .Select(id => fieldMap[id])
+                        .ToList();
+                }
+                else
+                {
+                    // The default report exists but has never been explicitly configured — same
+                    // "all non-system fields" inference the Default Report Settings columns picker
+                    // shows before its first save (table-default-report-settings.component.ts's
+                    // initState()). Without this, a report merely inheriting an *unconfigured*
+                    // default fell through to the generic "every reportable field" fallback below —
+                    // which also pulls in Record ID#/Date Created/etc — instead of matching what the
+                    // settings page visually promises until someone actually saves it once.
+                    selectedFields = allFields
+                        .Where(f => f.Fid.HasValue && f.IsReportable && !f.IsSystem && visibleFieldIds.Contains((long)f.Fid!.Value))
+                        .ToList();
+                }
             }
         }
 
@@ -550,6 +604,169 @@ public class RunReportQueryHandler
                 allowedFieldIds.Contains(rf.FieldId) ||
                 allowedFieldSubFieldPairs.Contains((rf.FieldId, rf.SubField ?? string.Empty)))
             .ToList();
+    }
+
+    /// <summary>Recursively resolves two kinds of User-field filter values that can't be
+    /// evaluated as literal SQL text as-is:
+    /// (1) "isCurrentUser" conditions rewrite to a literal "eq" against the caller's own user id.
+    /// (2) Literal User/MultiUser condition VALUES arrive from the frontend's user picker as
+    ///     userPublicId Guid string(s) (comma-joined for MultiUser) — AppUserPickerResponse's own
+    ///     wire shape — but the column itself stores the plain long core.[User].Id (confirmed
+    ///     against every other User-field read path — see ResolveUserNamesAsync below,
+    ///     RecordResult.ResolveUserValue, GetDistinctFieldValuesQueryHandler, and
+    ///     RecordRepository's filter-SQL builder, which compares the stored column verbatim with
+    ///     no Guid conversion). Left unresolved, a picked user would never match. Each Guid part
+    ///     is resolved via IUserRepository.GetByPublicIdAsync and cached per call so the same
+    ///     picked user referenced by several conditions only costs one lookup; a part that isn't
+    ///     a parseable Guid (already numeric, or free text) passes through unchanged.
+    /// Do not copy RolePermissionEnforcer's appUser.UserPublicId.ToString() pattern for (1) — that
+    /// path is unproven (mock-only unit test, its UI is disabled) and writes the wrong id space.
+    /// Returns a new tree (never mutates the input) so callers holding onto the original
+    /// `definition.FilterTree` reference elsewhere aren't affected.</summary>
+    /// <summary>Substitutes each "&lt;ask the user&gt;" condition's value with the caller-supplied
+    /// answer, keyed by the condition's tree-path (root-to-leaf node indices joined with "-" —
+    /// must match table-report-view.component.ts's askConditionKey exactly). Preserves the tree's
+    /// exact AND/OR structure — this is why ask-answers are resolved this way instead of merged
+    /// as a separate flat group AND'd on top of everything else: a flat AND merge can't correctly
+    /// represent an ask-condition that lives inside an OR group (confirmed by direct testing — it
+    /// silently narrowed a saved "A or B" filter into "A and B"). An unanswered ask-condition (no
+    /// matching key, or a blank answer — e.g. the report's saved definition was run directly,
+    /// bypassing the prompt entirely) is left with ValueMode "ask" and an empty Value, which
+    /// BuildConditionClause's existing empty-value guard already treats as a no-op.</summary>
+    internal static FilterGroup? ResolveAskAnswers(FilterGroup? group, IReadOnlyDictionary<string, string>? answers, List<int> path)
+    {
+        if (group is null) return null;
+        var nodes = new List<FilterNode>();
+        for (var i = 0; i < group.Nodes.Count; i++)
+        {
+            var n = group.Nodes[i];
+            var childPath = new List<int>(path) { i };
+            FilterCondition? newCondition = n.Condition;
+            if (n.Condition is { } cond && string.Equals(cond.ValueMode, "ask", StringComparison.OrdinalIgnoreCase))
+            {
+                var key = string.Join("-", childPath);
+                if (answers != null && answers.TryGetValue(key, out var answer) && !string.IsNullOrEmpty(answer))
+                {
+                    newCondition = new FilterCondition
+                    {
+                        FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
+                        Value = answer, ValueMode = "literal", ValueFieldId = null,
+                    };
+                }
+            }
+            nodes.Add(new FilterNode
+            {
+                Condition = newCondition,
+                Group = ResolveAskAnswers(n.Group, answers, childPath),
+            });
+        }
+        return new FilterGroup { Logic = group.Logic, Nodes = nodes };
+    }
+
+    /// <summary>Resolves the Date-group's relative value-mode tiers (today/yesterday/tomorrow/
+    /// pastDays/futureDays — the "day(s) in the past/future" tiers carry the day count in
+    /// cond.Value) into a literal date string, matching the same "resolve one layer above the SQL
+    /// builder" shape as the other resolvers in this file. Anchored to UTC "now" — a known
+    /// simplification, since no per-tenant/app timezone is tracked anywhere else in this codebase
+    /// either. Non-Date-group conditions and any other ValueMode pass through unchanged.</summary>
+    internal static FilterGroup? ResolveDateValueModeConditions(FilterGroup? group)
+    {
+        if (group is null) return null;
+        var today = DateTime.UtcNow.Date;
+        return new FilterGroup
+        {
+            Logic = group.Logic,
+            Nodes = group.Nodes.Select(n => new FilterNode
+            {
+                Condition = n.Condition is null ? null : ResolveDateCondition(n.Condition, today),
+                Group = ResolveDateValueModeConditions(n.Group),
+            }).ToList(),
+        };
+    }
+
+    private static FilterCondition ResolveDateCondition(FilterCondition cond, DateTime today)
+    {
+        const string isoFormat = "yyyy-MM-dd";
+        string? resolved = cond.ValueMode switch
+        {
+            "today" => today.ToString(isoFormat),
+            "yesterday" => today.AddDays(-1).ToString(isoFormat),
+            "tomorrow" => today.AddDays(1).ToString(isoFormat),
+            "pastDays" => int.TryParse(cond.Value, out var pd) ? today.AddDays(-pd).ToString(isoFormat) : null,
+            "futureDays" => int.TryParse(cond.Value, out var fd) ? today.AddDays(fd).ToString(isoFormat) : null,
+            _ => null,
+        };
+        if (resolved is null) return cond;
+        return new FilterCondition
+        {
+            FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
+            Value = resolved, ValueMode = "literal", ValueFieldId = null,
+        };
+    }
+
+    internal async Task<FilterGroup?> ResolveUserFieldValuesAsync(
+        FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
+        Dictionary<Guid, long> guidCache, CancellationToken ct)
+    {
+        if (group is null) return null;
+        var nodes = new List<FilterNode>();
+        foreach (var n in group.Nodes)
+        {
+            FilterCondition? newCondition = n.Condition;
+            if (n.Condition is { } cond)
+            {
+                if (string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase))
+                {
+                    newCondition = new FilterCondition { FieldId = cond.FieldId, Operator = "eq", Value = currentUserId.ToString() };
+                }
+                else if (!string.IsNullOrEmpty(cond.Value)
+                    && (cond.ValueMode is null || string.Equals(cond.ValueMode, "literal", StringComparison.OrdinalIgnoreCase))
+                    && fieldLookup.TryGetValue(cond.FieldId, out var field)
+                    && (field.TypeCode is "User" or "MultiUser"))
+                {
+                    var parts = cond.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    var resolvedParts = new List<string>(parts.Length);
+                    foreach (var part in parts)
+                    {
+                        if (Guid.TryParse(part, out var guid))
+                        {
+                            if (!guidCache.TryGetValue(guid, out var longId))
+                            {
+                                try
+                                {
+                                    var user = await _userRepo.GetByPublicIdAsync(guid, ct);
+                                    longId = user.Id;
+                                }
+                                catch (Exception)
+                                {
+                                    // Unresolvable (deleted/unknown user) — leave the Guid text as-is;
+                                    // it simply won't match anything, which is the safe failure mode.
+                                    longId = -1;
+                                }
+                                guidCache[guid] = longId;
+                            }
+                            resolvedParts.Add(longId == -1 ? part : longId.ToString());
+                        }
+                        else
+                        {
+                            resolvedParts.Add(part);
+                        }
+                    }
+                    newCondition = new FilterCondition
+                    {
+                        FieldId = cond.FieldId, Operator = cond.Operator, SubField = cond.SubField,
+                        ValueMode = cond.ValueMode, ValueFieldId = cond.ValueFieldId,
+                        Value = string.Join(",", resolvedParts),
+                    };
+                }
+            }
+            nodes.Add(new FilterNode
+            {
+                Condition = newCondition,
+                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, ct),
+            });
+        }
+        return new FilterGroup { Logic = group.Logic, Nodes = nodes };
     }
 
     internal static FilterGroup? MergeRuntimeFilters(

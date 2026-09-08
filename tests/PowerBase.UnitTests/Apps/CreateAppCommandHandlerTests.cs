@@ -114,4 +114,48 @@ public class CreateAppCommandHandlerTests
         await sut.Invoking(s => s.HandleAsync(new CreateAppCommand(new string('x', 201), null, null, null, Array.Empty<TableSpec>())))
             .Should().ThrowAsync<ValidationException>();
     }
+
+    [Fact]
+    public async Task HandleAsync_DuplicateTableNames_ThrowsValidationException_WithoutCreatingApp()
+    {
+        SetupHappyPath(Guid.NewGuid());
+        var sut = CreateSut();
+
+        var tables = new[] { new TableSpec("Firts Table"), new TableSpec("Firts Table") };
+
+        await sut.Invoking(s => s.HandleAsync(new CreateAppCommand("My App", null, null, null, tables)))
+            .Should().ThrowAsync<ValidationException>()
+            .WithMessage("*Table name already exists*");
+
+        // Nothing — not even the App row itself — should be created once duplicates are caught.
+        await _appRepo.DidNotReceive().CreateAsync(Arg.Any<App>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleAsync_DuplicateTableNames_CaseInsensitiveAndWhitespace_ThrowsValidationException()
+    {
+        SetupHappyPath(Guid.NewGuid());
+        var sut = CreateSut();
+
+        var tables = new[] { new TableSpec("Clients"), new TableSpec(" clients ") };
+
+        await sut.Invoking(s => s.HandleAsync(new CreateAppCommand("My App", null, null, null, tables)))
+            .Should().ThrowAsync<ValidationException>();
+    }
+
+    [Fact]
+    public async Task HandleAsync_DuplicateFieldNamesWithinSameTable_ThrowsValidationException_WithoutCreatingApp()
+    {
+        SetupHappyPath(Guid.NewGuid());
+        var sut = CreateSut();
+
+        var fields = new[] { new AppFieldSpec("Name", "Text"), new AppFieldSpec("Name", "Text") };
+        var tables = new[] { new TableSpec("Firts Table", Fields: fields) };
+
+        await sut.Invoking(s => s.HandleAsync(new CreateAppCommand("My App", null, null, null, tables)))
+            .Should().ThrowAsync<ValidationException>()
+            .WithMessage("*Field name already exists in this table*");
+
+        await _appRepo.DidNotReceive().CreateAsync(Arg.Any<App>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
 }

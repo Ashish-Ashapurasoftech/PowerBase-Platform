@@ -120,6 +120,12 @@ public class BulkCreateFieldsCommandHandler
 
             var nextFid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
 
+            // Searchable/Sortable/Reportable/Filterable start from the field type's own defaults
+            // (see FieldAdvancedSettingsCapability) rather than one fixed set for every type. Types
+            // outside the matrix keep the old fixed defaults, unchanged.
+            var advancedDefaults = FieldAdvancedSettingsCapability.Resolve(fieldType.Code, item.Settings)
+                ?? new FieldAdvancedSettingsCapability.Defaults(Searchable: false, Sortable: true, Reportable: true, Filterable: true, Auditable: false);
+
             var field = new AppField
             {
                 AppTableId = table.Id,
@@ -133,10 +139,10 @@ public class BulkCreateFieldsCommandHandler
                 Fid = nextFid,
                 Settings = item.Settings,
                 CreatedBy = _queryContext.UserId,
-                IsSearchable = false,
-                IsSortable = true,
-                IsFilterable = true,
-                IsReportable = true,
+                IsSearchable = advancedDefaults.Searchable,
+                IsSortable = advancedDefaults.Sortable,
+                IsFilterable = advancedDefaults.Filterable,
+                IsReportable = advancedDefaults.Reportable,
                 IsAuditable = item.IsAuditable,
                 IsEncrypted = item.IsEncrypted,
             };

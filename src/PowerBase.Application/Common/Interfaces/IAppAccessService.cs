@@ -11,6 +11,7 @@ public interface IAppAccessService
     Task RequirePermissionByFormRulePublicIdAsync(Guid rulePublicId, string permissionCode, CancellationToken ct = default);
     Task RequirePermissionByPagePublicIdAsync(Guid pagePublicId, string permissionCode, CancellationToken ct = default);
     Task RequirePermissionByPipelinePublicIdAsync(Guid pipelinePublicId, string permissionCode, CancellationToken ct = default);
+    Task RequirePermissionByRolePublicIdAsync(Guid rolePublicId, string permissionCode, CancellationToken ct = default);
 
     /// <summary>Ensures the user is a member of the app that owns the specified table. Does NOT require any specific permission code.</summary>
     Task RequireMembershipByTablePublicIdAsync(Guid tablePublicId, CancellationToken ct = default);

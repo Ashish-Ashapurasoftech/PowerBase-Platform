@@ -69,6 +69,9 @@ public class ReportOptionsDto
     public bool ShowViewIcon { get; init; } = true;
     public bool ShowQuickPeekIcon { get; init; } = true;
     public bool DisableBulkDelete { get; init; }
+    public bool DisableBulkUpdate { get; init; }
+    public bool DisableGridEdit { get; init; }
+    public bool ShowDescriptionOnReportPage { get; init; }
 }
 
 public class CustomDynamicFilterItemDto
@@ -97,6 +100,8 @@ public class FilterConditionDto
     public string Operator { get; init; } = "eq";
     public string? Value { get; init; }
     public string? SubField { get; init; }
+    public string? ValueMode { get; init; }
+    public long? ValueFieldId { get; init; }
 }
 
 // ── Sort DTOs ─────────────────────────────────────────────────────────────────
