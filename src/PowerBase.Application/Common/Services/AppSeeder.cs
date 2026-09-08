@@ -194,6 +194,13 @@ public class AppSeeder : IAppSeeder
             Width        = 1,
             DisplayOrder = 1,
             Elements     = [],
+            // Grid-snap coordinates (Phase 8) — seeded directly instead of leaving these null,
+            // which used to make the frontend's legacy-layout migration (deriveGridFromLegacy)
+            // give this lone block the section's FULL grid width the first time the form was
+            // opened in the designer. 4 matches DEFAULT_SECTION_COL_SPAN, the same default a
+            // manually-added section's first column already gets.
+            ColStart     = 1,
+            ColSpan      = 4,
         };
         var defaultSection = new FormSection
         {
