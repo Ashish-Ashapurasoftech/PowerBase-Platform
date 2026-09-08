@@ -425,12 +425,19 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
 
                                 if (grp.TryGetProperty("logicalOp", out var opProp) || grp.TryGetProperty("LogicalOp", out opProp))
                                 {
-                                    var opStr = opProp.GetString();
-                                    if (!string.IsNullOrWhiteSpace(opStr) &&
-                                        !opStr.Equals("AND", StringComparison.OrdinalIgnoreCase) &&
-                                        !opStr.Equals("OR", StringComparison.OrdinalIgnoreCase))
+                                    if (opProp.ValueKind == JsonValueKind.Null)
                                     {
-                                        context.AddFailure("Steps", $"Condition step '{step.RefId}' contains invalid LogicalOp '{opStr}'. Allowed values are AND or OR.");
+                                        context.AddFailure("Steps", $"Condition step '{step.RefId}' contains invalid LogicalOp null. Allowed values are AND or OR.");
+                                    }
+                                    else
+                                    {
+                                        var opStr = opProp.GetString()?.Trim();
+                                        if (string.IsNullOrWhiteSpace(opStr) ||
+                                            (!opStr.Equals("AND", StringComparison.OrdinalIgnoreCase) &&
+                                             !opStr.Equals("OR", StringComparison.OrdinalIgnoreCase)))
+                                        {
+                                            context.AddFailure("Steps", $"Condition step '{step.RefId}' contains invalid LogicalOp '{opStr}'. Allowed values are AND or OR.");
+                                        }
                                     }
                                 }
 

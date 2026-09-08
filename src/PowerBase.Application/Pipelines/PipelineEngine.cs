@@ -2600,10 +2600,15 @@ public class PipelineEngine : IPipelineEngine
             throw new PipelineStepException($"Invalid Condition LogicalOp '{group.LogicalOp}'. Allowed values are AND or OR.");
         }
 
+        if (group.LogicalOp != null && string.IsNullOrWhiteSpace(group.LogicalOp))
+        {
+            throw new PipelineStepException($"Invalid Condition LogicalOp '{group.LogicalOp}'. Allowed values are AND or OR.");
+        }
+
         var activeRules = group.Rules.Where(r => !IsRuleNodeCompletelyBlank(r)).ToList();
         if (!activeRules.Any()) return false;
 
-        bool isAnd = string.IsNullOrWhiteSpace(group.LogicalOp) || group.LogicalOp.Equals("AND", StringComparison.OrdinalIgnoreCase);
+        bool isAnd = group.LogicalOp?.Equals("AND", StringComparison.OrdinalIgnoreCase) == true;
 
         foreach (var rule in activeRules)
         {
@@ -2756,6 +2761,7 @@ public class PipelineEngine : IPipelineEngine
         }
 
         Guid tablePublicId = Guid.Empty;
+        string? connectionPublicId = null;
         using (var doc = JsonDocument.Parse(sourceStep.ConfigJson))
         {
             var root = doc.RootElement;
@@ -2769,6 +2775,17 @@ public class PipelineEngine : IPipelineEngine
                     tablePublicId = g;
                 }
             }
+
+            if (root.TryGetProperty("connectionPublicId", out var cProp) ||
+                root.TryGetProperty("ConnectionPublicId", out cProp) ||
+                root.TryGetProperty("connection", out cProp) ||
+                root.TryGetProperty("Connection", out cProp))
+            {
+                if (cProp.ValueKind == JsonValueKind.String)
+                {
+                    connectionPublicId = cProp.GetString();
+                }
+            }
         }
 
         if (tablePublicId == Guid.Empty)
@@ -2776,49 +2793,136 @@ public class PipelineEngine : IPipelineEngine
             throw new PipelineStepException($"Table ID for source step '{sourceStep.RefId}' referenced in condition token '{token}' could not be found.");
         }
 
-        var table = await tableRepo.GetByPublicIdAsync(tablePublicId, ct);
-        if (table == null)
+        IAppTableRepository effectiveTableRepo = tableRepo;
+        IAppFieldRepository effectiveFieldRepo = fieldRepo;
+        IDisposable? scopeToDispose = null;
+
+        if (Guid.TryParse(connectionPublicId, out var connectionGuid) && !PipelineStepValidator.SystemConnectionIds.Contains(connectionGuid))
         {
-            throw new PipelineStepException($"Table '{tablePublicId}' referenced in condition step could not be found in metadata.");
+            var resolvedTenantId = await _adminRepo.GetTenantIdByPublicIdAsync(connectionGuid, ct);
+            if (resolvedTenantId.HasValue)
+            {
+                if (resolvedTenantId.Value != _queryContext.TenantId)
+                {
+                    var scope = _serviceScopeFactory.CreateScope();
+                    scopeToDispose = scope;
+                    var scopedQueryContext = scope.ServiceProvider.GetRequiredService<IQueryContext>();
+                    scopedQueryContext.SetTenantId(resolvedTenantId.Value);
+                    scopedQueryContext.IsPipelineExecution = _queryContext.IsPipelineExecution;
+                    scopedQueryContext.PipelineDepth = _queryContext.PipelineDepth;
+                    scopedQueryContext.PipelineChainJson = _queryContext.PipelineChainJson;
+                    scopedQueryContext.SetUserIdentity(
+                        _queryContext.UserId,
+                        _queryContext.IsSuperAdmin,
+                        _queryContext.UserName,
+                        _queryContext.UserEmail,
+                        _queryContext.Permissions,
+                        _queryContext.TenantRole);
+
+                    var scopedTenantRepo = scope.ServiceProvider.GetRequiredService<ITenantRepository>();
+                    long actingUserId = _queryContext.UserId;
+                    try
+                    {
+                        using var pDoc = JsonDocument.Parse(payloadJson);
+                        if (pDoc.RootElement.TryGetProperty("_CreatedBy", out var cbProp) && cbProp.TryGetInt64(out var cbVal))
+                        {
+                            actingUserId = cbVal;
+                        }
+                    }
+                    catch { }
+
+                    var isMember = await scopedTenantRepo.IsActiveMemberAsync(actingUserId, ct);
+                    if (!isMember)
+                    {
+                        throw new UnauthorizedAccessException($"Execution authority user {actingUserId} is not an active member of target tenant {resolvedTenantId.Value}.");
+                    }
+
+                    effectiveTableRepo = scope.ServiceProvider.GetRequiredService<IAppTableRepository>();
+                    effectiveFieldRepo = scope.ServiceProvider.GetRequiredService<IAppFieldRepository>();
+                }
+            }
+            else
+            {
+                var connectionScopeResolver = _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>();
+                if (connectionScopeResolver != null)
+                {
+                    long actingUserId = _queryContext.UserId;
+                    try
+                    {
+                        using var pDoc = JsonDocument.Parse(payloadJson);
+                        if (pDoc.RootElement.TryGetProperty("_CreatedBy", out var cbProp) && cbProp.TryGetInt64(out var cbVal))
+                        {
+                            actingUserId = cbVal;
+                        }
+                    }
+                    catch { }
+
+                    var accountScope = await connectionScopeResolver.TryResolveForUserAsync(connectionGuid, actingUserId, ct);
+                    if (accountScope != null)
+                    {
+                        var accountScopeHandle = await Connections.Common.TargetTenantScopeHelper.OpenAsync(_serviceScopeFactory, accountScope, ct);
+                        scopeToDispose = accountScopeHandle;
+                        effectiveTableRepo = accountScopeHandle.GetRequiredService<IAppTableRepository>();
+                        effectiveFieldRepo = accountScopeHandle.GetRequiredService<IAppFieldRepository>();
+                    }
+                    else
+                    {
+                        throw new PipelineStepException($"Connection '{connectionGuid}' referenced by source step '{sourceStep.RefId}' could not be resolved or access was denied.");
+                    }
+                }
+            }
         }
 
-        var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
-        if (fields == null || !fields.Any())
+        try
         {
-            throw new PipelineStepException($"Fields for table '{table.Name}' could not be retrieved.");
-        }
+            var table = await effectiveTableRepo.GetByPublicIdAsync(tablePublicId, ct);
+            if (table == null)
+            {
+                throw new PipelineStepException($"Table '{tablePublicId}' referenced in condition step could not be found in metadata.");
+            }
 
-        int? searchFid = null;
-        if (fieldRef.StartsWith("fid_", StringComparison.OrdinalIgnoreCase) && int.TryParse(fieldRef.Substring(4), out var f1))
-        {
-            searchFid = f1;
-        }
-        else if (int.TryParse(fieldRef, out var f2))
-        {
-            searchFid = f2;
-        }
+            var fields = await effectiveFieldRepo.ListByTableAsync(table.Id, ct);
+            if (fields == null || !fields.Any())
+            {
+                throw new PipelineStepException($"Fields for table '{table.Name}' could not be retrieved.");
+            }
 
-        AppField? matchedField = null;
-        if (searchFid.HasValue)
-        {
-            matchedField = fields.FirstOrDefault(f => f.Fid == searchFid.Value);
-        }
+            int? searchFid = null;
+            if (fieldRef.StartsWith("fid_", StringComparison.OrdinalIgnoreCase) && int.TryParse(fieldRef.Substring(4), out var f1))
+            {
+                searchFid = f1;
+            }
+            else if (int.TryParse(fieldRef, out var f2))
+            {
+                searchFid = f2;
+            }
 
-        if (matchedField == null)
-        {
-            matchedField = fields.FirstOrDefault(f =>
-                f.Name.Equals(fieldRef, StringComparison.OrdinalIgnoreCase) ||
-                f.Label.Equals(fieldRef, StringComparison.OrdinalIgnoreCase) ||
-                $"fid_{f.Fid}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase) ||
-                $"fid_{f.Id}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase));
-        }
+            AppField? matchedField = null;
+            if (searchFid.HasValue)
+            {
+                matchedField = fields.FirstOrDefault(f => f.Fid == searchFid.Value);
+            }
 
-        if (matchedField == null)
-        {
-            throw new PipelineStepException($"Field metadata for token '{token}' (field '{fieldRef}') could not be resolved.");
-        }
+            if (matchedField == null)
+            {
+                matchedField = fields.FirstOrDefault(f =>
+                    f.Name.Equals(fieldRef, StringComparison.OrdinalIgnoreCase) ||
+                    f.Label.Equals(fieldRef, StringComparison.OrdinalIgnoreCase) ||
+                    $"fid_{f.Fid}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase) ||
+                    $"fid_{f.Id}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase));
+            }
 
-        return PipelineFilterEvaluator.GetTypeCategory(matchedField.TypeCode);
+            if (matchedField == null)
+            {
+                throw new PipelineStepException($"Field metadata for token '{token}' (field '{fieldRef}') could not be resolved.");
+            }
+
+            return PipelineFilterEvaluator.GetTypeCategory(matchedField.TypeCode);
+        }
+        finally
+        {
+            scopeToDispose?.Dispose();
+        }
     }
 
     private string EvaluateTokens(string? input, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
