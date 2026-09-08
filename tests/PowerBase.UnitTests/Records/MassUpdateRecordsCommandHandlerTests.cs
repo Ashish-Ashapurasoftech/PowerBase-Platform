@@ -15,12 +15,16 @@ public class MassUpdateRecordsCommandHandlerTests
     private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
 
+    private readonly IPipelineTriggerInterceptor _triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
+    private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
+    private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+
     private static AppTable MakeTable(long id = 5) => new() { Id = id, PublicId = Guid.NewGuid(), Name = "T" };
 
     private static AppField MakeField(int fid, bool isRequired = false, bool isUnique = false) =>
         new() { Id = fid, Fid = fid, Name = $"C_field{fid}", Label = $"Field {fid}", TypeCode = "Text", IsRequired = isRequired, IsUnique = isUnique };
 
-    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo);
+    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext);
 
     public MassUpdateRecordsCommandHandlerTests()
     {

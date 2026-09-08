@@ -1477,5 +1477,133 @@ public class PipelineTriggersAndExternalActionsTests
         await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
         await pipelineRepo.Received(1).CreateOutboxItemAsync(Arg.Is<PipelineOutboxItem>(item => item.Depth == 11), dbTx, Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task RecordWriteService_CustomFieldUpdate_InvokesTriggerInterceptor()
+    {
+        // Arrange
+        var tableRepo = Substitute.For<IAppTableRepository>();
+        var fieldRepo = Substitute.For<IAppFieldRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var appUserRepo = Substitute.For<IAppUserRepository>();
+        var userRepo = Substitute.For<IUserRepository>();
+        var auditRepo = Substitute.For<IAuditRepository>();
+        var triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
+        var engine = new PowerBase.Formula.FormulaEngine();
+
+        var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid(), Name = "Test Table" };
+        var customField = new AppField { Id = 101, Fid = 6, Name = "Status", PhysicalColumnName = null, IsAuditable = false, TypeCode = "Text" };
+        var fields = new List<AppField> { customField };
+
+        var recordPublicId = Guid.NewGuid();
+        var oldRecord = new Dictionary<string, object?> { ["Id"] = 100L, ["f_6"] = "Draft" };
+        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<CancellationToken>())
+            .Returns(oldRecord);
+
+        var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
+        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, appUserRepo, userRepo, auditRepo, triggerInterceptor, engine);
+
+        // Act
+        await writeService.ApplyAsync(table, fields, recordPublicId, fieldValues, "Updated", "Record modified", CancellationToken.None);
+
+        // Assert: Interceptor MUST be called even when IsAuditable is false, and changedFieldIds MUST contain Fid 6 (not Id 101)
+        await triggerInterceptor.Received(1).InterceptAsync(
+            table,
+            fields,
+            recordPublicId,
+            Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(6) && (string)d[6]! == "Published"),
+            "record-updated",
+            Arg.Any<CancellationToken>(),
+            Arg.Any<IReadOnlyDictionary<long, object?>>(),
+            Arg.Is<IReadOnlyList<long>>(l => l.Contains(6) && !l.Contains(101)));
+    }
+
+    [Fact]
+    public async Task RecordWriteService_NoOpUpdate_DoesNotInvokeTriggerInterceptor()
+    {
+        // Arrange
+        var tableRepo = Substitute.For<IAppTableRepository>();
+        var fieldRepo = Substitute.For<IAppFieldRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var appUserRepo = Substitute.For<IAppUserRepository>();
+        var userRepo = Substitute.For<IUserRepository>();
+        var auditRepo = Substitute.For<IAuditRepository>();
+        var triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
+        var engine = new PowerBase.Formula.FormulaEngine();
+
+        var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid(), Name = "Test Table" };
+        var customField = new AppField { Id = 101, Fid = 6, Name = "Status", PhysicalColumnName = null, IsAuditable = false, TypeCode = "Text" };
+        var fields = new List<AppField> { customField };
+
+        var recordPublicId = Guid.NewGuid();
+        var oldRecord = new Dictionary<string, object?> { ["Id"] = 100L, ["f_6"] = "Published" };
+        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<CancellationToken>())
+            .Returns(oldRecord);
+
+        var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
+        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, appUserRepo, userRepo, auditRepo, triggerInterceptor, engine);
+
+        // Act
+        await writeService.ApplyAsync(table, fields, recordPublicId, fieldValues, "Updated", "Record modified", CancellationToken.None);
+
+        // Assert: Interceptor must NOT be invoked when the value is unchanged
+        await triggerInterceptor.DidNotReceiveWithAnyArgs().InterceptAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(),
+            Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IReadOnlyList<long>>());
+    }
+
+    [Fact]
+    public async Task MassUpdateCommandHandler_InvokesBulkTriggerInterceptor()
+    {
+        // Arrange
+        var tableRepo = Substitute.For<IAppTableRepository>();
+        var fieldRepo = Substitute.For<IAppFieldRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var enforcer = Substitute.For<IRolePermissionEnforcer>();
+        var auditRepo = Substitute.For<IAuditRepository>();
+        var triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var queryContext = Substitute.For<IQueryContext>();
+
+        var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid(), Name = "Test Table" };
+        var field = new AppField { Id = 101, Fid = 6, Name = "Status", PhysicalColumnName = null, IsAuditable = true, TypeCode = "Text" };
+        var fields = new List<AppField> { field };
+
+        var recId1 = Guid.NewGuid();
+        var recId2 = Guid.NewGuid();
+
+        tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+        enforcer.GetTableAccessAsync(table, fields, Arg.Any<CancellationToken>()).Returns(new TableAccessContext { Unrestricted = true });
+
+        recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, long> { [recId1] = 1L, [recId2] = 2L });
+
+        recordRepo.GetByPublicIdAsync(table, fields, Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<string, object?> { ["f_6"] = "Old" });
+
+        recordRepo.MassUpdateAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>())
+            .Returns(2);
+
+        var handler = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommandHandler(
+            tableRepo, fieldRepo, recordRepo, enforcer, auditRepo, triggerInterceptor, uow, queryContext);
+
+        var command = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommand(
+            table.PublicId, new List<Guid> { recId1, recId2 }, new Dictionary<long, object?> { [6] = "New" });
+
+        // Act
+        var affected = await handler.HandleAsync(command, CancellationToken.None);
+
+        // Assert
+        affected.Should().Be(2);
+        await triggerInterceptor.Received(1).InterceptBulkAsync(
+            table,
+            fields,
+            Arg.Is<IReadOnlyList<PowerBase.Application.Common.Models.PipelineRecordChange>>(list => list.Count == 2 && list.All(c => c.EventType == PowerBase.Domain.Enums.PipelineRecordEventType.Modified)),
+            Arg.Any<Guid>(),
+            Arg.Any<Guid>(),
+            Arg.Any<long>(),
+            Arg.Any<CancellationToken>());
+    }
 }
 

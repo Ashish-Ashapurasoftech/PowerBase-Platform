@@ -96,6 +96,7 @@ public class BulkDeleteRecordsCommandHandler
                             if (valuesDict.TryGetValue(colKey, out var val))
                             {
                                 beforeValues[f.Id] = val;
+                                beforeValues[f.Fid.Value] = val;
                             }
                         }
                     }

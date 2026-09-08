@@ -285,7 +285,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                                 if (triggerFields != null && triggerFields.Any())
                                 {
                                     var triggerFids = triggerFields.Select(f => ParseFid(f)).Where(x => x.HasValue).Select(x => x!.Value).ToList();
-                                    var changedFids = fields.Where(f => change.ChangedFieldIds.Contains(f.Id) && f.Fid.HasValue).Select(f => f.Fid!.Value).ToList();
+                                    var changedFids = fields.Where(f => f.Fid.HasValue && (change.ChangedFieldIds.Contains(f.Id) || change.ChangedFieldIds.Contains(f.Fid.Value))).Select(f => f.Fid!.Value).ToList();
                                     if (triggerFids.Intersect(changedFids).Any())
                                     {
                                         isCandidate = true;
