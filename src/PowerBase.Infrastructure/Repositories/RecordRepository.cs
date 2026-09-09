@@ -959,7 +959,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         foreach (var agg in aggregations)
         {
             if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
-            var col = PhysicalNaming.ColumnName((int)agg.FieldId);
+            // Mirror groupCol/seriesCol above — a system field (e.g. Record ID#) stores its
+            // value under PhysicalColumnName, not the generic f_{fid} slot; aggregating it via
+            // ColumnName() alone referenced a column that never existed (SQL error 207).
+            var col = aggField.IsSystem && !string.IsNullOrEmpty(aggField.PhysicalColumnName)
+                ? aggField.PhysicalColumnName!
+                : PhysicalNaming.ColumnName((int)agg.FieldId);
             var alias = $"[{agg.Function}_{aggField.Name.Replace(" ", "_")}]";
             var clause = agg.Function switch
             {

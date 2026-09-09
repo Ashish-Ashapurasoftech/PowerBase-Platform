@@ -58,6 +58,7 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
         }
 
         CommonReportValidationHelpers.ForbidIfPopulated(input.Columns.Count > 0, "columns", "Chart", errors);
+        CommonReportValidationHelpers.ForbidIfPopulated(input.SortFields.Count > 0, "sortFields", "Chart", errors);
         CommonReportValidationHelpers.ForbidIfPopulated(input.TableSortGroup.Count > 0, "tableSortGroup", "Chart", errors);
         CommonReportValidationHelpers.ForbidIfPopulated(input.Options is not null, "options", "Chart", errors);
 
