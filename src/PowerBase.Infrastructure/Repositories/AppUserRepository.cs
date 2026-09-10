@@ -20,10 +20,12 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
             au.CreatedOn,
             CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
-            ISNULL(au.IsFromGroup, 0) AS IsFromGroup
+            ISNULL(au.IsFromGroup, 0) AS IsFromGroup,
+            g.Name AS GroupName
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
         JOIN meta.App a ON a.Id = au.AppId
+        LEFT JOIN meta.[Group] g ON g.Id = au.GroupId AND au.IsFromGroup = 1
         WHERE au.AppId    = @appId
           AND au.IsDeleted = 0
         ORDER BY au.UserName
@@ -43,6 +45,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
                 au.CreatedOn,
                 CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
                 ISNULL(au.IsFromGroup, 0) AS IsFromGroup,
+                g.Name AS GroupName,
                 ROW_NUMBER() OVER (
                     PARTITION BY au.UserId 
                     ORDER BY ISNULL(ar.Rank, 999999) ASC, au.CreatedOn ASC
@@ -50,6 +53,7 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             FROM meta.AppUser au
             JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
             JOIN meta.App a ON a.Id = au.AppId
+            LEFT JOIN meta.[Group] g ON g.Id = au.GroupId AND au.IsFromGroup = 1
             WHERE au.AppId    = @appId
               AND au.IsDeleted = 0
               AND au.Status    = 'Active'
@@ -66,13 +70,14 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             ShowInUserPickers,
             CreatedOn,
             IsOwner,
-            IsFromGroup
+            IsFromGroup,
+            GroupName
         FROM RankedUsers
         WHERE rn = 1
         ORDER BY UserName
         """;
 
-    private const string ListByAppPagedSqlTemplate = """
+    private const string ListByAppBaseSql = """
         SELECT
             au.PublicId,
             au.UserPublicId,
@@ -84,50 +89,23 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
             au.CreatedOn,
             CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
-            ISNULL(au.IsFromGroup, 0) AS IsFromGroup
+            ISNULL(au.IsFromGroup, 0) AS IsFromGroup,
+            g.Name AS GroupName
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
         JOIN meta.App a ON a.Id = au.AppId
-        WHERE au.AppId    = @appId
-          AND au.IsDeleted = 0
-          AND (@search IS NULL OR au.UserName LIKE @search OR au.UserEmail LIKE @search)
-          AND (@role IS NULL OR ar.Name = @role)
-        ORDER BY {0}
-        OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+        LEFT JOIN meta.[Group] g ON g.Id = au.GroupId AND au.IsFromGroup = 1
+        {0}
+        ORDER BY {1}
         """;
 
-    private const string ListByAppFilteredSqlTemplate = """
-        SELECT
-            au.PublicId,
-            au.UserPublicId,
-            au.UserName,
-            au.UserEmail,
-            ar.PublicId AS RolePublicId,
-            ar.Name     AS RoleName,
-            au.Status,
-            ISNULL(au.ShowInUserPickers, 1) AS ShowInUserPickers,
-            au.CreatedOn,
-            CAST(IIF(a.OwnerId = au.UserId, 1, 0) AS BIT) AS IsOwner,
-            ISNULL(au.IsFromGroup, 0) AS IsFromGroup
-        FROM meta.AppUser au
-        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
-        JOIN meta.App a ON a.Id = au.AppId
-        WHERE au.AppId    = @appId
-          AND au.IsDeleted = 0
-          AND (@search IS NULL OR au.UserName LIKE @search OR au.UserEmail LIKE @search)
-          AND (@role IS NULL OR ar.Name = @role)
-        ORDER BY {0}
-        """;
-
-    private const string CountByAppSql = """
+    private const string CountByAppBaseSql = """
         SELECT COUNT(1)
         FROM meta.AppUser au
         JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
         JOIN meta.App a ON a.Id = au.AppId
-        WHERE au.AppId    = @appId
-          AND au.IsDeleted = 0
-          AND (@search IS NULL OR au.UserName LIKE @search OR au.UserEmail LIKE @search)
-          AND (@role IS NULL OR ar.Name = @role)
+        LEFT JOIN meta.[Group] g ON g.Id = au.GroupId AND au.IsFromGroup = 1
+        {0}
         """;
 
     private const string GetByAppAndUserSql = """
@@ -299,12 +277,88 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         return results.AsList();
     }
 
+    private static (string WhereSql, DynamicParameters Params) BuildFilterClause(
+        long appId,
+        string? search,
+        IReadOnlyList<string>? roles,
+        IReadOnlyList<string>? accessTypes,
+        IReadOnlyList<string>? userPickerFilters,
+        IReadOnlyList<string>? groups)
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("appId", appId);
+
+        var conditions = new List<string>
+        {
+            "au.AppId = @appId",
+            "au.IsDeleted = 0"
+        };
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            parameters.Add("search", $"%{search.Trim()}%");
+            conditions.Add("(au.UserName LIKE @search OR au.UserEmail LIKE @search)");
+        }
+
+        // Role filter (multi-select)
+        var activeRoles = roles?.Where(r => !string.IsNullOrWhiteSpace(r)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (activeRoles != null && activeRoles.Count > 0)
+        {
+            parameters.Add("roles", activeRoles);
+            conditions.Add("ar.Name IN @roles");
+        }
+
+        // Access Type filter (individual vs group)
+        var activeAccessTypes = accessTypes?.Where(a => !string.IsNullOrWhiteSpace(a))
+            .Select(a => a.Trim().ToLowerInvariant()).Distinct().ToList();
+        if (activeAccessTypes != null && activeAccessTypes.Count == 1)
+        {
+            if (activeAccessTypes.Contains("individual"))
+            {
+                conditions.Add("ISNULL(au.IsFromGroup, 0) = 0");
+            }
+            else if (activeAccessTypes.Contains("group"))
+            {
+                conditions.Add("ISNULL(au.IsFromGroup, 0) = 1");
+            }
+        }
+
+        // User Picker filter (shown vs hidden)
+        var activePickerFilters = userPickerFilters?.Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p.Trim().ToLowerInvariant()).Distinct().ToList();
+        if (activePickerFilters != null && activePickerFilters.Count == 1)
+        {
+            if (activePickerFilters.Contains("shown"))
+            {
+                conditions.Add("ISNULL(au.ShowInUserPickers, 1) = 1");
+            }
+            else if (activePickerFilters.Contains("hidden"))
+            {
+                conditions.Add("ISNULL(au.ShowInUserPickers, 1) = 0");
+            }
+        }
+
+        // Groups filter (multi-select)
+        var activeGroups = groups?.Where(g => !string.IsNullOrWhiteSpace(g)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (activeGroups != null && activeGroups.Count > 0)
+        {
+            parameters.Add("groups", activeGroups);
+            conditions.Add("(au.IsFromGroup = 1 AND g.Name IN @groups)");
+        }
+
+        var whereSql = "WHERE " + string.Join(" AND ", conditions);
+        return (whereSql, parameters);
+    }
+
     public async Task<IReadOnlyList<AppUserDetail>> ListByAppPagedAsync(
         long appId,
         int page,
         int pageSize,
         string? search,
-        string? role,
+        IReadOnlyList<string>? roles,
+        IReadOnlyList<string>? accessTypes,
+        IReadOnlyList<string>? userPickerFilters,
+        IReadOnlyList<string>? groups,
         string sortBy,
         bool sortDesc,
         CancellationToken ct = default)
@@ -317,25 +371,26 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             "addedon"   => "au.CreatedOn",
             _           => "au.UserName",
         };
-        var sql = string.Format(ListByAppPagedSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}");
+        var orderBy = $"{column} {(sortDesc ? "DESC" : "ASC")}";
+        var (whereSql, parameters) = BuildFilterClause(appId, search, roles, accessTypes, userPickerFilters, groups);
+        parameters.Add("offset", (page - 1) * pageSize);
+        parameters.Add("pageSize", pageSize);
+
+        var sql = $"{string.Format(ListByAppBaseSql, whereSql, orderBy)} OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY";
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync<AppUserDetail>(
-            new CommandDefinition(sql, new
-            {
-                appId,
-                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
-                role = string.IsNullOrWhiteSpace(role) ? null : role,
-                offset = (page - 1) * pageSize,
-                pageSize
-            }, cancellationToken: ct));
+            new CommandDefinition(sql, parameters, cancellationToken: ct));
         return rows.ToList();
     }
 
     public async Task<IReadOnlyList<AppUserDetail>> ListByAppFilteredAsync(
         long appId,
         string? search,
-        string? role,
+        IReadOnlyList<string>? roles,
+        IReadOnlyList<string>? accessTypes,
+        IReadOnlyList<string>? userPickerFilters,
+        IReadOnlyList<string>? groups,
         string sortBy,
         bool sortDesc,
         CancellationToken ct = default)
@@ -348,33 +403,32 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
             "addedon"   => "au.CreatedOn",
             _           => "au.UserName",
         };
-        var sql = string.Format(ListByAppFilteredSqlTemplate, $"{column} {(sortDesc ? "DESC" : "ASC")}");
+        var orderBy = $"{column} {(sortDesc ? "DESC" : "ASC")}";
+        var (whereSql, parameters) = BuildFilterClause(appId, search, roles, accessTypes, userPickerFilters, groups);
+
+        var sql = string.Format(ListByAppBaseSql, whereSql, orderBy);
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync<AppUserDetail>(
-            new CommandDefinition(sql, new
-            {
-                appId,
-                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
-                role = string.IsNullOrWhiteSpace(role) ? null : role
-            }, cancellationToken: ct));
+            new CommandDefinition(sql, parameters, cancellationToken: ct));
         return rows.ToList();
     }
 
     public async Task<int> CountByAppAsync(
         long appId,
         string? search,
-        string? role,
+        IReadOnlyList<string>? roles,
+        IReadOnlyList<string>? accessTypes,
+        IReadOnlyList<string>? userPickerFilters,
+        IReadOnlyList<string>? groups,
         CancellationToken ct = default)
     {
+        var (whereSql, parameters) = BuildFilterClause(appId, search, roles, accessTypes, userPickerFilters, groups);
+        var sql = string.Format(CountByAppBaseSql, whereSql);
+
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(
-            new CommandDefinition(CountByAppSql, new
-            {
-                appId,
-                search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
-                role = string.IsNullOrWhiteSpace(role) ? null : role,
-            }, cancellationToken: ct));
+            new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
     public async Task<AppUser?> GetByAppAndUserAsync(long appId, long userId, CancellationToken ct = default)
