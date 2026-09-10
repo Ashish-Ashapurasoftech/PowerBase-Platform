@@ -479,6 +479,12 @@ public class PipelineEngine : IPipelineEngine
                                         var selectedDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(selectedElement.GetRawText());
                                         if (selectedDict != null)
                                         {
+                                            if (triggerData.TryGetValue("RecordPublicId", out var recIdObj) && recIdObj != null)
+                                            {
+                                                selectedDict["RecordPublicId"] = recIdObj.ToString();
+                                                selectedDict["id"] = recIdObj.ToString();
+                                                selectedDict["publicId"] = recIdObj.ToString();
+                                            }
                                             stepsDict[refId] = selectedDict;
                                         }
                                     }
@@ -3146,6 +3152,36 @@ public class PipelineEngine : IPipelineEngine
                 contextDict["trigger"] = triggerData;
                 stepsDict["trigger"] = triggerData;
             }
+
+            // Normalize legacy un-prefixed step tokens (e.g. {{ref_9356.fid_6}} -> {{steps.ref_9356.fid_6}})
+            input = System.Text.RegularExpressions.Regex.Replace(input, @"\{\{\s*([a-zA-Z0-9_]+)(\.[^|}]+?)(\s*\|.*)?\s*\}\}", match =>
+            {
+                var firstSegment = match.Groups[1].Value;
+                var rest = match.Groups[2].Value;
+                var filterPipe = match.Groups[3].Value;
+
+                if (firstSegment.Equals("steps", StringComparison.OrdinalIgnoreCase) ||
+                    firstSegment.Equals("trigger", StringComparison.OrdinalIgnoreCase) ||
+                    firstSegment.Equals("ERROR", StringComparison.Ordinal) ||
+                    firstSegment.Equals("variables", StringComparison.OrdinalIgnoreCase))
+                {
+                    return match.Value;
+                }
+
+                bool isValidStepRef = stepsDict.Keys.Any(k => string.Equals(k, firstSegment, StringComparison.OrdinalIgnoreCase));
+                if (!isValidStepRef && allSteps != null)
+                {
+                    isValidStepRef = allSteps.Any(s => string.Equals(s.RefId, firstSegment, StringComparison.OrdinalIgnoreCase) ||
+                                                       string.Equals(s.Id.ToString(), firstSegment, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (isValidStepRef)
+                {
+                    return "{{" + $"steps.{firstSegment}{rest}{filterPipe}" + "}}";
+                }
+
+                return match.Value;
+            });
 
             var context = new CustomTemplateContext(contextDict);
             context.MemberRenamer = member => member.Name;

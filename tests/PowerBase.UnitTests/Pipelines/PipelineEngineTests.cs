@@ -2558,6 +2558,272 @@ public class PipelineEngineTests
             Arg.Any<CancellationToken>()
         );
     }
+
+    [Fact]
+    public void EvaluateTokens_UnprefixedStepRef_ShouldResolveCorrectly()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            TriggerStepRefId = "ref_9356",
+            SelectedFieldValues = new { fid_6 = "ignore" }
+        });
+
+        InvokeEvaluateTokens("{{ref_9356.fid_6}}", payload).Should().Be("ignore");
+    }
+
+    [Fact]
+    public void EvaluateTokens_CanonicalStepsRef_ShouldRemainUnchanged()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            TriggerStepRefId = "ref_9356",
+            SelectedFieldValues = new { fid_6 = "ignore" }
+        });
+
+        InvokeEvaluateTokens("{{steps.ref_9356.fid_6}}", payload).Should().Be("ignore");
+    }
+
+    [Fact]
+    public void EvaluateTokens_UnknownTopLevelToken_ShouldStillFail()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            TriggerStepRefId = "ref_9356",
+            SelectedFieldValues = new { fid_6 = "ignore" }
+        });
+
+        Action act = () => InvokeEvaluateTokens("{{unknown_ref.fid_6}}", payload);
+        act.Should().Throw<PowerBase.Domain.Exceptions.PipelineStepException>()
+           .WithMessage("*Failed to resolve dynamic token*");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ConditionTrue_TriggerFieldMatch_ExecutesTrueBranchAndUpdateRecord()
+    {
+        var targetRecordGuid = Guid.NewGuid();
+        var tableGuid = Guid.NewGuid();
+
+        var triggerPayload = JsonSerializer.Serialize(new
+        {
+            TriggerStepRefId = "ref_9356",
+            RecordPublicId = targetRecordGuid.ToString(),
+            SelectedFieldValues = new { fid_6 = "ignore" }
+        });
+
+        var task = new PipelineExecutionTask
+        {
+            PipelineId = 301,
+            TenantId = 1,
+            TriggerEvent = "new-event",
+            TriggerPayloadJson = triggerPayload
+        };
+
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(301, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 301, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 1, Type = "trigger", Subtype = "new-event", RefId = "ref_9356" },
+            new()
+            {
+                Id = 2,
+                RefId = "ref_cond",
+                Label = "Check Name",
+                Type = "condition",
+                Subtype = "if-else",
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    RuleGroups = new[] {
+                        new {
+                            LogicalOp = "AND",
+                            Rules = new[] {
+                                new { Left = "{{ref_9356.fid_6}}", Op = "equals", Right = "ignore" }
+                            }
+                        }
+                    }
+                })
+            },
+            new()
+            {
+                Id = 3,
+                ParentStepId = 2,
+                ParentBranch = "children",
+                RefId = "ref_update_true",
+                Label = "Update Name to IF",
+                Type = "action",
+                Subtype = "update-record",
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    TableId = tableGuid.ToString(),
+                    TargetRecordId = "{{steps.ref_9356.RecordPublicId}}",
+                    FieldMappings = new[] { new { Field = "fid_6", Value = "if" } }
+                })
+            },
+            new()
+            {
+                Id = 4,
+                ParentStepId = 2,
+                ParentBranch = "elsechildren",
+                RefId = "ref_update_false",
+                Label = "Update Name to ELSE",
+                Type = "action",
+                Subtype = "update-record",
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    TableId = tableGuid.ToString(),
+                    TargetRecordId = "{{steps.ref_9356.RecordPublicId}}",
+                    FieldMappings = new[] { new { Field = "fid_6", Value = "else" } }
+                })
+            }
+        };
+
+        _pipelineRepo.GetStepsByPipelineIdAsync(301, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 50, PublicId = tableGuid, Name = "TestTable" };
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
+
+        var nameField = new AppField { Id = 6, AppTableId = 50, Fid = 6, Name = "Name", Label = "Name", TypeCode = "TEXT" };
+        _fieldRepo.ListByTableAsync(50, Arg.Any<CancellationToken>()).Returns(new List<AppField> { nameField });
+
+        _recordWriteService.ApplyAsync(
+            table, Arg.Any<IReadOnlyList<AppField>>(), targetRecordGuid,
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>())
+            .Returns(new List<AppField> { nameField });
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: True branch (step 3) executed, Else branch (step 4) did NOT execute
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 3), Arg.Any<CancellationToken>());
+        await _pipelineRepo.DidNotReceive().CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 4), Arg.Any<CancellationToken>());
+
+        // Verify ApplyAsync updated fid_6 = "if"
+        await _recordWriteService.Received(1).ApplyAsync(
+            table,
+            Arg.Any<IReadOnlyList<AppField>>(),
+            targetRecordGuid,
+            Arg.Is<IReadOnlyDictionary<long, object?>>(dict => dict.ContainsKey(6) && (string)dict[6]! == "if"),
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<CancellationToken>(),
+            Arg.Any<System.Data.IDbTransaction?>()
+        );
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ConditionFalse_TriggerFieldMismatch_ExecutesElseBranchAndUpdateRecord()
+    {
+        var targetRecordGuid = Guid.NewGuid();
+        var tableGuid = Guid.NewGuid();
+
+        var triggerPayload = JsonSerializer.Serialize(new
+        {
+            TriggerStepRefId = "ref_9356",
+            RecordPublicId = targetRecordGuid.ToString(),
+            SelectedFieldValues = new { fid_6 = "abc" }
+        });
+
+        var task = new PipelineExecutionTask
+        {
+            PipelineId = 302,
+            TenantId = 1,
+            TriggerEvent = "new-event",
+            TriggerPayloadJson = triggerPayload
+        };
+
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(302, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 302, IsActive = true, IsDeleted = false });
+
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 1, Type = "trigger", Subtype = "new-event", RefId = "ref_9356" },
+            new()
+            {
+                Id = 2,
+                RefId = "ref_cond",
+                Label = "Check Name",
+                Type = "condition",
+                Subtype = "if-else",
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    RuleGroups = new[] {
+                        new {
+                            LogicalOp = "AND",
+                            Rules = new[] {
+                                new { Left = "{{ref_9356.fid_6}}", Op = "equals", Right = "ignore" }
+                            }
+                        }
+                    }
+                })
+            },
+            new()
+            {
+                Id = 3,
+                ParentStepId = 2,
+                ParentBranch = "children",
+                RefId = "ref_update_true",
+                Label = "Update Name to IF",
+                Type = "action",
+                Subtype = "update-record",
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    TableId = tableGuid.ToString(),
+                    TargetRecordId = "{{steps.ref_9356.RecordPublicId}}",
+                    FieldMappings = new[] { new { Field = "fid_6", Value = "if" } }
+                })
+            },
+            new()
+            {
+                Id = 4,
+                ParentStepId = 2,
+                ParentBranch = "elsechildren",
+                RefId = "ref_update_false",
+                Label = "Update Name to ELSE",
+                Type = "action",
+                Subtype = "update-record",
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    TableId = tableGuid.ToString(),
+                    TargetRecordId = "{{steps.ref_9356.RecordPublicId}}",
+                    FieldMappings = new[] { new { Field = "fid_6", Value = "else" } }
+                })
+            }
+        };
+
+        _pipelineRepo.GetStepsByPipelineIdAsync(302, Arg.Any<CancellationToken>()).Returns(steps);
+
+        var table = new AppTable { Id = 50, PublicId = tableGuid, Name = "TestTable" };
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
+
+        var nameField = new AppField { Id = 6, AppTableId = 50, Fid = 6, Name = "Name", Label = "Name", TypeCode = "TEXT" };
+        _fieldRepo.ListByTableAsync(50, Arg.Any<CancellationToken>()).Returns(new List<AppField> { nameField });
+
+        _recordWriteService.ApplyAsync(
+            table, Arg.Any<IReadOnlyList<AppField>>(), targetRecordGuid,
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>())
+            .Returns(new List<AppField> { nameField });
+
+        // Act
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        // Assert: Else branch (step 4) executed, True branch (step 3) did NOT execute
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 4), Arg.Any<CancellationToken>());
+        await _pipelineRepo.DidNotReceive().CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 3), Arg.Any<CancellationToken>());
+
+        // Verify ApplyAsync updated fid_6 = "else"
+        await _recordWriteService.Received(1).ApplyAsync(
+            table,
+            Arg.Any<IReadOnlyList<AppField>>(),
+            targetRecordGuid,
+            Arg.Is<IReadOnlyDictionary<long, object?>>(dict => dict.ContainsKey(6) && (string)dict[6]! == "else"),
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<CancellationToken>(),
+            Arg.Any<System.Data.IDbTransaction?>()
+        );
+    }
 }
 
 
