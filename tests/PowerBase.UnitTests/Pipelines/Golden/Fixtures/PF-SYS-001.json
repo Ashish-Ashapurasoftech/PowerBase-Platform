@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-SYS-001",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Multi-tenant queue partitioning by TenantId column in meta.PipelineQueue",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-SYS-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

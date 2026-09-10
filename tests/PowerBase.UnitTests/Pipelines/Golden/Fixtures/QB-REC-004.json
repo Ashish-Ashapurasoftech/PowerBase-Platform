@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-REC-004",
+  "classification": "QB-DOC",
+  "description": "Update Record modifies field values of specified record by ID",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/use-the-quickbase-channel",
+  "relevantHeading": "Quickbase > Update Record",
+  "testPayload": {
+    "stepId": "QB-REC-004",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

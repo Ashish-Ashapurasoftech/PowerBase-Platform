@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-EVT-001",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Deleted record event exposes OldValues dictionary key",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-EVT-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

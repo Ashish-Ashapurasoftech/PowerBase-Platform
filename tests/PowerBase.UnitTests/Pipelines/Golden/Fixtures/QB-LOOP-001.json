@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-LOOP-001",
+  "classification": "QB-DOC",
+  "description": "Sequential iteration over collection of records",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/about-pipelines",
+  "relevantHeading": "About pipelines > Loops",
+  "testPayload": {
+    "stepId": "QB-LOOP-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}
