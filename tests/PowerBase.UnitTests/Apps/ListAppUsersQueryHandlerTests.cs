@@ -43,16 +43,28 @@ public class ListAppUsersQueryHandlerTests
 
         var users = new List<AppUserDetail>
         {
-            new AppUserDetail(Guid.NewGuid(), Guid.NewGuid(), "John Doe", "john@test.com", Guid.NewGuid(), "Admin", "Active", true, DateTime.UtcNow, false, false)
+            new AppUserDetail(Guid.NewGuid(), Guid.NewGuid(), "John Doe", "john@test.com", Guid.NewGuid(), "Admin", "Active", true, DateTime.UtcNow, false, false, null)
         };
 
         _appRepository.GetByPublicIdAsync(appPublicId, Arg.Any<CancellationToken>())
             .Returns(app);
 
-        _appUserRepository.ListByAppPagedAsync(45, 1, 20, "John", "Admin", "userName", false, Arg.Any<CancellationToken>())
+        _appUserRepository.ListByAppPagedAsync(
+            45, 1, 20, "John",
+            Arg.Is<IReadOnlyList<string>>(r => r.Contains("Admin")),
+            Arg.Any<IReadOnlyList<string>?>(),
+            Arg.Any<IReadOnlyList<string>?>(),
+            Arg.Any<IReadOnlyList<string>?>(),
+            "userName", false, Arg.Any<CancellationToken>())
             .Returns(users);
 
-        _appUserRepository.CountByAppAsync(45, "John", "Admin", Arg.Any<CancellationToken>())
+        _appUserRepository.CountByAppAsync(
+            45, "John",
+            Arg.Is<IReadOnlyList<string>>(r => r.Contains("Admin")),
+            Arg.Any<IReadOnlyList<string>?>(),
+            Arg.Any<IReadOnlyList<string>?>(),
+            Arg.Any<IReadOnlyList<string>?>(),
+            Arg.Any<CancellationToken>())
             .Returns(1);
 
         // Act
@@ -87,14 +99,20 @@ public class ListAppUsersQueryHandlerTests
 
         var users = new List<AppUserDetail>
         {
-            new AppUserDetail(Guid.NewGuid(), Guid.NewGuid(), "John Doe", "john@test.com", Guid.NewGuid(), "Admin", "Active", true, DateTime.UtcNow, false, false),
-            new AppUserDetail(Guid.NewGuid(), Guid.NewGuid(), "Johnny Boy", "johnny@test.com", Guid.NewGuid(), "Admin", "Active", true, DateTime.UtcNow, false, false)
+            new AppUserDetail(Guid.NewGuid(), Guid.NewGuid(), "John Doe", "john@test.com", Guid.NewGuid(), "Admin", "Active", true, DateTime.UtcNow, false, false, null),
+            new AppUserDetail(Guid.NewGuid(), Guid.NewGuid(), "Johnny Boy", "johnny@test.com", Guid.NewGuid(), "Admin", "Active", true, DateTime.UtcNow, false, false, null)
         };
 
         _appRepository.GetByPublicIdAsync(appPublicId, Arg.Any<CancellationToken>())
             .Returns(app);
 
-        _appUserRepository.ListByAppFilteredAsync(45, "John", "Admin", "userName", false, Arg.Any<CancellationToken>())
+        _appUserRepository.ListByAppFilteredAsync(
+            45, "John",
+            Arg.Is<IReadOnlyList<string>>(r => r.Contains("Admin")),
+            Arg.Any<IReadOnlyList<string>?>(),
+            Arg.Any<IReadOnlyList<string>?>(),
+            Arg.Any<IReadOnlyList<string>?>(),
+            "userName", false, Arg.Any<CancellationToken>())
             .Returns(users);
 
         // Act
@@ -106,7 +124,8 @@ public class ListAppUsersQueryHandlerTests
         Assert.Equal(2, result.Items.Count);
         await _appUserRepository.DidNotReceive().ListByAppPagedAsync(
             Arg.Any<long>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<string>(), 
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(),
+            Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -128,7 +147,10 @@ public class ListAppUsersQueryHandlerTests
         _appRepository.GetByPublicIdAsync(appPublicId, Arg.Any<CancellationToken>())
             .Returns(app);
 
-        _appUserRepository.ListByAppPagedAsync(45, 1, 20, null, null, "userName", false, Arg.Any<CancellationToken>())
+        _appUserRepository.ListByAppPagedAsync(
+            45, 1, 20, null,
+            Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(),
+            "userName", false, Arg.Any<CancellationToken>())
             .Returns(new List<AppUserDetail>());
 
         // Act
@@ -137,7 +159,10 @@ public class ListAppUsersQueryHandlerTests
         // Assert
         Assert.Equal(1, result.Page);
         Assert.Equal(20, result.PageSize);
-        await _appUserRepository.Received(1).ListByAppPagedAsync(45, 1, 20, null, null, "userName", false, Arg.Any<CancellationToken>());
+        await _appUserRepository.Received(1).ListByAppPagedAsync(
+            45, 1, 20, null,
+            Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(),
+            "userName", false, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -159,14 +184,20 @@ public class ListAppUsersQueryHandlerTests
         _appRepository.GetByPublicIdAsync(appPublicId, Arg.Any<CancellationToken>())
             .Returns(app);
 
-        _appUserRepository.ListByAppPagedAsync(45, 1, 20, null, null, "userName", false, Arg.Any<CancellationToken>())
+        _appUserRepository.ListByAppPagedAsync(
+            45, 1, 20, null,
+            Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(),
+            "userName", false, Arg.Any<CancellationToken>())
             .Returns(new List<AppUserDetail>());
 
         // Act
         await _listAppUsersHandler.HandleAsync(query, CancellationToken.None);
 
         // Assert
-        await _appUserRepository.Received(1).ListByAppPagedAsync(45, 1, 20, null, null, "userName", false, Arg.Any<CancellationToken>());
+        await _appUserRepository.Received(1).ListByAppPagedAsync(
+            45, 1, 20, null,
+            Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(), Arg.Any<IReadOnlyList<string>>(),
+            "userName", false, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -178,7 +209,7 @@ public class ListAppUsersQueryHandlerTests
 
         var users = new List<AppUserDetail>
         {
-            new AppUserDetail(Guid.NewGuid(), Guid.NewGuid(), "Jane Doe", "jane@test.com", Guid.NewGuid(), "Member", "Active", true, DateTime.UtcNow, false, false)
+            new AppUserDetail(Guid.NewGuid(), Guid.NewGuid(), "Jane Doe", "jane@test.com", Guid.NewGuid(), "Member", "Active", true, DateTime.UtcNow, false, false, null)
         };
 
         _appRepository.GetIdByPublicIdAsync(appPublicId, Arg.Any<CancellationToken>())

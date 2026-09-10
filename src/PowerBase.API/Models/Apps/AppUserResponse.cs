@@ -13,4 +13,5 @@ public class AppUserResponse
     public string AddedOn { get; init; } = string.Empty;
     public bool IsOwner { get; init; }
     public bool IsFromGroup { get; init; }
+    public string? GroupName { get; init; }
 }
