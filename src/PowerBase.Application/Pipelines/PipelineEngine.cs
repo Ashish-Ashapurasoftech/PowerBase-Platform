@@ -1342,7 +1342,11 @@ public class PipelineEngine : IPipelineEngine
             {
                 var norm = new Dictionary<string, object?>();
                 if (record.TryGetValue("Id", out var searchIdVal)) norm["Id"] = searchIdVal;
-                if (record.TryGetValue("PublicId", out var searchPubIdVal)) norm["PublicId"] = searchPubIdVal;
+                if (record.TryGetValue("PublicId", out var searchPubIdVal))
+                {
+                    norm["PublicId"] = searchPubIdVal;
+                    norm["RecordPublicId"] = searchPubIdVal;
+                }
                 if (record.TryGetValue("CreatedOn", out var searchCoVal)) norm["CreatedOn"] = searchCoVal;
                 if (record.TryGetValue("CreatedBy", out var searchCbVal)) norm["CreatedBy"] = searchCbVal;
                 if (record.TryGetValue("ModifiedOn", out var searchMoVal)) norm["ModifiedOn"] = searchMoVal;
@@ -1885,6 +1889,8 @@ public class PipelineEngine : IPipelineEngine
 
                 int index = 0;
                 int count = itemsList.Count;
+                int failedCount = 0;
+                Exception? firstIterationError = null;
 
                 stepsDict.TryGetValue(step.RefId, out var previousLoopScope);
 
@@ -1911,7 +1917,9 @@ public class PipelineEngine : IPipelineEngine
                         {
                             throw;
                         }
-                        _logger.LogWarning(ex, "Iteration {Index} failed in Loop step {StepId}. Containing iteration error.", index, step.Id);
+                        failedCount++;
+                        firstIterationError ??= ex;
+                        _logger.LogWarning(ex, "Iteration {Index} failed in Loop step {StepId}. Continuing remaining items; the loop will be marked failed.", index, step.Id);
                     }
 
                     _logger.LogInformation("Loop step {StepId} iteration {Index} completed.", step.Id, index);
@@ -1927,7 +1935,13 @@ public class PipelineEngine : IPipelineEngine
                     stepsDict.Remove(step.RefId);
                 }
 
-                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count });
+                if (failedCount > 0)
+                {
+                    //throw new InvalidOperationException($"Loop step '{step.RefId}' failed in {failedCount} of {count} iterations. First error: {firstIterationError?.Message}", firstIterationError);
+                    _logger.LogWarning("Loop step '{StepRefId}' completed with {FailedCount} of {TotalCount} failed iterations.", step.RefId, failedCount, count);
+                }
+
+                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count, FailedIterationCount = failedCount });
             }
         }
         else if (subtype == "send-email" || subtype == "send-email-outlook")

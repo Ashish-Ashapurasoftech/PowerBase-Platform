@@ -855,6 +855,44 @@ public class PipelineEngineTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_SearchLoopUpdate_ResolvesEachRecordPublicId()
+    {
+        var tableId = Guid.NewGuid();
+        var recordIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "manual", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true });
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>
+        {
+            new() { Id = 11, RefId = "ref_search", Type = "query", Subtype = "search-records",
+                ConfigJson = JsonSerializer.Serialize(new { TableId = tableId }) },
+            new() { Id = 12, RefId = "ref_loop", Type = "loop", Subtype = "for-each",
+                ConfigJson = JsonSerializer.Serialize(new { LoopOverStepId = "ref_search" }) },
+            new() { Id = 13, RefId = "ref_update", Type = "action", Subtype = "update-record", ParentStepId = 12, ParentBranch = "children",
+                ConfigJson = JsonSerializer.Serialize(new { TableId = tableId, TargetRecordId = "{{steps.ref_loop.item.RecordPublicId}}",
+                    FieldMappings = new[] { new { Field = "fid_6", Value = "Updated" } } }) }
+        });
+        var table = new AppTable { Id = 100, PublicId = tableId };
+        var fields = new List<AppField> { new() { Id = 6, Fid = 6, Name = "Name", TypeCode = "TEXT" } };
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+        _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(recordIds.Select(id => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["PublicId"] = id }).ToList());
+        _recordWriteService.ApplyAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>()).Returns(new Dictionary<long, object?> { [6] = "Updated" });
+
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        foreach (var recordId in recordIds)
+        {
+            await _recordWriteService.Received(1).ApplyAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordId,
+                Arg.Is<IReadOnlyDictionary<long, object?>>(values => (string)values[6]! == "Updated"),
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>());
+        }
+        await _pipelineRepo.Received().UpdateRunAsync(Arg.Is<PipelineRun>(r => r.Status == "Success"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task ExecuteAsync_SearchRecordsAndLoopForEach_ExecutesCreateRecordForEachMatchedItem()
     {
         // Arrange
@@ -2689,7 +2727,7 @@ public class PipelineEngineTests
             table, Arg.Any<IReadOnlyList<AppField>>(), targetRecordGuid,
             Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>())
-            .Returns(new List<AppField> { nameField });
+            .Returns(new Dictionary<long, object?> { [6] = "updated" });
 
         // Act
         await _engine.ExecuteAsync(task, CancellationToken.None);
@@ -2803,7 +2841,7 @@ public class PipelineEngineTests
             table, Arg.Any<IReadOnlyList<AppField>>(), targetRecordGuid,
             Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>())
-            .Returns(new List<AppField> { nameField });
+            .Returns(new Dictionary<long, object?> { [6] = "updated" });
 
         // Act
         await _engine.ExecuteAsync(task, CancellationToken.None);

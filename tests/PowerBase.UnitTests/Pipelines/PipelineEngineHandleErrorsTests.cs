@@ -402,7 +402,7 @@ public class PipelineEngineHandleErrorsTests
     }
 
     [Fact]
-    public async Task Loop_OrdinaryIterationFailure_Contained_NextIterationContinues()
+    public async Task Loop_OrdinaryIterationFailure_NextIterationContinuesAndLoopContainsFailure()
     {
         // Arrange
         var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "RecordAdded", TriggerPayloadJson = "{}" };
@@ -426,7 +426,7 @@ public class PipelineEngineHandleErrorsTests
             {
                 Id = 2,
                 PublicId = Guid.NewGuid(),
-                RefId = "loop_1",
+                RefId = "ref_loop",
                 Label = "Loop Step",
                 Type = "loop",
                 Subtype = "for-each",
@@ -442,7 +442,7 @@ public class PipelineEngineHandleErrorsTests
                 Label = "Lookup in loop",
                 Type = "query",
                 Subtype = "look-up-record",
-                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Guid.NewGuid().ToString(), RecordIdValue = "{{steps.loop_1.item.Id}}" })
+                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Guid.NewGuid().ToString(), RecordIdValue = "{{steps.ref_loop.item.Id}}" })
             }
         };
 
@@ -481,10 +481,12 @@ public class PipelineEngineHandleErrorsTests
         // Assert
         // Lookup step in loop (Id 3) should have been invoked 3 times (for items 101, 999, 103)
         await _pipelineRepo.Received(3).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 3), Arg.Any<CancellationToken>());
+        // Quickbase Parity: Loop contains iteration failure, pipeline completes successfully
+        await _pipelineRepo.Received().UpdateRunAsync(Arg.Is<PipelineRun>(r => r.Status == "Success"), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task HandleErrors_ContainingLoop_IterationFailureDoesNotTriggerOuterOnError()
+    public async Task HandleErrors_ContainingLoop_IterationFailureRunsOuterOnSuccess()
     {
         // Arrange
         var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "RecordAdded", TriggerPayloadJson = "{}" };
@@ -522,7 +524,7 @@ public class PipelineEngineHandleErrorsTests
                 ParentStepId = 1,
                 ParentBranch = "children",
                 PublicId = Guid.NewGuid(),
-                RefId = "loop_1",
+                RefId = "ref_loop",
                 Label = "Loop Step",
                 Type = "loop",
                 Subtype = "for-each",
@@ -538,7 +540,7 @@ public class PipelineEngineHandleErrorsTests
                 Label = "Lookup in loop",
                 Type = "query",
                 Subtype = "look-up-record",
-                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Guid.NewGuid().ToString(), RecordIdValue = "{{steps.loop_1.id}}" })
+                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Guid.NewGuid().ToString(), RecordIdValue = "{{steps.ref_loop.item.Id}}" })
             },
             new()
             {
@@ -588,7 +590,7 @@ public class PipelineEngineHandleErrorsTests
         await _engine.ExecuteAsync(task, CancellationToken.None);
 
         // Assert
-        // Outer On Success (Id 5) executed, outer On Error (Id 6) did NOT execute
+        // Quickbase Parity: Loop contains iteration failure. Outer On Success executes, outer On Error does NOT execute.
         await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 5), Arg.Any<CancellationToken>());
         await _pipelineRepo.DidNotReceive().CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 6), Arg.Any<CancellationToken>());
     }
@@ -715,4 +717,3 @@ public class PipelineEngineHandleErrorsTests
         await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 3), Arg.Any<CancellationToken>());
     }
 }
-
