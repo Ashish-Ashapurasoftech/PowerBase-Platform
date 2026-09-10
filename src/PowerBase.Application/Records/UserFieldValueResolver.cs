@@ -68,8 +68,18 @@ public static class UserFieldValueResolver
             }
             if (!anyResolved) continue;
 
+            // MultiUser's physical column is read back everywhere (ResolveUserNamesAsync,
+            // RecordResult.ResolveUserValue) via JsonSerializer.Deserialize<List<long>> — a plain
+            // JsonSerializer.Serialize(List<string>) here produced a JSON array of STRINGS
+            // (["2"]), which that strict long-array deserializer throws on (no string->number
+            // coercion by default) and silently swallows, leaving every value permanently
+            // unresolved (raw ids or "null" shown instead of names). Parse each part back to a
+            // number before serializing so the array is numeric (`[2]`), matching what every
+            // reader expects; a genuinely non-numeric part (shouldn't happen — MultiUser holds
+            // only resolved ids — but never crash on unexpected data) is passed through as a
+            // string unchanged.
             effectiveValues[field.Fid.Value] = field.TypeCode == "MultiUser"
-                ? JsonSerializer.Serialize(resolvedParts)
+                ? JsonSerializer.Serialize(resolvedParts.Select(p => long.TryParse(p, out var n) ? (object)n : p))
                 : resolvedParts[0];
         }
     }

@@ -50,6 +50,14 @@ public class BulkCreateFieldsCommandHandler
                 { "Fields", ["At least one field is required."] }
             });
 
+        var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
+
+        // Snapshot of fields already on the table — also doubles as the base for the duplicate-label
+        // check below, and grows as each item in this batch is created, so e.g. a first-ever bulk
+        // add of 3 fields fills Primary/Secondary/Tertiary in order just like adding them one at a
+        // time would (see RecordPickerAutoAdvancer).
+        var fieldsSoFar = (await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>()).ToList();
+
         // Validate all items up-front before touching the DB.
         var validator = new CreateFieldCommandValidator();
         var allErrors = new Dictionary<string, string[]>();
@@ -82,21 +90,45 @@ public class BulkCreateFieldsCommandHandler
                     allErrors[$"Fields[{i}].{key}"] = msgs;
         }
 
+        // Duplicate-label check — within this batch AND against fields that already exist on the
+        // table — runs BEFORE any field is created. Without this, the loop below creates rows one
+        // at a time and only discovers a duplicate once it reaches it (see LabelExistsInTableAsync
+        // further down), so a batch like [f1, f1, f1] silently created the first "f1" before the
+        // second one's DuplicateException aborted the request — a stray row a client wouldn't see
+        // until they refreshed the page. Comparison is trim + case-insensitive, matching what
+        // AppFieldRepository.LabelExistsInTableAsync itself does.
+        var existingLabels = fieldsSoFar
+            .Select(f => NormalizeLabel(f.Label))
+            .Where(l => l.Length > 0)
+            .ToHashSet();
+        var seenInBatch = new HashSet<string>();
+        for (var i = 0; i < command.Fields.Count; i++)
+        {
+            var normalized = NormalizeLabel(command.Fields[i].Label);
+            if (normalized.Length == 0) continue; // NotEmpty already reported above
+
+            if (existingLabels.Contains(normalized))
+                allErrors[$"Fields[{i}].Label"] = [$"Field with label '{command.Fields[i].Label.Trim()}' already exists."];
+            else if (!seenInBatch.Add(normalized))
+                allErrors[$"Fields[{i}].Label"] = [$"Duplicate label '{command.Fields[i].Label.Trim()}' in this request."];
+        }
+
         if (allErrors.Count > 0)
             throw new ValidationException(allErrors);
 
-        var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
         var formsForTable = await _formRepo.ListByTableAsync(table.PublicId, ct);
-
-        // Snapshot of fields on the table so far — grows as each item in this batch is created, so
-        // e.g. a first-ever bulk add of 3 fields fills Primary/Secondary/Tertiary in order just like
-        // adding them one at a time would (see RecordPickerAutoAdvancer).
-        var fieldsSoFar = (await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>()).ToList();
 
         var results = new List<CreateFieldResult>();
 
         foreach (var item in command.Fields)
         {
+            // Leading/trailing whitespace is never meaningful here — trim server-side so a client
+            // that bypasses the UI (a direct API call) can't persist " Full Name " verbatim.
+            // NullIfBlank also collapses a whitespace-only Description down to "unset", matching
+            // what omitting it altogether means. item.Label is already validated NotEmpty above.
+            var label = item.Label.Trim();
+            var description = NullIfBlank(item.Description);
+
             // item.Name is only ever set by trusted internal callers (PBL/QBL import) preserving a
             // field's original stable identifier; the public API never supplies it, so the normal
             // path always auto-generates Name from Label (and enforces per-table Label uniqueness —
@@ -110,9 +142,9 @@ public class BulkCreateFieldsCommandHandler
             }
             else
             {
-                if (await _fieldRepo.LabelExistsInTableAsync(table.Id, item.Label, ct: ct))
-                    throw new DuplicateException("Field", "label", item.Label);
-                name = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, item.Label, isSystem: false, ct);
+                if (await _fieldRepo.LabelExistsInTableAsync(table.Id, label, ct: ct))
+                    throw new DuplicateException("Field", "label", label);
+                name = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, label, isSystem: false, ct);
             }
 
             var fieldType = await _fieldTypeRepo.GetByCodeAsync(item.TypeCode, ct)
@@ -132,8 +164,8 @@ public class BulkCreateFieldsCommandHandler
                 FieldTypeId = fieldType.Id,
                 TypeCode = fieldType.Code,
                 Name = name,
-                Label = item.Label,
-                Description = item.Description,
+                Label = label,
+                Description = description,
                 IsRequired = item.IsRequired,
                 DefaultValue = item.DefaultValue,
                 Fid = nextFid,
@@ -180,7 +212,7 @@ public class BulkCreateFieldsCommandHandler
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(),
-                $"Field added: {item.Label} To TableName : {table.Name}", appId: table.AppId, ct: ct);
+                $"Field added: {label} To TableName : {table.Name}", appId: table.AppId, ct: ct);
 
             results.Add(new CreateFieldResult
             {
@@ -202,4 +234,8 @@ public class BulkCreateFieldsCommandHandler
 
         return results;
     }
+
+    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static string NormalizeLabel(string? value) => (value ?? string.Empty).Trim().ToLowerInvariant();
 }

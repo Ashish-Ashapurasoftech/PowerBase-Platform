@@ -9,6 +9,7 @@ public interface IUserRepository
     Task<User> GetByIdAsync(long id, CancellationToken ct = default);
     Task<User> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyDictionary<long, string>> GetNamesByIdsAsync(IEnumerable<long> ids, CancellationToken ct = default);
+    Task<IReadOnlyDictionary<long, Guid>> GetPublicIdsByIdsAsync(IEnumerable<long> ids, CancellationToken ct = default);
     Task<long> CreateAsync(User user, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task ActivateAsync(long userId, string firstName, string lastName, string hashedPassword, CancellationToken ct = default);
     Task UpdateProfileAsync(long userId, string firstName, string lastName, CancellationToken ct = default);

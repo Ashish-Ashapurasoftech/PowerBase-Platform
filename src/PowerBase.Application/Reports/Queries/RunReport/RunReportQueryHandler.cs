@@ -1134,4 +1134,48 @@ public class RunReportQueryHandler
 
         return await userRepo.GetNamesByIdsAsync(ids, ct);
     }
+
+    /// <summary>Sibling of <see cref="ResolveUserNamesAsync"/>, but resolves each User/MultiUser
+    /// field's internal long id to its public Guid instead of its display name. Used only by
+    /// GetRecordQueryHandler (the single-record fetch backing the Add/Edit Record form) — every
+    /// other read path (list/table, Summary/Chart, export) wants a ready-to-display name and keeps
+    /// using ResolveUserNamesAsync. The Edit form's User/MultiUser picker is keyed by userPublicId
+    /// (see AppUserPickerResponse / UserFieldValueResolver, which resolves the picker's submitted
+    /// Guid back to this same long id on save) — handing it a display name instead of a Guid left
+    /// the picker unable to match any option, showing empty ("Select User") no matter what was
+    /// actually saved. Deliberately does NOT cover CreatedBy/ModifiedBy — those are read-only
+    /// system columns never rendered through a picker, so they stay resolved to names via
+    /// ResolveUserNamesAsync regardless.</summary>
+    internal static async Task<IReadOnlyDictionary<long, Guid>> ResolveUserPublicIdsAsync(
+        IEnumerable<IReadOnlyDictionary<string, object?>> rows,
+        IReadOnlyList<AppField> fields,
+        IUserRepository userRepo,
+        CancellationToken ct)
+    {
+        var hasUserFields = fields.Any(f => f.TypeCode is "User" or "MultiUser");
+        if (!hasUserFields) return new Dictionary<long, Guid>();
+
+        var ids = new HashSet<long>();
+        foreach (var row in rows)
+        {
+            foreach (var f in fields.Where(f => f.TypeCode is "User" or "MultiUser" && f.Fid.HasValue))
+            {
+                var col = PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value);
+                if (!row.TryGetValue(col, out var val) || val is null) continue;
+                var str = val.ToString()!;
+                if (str.TrimStart().StartsWith('['))
+                {
+                    try
+                    {
+                        var parsed = System.Text.Json.JsonSerializer.Deserialize<List<long>>(str);
+                        if (parsed != null) foreach (var pid in parsed) ids.Add(pid);
+                    }
+                    catch { }
+                }
+                else if (long.TryParse(str, out var uid)) ids.Add(uid);
+            }
+        }
+
+        return await userRepo.GetPublicIdsByIdsAsync(ids, ct);
+    }
 }
