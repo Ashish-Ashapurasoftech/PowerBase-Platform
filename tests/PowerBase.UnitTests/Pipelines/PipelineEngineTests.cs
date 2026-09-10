@@ -2602,8 +2602,10 @@ public class PipelineEngineTests
     {
         var payload = JsonSerializer.Serialize(new
         {
-            TriggerStepRefId = "ref_9356",
-            SelectedFieldValues = new { fid_6 = "ignore" }
+            steps = new
+            {
+                ref_9356 = new { fid_6 = "ignore" }
+            }
         });
 
         InvokeEvaluateTokens("{{ref_9356.fid_6}}", payload).Should().Be("ignore");
@@ -2614,8 +2616,10 @@ public class PipelineEngineTests
     {
         var payload = JsonSerializer.Serialize(new
         {
-            TriggerStepRefId = "ref_9356",
-            SelectedFieldValues = new { fid_6 = "ignore" }
+            steps = new
+            {
+                ref_9356 = new { fid_6 = "ignore" }
+            }
         });
 
         InvokeEvaluateTokens("{{steps.ref_9356.fid_6}}", payload).Should().Be("ignore");
@@ -2626,12 +2630,15 @@ public class PipelineEngineTests
     {
         var payload = JsonSerializer.Serialize(new
         {
-            TriggerStepRefId = "ref_9356",
-            SelectedFieldValues = new { fid_6 = "ignore" }
+            steps = new
+            {
+                ref_9356 = new { fid_6 = "ignore" }
+            }
         });
 
         Action act = () => InvokeEvaluateTokens("{{unknown_ref.fid_6}}", payload);
-        act.Should().Throw<PowerBase.Domain.Exceptions.PipelineStepException>()
+        act.Should().Throw<TargetInvocationException>()
+           .WithInnerException<PowerBase.Domain.Exceptions.PipelineStepException>()
            .WithMessage("*Failed to resolve dynamic token*");
     }
 

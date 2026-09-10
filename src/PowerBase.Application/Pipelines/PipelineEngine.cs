@@ -2875,7 +2875,7 @@ public class PipelineEngine : IPipelineEngine
 
         if (sourceStep == null || string.IsNullOrWhiteSpace(sourceStep.ConfigJson))
         {
-            if (allSteps == null || allSteps.Count == 0)
+            if (allSteps == null || allSteps.Count == 0 || (sourceStep != null && sourceStep.Type == "trigger"))
             {
                 return "TEXT";
             }
