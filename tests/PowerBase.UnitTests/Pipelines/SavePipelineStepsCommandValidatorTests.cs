@@ -109,7 +109,7 @@ public class SavePipelineStepsCommandValidatorTests
 
         // Assert
         result.IsValid.Should().BeFalse();
-        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with either a Trigger step or a Search/Query step"));
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with either a Trigger step, a Search/Query step, or a Handle Errors step"));
     }
 
     [Fact]
@@ -1005,5 +1005,47 @@ public class SavePipelineStepsCommandValidatorTests
 
         result.IsValid.Should().BeFalse();
         result.Errors.Should().Contain(e => e.ErrorMessage.Contains("invalid complex JSON structure"));
+    }
+
+    [Fact]
+    public async Task Validate_RootHandleErrorsInNonTriggerPipeline_ReturnsValid()
+    {
+        var handleErrors = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_he",
+            Type = "control",
+            Subtype = "handle-errors",
+            ConfigJson = "{\"fallbackAction\":\"handle\"}",
+            Children = new List<SavePipelineStepDto> { CreateActionStep("ref_action") },
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { handleErrors }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_RootHandleErrorsWithNestedTrigger_ReturnsInvalid()
+    {
+        var nestedTrigger = CreateTriggerStep("ref_trig");
+        var handleErrors = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_he",
+            Type = "control",
+            Subtype = "handle-errors",
+            ConfigJson = "{\"fallbackAction\":\"handle\"}",
+            Children = new List<SavePipelineStepDto> { nestedTrigger },
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { handleErrors }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("cannot be nested inside container steps"));
     }
 }

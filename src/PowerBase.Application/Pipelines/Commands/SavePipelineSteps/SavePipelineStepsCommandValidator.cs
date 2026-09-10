@@ -24,12 +24,14 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             return;
         }
 
-        // Rule 1: Must begin with exactly one Trigger or Search/Query step at root index 0
+        // Rule 1: Must begin with a Trigger, Search/Query step, or Handle Errors step at root index 0
         var firstStep = steps[0];
-        bool isValidFirstStep = firstStep.Type == "trigger" || (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record"));
+        bool isValidFirstStep = firstStep.Type == "trigger" || 
+                                (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
+                                (firstStep.Subtype == "handle-errors");
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A pipeline must begin with either a Trigger step or a Search/Query step.");
+            context.AddFailure("Steps", "A pipeline must begin with either a Trigger step, a Search/Query step, or a Handle Errors step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();
@@ -294,6 +296,15 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                 {
                     var refId = match.Groups[1].Value;
                     if (refId == "trigger" || refId.StartsWith("fid_")) continue;
+
+                     if (string.Equals(refId, "ERROR", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (branchType != "errorChildren")
+                        {
+                            context.AddFailure("Steps", $"Step '{step.RefId}' cannot reference ERROR object outside of an On error branch.");
+                        }
+                        continue;
+                    }
 
                     if (!traversedRefIds.Contains(refId))
                     {

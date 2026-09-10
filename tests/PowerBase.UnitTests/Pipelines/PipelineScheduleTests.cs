@@ -903,6 +903,31 @@ public class PipelineScheduleTests
     }
 
     [Fact]
+    public void HandleErrorsRoot_WithMonitoredAction_IsScheduleEligible()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "control", Subtype = "handle-errors", DisplayOrder = 0, IsDeleted = false },
+            new PipelineStep { Id = 2, Type = "action", Subtype = "create-record", ParentStepId = 1, ParentBranch = "children", DisplayOrder = 0, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public void EmptyHandleErrorsRoot_IsNotScheduleEligible()
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = "control", Subtype = "handle-errors", DisplayOrder = 0, IsDeleted = false }
+        };
+
+        var result = PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps);
+        result.Should().BeFalse();
+    }
+
+    [Fact]
     public void TriggerRoot_IsNotScheduleEligible()
     {
         var steps = new List<PipelineStep>

@@ -318,6 +318,16 @@ public class PipelineEngine : IPipelineEngine
 
             // Mismatch validation before execution starts
             var rootStep = activeSteps.FirstOrDefault(s => s.ParentStepId == null);
+            var firstQueryStep = rootStep;
+            while (firstQueryStep != null && firstQueryStep.Subtype == "handle-errors")
+            {
+                firstQueryStep = activeSteps
+                    .Where(s => s.ParentStepId == firstQueryStep.Id && string.Equals(s.ParentBranch, "children", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(s => s.DisplayOrder)
+                    .ThenBy(s => s.Id)
+                    .FirstOrDefault();
+            }
+
             var eventName = task.TriggerEvent?.ToLowerInvariant() ?? "manual";
             var normalizedEventName = eventName.Replace("-", "").Replace("_", "");
             if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent" or "webhook")
@@ -337,14 +347,14 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (normalizedEventName == "activation")
                 {
-                    if (rootStep == null || rootStep.Type != "query" || (rootStep.Subtype != "search-records" && rootStep.Subtype != "look-up-record"))
+                    if (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record"))
                     {
                         throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a query-first pipeline structure.");
                     }
                 }
                 else if (normalizedEventName == "pipeline_schedule")
                 {
-                    if (rootStep == null || rootStep.Type != "query" || (rootStep.Subtype != "search-records" && rootStep.Subtype != "look-up-record"))
+                    if (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record"))
                     {
                         throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a query-first pipeline structure.");
                     }
@@ -1667,6 +1677,93 @@ public class PipelineEngine : IPipelineEngine
 
             return JsonSerializer.Serialize(new { Matched = isMatched, EvaluatedBranch = branch });
         }
+        else if (subtype == "handle-errors")
+        {
+            var config = JsonSerializer.Deserialize<HandleErrorsStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var fallbackAction = (config?.FallbackAction?.ToLowerInvariant() == "ignore") ? "ignore" : "handle";
+
+            stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                FallbackAction = fallbackAction
+            });
+
+            _logger.LogInformation("Handle Errors step {StepId} started monitoring. Mode: {FallbackAction}", step.Id, fallbackAction);
+
+            bool monitoredSuccess = false;
+            Exception? caughtException = null;
+
+            try
+            {
+                await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/monitored", ct);
+                monitoredSuccess = true;
+            }
+            catch (Exception ex)
+            {
+                if (!IsCatchablePipelineStepError(ex))
+                {
+                    throw;
+                }
+                caughtException = ex;
+                monitoredSuccess = false;
+            }
+
+            if (monitoredSuccess)
+            {
+                if (fallbackAction == "handle")
+                {
+                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "successchildren", contextDict, stepsDict, snapshots, $"{executionPath}/on_success", ct);
+                }
+                return JsonSerializer.Serialize(new { Handled = false, Status = "Success" });
+            }
+            else
+            {
+                if (fallbackAction == "ignore")
+                {
+                    _logger.LogWarning("Monitored step in Handle Errors step {StepId} failed with error '{ErrorMessage}'. Fallback action is Ignore; resuming pipeline.", step.Id, caughtException?.Message);
+                    return JsonSerializer.Serialize(new { Handled = true, FallbackAction = "ignore", ErrorMessage = caughtException?.Message });
+                }
+
+                var failedSnap = snapshots.LastOrDefault(s => s.Status == "Failed");
+                var failedRefId = failedSnap?.Step.RefId ?? step.RefId;
+                var failedChannel = failedSnap?.Step.Type ?? "powerbase";
+                var failedSubtype = failedSnap?.Step.Subtype ?? "action";
+                var failedName = failedSnap?.Step.Label ?? "Action Step";
+                var sanitizedMsg = SanitizeErrorMessage(caughtException?.Message ?? "Unknown error");
+
+                var currentErrorDict = new Dictionary<string, object?>
+                {
+                    { "reference_id", failedRefId },
+                    { "channel", failedChannel },
+                    { "step", failedSubtype },
+                    { "name", failedName },
+                    { "error_message", sanitizedMsg }
+                };
+
+                object? prevStepsError = null;
+                object? prevContextError = null;
+                bool hadPrevStepsError = stepsDict.TryGetValue("ERROR", out prevStepsError);
+                bool hadPrevContextError = contextDict.TryGetValue("ERROR", out prevContextError);
+
+                try
+                {
+                    stepsDict["ERROR"] = currentErrorDict;
+                    contextDict["ERROR"] = currentErrorDict;
+
+                    _logger.LogInformation("Handle Errors step {StepId} executing On Error branch for failed step {FailedRefId}.", step.Id, failedRefId);
+
+                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "errorchildren", contextDict, stepsDict, snapshots, $"{executionPath}/on_error", ct);
+                }
+                finally
+                {
+                    if (hadPrevStepsError) stepsDict["ERROR"] = prevStepsError!;
+                    else stepsDict.Remove("ERROR");
+
+                    if (hadPrevContextError) contextDict["ERROR"] = prevContextError!;
+                    else contextDict.Remove("ERROR");
+                }
+
+                return JsonSerializer.Serialize(new { Handled = true, FallbackAction = "handle", FailedStepRefId = failedRefId, ErrorMessage = sanitizedMsg });
+            }
+        }
         else if (subtype == "loop" || subtype == "for-each")
         {
             var config = JsonSerializer.Deserialize<LoopStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -1798,7 +1895,18 @@ public class PipelineEngine : IPipelineEngine
 
                     stepsDict[step.RefId] = loopScope;
 
-                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{index}", ct);
+                    try
+                    {
+                        await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{index}", ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (IsControlFlowOrInfrastructureException(ex))
+                        {
+                            throw;
+                        }
+                        _logger.LogWarning(ex, "Iteration {Index} failed in Loop step {StepId}. Containing iteration error.", index, step.Id);
+                    }
 
                     _logger.LogInformation("Loop step {StepId} iteration {Index} completed.", step.Id, index);
                     index++;
@@ -2480,6 +2588,24 @@ public class PipelineEngine : IPipelineEngine
     private IEnumerable<object>? GetLoopCollection(object? sourceVal)
     {
         if (sourceVal == null) return null;
+
+        if (sourceVal is string str && !string.IsNullOrWhiteSpace(str))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(str);
+                var root = doc.RootElement.Clone();
+                if (root.ValueKind == JsonValueKind.Array)
+                {
+                    return root.EnumerateArray().Select(e => (object)e.Clone()).ToList();
+                }
+                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("records", out var recs) && recs.ValueKind == JsonValueKind.Array)
+                {
+                    return recs.EnumerateArray().Select(e => (object)e.Clone()).ToList();
+                }
+            }
+            catch { }
+        }
 
         if (sourceVal is JsonElement jsonEl)
         {
@@ -3449,6 +3575,14 @@ public class PipelineEngine : IPipelineEngine
                         return true;
                     }
                 }
+                foreach (var p in el.EnumerateObject())
+                {
+                    if (string.Equals(p.Name, member, StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = ConvertJsonElement(p.Value)!;
+                        return true;
+                    }
+                }
             }
             return false;
         }
@@ -3497,6 +3631,14 @@ public class PipelineEngine : IPipelineEngine
                         if (el.TryGetProperty(stableKey, out var stableProp))
                         {
                             value = ConvertJsonElement(stableProp)!;
+                            return true;
+                        }
+                    }
+                    foreach (var p in el.EnumerateObject())
+                    {
+                        if (string.Equals(p.Name, member, StringComparison.OrdinalIgnoreCase))
+                        {
+                            value = ConvertJsonElement(p.Value)!;
                             return true;
                         }
                     }
@@ -3627,6 +3769,124 @@ public class PipelineEngine : IPipelineEngine
         public string? FromAddress { get; set; }
         public List<string>? Attachments { get; set; }
     }
+
+    private class HandleErrorsStepConfig
+    {
+        public string? FallbackAction { get; set; }
+    }
+
+    private static bool IsControlFlowOrInfrastructureException(Exception ex)
+    {
+        if (ex is PipelineStopExecutionException ||
+            ex is OperationCanceledException ||
+            ex is PipelineRecursionException)
+        {
+            return true;
+        }
+
+        var property = ex.GetType().GetProperty("Number");
+        if (property != null)
+        {
+            var number = property.GetValue(ex);
+            if (number is int intVal && intVal == 1205)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static bool IsCatchablePipelineStepError(Exception ex)
+    {
+        if (ex == null) return false;
+
+        if (IsControlFlowOrInfrastructureException(ex))
+        {
+            return false;
+        }
+
+        if (ex is PipelineStopExecutionException ||
+            ex is OperationCanceledException ||
+            ex is PipelineRunRunningException ||
+            ex is PowerBase.Domain.Exceptions.PipelineRecursionException ||
+            ex is PowerBase.Domain.Exceptions.PipelineNonRetryableException)
+        {
+            return false;
+        }
+
+        var curr = ex.InnerException;
+        while (curr != null)
+        {
+            if (curr is PipelineStopExecutionException ||
+                curr is OperationCanceledException ||
+                curr is PipelineRunRunningException ||
+                curr is PowerBase.Domain.Exceptions.PipelineRecursionException ||
+                curr is PowerBase.Domain.Exceptions.PipelineNonRetryableException)
+            {
+                return false;
+            }
+            curr = curr.InnerException;
+        }
+
+        if (ex is PowerBase.Domain.Exceptions.NotFoundException ||
+            ex is PowerBase.Domain.Exceptions.ValidationException ||
+            ex is PowerBase.Domain.Exceptions.UnauthorizedActionException ||
+            ex is InvalidOperationException ||
+            ex is ArgumentException ||
+            ex is FormatException ||
+            ex is KeyNotFoundException)
+        {
+            return true;
+        }
+
+        if (ex is System.Net.Http.HttpRequestException httpEx)
+        {
+            if (httpEx.InnerException is System.Net.Sockets.SocketException)
+            {
+                return false;
+            }
+
+            if (httpEx.StatusCode.HasValue)
+            {
+                var code = (int)httpEx.StatusCode.Value;
+                if (code == 400 || code == 401 || code == 403 || code == 404 || code == 409)
+                {
+                    return true;
+                }
+                return false;
+            }
+
+            var msg = httpEx.Message;
+            if (msg.Contains("status code 5") || msg.Contains("status code 429"))
+            {
+                return false;
+            }
+
+            if (msg.Contains("status code 400") || msg.Contains("status code 401") ||
+                msg.Contains("status code 403") || msg.Contains("status code 404") ||
+                msg.Contains("status code 409"))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        return false;
+    }
+
+    public static string SanitizeErrorMessage(string? msg)
+    {
+        if (string.IsNullOrWhiteSpace(msg)) return "An error occurred during step execution.";
+        var sanitized = msg;
+        if (sanitized.Contains("Bearer ", StringComparison.OrdinalIgnoreCase))
+            sanitized = System.Text.RegularExpressions.Regex.Replace(sanitized, @"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*", "Bearer [REDACTED]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (sanitized.Contains("Password=", StringComparison.OrdinalIgnoreCase))
+            sanitized = System.Text.RegularExpressions.Regex.Replace(sanitized, @"Password=[^;]+", "Password=[REDACTED]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return sanitized;
+    }
+
 
     private class MakeRequestStepConfig
     {
@@ -4212,6 +4472,7 @@ public class PipelineEngine : IPipelineEngine
                 $"Field with name '{fieldReference}' was not found in the target table.");
         }
     }
+
 
     public class RawStepAuditSnapshot
     {
