@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-COND-002",
+  "classification": "QB-DOC",
+  "description": "Numeric magnitude comparison (>)",
+  "verifiedLiveUrl": "https://help.quickbase.com/v1/docs/jinja-reference",
+  "relevantHeading": "Jinja reference > Math & Logic",
+  "testPayload": {
+    "stepId": "QB-COND-002",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

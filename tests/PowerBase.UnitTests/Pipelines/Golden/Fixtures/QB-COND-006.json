@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-COND-006",
+  "classification": "QB-DOC",
+  "description": "Dynamic token to dynamic token runtime comparison",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/start-with-jinja-in-pipelines",
+  "relevantHeading": "Jinja in Pipelines",
+  "testPayload": {
+    "stepId": "QB-COND-006",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

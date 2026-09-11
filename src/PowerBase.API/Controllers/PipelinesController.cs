@@ -222,6 +222,113 @@ public class PipelinesController : ControllerBase
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<PipelineResponse>(response));
     }
 
+    /// <summary>Get list of all timezones in canonical IANA format.</summary>
+    [HttpGet("api/v1/pipelines/timezones")]
+    [ProducesResponseType(typeof(List<PowerBase.Application.Pipelines.Queries.GetTimeZones.TimeZoneDto>), StatusCodes.Status200OK)]
+    public IActionResult GetTimeZones()
+    {
+        var timeZones = TimeZoneInfo.GetSystemTimeZones();
+        var resultList = new List<PowerBase.Application.Pipelines.Queries.GetTimeZones.TimeZoneDto>();
+        
+        foreach (var tz in timeZones)
+        {
+            string ianaId = TimeZoneInfo.TryConvertWindowsIdToIanaId(tz.Id, out var canonicalId) ? canonicalId : tz.Id;
+            if (string.Equals(ianaId, "Etc/UTC", StringComparison.OrdinalIgnoreCase))
+            {
+                ianaId = "UTC";
+            }
+            else if (string.Equals(ianaId, "Asia/Calcutta", StringComparison.OrdinalIgnoreCase))
+            {
+                ianaId = "Asia/Kolkata";
+            }
+
+            var offset = tz.GetUtcOffset(DateTime.UtcNow);
+            var sign = offset.Ticks >= 0 ? "+" : "-";
+            var offsetStr = $"UTC{sign}{Math.Abs(offset.Hours):00}:{Math.Abs(offset.Minutes):00}";
+            var displayName = $"({offsetStr}) {ianaId} ({tz.StandardName})";
+
+            resultList.Add(new PowerBase.Application.Pipelines.Queries.GetTimeZones.TimeZoneDto
+            {
+                Id = ianaId,
+                DisplayName = displayName
+            });
+        }
+
+        // Ensure key representative zones are always present, even on Windows hosts
+        var representativeZones = new[]
+        {
+            "UTC",
+            "Asia/Kolkata",
+            "Asia/Tokyo",
+            "Asia/Dubai",
+            "Asia/Singapore",
+            "Europe/London",
+            "Europe/Paris",
+            "Europe/Berlin",
+            "America/New_York",
+            "America/Chicago",
+            "America/Denver",
+            "America/Los_Angeles",
+            "America/Toronto",
+            "America/Sao_Paulo",
+            "Australia/Sydney",
+            "Pacific/Auckland"
+        };
+
+        foreach (var repId in representativeZones)
+        {
+            if (!resultList.Any(t => string.Equals(t.Id, repId, StringComparison.OrdinalIgnoreCase)))
+            {
+                try
+                {
+                    var tz = PowerBase.Infrastructure.Pipelines.TimeZoneMapper.ResolveTimeZone(repId);
+                    var offset = tz.GetUtcOffset(DateTime.UtcNow);
+                    var sign = offset.Ticks >= 0 ? "+" : "-";
+                    var offsetStr = $"UTC{sign}{Math.Abs(offset.Hours):00}:{Math.Abs(offset.Minutes):00}";
+                    var displayName = $"({offsetStr}) {repId} ({tz.StandardName})";
+
+                    resultList.Add(new PowerBase.Application.Pipelines.Queries.GetTimeZones.TimeZoneDto
+                    {
+                        Id = repId,
+                        DisplayName = displayName
+                    });
+                }
+                catch
+                {
+                    // Fallback or ignore if unresolved
+                }
+            }
+        }
+
+        var sortedList = resultList
+            .GroupBy(t => t.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(t => {
+                try
+                {
+                    var tz = PowerBase.Infrastructure.Pipelines.TimeZoneMapper.ResolveTimeZone(t.Id);
+                    return tz.GetUtcOffset(DateTime.UtcNow).TotalMinutes;
+                }
+                catch
+                {
+                    return 0.0;
+                }
+            })
+            .ThenBy(t => t.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (!sortedList.Any(t => string.Equals(t.Id, "UTC", StringComparison.OrdinalIgnoreCase)))
+        {
+            sortedList.Insert(0, new PowerBase.Application.Pipelines.Queries.GetTimeZones.TimeZoneDto
+            {
+                Id = "UTC",
+                DisplayName = "(UTC+00:00) UTC (Coordinated Universal Time)"
+            });
+        }
+
+        return Ok(sortedList);
+    }
+
     // --- Mappings ---
 
     private static PipelineResponse MapToResponse(CreatePipelineResult result) => new()

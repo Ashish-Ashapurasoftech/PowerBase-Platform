@@ -136,10 +136,10 @@ public sealed class RecordWriteService : IRecordWriteService
 
         await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct, onIndexMessageCreated);
 
-        // Build before/after values and genuinely changed field IDs keyed by f.Id
+        // Build before/after values and genuinely changed field IDs for pipeline triggering
         var beforeValues = new Dictionary<long, object?>();
         var afterValues = new Dictionary<long, object?>();
-        var changedFieldIds = new List<long>();
+        var pipelineChangedFields = new List<AppField>();
 
         foreach (var f in fields)
         {
@@ -147,82 +147,88 @@ public sealed class RecordWriteService : IRecordWriteService
             {
                 var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                 var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
+
+                // Key by both Id and Fid for full evaluator & snapshot lookup compatibility
                 beforeValues[f.Id] = oldVal;
+                beforeValues[f.Fid.Value] = oldVal;
 
                 if (effectiveValues.TryGetValue(f.Fid.Value, out var newVal))
                 {
                     afterValues[f.Id] = newVal;
-                    if (!AreValuesEqual(oldVal, newVal, f.TypeCode))
+                    afterValues[f.Fid.Value] = newVal;
+
+                    if (!f.IsSystem && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode) && !AreValuesEqual(oldVal, newVal, f.TypeCode))
                     {
-                        changedFieldIds.Add(f.Id);
+                        pipelineChangedFields.Add(f);
                     }
                 }
                 else
                 {
                     afterValues[f.Id] = oldVal;
+                    afterValues[f.Fid.Value] = oldVal;
                 }
             }
         }
 
-        // Build field-level diff — only fields where value actually changed, keyed by display label
-        var candidateFields = fields.Where(f =>
-            f.Fid.HasValue && fieldValues.ContainsKey((long)f.Fid.Value) && !f.IsSystem && f.PhysicalColumnName is not null && f.IsAuditable).ToList();
+        // Canonical pipeline changedFieldIds strictly contains f.Fid.Value (never f.Id)
+        var changedFieldIds = pipelineChangedFields
+            .Select(f => (long)f.Fid!.Value)
+            .Distinct()
+            .ToList();
 
-        var actuallyChanged = candidateFields.Where(f =>
-        {
-            var colKey = PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value);
-            var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov?.ToString() : null;
-            var newVal = fieldValues.TryGetValue((long)f.Fid.Value, out var nv) ? nv?.ToString() : null;
-            return oldVal != newVal;
-        }).ToList();
+        // Separate audit logging from pipeline trigger change detection:
+        // Auditing only logs detailed field diffs for fields where IsAuditable == true
+        var auditableChangedFields = pipelineChangedFields.Where(f => f.IsAuditable).ToList();
 
-        if (actuallyChanged.Count == 0)
+        if (auditableChangedFields.Count == 0)
         {
-            // Nothing really changed — log a simple entry with no diff
+            // Log simple audit entry without diffs if no auditable fields changed
             await _auditRepo.LogActivityAsync(
                 auditAction, AuditEntityTypes.Record, recordPublicId.ToString(),
                 entityTitle,
                 appId: table.AppId, ct: ct);
-            return effectiveValues;
         }
-
-        // Resolve User-type fields: load app users once if any User field changed
-        Dictionary<string, string>? userNameMap = null;
-        if (actuallyChanged.Any(f => f.TypeCode == "User"))
+        else
         {
-            var appUsers = await _appUserRepo.ListByAppIdAsync(table.AppId, ct);
-            userNameMap = appUsers.ToDictionary(
-                u => u.PublicId.ToString(),
-                u => u.UserName,
-                StringComparer.OrdinalIgnoreCase);
+            // Resolve User-type fields: load app users once if any auditable User field changed
+            Dictionary<string, string>? userNameMap = null;
+            if (auditableChangedFields.Any(f => f.TypeCode == "User"))
+            {
+                var appUsers = await _appUserRepo.ListByAppIdAsync(table.AppId, ct);
+                userNameMap = appUsers.ToDictionary(
+                    u => u.PublicId.ToString(),
+                    u => u.UserName,
+                    StringComparer.OrdinalIgnoreCase);
+            }
+
+            string ResolveDisplay(AppField f, string? raw)
+            {
+                if (raw is null) return string.Empty;
+                if (f.TypeCode == "User" && userNameMap is not null && userNameMap.TryGetValue(raw, out var name))
+                    return name;
+                return raw;
+            }
+
+            var oldValuesDict = auditableChangedFields.ToDictionary(
+                f => f.Label ?? f.Name,
+                f => ResolveDisplay(f, oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var v) ? v?.ToString() : null)
+            );
+            var newValuesDict = auditableChangedFields.ToDictionary(
+                f => f.Label ?? f.Name,
+                f => ResolveDisplay(f, effectiveValues.TryGetValue((long)f.Fid!.Value, out var v) ? v?.ToString() : null)
+            );
+
+            await _auditRepo.LogActivityAsync(
+                auditAction, AuditEntityTypes.Record, recordPublicId.ToString(),
+                entityTitle,
+                appId: table.AppId,
+                oldValues: JsonSerializer.Serialize(oldValuesDict),
+                newValues: JsonSerializer.Serialize(newValuesDict),
+                ct: ct);
         }
 
-        string ResolveDisplay(AppField f, string? raw)
-        {
-            if (raw is null) return string.Empty;
-            if (f.TypeCode == "User" && userNameMap is not null && userNameMap.TryGetValue(raw, out var name))
-                return name;
-            return raw;
-        }
-
-        var oldValuesDict = actuallyChanged.ToDictionary(
-            f => f.Label ?? f.Name,
-            f => ResolveDisplay(f, oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value), out var v) ? v?.ToString() : null)
-        );
-        var newValuesDict = actuallyChanged.ToDictionary(
-            f => f.Label ?? f.Name,
-            f => ResolveDisplay(f, fieldValues.TryGetValue((long)f.Fid!.Value, out var v) ? v?.ToString() : null)
-        );
-
-        await _auditRepo.LogActivityAsync(
-            auditAction, AuditEntityTypes.Record, recordPublicId.ToString(),
-            entityTitle,
-            appId: table.AppId,
-            oldValues: JsonSerializer.Serialize(oldValuesDict),
-            newValues: JsonSerializer.Serialize(newValuesDict),
-            ct: ct);
-
-        if (!suppressInterception)
+        // Invoke pipeline trigger interceptor if any genuine pipeline field changed, independent of IsAuditable
+        if (pipelineChangedFields.Count > 0 && !suppressInterception)
         {
             await _triggerInterceptor.InterceptAsync(table, fields, recordPublicId, afterValues, "record-updated", ct, beforeValues, changedFieldIds);
         }

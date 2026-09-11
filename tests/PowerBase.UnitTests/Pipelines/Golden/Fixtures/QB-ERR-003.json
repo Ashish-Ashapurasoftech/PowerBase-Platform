@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-ERR-003",
+  "classification": "QB-DOC",
+  "description": "Exposes ERROR.step, ERROR.error_message, ERROR.channel, ERROR.name, ERROR.reference_id",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/handle-errors",
+  "relevantHeading": "Handle errors > The ERROR object",
+  "testPayload": {
+    "stepId": "QB-ERR-003",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

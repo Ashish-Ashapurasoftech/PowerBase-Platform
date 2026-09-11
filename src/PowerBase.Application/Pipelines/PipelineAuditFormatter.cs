@@ -780,11 +780,15 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 logMessage = $@"Deleted record ""{recordDisplayName}"" from {tableName}.";
             }
-            else if (subtype == "condition")
+            else if (string.Equals(type, "condition", StringComparison.OrdinalIgnoreCase) || string.Equals(subtype, "condition", StringComparison.OrdinalIgnoreCase))
             {
+                if (inputDict.TryGetValue("ResolvedRules", out var rrObj) && rrObj != null)
+                {
+                    friendlyInput["Evaluated Rules"] = AsList(rrObj);
+                }
                 if (inputDict.TryGetValue("RuleGroups", out var rgObj) && rgObj != null)
                 {
-                    friendlyInput["Criteria"] = AsDictionary(rgObj);
+                    friendlyInput["Criteria"] = rgObj;
                 }
                 else
                 {

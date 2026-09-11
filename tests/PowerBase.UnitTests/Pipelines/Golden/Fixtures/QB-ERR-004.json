@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-ERR-004",
+  "classification": "QB-DOC",
+  "description": "Connection failures & system errors are non-catchable",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/handle-errors",
+  "relevantHeading": "Handle errors > Non-catchable errors",
+  "testPayload": {
+    "stepId": "QB-ERR-004",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

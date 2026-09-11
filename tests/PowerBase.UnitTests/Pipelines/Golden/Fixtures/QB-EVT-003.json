@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-EVT-003",
+  "classification": "QB-DOC",
+  "description": "On Record Deleted event triggers pipeline when record is deleted",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/use-the-quickbase-channel",
+  "relevantHeading": "Quickbase > Triggers",
+  "testPayload": {
+    "stepId": "QB-EVT-003",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

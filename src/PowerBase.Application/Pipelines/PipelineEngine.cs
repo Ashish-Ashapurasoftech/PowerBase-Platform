@@ -318,6 +318,16 @@ public class PipelineEngine : IPipelineEngine
 
             // Mismatch validation before execution starts
             var rootStep = activeSteps.FirstOrDefault(s => s.ParentStepId == null);
+            var firstQueryStep = rootStep;
+            while (firstQueryStep != null && firstQueryStep.Subtype == "handle-errors")
+            {
+                firstQueryStep = activeSteps
+                    .Where(s => s.ParentStepId == firstQueryStep.Id && string.Equals(s.ParentBranch, "children", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(s => s.DisplayOrder)
+                    .ThenBy(s => s.Id)
+                    .FirstOrDefault();
+            }
+
             var eventName = task.TriggerEvent?.ToLowerInvariant() ?? "manual";
             var normalizedEventName = eventName.Replace("-", "").Replace("_", "");
             if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent" or "webhook")
@@ -337,14 +347,14 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (normalizedEventName == "activation")
                 {
-                    if (rootStep == null || rootStep.Type != "query" || (rootStep.Subtype != "search-records" && rootStep.Subtype != "look-up-record"))
+                    if (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record"))
                     {
                         throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a query-first pipeline structure.");
                     }
                 }
                 else if (normalizedEventName == "pipeline_schedule")
                 {
-                    if (rootStep == null || rootStep.Type != "query" || (rootStep.Subtype != "search-records" && rootStep.Subtype != "look-up-record"))
+                    if (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record"))
                     {
                         throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a query-first pipeline structure.");
                     }
@@ -469,6 +479,12 @@ public class PipelineEngine : IPipelineEngine
                                         var selectedDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(selectedElement.GetRawText());
                                         if (selectedDict != null)
                                         {
+                                            if (triggerData.TryGetValue("RecordPublicId", out var recIdObj) && recIdObj != null)
+                                            {
+                                                selectedDict["RecordPublicId"] = recIdObj.ToString();
+                                                selectedDict["id"] = recIdObj.ToString();
+                                                selectedDict["publicId"] = recIdObj.ToString();
+                                            }
                                             stepsDict[refId] = selectedDict;
                                         }
                                     }
@@ -796,7 +812,7 @@ public class PipelineEngine : IPipelineEngine
         CancellationToken ct)
     {
         var siblings = allSteps
-            .Where(s => s.ParentStepId == parentStepId && (parentStepId == null || s.ParentBranch == parentBranch))
+            .Where(s => s.ParentStepId == parentStepId && (parentStepId == null || string.Equals(s.ParentBranch, parentBranch, StringComparison.OrdinalIgnoreCase)))
             .OrderBy(s => s.DisplayOrder)
             .ToList();
 
@@ -1230,7 +1246,7 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (f.Fid.HasValue)
                 {
-                    var colName = PhysicalNaming.ColumnName(f.Fid.Value);
+                    var colName = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                     if (record.TryGetValue(colName, out var val))
                     {
                         norm[$"fid_{f.Fid.Value}"] = val;
@@ -1326,7 +1342,11 @@ public class PipelineEngine : IPipelineEngine
             {
                 var norm = new Dictionary<string, object?>();
                 if (record.TryGetValue("Id", out var searchIdVal)) norm["Id"] = searchIdVal;
-                if (record.TryGetValue("PublicId", out var searchPubIdVal)) norm["PublicId"] = searchPubIdVal;
+                if (record.TryGetValue("PublicId", out var searchPubIdVal))
+                {
+                    norm["PublicId"] = searchPubIdVal;
+                    norm["RecordPublicId"] = searchPubIdVal;
+                }
                 if (record.TryGetValue("CreatedOn", out var searchCoVal)) norm["CreatedOn"] = searchCoVal;
                 if (record.TryGetValue("CreatedBy", out var searchCbVal)) norm["CreatedBy"] = searchCbVal;
                 if (record.TryGetValue("ModifiedOn", out var searchMoVal)) norm["ModifiedOn"] = searchMoVal;
@@ -1336,8 +1356,8 @@ public class PipelineEngine : IPipelineEngine
                 {
                     if (f.Fid.HasValue)
                     {
-                        var colName = PhysicalNaming.ColumnName(f.Fid.Value);
-                        if (record.TryGetValue(colName, out var val))
+                        var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
+                        if (record.TryGetValue(colKey, out var val))
                         {
                             norm[$"fid_{f.Fid.Value}"] = val;
                         }
@@ -1599,40 +1619,66 @@ public class PipelineEngine : IPipelineEngine
 
             throw new PipelineStopExecutionException(string.IsNullOrWhiteSpace(reason) ? "Execution halted by pipeline stop action." : reason);
         }
-        else if (subtype == "condition")
+        else if (string.Equals(step.Type, "condition", StringComparison.OrdinalIgnoreCase) || string.Equals(step.Subtype, "condition", StringComparison.OrdinalIgnoreCase))
         {
             var config = JsonSerializer.Deserialize<ConditionStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             
             bool isMatched = false;
-            if (config?.RuleGroups != null && config.RuleGroups.Any())
-            {
-                isMatched = config.RuleGroups.All(g => EvaluateConditionGroup(g, payloadJson, executionPath, allSteps));
-                _logger.LogInformation("Condition step {StepId} resolved via recursive ruleGroups evaluation. Result: {Result}", step.Id, isMatched);
+            var resolvedAuditRules = new List<object>();
 
-                stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                    RuleGroups = config.RuleGroups.Select(g => new {
-                        g.LogicalOp,
-                        Rules = g.Rules?.Select(r => new {
-                            r.Type,
-                            Left = EvaluateTokens(r.Left, payloadJson, executionPath, allSteps),
-                            Op = r.Op,
-                            Right = EvaluateTokens(r.Right, payloadJson, executionPath, allSteps)
-                        })
-                    })
-                });
+            var activeGroups = config?.RuleGroups?.Where(g => !IsGroupCompletelyBlank(g)).ToList();
+            if (activeGroups == null || !activeGroups.Any())
+            {
+                if (!string.IsNullOrWhiteSpace(config?.LeftOperand))
+                {
+                    var left = EvaluateTokens(config.LeftOperand, payloadJson, executionPath, allSteps);
+                    var right = EvaluateTokens(config.RightOperand, payloadJson, executionPath, allSteps);
+                    var op = config.Operator ?? "equals";
+                    var typeCategory = await ResolveRuleTypeCategoryAsync(config.LeftOperand, payloadJson, allSteps, fieldRepo, tableRepo, ct);
+                    isMatched = PipelineFilterEvaluator.EvaluateConditionOperator(left, op, right, typeCategory, _logger);
+                    _logger.LogInformation("Condition step {StepId} resolved Left: '{Left}', Operator: '{Op}', Right: '{Right}'. Result: {Result}", step.Id, left, op, right, isMatched);
+
+                    stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                        LeftOperand = config.LeftOperand,
+                        LeftResolved = left,
+                        Operator = op,
+                        RightOperand = config.RightOperand,
+                        RightResolved = right,
+                        TypeCategory = typeCategory,
+                        Matched = isMatched
+                    });
+                }
+                else
+                {
+                    // Fail closed: no rule groups or all blank groups evaluate to false
+                    isMatched = false;
+                    _logger.LogInformation("Condition step {StepId} failed closed due to empty rule groups. Result: false", step.Id);
+                    stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                        RuleGroups = new object[0],
+                        Matched = false,
+                        Reason = "No active condition rule groups configured"
+                    });
+                }
             }
             else
             {
-                var left = EvaluateTokens(config?.LeftOperand, payloadJson, executionPath, allSteps);
-                var right = EvaluateTokens(config?.RightOperand, payloadJson, executionPath, allSteps);
-                var op = config?.Operator ?? "equals";
-                isMatched = EvaluateConditionOperator(left, op, right);
-                _logger.LogInformation("Condition step {StepId} resolved Left: '{Left}', Operator: '{Op}', Right: '{Right}'. Result: {Result}", step.Id, left, op, right, isMatched);
+                isMatched = await EvaluateConditionRuleGroupsAsync(activeGroups, payloadJson, executionPath, fieldRepo, tableRepo, allSteps, resolvedAuditRules, ct);
+                _logger.LogInformation("Condition step {StepId} resolved via recursive ruleGroups evaluation. Result: {Result}", step.Id, isMatched);
 
                 stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                    LeftOperand = left,
-                    Operator = op,
-                    RightOperand = right
+                    RuleGroups = activeGroups.Select(g => new {
+                        g.LogicalOp,
+                        Rules = g.Rules?.Select(r => new {
+                            r.Type,
+                            Left = r.Left,
+                            LeftResolved = EvaluateTokens(r.Left, payloadJson, executionPath, allSteps),
+                            Op = r.Op,
+                            Right = r.Right,
+                            RightResolved = EvaluateTokens(r.Right, payloadJson, executionPath, allSteps)
+                        })
+                    }),
+                    ResolvedRules = resolvedAuditRules,
+                    Matched = isMatched
                 });
             }
 
@@ -1640,6 +1686,93 @@ public class PipelineEngine : IPipelineEngine
             await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, branch, contextDict, stepsDict, snapshots, $"{executionPath}/{branch}", ct);
 
             return JsonSerializer.Serialize(new { Matched = isMatched, EvaluatedBranch = branch });
+        }
+        else if (subtype == "handle-errors")
+        {
+            var config = JsonSerializer.Deserialize<HandleErrorsStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var fallbackAction = (config?.FallbackAction?.ToLowerInvariant() == "ignore") ? "ignore" : "handle";
+
+            stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                FallbackAction = fallbackAction
+            });
+
+            _logger.LogInformation("Handle Errors step {StepId} started monitoring. Mode: {FallbackAction}", step.Id, fallbackAction);
+
+            bool monitoredSuccess = false;
+            Exception? caughtException = null;
+
+            try
+            {
+                await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/monitored", ct);
+                monitoredSuccess = true;
+            }
+            catch (Exception ex)
+            {
+                if (!IsCatchablePipelineStepError(ex))
+                {
+                    throw;
+                }
+                caughtException = ex;
+                monitoredSuccess = false;
+            }
+
+            if (monitoredSuccess)
+            {
+                if (fallbackAction == "handle")
+                {
+                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "successchildren", contextDict, stepsDict, snapshots, $"{executionPath}/on_success", ct);
+                }
+                return JsonSerializer.Serialize(new { Handled = false, Status = "Success" });
+            }
+            else
+            {
+                if (fallbackAction == "ignore")
+                {
+                    _logger.LogWarning("Monitored step in Handle Errors step {StepId} failed with error '{ErrorMessage}'. Fallback action is Ignore; resuming pipeline.", step.Id, caughtException?.Message);
+                    return JsonSerializer.Serialize(new { Handled = true, FallbackAction = "ignore", ErrorMessage = caughtException?.Message });
+                }
+
+                var failedSnap = snapshots.LastOrDefault(s => s.Status == "Failed");
+                var failedRefId = failedSnap?.Step.RefId ?? step.RefId;
+                var failedChannel = failedSnap?.Step.Type ?? "powerbase";
+                var failedSubtype = failedSnap?.Step.Subtype ?? "action";
+                var failedName = failedSnap?.Step.Label ?? "Action Step";
+                var sanitizedMsg = SanitizeErrorMessage(caughtException?.Message ?? "Unknown error");
+
+                var currentErrorDict = new Dictionary<string, object?>
+                {
+                    { "reference_id", failedRefId },
+                    { "channel", failedChannel },
+                    { "step", failedSubtype },
+                    { "name", failedName },
+                    { "error_message", sanitizedMsg }
+                };
+
+                object? prevStepsError = null;
+                object? prevContextError = null;
+                bool hadPrevStepsError = stepsDict.TryGetValue("ERROR", out prevStepsError);
+                bool hadPrevContextError = contextDict.TryGetValue("ERROR", out prevContextError);
+
+                try
+                {
+                    stepsDict["ERROR"] = currentErrorDict;
+                    contextDict["ERROR"] = currentErrorDict;
+
+                    _logger.LogInformation("Handle Errors step {StepId} executing On Error branch for failed step {FailedRefId}.", step.Id, failedRefId);
+
+                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "errorchildren", contextDict, stepsDict, snapshots, $"{executionPath}/on_error", ct);
+                }
+                finally
+                {
+                    if (hadPrevStepsError) stepsDict["ERROR"] = prevStepsError!;
+                    else stepsDict.Remove("ERROR");
+
+                    if (hadPrevContextError) contextDict["ERROR"] = prevContextError!;
+                    else contextDict.Remove("ERROR");
+                }
+
+                return JsonSerializer.Serialize(new { Handled = true, FallbackAction = "handle", FailedStepRefId = failedRefId, ErrorMessage = sanitizedMsg });
+            }
         }
         else if (subtype == "loop" || subtype == "for-each")
         {
@@ -1704,26 +1837,29 @@ public class PipelineEngine : IPipelineEngine
 
                         stepsDict[step.RefId] = loopScope;
 
-                        // Create transaction for item-level checkpoint
-                        await _uow.BeginAsync(ct);
                         try
                         {
                             await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{r.Ordinal}", ct);
-                            
-                            // Mark item Processed = 1 (Success) in database
-                            await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 1, _uow.Transaction, ct);
-                            await _uow.CommitAsync(ct);
-                            processedCount++;
                         }
                         catch (Exception ex)
                         {
-                            await _uow.RollbackAsync(ct);
-                            
-                            // Mark item Processed = 2 (Failed) in database
-                            await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 2, null, ct);
+                            try
+                            {
+                                // Mark item Processed = 2 (Failed) in database using source tenant repository / fresh connection
+                                await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 2, transaction: null, ct);
+                            }
+                            catch (Exception markEx)
+                            {
+                                _logger.LogError(markEx, "Failed to update bulk event record status to Processed=2 for record {RecordId}", r.Id);
+                            }
+
                             _logger.LogError(ex, "Iteration failed for Ordinal {Ordinal} in bulk event Loop step {StepId}", r.Ordinal, step.Id);
                             throw; // Re-throw to cause pipeline execution to enter crash retry state, resuming from failure item
                         }
+
+                        // Mark item Processed = 1 (Success) in database using source tenant repository / fresh connection
+                        await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 1, transaction: null, ct);
+                        processedCount++;
                     }
                 }
 
@@ -1753,6 +1889,8 @@ public class PipelineEngine : IPipelineEngine
 
                 int index = 0;
                 int count = itemsList.Count;
+                int failedCount = 0;
+                Exception? firstIterationError = null;
 
                 stepsDict.TryGetValue(step.RefId, out var previousLoopScope);
 
@@ -1769,7 +1907,20 @@ public class PipelineEngine : IPipelineEngine
 
                     stepsDict[step.RefId] = loopScope;
 
-                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{index}", ct);
+                    try
+                    {
+                        await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{index}", ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (IsControlFlowOrInfrastructureException(ex))
+                        {
+                            throw;
+                        }
+                        failedCount++;
+                        firstIterationError ??= ex;
+                        _logger.LogWarning(ex, "Iteration {Index} failed in Loop step {StepId}. Continuing remaining items; the loop will be marked failed.", index, step.Id);
+                    }
 
                     _logger.LogInformation("Loop step {StepId} iteration {Index} completed.", step.Id, index);
                     index++;
@@ -1784,7 +1935,13 @@ public class PipelineEngine : IPipelineEngine
                     stepsDict.Remove(step.RefId);
                 }
 
-                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count });
+                if (failedCount > 0)
+                {
+                    //throw new InvalidOperationException($"Loop step '{step.RefId}' failed in {failedCount} of {count} iterations. First error: {firstIterationError?.Message}", firstIterationError);
+                    _logger.LogWarning("Loop step '{StepRefId}' completed with {FailedCount} of {TotalCount} failed iterations.", step.RefId, failedCount, count);
+                }
+
+                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count, FailedIterationCount = failedCount });
             }
         }
         else if (subtype == "send-email" || subtype == "send-email-outlook")
@@ -2452,6 +2609,24 @@ public class PipelineEngine : IPipelineEngine
     {
         if (sourceVal == null) return null;
 
+        if (sourceVal is string str && !string.IsNullOrWhiteSpace(str))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(str);
+                var root = doc.RootElement.Clone();
+                if (root.ValueKind == JsonValueKind.Array)
+                {
+                    return root.EnumerateArray().Select(e => (object)e.Clone()).ToList();
+                }
+                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("records", out var recs) && recs.ValueKind == JsonValueKind.Array)
+                {
+                    return recs.EnumerateArray().Select(e => (object)e.Clone()).ToList();
+                }
+            }
+            catch { }
+        }
+
         if (sourceVal is JsonElement jsonEl)
         {
             if (jsonEl.ValueKind == JsonValueKind.Array)
@@ -2515,24 +2690,135 @@ public class PipelineEngine : IPipelineEngine
         return PipelineFilterEvaluator.EvaluateConditionOperator(leftVal, op, rightVal, logger: _logger);
     }
 
-    private bool EvaluateConditionGroup(ConditionRuleGroup group, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
+    private static bool IsRuleNodeCompletelyBlank(ConditionRuleNode rule)
     {
-        if (group.Rules == null || !group.Rules.Any()) return true;
+        if (rule == null) return true;
+        if (rule.Type == "nested")
+        {
+            if (rule.Groups == null || !rule.Groups.Any()) return true;
+            return rule.Groups.All(g => IsGroupCompletelyBlank(g));
+        }
+        return string.IsNullOrWhiteSpace(rule.Left) &&
+               (string.IsNullOrWhiteSpace(rule.Op) || rule.Op.Equals("equals", StringComparison.OrdinalIgnoreCase)) &&
+               string.IsNullOrWhiteSpace(rule.Right);
+    }
 
-        bool isAnd = group.LogicalOp.Equals("AND", StringComparison.OrdinalIgnoreCase);
+    private static bool IsGroupCompletelyBlank(ConditionRuleGroup group)
+    {
+        if (group == null || group.Rules == null || !group.Rules.Any()) return true;
+        return group.Rules.All(r => IsRuleNodeCompletelyBlank(r));
+    }
 
-        foreach (var rule in group.Rules)
+    private async Task<bool> EvaluateConditionRuleGroupsAsync(
+        List<ConditionRuleGroup> groups,
+        string payloadJson,
+        string? executionPath,
+        IAppFieldRepository fieldRepo,
+        IAppTableRepository tableRepo,
+        List<PipelineStep>? allSteps,
+        List<object> auditTrail,
+        CancellationToken ct)
+    {
+        if (groups == null || !groups.Any()) return false;
+        // Top-level RuleGroups are joined using OR / Any semantics
+        bool matchedAny = false;
+        foreach (var group in groups)
+        {
+            var res = await EvaluateConditionGroupAsync(group, payloadJson, executionPath, fieldRepo, tableRepo, allSteps, auditTrail, ct);
+            if (res) matchedAny = true;
+        }
+        return matchedAny;
+    }
+
+    private async Task<bool> EvaluateConditionGroupAsync(
+        ConditionRuleGroup group,
+        string payloadJson,
+        string? executionPath,
+        IAppFieldRepository fieldRepo,
+        IAppTableRepository tableRepo,
+        List<PipelineStep>? allSteps,
+        List<object> auditTrail,
+        CancellationToken ct)
+    {
+        if (group == null || group.Rules == null || !group.Rules.Any()) return false;
+
+        if (!string.IsNullOrWhiteSpace(group.LogicalOp) &&
+            !group.LogicalOp.Equals("AND", StringComparison.OrdinalIgnoreCase) &&
+            !group.LogicalOp.Equals("OR", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new PipelineStepException($"Invalid Condition LogicalOp '{group.LogicalOp}'. Allowed values are AND or OR.");
+        }
+
+        if (group.LogicalOp != null && string.IsNullOrWhiteSpace(group.LogicalOp))
+        {
+            throw new PipelineStepException($"Invalid Condition LogicalOp '{group.LogicalOp}'. Allowed values are AND or OR.");
+        }
+
+        var activeRules = group.Rules.Where(r => !IsRuleNodeCompletelyBlank(r)).ToList();
+        if (!activeRules.Any()) return false;
+
+        bool isAnd = group.LogicalOp?.Equals("AND", StringComparison.OrdinalIgnoreCase) == true;
+
+        foreach (var rule in activeRules)
         {
             bool ruleResult = false;
-            if (rule.Type == "rule")
+            if (rule.Type == "rule" || string.IsNullOrEmpty(rule.Type))
             {
-                var left = EvaluateTokens(rule.Left, payloadJson, executionPath, allSteps);
-                var right = EvaluateTokens(rule.Right, payloadJson, executionPath, allSteps);
-                ruleResult = EvaluateConditionOperator(left, rule.Op ?? "equals", right);
+                if (string.IsNullOrWhiteSpace(rule.Left) || string.IsNullOrWhiteSpace(rule.Op))
+                {
+                    ruleResult = false;
+                }
+                else
+                {
+                    var leftVal = EvaluateTokens(rule.Left, payloadJson, executionPath, allSteps);
+                    var rightVal = EvaluateTokens(rule.Right, payloadJson, executionPath, allSteps);
+
+                    var leftCategory = await ResolveRuleTypeCategoryAsync(rule.Left, payloadJson, allSteps, fieldRepo, tableRepo, ct);
+
+                    if (!string.IsNullOrWhiteSpace(rule.Right) && System.Text.RegularExpressions.Regex.IsMatch(rule.Right.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.)"))
+                    {
+                        var rightCategory = await ResolveRuleTypeCategoryAsync(rule.Right, payloadJson, allSteps, fieldRepo, tableRepo, ct);
+                        if (!leftCategory.Equals(rightCategory, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new PipelineStepException($"Incompatible dynamic operand types: Left operand '{rule.Left}' ({leftCategory}) vs Right operand '{rule.Right}' ({rightCategory}).");
+                        }
+                    }
+
+                    ruleResult = PipelineFilterEvaluator.EvaluateConditionOperator(leftVal, rule.Op ?? "equals", rightVal, leftCategory, _logger);
+
+                    auditTrail?.Add(new {
+                        Type = "rule",
+                        LeftToken = rule.Left,
+                        LeftResolved = leftVal,
+                        Op = rule.Op,
+                        RightToken = rule.Right,
+                        RightResolved = rightVal,
+                        TypeCategory = leftCategory,
+                        Matched = ruleResult
+                    });
+                }
             }
-            else if (rule.Type == "nested" && rule.Groups != null)
+            else if (rule.Type == "nested" && rule.Groups != null && rule.Groups.Any())
             {
-                ruleResult = rule.Groups.All(g => EvaluateConditionGroup(g, payloadJson, executionPath, allSteps));
+                var activeSubGroups = rule.Groups.Where(sg => !IsGroupCompletelyBlank(sg)).ToList();
+                if (activeSubGroups == null || !activeSubGroups.Any())
+                {
+                    ruleResult = false;
+                }
+                else
+                {
+                    // Nested rule.Groups sibling groups are joined using OR (Any) semantics
+                    ruleResult = false;
+                    foreach (var subGrp in activeSubGroups)
+                    {
+                        var subRes = await EvaluateConditionGroupAsync(subGrp, payloadJson, executionPath, fieldRepo, tableRepo, allSteps, auditTrail, ct);
+                        if (subRes) ruleResult = true;
+                    }
+                }
+            }
+            else
+            {
+                ruleResult = false; // Malformed / unknown rule type fails closed
             }
 
             if (isAnd && !ruleResult) return false;
@@ -2540,6 +2826,253 @@ public class PipelineEngine : IPipelineEngine
         }
 
         return isAnd;
+    }
+
+    private async Task<string> ResolveRuleTypeCategoryAsync(
+        string? token,
+        string payloadJson,
+        List<PipelineStep>? allSteps,
+        IAppFieldRepository fieldRepo,
+        IAppTableRepository tableRepo,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return "TEXT";
+
+        var trimmedToken = token.Trim();
+        bool isDynamicToken = System.Text.RegularExpressions.Regex.IsMatch(trimmedToken, @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
+        if (!isDynamicToken)
+        {
+            return "TEXT"; // Static literal value defaults to category TEXT
+        }
+
+        // Match {{steps.ref_1001.fid_5}}, {{steps.ref_loop.item.fid_5}}, {{ref_1001.fid_5}}, or {{trigger.fid_3}}
+        var match = System.Text.RegularExpressions.Regex.Match(trimmedToken, @"\{\{\s*(?:steps\.)?([a-zA-Z0-9_]+)(?:\.[a-zA-Z0-9_]+)*\.([a-zA-Z0-9_]+)\s*\}\}");
+        if (!match.Success)
+        {
+            match = System.Text.RegularExpressions.Regex.Match(trimmedToken, @"\{\{\s*(trigger)\.([a-zA-Z0-9_]+)\s*\}\}");
+        }
+
+        if (!match.Success)
+        {
+            throw new PipelineStepException($"Condition token '{token}' is malformed and could not be parsed.");
+        }
+
+        var stepRef = match.Groups[1].Value;
+        var fieldRef = match.Groups[2].Value;
+
+        PipelineStep? sourceStep = null;
+        if (allSteps != null && allSteps.Count > 0)
+        {
+            if (stepRef.Equals("trigger", StringComparison.OrdinalIgnoreCase))
+            {
+                sourceStep = allSteps.FirstOrDefault(s => s.Type == "trigger");
+            }
+            else
+            {
+                sourceStep = allSteps.FirstOrDefault(s => string.Equals(s.RefId, stepRef, StringComparison.OrdinalIgnoreCase) || string.Equals(s.Id.ToString(), stepRef, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
+        if (sourceStep == null || string.IsNullOrWhiteSpace(sourceStep.ConfigJson))
+        {
+            if (allSteps == null || allSteps.Count == 0 || (sourceStep != null && sourceStep.Type == "trigger"))
+            {
+                return "TEXT";
+            }
+            throw new PipelineStepException($"Source step '{stepRef}' referenced in condition token '{token}' could not be resolved.");
+        }
+
+        // If source step is a Loop step, resolve table metadata from its loopOverStepId step
+        if (sourceStep.Type == "loop" || sourceStep.Subtype == "for-each")
+        {
+            string? loopOverStepId = null;
+            using (var loopDoc = JsonDocument.Parse(sourceStep.ConfigJson))
+            {
+                var loopRoot = loopDoc.RootElement;
+                if ((loopRoot.TryGetProperty("loopOverStepId", out var lProp) || loopRoot.TryGetProperty("LoopOverStepId", out lProp)) && lProp.ValueKind == JsonValueKind.String)
+                {
+                    loopOverStepId = lProp.GetString();
+                }
+            }
+
+            if (string.IsNullOrEmpty(loopOverStepId))
+            {
+                throw new PipelineStepException($"Loop step '{stepRef}' referenced in condition token '{token}' does not have a valid target step (loopOverStepId).");
+            }
+
+            var collectionStep = allSteps?.FirstOrDefault(s => string.Equals(s.RefId, loopOverStepId, StringComparison.OrdinalIgnoreCase) || string.Equals(s.Id.ToString(), loopOverStepId, StringComparison.OrdinalIgnoreCase));
+            if (collectionStep == null || string.IsNullOrWhiteSpace(collectionStep.ConfigJson))
+            {
+                throw new PipelineStepException($"Collection source step '{loopOverStepId}' referenced by loop step '{stepRef}' for token '{token}' could not be resolved.");
+            }
+
+            sourceStep = collectionStep;
+        }
+
+        Guid tablePublicId = Guid.Empty;
+        string? connectionPublicId = null;
+        using (var doc = JsonDocument.Parse(sourceStep.ConfigJson))
+        {
+            var root = doc.RootElement;
+            if (root.TryGetProperty("tableId", out var tProp) ||
+                root.TryGetProperty("tablePublicId", out tProp) ||
+                root.TryGetProperty("TableId", out tProp) ||
+                root.TryGetProperty("TablePublicId", out tProp))
+            {
+                if (tProp.ValueKind == JsonValueKind.String && Guid.TryParse(tProp.GetString(), out var g))
+                {
+                    tablePublicId = g;
+                }
+            }
+
+            if (root.TryGetProperty("connectionPublicId", out var cProp) ||
+                root.TryGetProperty("ConnectionPublicId", out cProp) ||
+                root.TryGetProperty("connection", out cProp) ||
+                root.TryGetProperty("Connection", out cProp))
+            {
+                if (cProp.ValueKind == JsonValueKind.String)
+                {
+                    connectionPublicId = cProp.GetString();
+                }
+            }
+        }
+
+        if (tablePublicId == Guid.Empty)
+        {
+            throw new PipelineStepException($"Table ID for source step '{sourceStep.RefId}' referenced in condition token '{token}' could not be found.");
+        }
+
+        IAppTableRepository effectiveTableRepo = tableRepo;
+        IAppFieldRepository effectiveFieldRepo = fieldRepo;
+        IDisposable? scopeToDispose = null;
+
+        if (Guid.TryParse(connectionPublicId, out var connectionGuid) && !PipelineStepValidator.SystemConnectionIds.Contains(connectionGuid))
+        {
+            var resolvedTenantId = await _adminRepo.GetTenantIdByPublicIdAsync(connectionGuid, ct);
+            if (resolvedTenantId.HasValue)
+            {
+                if (resolvedTenantId.Value != _queryContext.TenantId)
+                {
+                    var scope = _serviceScopeFactory.CreateScope();
+                    scopeToDispose = scope;
+                    var scopedQueryContext = scope.ServiceProvider.GetRequiredService<IQueryContext>();
+                    scopedQueryContext.SetTenantId(resolvedTenantId.Value);
+                    scopedQueryContext.IsPipelineExecution = _queryContext.IsPipelineExecution;
+                    scopedQueryContext.PipelineDepth = _queryContext.PipelineDepth;
+                    scopedQueryContext.PipelineChainJson = _queryContext.PipelineChainJson;
+                    scopedQueryContext.SetUserIdentity(
+                        _queryContext.UserId,
+                        _queryContext.IsSuperAdmin,
+                        _queryContext.UserName,
+                        _queryContext.UserEmail,
+                        _queryContext.Permissions,
+                        _queryContext.TenantRole);
+
+                    var scopedTenantRepo = scope.ServiceProvider.GetRequiredService<ITenantRepository>();
+                    long actingUserId = _queryContext.UserId;
+                    try
+                    {
+                        using var pDoc = JsonDocument.Parse(payloadJson);
+                        if (pDoc.RootElement.TryGetProperty("_CreatedBy", out var cbProp) && cbProp.TryGetInt64(out var cbVal))
+                        {
+                            actingUserId = cbVal;
+                        }
+                    }
+                    catch { }
+
+                    var isMember = await scopedTenantRepo.IsActiveMemberAsync(actingUserId, ct);
+                    if (!isMember)
+                    {
+                        throw new UnauthorizedAccessException($"Execution authority user {actingUserId} is not an active member of target tenant {resolvedTenantId.Value}.");
+                    }
+
+                    effectiveTableRepo = scope.ServiceProvider.GetRequiredService<IAppTableRepository>();
+                    effectiveFieldRepo = scope.ServiceProvider.GetRequiredService<IAppFieldRepository>();
+                }
+            }
+            else
+            {
+                var connectionScopeResolver = _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>();
+                if (connectionScopeResolver != null)
+                {
+                    long actingUserId = _queryContext.UserId;
+                    try
+                    {
+                        using var pDoc = JsonDocument.Parse(payloadJson);
+                        if (pDoc.RootElement.TryGetProperty("_CreatedBy", out var cbProp) && cbProp.TryGetInt64(out var cbVal))
+                        {
+                            actingUserId = cbVal;
+                        }
+                    }
+                    catch { }
+
+                    var accountScope = await connectionScopeResolver.TryResolveForUserAsync(connectionGuid, actingUserId, ct);
+                    if (accountScope != null)
+                    {
+                        var accountScopeHandle = await Connections.Common.TargetTenantScopeHelper.OpenAsync(_serviceScopeFactory, accountScope, ct);
+                        scopeToDispose = accountScopeHandle;
+                        effectiveTableRepo = accountScopeHandle.GetRequiredService<IAppTableRepository>();
+                        effectiveFieldRepo = accountScopeHandle.GetRequiredService<IAppFieldRepository>();
+                    }
+                    else
+                    {
+                        throw new PipelineStepException($"Connection '{connectionGuid}' referenced by source step '{sourceStep.RefId}' could not be resolved or access was denied.");
+                    }
+                }
+            }
+        }
+
+        try
+        {
+            var table = await effectiveTableRepo.GetByPublicIdAsync(tablePublicId, ct);
+            if (table == null)
+            {
+                throw new PipelineStepException($"Table '{tablePublicId}' referenced in condition step could not be found in metadata.");
+            }
+
+            var fields = await effectiveFieldRepo.ListByTableAsync(table.Id, ct);
+            if (fields == null || !fields.Any())
+            {
+                throw new PipelineStepException($"Fields for table '{table.Name}' could not be retrieved.");
+            }
+
+            AppField? matchedField = ResolvePipelineField(fieldRef, fields);
+
+            if (matchedField == null)
+            {
+                throw new PipelineStepException($"Field metadata for token '{token}' (field '{fieldRef}') could not be resolved.");
+            }
+
+            return PipelineFilterEvaluator.GetTypeCategory(matchedField.TypeCode);
+        }
+        finally
+        {
+            scopeToDispose?.Dispose();
+        }
+    }
+
+    public static AppField? ResolvePipelineField(string? fieldRef, IEnumerable<AppField>? fields)
+    {
+        if (string.IsNullOrWhiteSpace(fieldRef) || fields == null) return null;
+
+        // 1. Primary canonical format: fid_<FID> (e.g. fid_3, fid_15, fid_6)
+        if (fieldRef.StartsWith("fid_", StringComparison.OrdinalIgnoreCase) && int.TryParse(fieldRef.Substring(4), out var fidNum))
+        {
+            return fields.FirstOrDefault(f => f.Fid == fidNum);
+        }
+
+        // 2. Direct numeric FID
+        if (int.TryParse(fieldRef, out var directFid))
+        {
+            return fields.FirstOrDefault(f => f.Fid == directFid);
+        }
+
+        // 3. Fallback: match by Name, Label, PhysicalColumnName, or fid_<Id>
+        return fields.FirstOrDefault(f =>
+            string.Equals(f.Name, fieldRef, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(f.Label, fieldRef, StringComparison.OrdinalIgnoreCase) ||
+            (f.IsSystem && string.Equals(f.PhysicalColumnName, fieldRef, StringComparison.OrdinalIgnoreCase)) ||
+            $"fid_{f.Id}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase));
     }
 
     private string EvaluateTokens(string? input, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
@@ -2553,7 +3086,7 @@ public class PipelineEngine : IPipelineEngine
             var pathParts = executionPath.Split('/');
             foreach (var part in pathParts)
             {
-                var loopStep = allSteps.FirstOrDefault(s => s.RefId == part && (s.Type == "loop" || s.Subtype == "for-each"));
+                var loopStep = allSteps.FirstOrDefault(s => (s.RefId == part || string.Equals(s.Id.ToString(), part, StringComparison.OrdinalIgnoreCase)) && (s.Type == "loop" || s.Subtype == "for-each"));
                 if (loopStep != null && !string.IsNullOrEmpty(loopStep.ConfigJson))
                 {
                     try
@@ -2565,8 +3098,12 @@ public class PipelineEngine : IPipelineEngine
                             var loopOverStepId = loopOverProp.GetString();
                             if (!string.IsNullOrEmpty(loopOverStepId))
                             {
-                                var targetPattern = $@"(?<=\b(?:steps\.)?)({Regex.Escape(loopOverStepId)})(?=\.(?!records\b)[a-zA-Z0-9_]+)";
-                                input = Regex.Replace(input, targetPattern, $"{loopStep.RefId}.item", RegexOptions.IgnoreCase);
+                                var targetStep = allSteps.FirstOrDefault(s => string.Equals(s.Id.ToString(), loopOverStepId, StringComparison.OrdinalIgnoreCase) || string.Equals(s.RefId, loopOverStepId, StringComparison.OrdinalIgnoreCase));
+                                if (targetStep != null)
+                                {
+                                    var targetPattern = $@"(?:\bsteps\.)?(?:{Regex.Escape(targetStep.RefId)}|{Regex.Escape(targetStep.Id.ToString())})(?=\.(?!records\b)[a-zA-Z0-9_]+)";
+                                    input = Regex.Replace(input, targetPattern, $"steps.{loopStep.RefId}.item", RegexOptions.IgnoreCase);
+                                }
                             }
                         }
                     }
@@ -2629,6 +3166,36 @@ public class PipelineEngine : IPipelineEngine
                 contextDict["trigger"] = triggerData;
                 stepsDict["trigger"] = triggerData;
             }
+
+            // Normalize legacy un-prefixed step tokens (e.g. {{ref_9356.fid_6}} -> {{steps.ref_9356.fid_6}})
+            input = System.Text.RegularExpressions.Regex.Replace(input, @"\{\{\s*([a-zA-Z0-9_]+)(\.[^|}]+?)(\s*\|.*)?\s*\}\}", match =>
+            {
+                var firstSegment = match.Groups[1].Value;
+                var rest = match.Groups[2].Value;
+                var filterPipe = match.Groups[3].Value;
+
+                if (firstSegment.Equals("steps", StringComparison.OrdinalIgnoreCase) ||
+                    firstSegment.Equals("trigger", StringComparison.OrdinalIgnoreCase) ||
+                    firstSegment.Equals("ERROR", StringComparison.Ordinal) ||
+                    firstSegment.Equals("variables", StringComparison.OrdinalIgnoreCase))
+                {
+                    return match.Value;
+                }
+
+                bool isValidStepRef = stepsDict.Keys.Any(k => string.Equals(k, firstSegment, StringComparison.OrdinalIgnoreCase));
+                if (!isValidStepRef && allSteps != null)
+                {
+                    isValidStepRef = allSteps.Any(s => string.Equals(s.RefId, firstSegment, StringComparison.OrdinalIgnoreCase) ||
+                                                       string.Equals(s.Id.ToString(), firstSegment, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (isValidStepRef)
+                {
+                    return "{{" + $"steps.{firstSegment}{rest}{filterPipe}" + "}}";
+                }
+
+                return match.Value;
+            });
 
             var context = new CustomTemplateContext(contextDict);
             context.MemberRenamer = member => member.Name;
@@ -2734,10 +3301,25 @@ public class PipelineEngine : IPipelineEngine
                 }
             });
 
+            bool isDynamicInput = System.Text.RegularExpressions.Regex.IsMatch(input.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
+            if (isDynamicInput && (string.IsNullOrEmpty(result) || result.Contains("{{") || result.Contains("[NOT_FOUND]")))
+            {
+                throw new PipelineStepException($"Failed to resolve dynamic token '{input}' in pipeline step execution context.");
+            }
+
             return result;
         }
-        catch
+        catch (PipelineStepException)
         {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            bool isDynamicInput = System.Text.RegularExpressions.Regex.IsMatch(input.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
+            if (isDynamicInput)
+            {
+                throw new PipelineStepException($"Failed to resolve dynamic token '{input}' in pipeline step execution context: {ex.Message}");
+            }
             return input;
         }
     }
@@ -3043,6 +3625,14 @@ public class PipelineEngine : IPipelineEngine
                         return true;
                     }
                 }
+                foreach (var p in el.EnumerateObject())
+                {
+                    if (string.Equals(p.Name, member, StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = ConvertJsonElement(p.Value)!;
+                        return true;
+                    }
+                }
             }
             return false;
         }
@@ -3091,6 +3681,14 @@ public class PipelineEngine : IPipelineEngine
                         if (el.TryGetProperty(stableKey, out var stableProp))
                         {
                             value = ConvertJsonElement(stableProp)!;
+                            return true;
+                        }
+                    }
+                    foreach (var p in el.EnumerateObject())
+                    {
+                        if (string.Equals(p.Name, member, StringComparison.OrdinalIgnoreCase))
+                        {
+                            value = ConvertJsonElement(p.Value)!;
                             return true;
                         }
                     }
@@ -3221,6 +3819,124 @@ public class PipelineEngine : IPipelineEngine
         public string? FromAddress { get; set; }
         public List<string>? Attachments { get; set; }
     }
+
+    private class HandleErrorsStepConfig
+    {
+        public string? FallbackAction { get; set; }
+    }
+
+    private static bool IsControlFlowOrInfrastructureException(Exception ex)
+    {
+        if (ex is PipelineStopExecutionException ||
+            ex is OperationCanceledException ||
+            ex is PipelineRecursionException)
+        {
+            return true;
+        }
+
+        var property = ex.GetType().GetProperty("Number");
+        if (property != null)
+        {
+            var number = property.GetValue(ex);
+            if (number is int intVal && intVal == 1205)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static bool IsCatchablePipelineStepError(Exception ex)
+    {
+        if (ex == null) return false;
+
+        if (IsControlFlowOrInfrastructureException(ex))
+        {
+            return false;
+        }
+
+        if (ex is PipelineStopExecutionException ||
+            ex is OperationCanceledException ||
+            ex is PipelineRunRunningException ||
+            ex is PowerBase.Domain.Exceptions.PipelineRecursionException ||
+            ex is PowerBase.Domain.Exceptions.PipelineNonRetryableException)
+        {
+            return false;
+        }
+
+        var curr = ex.InnerException;
+        while (curr != null)
+        {
+            if (curr is PipelineStopExecutionException ||
+                curr is OperationCanceledException ||
+                curr is PipelineRunRunningException ||
+                curr is PowerBase.Domain.Exceptions.PipelineRecursionException ||
+                curr is PowerBase.Domain.Exceptions.PipelineNonRetryableException)
+            {
+                return false;
+            }
+            curr = curr.InnerException;
+        }
+
+        if (ex is PowerBase.Domain.Exceptions.NotFoundException ||
+            ex is PowerBase.Domain.Exceptions.ValidationException ||
+            ex is PowerBase.Domain.Exceptions.UnauthorizedActionException ||
+            ex is InvalidOperationException ||
+            ex is ArgumentException ||
+            ex is FormatException ||
+            ex is KeyNotFoundException)
+        {
+            return true;
+        }
+
+        if (ex is System.Net.Http.HttpRequestException httpEx)
+        {
+            if (httpEx.InnerException is System.Net.Sockets.SocketException)
+            {
+                return false;
+            }
+
+            if (httpEx.StatusCode.HasValue)
+            {
+                var code = (int)httpEx.StatusCode.Value;
+                if (code == 400 || code == 401 || code == 403 || code == 404 || code == 409)
+                {
+                    return true;
+                }
+                return false;
+            }
+
+            var msg = httpEx.Message;
+            if (msg.Contains("status code 5") || msg.Contains("status code 429"))
+            {
+                return false;
+            }
+
+            if (msg.Contains("status code 400") || msg.Contains("status code 401") ||
+                msg.Contains("status code 403") || msg.Contains("status code 404") ||
+                msg.Contains("status code 409"))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        return false;
+    }
+
+    public static string SanitizeErrorMessage(string? msg)
+    {
+        if (string.IsNullOrWhiteSpace(msg)) return "An error occurred during step execution.";
+        var sanitized = msg;
+        if (sanitized.Contains("Bearer ", StringComparison.OrdinalIgnoreCase))
+            sanitized = System.Text.RegularExpressions.Regex.Replace(sanitized, @"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*", "Bearer [REDACTED]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (sanitized.Contains("Password=", StringComparison.OrdinalIgnoreCase))
+            sanitized = System.Text.RegularExpressions.Regex.Replace(sanitized, @"Password=[^;]+", "Password=[REDACTED]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return sanitized;
+    }
+
 
     private class MakeRequestStepConfig
     {
@@ -3806,6 +4522,7 @@ public class PipelineEngine : IPipelineEngine
                 $"Field with name '{fieldReference}' was not found in the target table.");
         }
     }
+
 
     public class RawStepAuditSnapshot
     {

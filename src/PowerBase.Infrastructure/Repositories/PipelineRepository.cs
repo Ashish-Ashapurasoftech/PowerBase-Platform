@@ -1543,6 +1543,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         public List<string>? TriggerFields { get; set; }
         public List<string>? SubsequentFields { get; set; }
         public bool LimitRecords { get; set; }
+        [System.Text.Json.Serialization.JsonConverter(typeof(PowerBase.Application.Pipelines.RecordLimitJsonConverter))]
         public int? MaxRecords { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterRule>? Filters { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterGroup>? FilterGroups { get; set; }
@@ -1601,7 +1602,11 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
 
         if (transaction != null)
         {
-            await transaction.Connection!.ExecuteAsync(new CommandDefinition(sql, new { ids, processedStatus }, transaction, cancellationToken: ct));
+            if (transaction.Connection == null)
+            {
+                throw new InvalidOperationException("Cannot mark bulk event records using a completed or disposed transaction.");
+            }
+            await transaction.Connection.ExecuteAsync(new CommandDefinition(sql, new { ids, processedStatus }, transaction, cancellationToken: ct));
             return;
         }
 

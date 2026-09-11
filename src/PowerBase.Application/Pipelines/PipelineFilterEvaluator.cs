@@ -25,20 +25,20 @@ public static class PipelineFilterEvaluator
 {
     public static readonly Dictionary<string, string[]> AllowedOperatorsByTypeCategory = new()
     {
-        ["NUMBER"] = new[] { "equals", "=", "is", "not_equals", "<>", "!=", "is_not", "is-not", "greater_than", ">", "is-after", "after", "greater_than_or_equals", ">=", "is-on-or-after", "on-or-after", "less_than", "<", "is-before", "before", "less_than_or_equals", "<=", "is-on-or-before", "on-or-before", "is_blank", "is-empty", "is_empty", "is_not_blank", "is-not-empty", "is_not_empty" },
-        ["DATE"] = new[] { "equals", "=", "is", "not_equals", "<>", "!=", "is_not", "is-not", "greater_than", ">", "is-after", "after", "greater_than_or_equals", ">=", "is-on-or-after", "on-or-after", "less_than", "<", "is-before", "before", "less_than_or_equals", "<=", "is-on-or-before", "on-or-before", "is_blank", "is-empty", "is_empty", "is_not_blank", "is-not-empty", "is_not_empty" },
-        ["BOOLEAN"] = new[] { "equals", "=", "is", "not_equals", "<>", "!=", "is_not", "is-not", "is_true", "is-true", "is_false", "is-false", "is_blank", "is-empty", "is_empty", "is_not_blank", "is-not-empty", "is_not_empty" },
-        ["TEXT"] = new[] { "equals", "=", "is", "not_equals", "<>", "!=", "is_not", "is-not", "contains", "not_contains", "not-contains", "starts_with", "starts-with", "not_starts_with", "ends_with", "ends-with", "not_ends_with", "is_blank", "is-empty", "is_empty", "is_not_blank", "is-not-empty", "is_not_empty", "is_true", "is-true", "is_false", "is-false" }
+        ["NUMBER"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "greater_than", "greater-than", ">", "is-after", "after", "greater_than_or_equals", "greater-than-or-equal", "greater-than-or-equals", ">=", "is-on-or-after", "on-or-after", "on_or_after", "less_than", "less-than", "<", "is-before", "before", "less_than_or_equals", "less-than-or-equal", "less-than-or-equals", "<=", "is-on-or-before", "on-or-before", "on_or_before", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty" },
+        ["DATE"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "greater_than", "greater-than", ">", "is-after", "after", "greater_than_or_equals", "greater-than-or-equal", "greater-than-or-equals", ">=", "is-on-or-after", "on-or-after", "on_or_after", "less_than", "less-than", "<", "is-before", "before", "less_than_or_equals", "less-than-or-equal", "less-than-or-equals", "<=", "is-on-or-before", "on-or-before", "on_or_before", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty" },
+        ["BOOLEAN"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "is_true", "is-true", "is_false", "is-false", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty" },
+        ["TEXT"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "contains", "not_contains", "not-contains", "starts_with", "starts-with", "not_starts_with", "not-starts-with", "ends_with", "ends-with", "not_ends_with", "not-ends-with", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty", "is_true", "is-true", "is_false", "is-false" }
     };
 
     public static string GetTypeCategory(string typeCode)
     {
         var code = typeCode?.ToUpperInvariant();
-        if (code == "NUMBER" || code == "CURRENCY" || code == "PERCENT" || code == "RATING" || code == "NUMERIC" || code == "INTEGER" || code == "FLOAT" || code == "NUMERICRANGE")
+        if (code == "NUMBER" || code == "CURRENCY" || code == "PERCENT" || code == "RATING" || code == "NUMERIC" || code == "INTEGER" || code == "FLOAT" || code == "NUMERICRANGE" || code == "RECORDID" || code == "DURATION")
             return "NUMBER";
-        if (code == "DATE" || code == "DATETIME" || code == "TIME" || code == "DURATION" || code == "DATERANGE")
+        if (code == "DATE" || code == "DATETIME" || code == "TIMESTAMP" || code == "TIME" || code == "DATERANGE")
             return "DATE";
-        if (code == "BOOLEAN")
+        if (code == "BOOLEAN" || code == "CHECKBOX")
             return "BOOLEAN";
         return "TEXT";
     }
@@ -206,7 +206,7 @@ public static class PipelineFilterEvaluator
         }
 
         // 3. Enforce the specified field type category
-        switch (typeCategory)
+        switch (typeCategory.ToUpperInvariant())
         {
             case "NUMBER":
                 {
@@ -267,38 +267,41 @@ public static class PipelineFilterEvaluator
                         return false;
                     }
 
+                    var lDateOnly = lDate.Date;
+                    var rDateOnly = rDate.Date;
+
                     switch (normalizedOp)
                     {
                         case "equals":
                         case "=":
                         case "is":
-                            return lDate == rDate;
+                            return lDateOnly == rDateOnly;
                         case "not_equals":
                         case "<>":
                         case "!=":
                         case "is_not":
                         case "is-not":
-                            return lDate != rDate;
+                            return lDateOnly != rDateOnly;
                         case "greater_than":
                         case ">":
                         case "is-after":
                         case "after":
-                            return lDate > rDate;
+                            return lDateOnly > rDateOnly;
                         case "greater_than_or_equals":
                         case ">=":
                         case "is-on-or-after":
                         case "on-or-after":
-                            return lDate >= rDate;
+                            return lDateOnly >= rDateOnly;
                         case "less_than":
                         case "<":
                         case "is-before":
                         case "before":
-                            return lDate < rDate;
+                            return lDateOnly < rDateOnly;
                         case "less_than_or_equals":
                         case "<=":
                         case "is-on-or-before":
                         case "on-or-before":
-                            return lDate <= rDate;
+                            return lDateOnly <= rDateOnly;
                         default:
                             return false;
                     }
@@ -359,11 +362,13 @@ public static class PipelineFilterEvaluator
                         case "starts-with":
                             return left.StartsWith(right, StringComparison.OrdinalIgnoreCase);
                         case "not_starts_with":
+                        case "not-starts-with":
                             return !left.StartsWith(right, StringComparison.OrdinalIgnoreCase);
                         case "ends_with":
                         case "ends-with":
                             return left.EndsWith(right, StringComparison.OrdinalIgnoreCase);
                         case "not_ends_with":
+                        case "not-ends-with":
                             return !left.EndsWith(right, StringComparison.OrdinalIgnoreCase);
                         case "greater_than":
                         case ">":
@@ -391,6 +396,7 @@ public static class PipelineFilterEvaluator
     /// </summary>
     private static string NormalizeOperator(string op)
     {
+        if (string.IsNullOrWhiteSpace(op)) return "equals";
         var normalized = op.ToLowerInvariant().Trim().Replace('-', '_');
         return normalized switch
         {
@@ -398,6 +404,22 @@ public static class PipelineFilterEvaluator
             "is_not_null" => "is_not_blank",
             "is_empty" => "is_blank",
             "is_not_empty" => "is_not_blank",
+            "not_equals" => "not_equals",
+            "does_not_equal" => "not_equals",
+            "does_not_contain" => "not_contains",
+            "not_contains" => "not_contains",
+            "starts_with" => "starts_with",
+            "not_starts_with" => "not_starts_with",
+            "ends_with" => "ends_with",
+            "not_ends_with" => "not_ends_with",
+            "greater_than_or_equal" => "greater_than_or_equals",
+            "greater_than_or_equals" => "greater_than_or_equals",
+            "less_than_or_equal" => "less_than_or_equals",
+            "less_than_or_equals" => "less_than_or_equals",
+            "on_or_before" => "less_than_or_equals",
+            "on_or_after" => "greater_than_or_equals",
+            "before" => "less_than",
+            "after" => "greater_than",
             _ => normalized
         };
     }

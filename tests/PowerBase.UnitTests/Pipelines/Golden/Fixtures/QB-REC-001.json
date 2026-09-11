@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-REC-001",
+  "classification": "QB-DOC",
+  "description": "Search Records queries table with filters and returns matching list",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/use-the-quickbase-channel",
+  "relevantHeading": "Quickbase > Search Records",
+  "testPayload": {
+    "stepId": "QB-REC-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

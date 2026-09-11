@@ -1,10 +1,13 @@
+using System.Data;
 using System.Linq;
 using System.Text.Json;
 using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Commands.UpdateField;
+using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Application.Fields.Versioning;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.UnitTests.Fields;
@@ -28,14 +31,20 @@ public class UpdateFieldSystemFieldCoercionTests
     private readonly IMessagePublisher _messagePublisher = Substitute.For<IMessagePublisher>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IAzureSearchService _searchService = Substitute.For<IAzureSearchService>();
+    private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
     // No validators registered — every TypeCode's Settings JSON passes through unvalidated, same
     // pattern FieldHandlerTests.cs already uses; the point of these tests is the coercion layer,
     // not per-type shape validation (that's covered by FieldSettingsValidators' own tests).
     private readonly FieldSettingsValidatorRegistry _settingsRegistry = new(Array.Empty<IFieldSettingsValidator>());
 
-    private UpdateFieldCommandHandler MakeSut() => new(
-        _tableRepo, _fieldRepo, _permRepo, _recordRepo, _auditRepo,
-        _schemaEngine, _settingsRegistry, _fieldTypeRepo, _messagePublisher, _queryContext, _searchService);
+    private UpdateFieldCommandHandler MakeSut()
+    {
+        var guard = new FieldSettingsGuard(_permRepo, _recordRepo, _settingsRegistry);
+        var versionService = new FieldVersionService(Substitute.For<IFieldVersionRepository>(), _queryContext);
+        return new UpdateFieldCommandHandler(
+            _tableRepo, _fieldRepo, _recordRepo, _auditRepo, _schemaEngine,
+            guard, versionService, _uow, _fieldTypeRepo, _messagePublisher, _queryContext, _searchService);
+    }
 
     private AppTable MakeTable(long id = 5)
     {
@@ -73,7 +82,7 @@ public class UpdateFieldSystemFieldCoercionTests
         _fieldRepo.UpdateAsync(
             field.PublicId, table.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<string?>(),
             Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
-            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>())
             .Returns(1);
         return field;
     }
@@ -91,7 +100,8 @@ public class UpdateFieldSystemFieldCoercionTests
         IsAuditable: true,
         IsUnique: true,
         IsEncrypted: false,
-        Settings: settings);
+        Settings: settings,
+        CommitMessage: "Testing system field coercion");
 
     [Fact]
     public async Task SystemField_LabelAndDescriptionAreForcedBackToExistingValues()
@@ -103,9 +113,9 @@ public class UpdateFieldSystemFieldCoercionTests
         await MakeSut().HandleAsync(command);
 
         await _fieldRepo.Received(1).UpdateAsync(
-            field.PublicId, table.Id, "Record ID#", "original description",
+            Arg.Is(field.PublicId), Arg.Is(table.Id), Arg.Is("Record ID#"), Arg.Is("original description"),
             Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
-            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
 
     [Fact]
@@ -118,11 +128,11 @@ public class UpdateFieldSystemFieldCoercionTests
         await MakeSut().HandleAsync(command);
 
         await _fieldRepo.Received(1).UpdateAsync(
-            field.PublicId, table.Id, Arg.Any<string>(), Arg.Any<string?>(),
-            /* isRequired */ false, /* defaultValue */ null,
-            Arg.Any<bool>(), /* isSortable */ false,
-            /* isFilterable */ false, Arg.Any<bool>(), /* isAuditable */ false,
-            /* isUnique */ false, /* isEncrypted */ false, Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Is(field.PublicId), Arg.Is(table.Id), Arg.Any<string>(), Arg.Any<string?>(),
+            /* isRequired */ Arg.Is(false), /* defaultValue */ Arg.Is<string?>(s => s == null),
+            Arg.Any<bool>(), /* isSortable */ Arg.Is(false),
+            /* isFilterable */ Arg.Is(false), Arg.Any<bool>(), /* isAuditable */ Arg.Is(false),
+            /* isUnique */ Arg.Is(false), /* isEncrypted */ Arg.Is(false), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
 
     [Fact]
@@ -135,9 +145,9 @@ public class UpdateFieldSystemFieldCoercionTests
         await MakeSut().HandleAsync(command);
 
         await _fieldRepo.Received(1).UpdateAsync(
-            field.PublicId, table.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<string?>(),
-            /* isSearchable */ true, Arg.Any<bool>(), Arg.Any<bool>(), /* isReportable */ false, Arg.Any<bool>(),
-            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Is(field.PublicId), Arg.Is(table.Id), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<string?>(),
+            /* isSearchable */ Arg.Is(true), Arg.Any<bool>(), Arg.Any<bool>(), /* isReportable */ Arg.Is(false), Arg.Any<bool>(),
+            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
 
     [Fact]
@@ -160,11 +170,11 @@ public class UpdateFieldSystemFieldCoercionTests
         await MakeSut().HandleAsync(command);
 
         await _fieldRepo.Received(1).UpdateAsync(
-            field.PublicId, table.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<string?>(),
+            Arg.Is(field.PublicId), Arg.Is(table.Id), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<string?>(),
             Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
             Arg.Any<bool>(), Arg.Any<bool>(),
             Arg.Is<string?>(s => AllowsOnlyDisplayTrio(s)),
-            Arg.Any<CancellationToken>());
+            Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
 
     /// <summary>True when the settings JSON contains only the Value-display trio (displayBold/
@@ -191,10 +201,10 @@ public class UpdateFieldSystemFieldCoercionTests
 
         // Everything the request asked for is honored as-is for a custom field.
         await _fieldRepo.Received(1).UpdateAsync(
-            field.PublicId, table.Id, "Hacked Label", "hacked description",
-            /* isRequired */ true, /* defaultValue */ "some default",
-            Arg.Any<bool>(), /* isSortable */ true,
-            /* isFilterable */ true, /* isReportable */ false, /* isAuditable */ true,
-            /* isUnique */ true, /* isEncrypted */ false, Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Is(field.PublicId), Arg.Is(table.Id), Arg.Is("Hacked Label"), Arg.Is("hacked description"),
+            /* isRequired */ Arg.Is(true), /* defaultValue */ Arg.Is("some default"),
+            Arg.Any<bool>(), /* isSortable */ Arg.Is(true),
+            /* isFilterable */ Arg.Is(true), /* isReportable */ Arg.Is(false), /* isAuditable */ Arg.Is(true),
+            /* isUnique */ Arg.Is(true), /* isEncrypted */ Arg.Is(false), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
 }

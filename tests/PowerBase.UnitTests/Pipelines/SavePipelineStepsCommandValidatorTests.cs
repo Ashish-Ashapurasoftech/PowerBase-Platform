@@ -109,7 +109,7 @@ public class SavePipelineStepsCommandValidatorTests
 
         // Assert
         result.IsValid.Should().BeFalse();
-        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with either a Trigger step or a Search/Query step"));
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with either a Trigger step, a Search/Query step, or a Handle Errors step"));
     }
 
     [Fact]
@@ -783,5 +783,269 @@ public class SavePipelineStepsCommandValidatorTests
         // Assert
         result.IsValid.Should().BeFalse();
         result.Errors.Should().Contain(e => e.ErrorMessage.Contains("must be nested inside a Condition or Loop"));
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithIntegerOperand_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":3}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithDecimalOperand_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":3.5}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithNegativeNumberOperand_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":-2}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithBooleanTrueOperand_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":true}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithBooleanFalseOperand_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":false}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithTextOperand_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":\"Ronak\"}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithDateOperand_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":\"2026-09-07T12:00:00.000Z\"}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithDynamicTokenOperand_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":\"{{steps.ref_1.fid_7}}\"}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithNullRightOperandForUnaryOperator_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"is_blank\",\"right\":null}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithObjectOperand_FailsValidationCleanly()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":{\"value\":3}}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("invalid complex JSON structure"));
+    }
+
+    [Fact]
+    public async Task Validate_ConditionWithArrayOperand_FailsValidationCleanly()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var condition = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_cond",
+            Type = "condition",
+            Subtype = "condition",
+            ConfigJson = "{\"ruleGroups\":[{\"logicalOp\":\"OR\",\"rules\":[{\"left\":\"{{steps.ref_1.fid_6}}\",\"op\":\"equals\",\"right\":[3]}]}]}",
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { trigger, condition }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("invalid complex JSON structure"));
+    }
+
+    [Fact]
+    public async Task Validate_RootHandleErrorsInNonTriggerPipeline_ReturnsValid()
+    {
+        var handleErrors = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_he",
+            Type = "control",
+            Subtype = "handle-errors",
+            ConfigJson = "{\"fallbackAction\":\"handle\"}",
+            Children = new List<SavePipelineStepDto> { CreateActionStep("ref_action") },
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { handleErrors }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_RootHandleErrorsWithNestedTrigger_ReturnsInvalid()
+    {
+        var nestedTrigger = CreateTriggerStep("ref_trig");
+        var handleErrors = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_he",
+            Type = "control",
+            Subtype = "handle-errors",
+            ConfigJson = "{\"fallbackAction\":\"handle\"}",
+            Children = new List<SavePipelineStepDto> { nestedTrigger },
+            IsValidated = true
+        };
+
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { handleErrors }, Array.Empty<byte>());
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("cannot be nested inside container steps"));
     }
 }
