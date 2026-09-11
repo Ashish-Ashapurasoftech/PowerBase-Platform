@@ -209,6 +209,10 @@ public class PipelineStepValidator
             config = JsonSerializer.Deserialize<NewEventStepConfig>(configJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                 ?? throw new InvalidOperationException();
         }
+        catch (JsonException ex) when (string.Equals(ex.Path, "$.maxRecords", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ValidationException(new Dictionary<string, string[]> { { "MaxRecords", new[] { "Maximum number of records must be a whole number between 1 and 2147483647." } } });
+        }
         catch
         {
             throw new ValidationException(new Dictionary<string, string[]> { { "ConfigJson", new[] { "Configuration is malformed." } } });
@@ -456,6 +460,7 @@ public class PipelineStepValidator
         public List<string>? TriggerFields { get; set; }
         public List<string>? SubsequentFields { get; set; }
         public bool LimitRecords { get; set; }
+        [System.Text.Json.Serialization.JsonConverter(typeof(PowerBase.Application.Pipelines.RecordLimitJsonConverter))]
         public int? MaxRecords { get; set; }
         public List<TriggerFilterRule>? Filters { get; set; }
         public List<TriggerFilterGroup>? FilterGroups { get; set; }
