@@ -69,8 +69,13 @@ public class CreateAppCommandHandler
                     .GroupBy(e => e.PropertyName)
                     .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
 
-        if (await _appRepo.NameExistsAsync(command.Name, ct))
-            throw new DuplicateException("App", "name", command.Name);
+        // Leading/trailing whitespace is never meaningful here — trim server-side so a client that
+        // bypasses the UI (a direct API call) can't persist " My App " verbatim.
+        var appName = command.Name.Trim();
+        var appDescription = NullIfBlank(command.Description);
+
+        if (await _appRepo.NameExistsAsync(appName, ct))
+            throw new DuplicateException("App", "name", appName);
 
         var owner = await _userRepo.GetByIdAsync(_queryContext.UserId, ct);
         var now = DateTime.UtcNow;
@@ -78,8 +83,8 @@ public class CreateAppCommandHandler
         {
             OwnerId = _queryContext.UserId,
             OwnerName = owner.Name,
-            Name = command.Name,
-            Description = command.Description,
+            Name = appName,
+            Description = appDescription,
             Icon = command.Icon,
             Color = command.Color,
             Status = "Active",
@@ -182,7 +187,7 @@ public class CreateAppCommandHandler
             }
 
             await _auditRepo.LogActivityAsync(
-                AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), $"Application added: {command.Name}", appId: appId, ct: ct);
+                AuditActions.Created, AuditEntityTypes.App, publicId.ToString(), $"Application added: {appName}", appId: appId, ct: ct);
 
             return new CreateAppResult
             {
@@ -206,16 +211,25 @@ public class CreateAppCommandHandler
 
     private async Task SeedTableAsync(long appId, long userId, TableSpec spec, CancellationToken ct)
     {
-        if (await _tableRepo.NameExistsInAppAsync(appId, spec.Name, ct))
-            throw new DuplicateException("Table", "name", spec.Name);
+        // Leading/trailing whitespace is never meaningful here — trim server-side so a client that
+        // bypasses the UI (a direct API call) can't persist " Employee " verbatim. NullIfBlank also
+        // collapses a whitespace-only optional value down to "unset", matching what omitting it
+        // altogether means.
+        var name = spec.Name.Trim();
+        var singularLabel = NullIfBlank(spec.SingularLabel);
+        var pluralLabel = NullIfBlank(spec.PluralLabel);
+        var description = NullIfBlank(spec.Description);
+
+        if (await _tableRepo.NameExistsInAppAsync(appId, name, ct))
+            throw new DuplicateException("Table", "name", name);
 
         var table = new AppTable
         {
             AppId = appId,
-            Name = spec.Name,
-            SingularLabel = spec.SingularLabel,
-            PluralLabel = spec.PluralLabel,
-            Description = spec.Description,
+            Name = name,
+            SingularLabel = singularLabel,
+            PluralLabel = pluralLabel,
+            Description = description,
             Icon = spec.Icon,
             CreatedBy = userId,
         };
@@ -225,8 +239,10 @@ public class CreateAppCommandHandler
         // Process Custom Fields
         if (spec.Fields != null && spec.Fields.Any())
         {
-            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label, Settings: f.Settings, IsEncrypted: f.IsEncrypted, Name: f.Name)).ToList();
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label.Trim(), Settings: f.Settings, IsEncrypted: f.IsEncrypted, Name: f.Name)).ToList();
             await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
         }
     }
+
+    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

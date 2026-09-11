@@ -9,6 +9,7 @@ using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.FieldSettings;
 using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
@@ -575,7 +576,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
             else
             {
-                parameters.Add(col, encryptedValues.TryGetValue((long)f.Fid.Value, out var ev) ? ev : values[(long)f.Fid.Value]);
+                var raw = values.TryGetValue((long)f.Fid.Value, out var rv2) ? rv2 : null;
+                parameters.Add(col, IsBlankForNonTextField(f, raw)
+                    ? null
+                    : (encryptedValues.TryGetValue((long)f.Fid.Value, out var ev) ? ev : raw));
             }
         }
 
@@ -671,7 +675,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             else
             {
                 setClauses.Add($"{col} = @{col}");
-                parameters.Add(col, valToBind);
+                parameters.Add(col, IsBlankForNonTextField(f, values[(long)f.Fid.Value]) ? null : valToBind);
             }
         }
 
@@ -760,7 +764,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
             else
             {
-                setClauses.Add($"{col} = @{col}"); parameters.Add(col, valToBind);
+                setClauses.Add($"{col} = @{col}");
+                parameters.Add(col, IsBlankForNonTextField(f, values[(long)f.Fid.Value]) ? null : valToBind);
             }
         }
 
@@ -959,12 +964,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         foreach (var agg in aggregations)
         {
             if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
-            var col = PhysicalNaming.ColumnName((int)agg.FieldId);
+            // Mirror groupCol/seriesCol above — a system field (e.g. Record ID#) stores its
+            // value under PhysicalColumnName, not the generic f_{fid} slot; aggregating it via
+            // ColumnName() alone referenced a column that never existed (SQL error 207).
+            var col = aggField.IsSystem && !string.IsNullOrEmpty(aggField.PhysicalColumnName)
+                ? aggField.PhysicalColumnName!
+                : PhysicalNaming.ColumnName((int)agg.FieldId);
             var alias = $"[{agg.Function}_{aggField.Name.Replace(" ", "_")}]";
+            // Number/Currency/Percent/Rating's "Treat blank values as 0 in calculations" Behavior
+            // Setting (defaults to true when unset — see NumericSettings.Validation) — SQL Server's
+            // SUM/AVG silently skip NULL rows by default, which is the opposite of "checked": that
+            // setting means a blank should count as 0 in both the sum and the average's denominator,
+            // not be excluded. ISNULL(...,0) makes that explicit; unchecked leaves the plain column
+            // so SUM/AVG's native NULL-skipping applies (blank genuinely excluded), matching the
+            // Table report's client-side footer (table-report-view.component.ts's
+            // formatAggregateForField, same setting, same semantics).
+            var sumAvgExpr = TreatBlankAsZero(aggField)
+                ? $"ISNULL(CAST({col} AS DECIMAL(18,4)), 0)"
+                : $"CAST({col} AS DECIMAL(18,4))";
             var clause = agg.Function switch
             {
-                "Sum" => $"SUM(CAST({col} AS DECIMAL(18,4))) AS {alias}",
-                "Avg" => $"AVG(CAST({col} AS DECIMAL(18,4))) AS {alias}",
+                "Sum" => $"SUM({sumAvgExpr}) AS {alias}",
+                "Avg" => $"AVG({sumAvgExpr}) AS {alias}",
                 "Min" => $"MIN({col}) AS {alias}",
                 "Max" => $"MAX({col}) AS {alias}",
                 "DistinctCount" => $"COUNT(DISTINCT {col}) AS {alias}",
@@ -992,6 +1013,24 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
         return rows.Select(ToDictionary).ToList();
+    }
+
+    /// <summary>Number/Currency/Percent/Rating's "Treat blank values as 0 in calculations" Behavior
+    /// Setting — defaults to true (matching <see cref="NumericSettings.TreatBlankAsZero"/>'s own
+    /// doc comment) when the field has no Settings JSON, no Validation block, or a malformed one.</summary>
+    private static bool TreatBlankAsZero(AppField field)
+    {
+        if (string.IsNullOrWhiteSpace(field.Settings)) return true;
+        try
+        {
+            var settings = JsonSerializer.Deserialize<NumericSettings>(
+                field.Settings, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return settings?.TreatBlankAsZero ?? true;
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
     }
 
     /// <summary>
@@ -1149,6 +1188,20 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var joiner = group.Logic?.ToLowerInvariant() == "or" ? " OR " : " AND ";
         return string.Join(joiner, parts);
     }
+
+    /// <summary>
+    /// True when `rawValue` is a blank string being written to a field whose physical column
+    /// genuinely doesn't store text (numeric/date/bit/bigint) — SQL Server can't implicitly
+    /// convert an empty string to those types and throws ("Error converting data type nvarchar to
+    /// ..."), so this must resolve to a real NULL write instead of being handed to Dapper's
+    /// parameter binder as-is (which infers an NVARCHAR parameter from the C# string). Checked
+    /// against the RAW (pre-encryption) value — encrypting a blank string for e.g. a Number field
+    /// would otherwise produce non-empty ciphertext for what should just be a NULL column. Mirrors
+    /// SplitRangeValue's own "normalise empty strings to null" handling below, just for the plain
+    /// (non-range) field case that was missing it.
+    /// </summary>
+    private static bool IsBlankForNonTextField(AppField field, object? rawValue) =>
+        rawValue is string s && string.IsNullOrWhiteSpace(s) && !PhysicalNaming.IsTextStoringTypeCode(field.TypeCode);
 
     /// <summary>
     /// Splits a range field value (sent as JSON object or IDictionary) into start and end SQL parameters.

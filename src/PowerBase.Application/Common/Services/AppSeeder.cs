@@ -158,6 +158,23 @@ public class AppSeeder : IAppSeeder
             DisplayOrder = 2,
         }, ct);
 
+        // The hidden row backing "Default Report Settings" (see Report.IsDefaultSettingsRecord) —
+        // deliberately its own row, never "List All" above, so editing List All's own settings
+        // (or any other report's) never bleeds into what other reports' "Default columns"/"Default
+        // dynamic filters" mode inherits, and vice versa. Never shown in any reports list.
+        await _reportRepo.CreateAsync(new Report
+        {
+            AppTableId = table.Id,
+            OwnerId = userId,
+            Name = "Default Report Settings",
+            ReportType = "Table",
+            Visibility = "Shared",
+            Definition = JsonSerializer.Serialize(new ReportDefinition()),
+            IsDefault = false,
+            IsDefaultSettingsRecord = true,
+            DisplayOrder = 0,
+        }, ct);
+
         // Auto-create "Main Form" with all seeded system fields in a default section
         var mainForm = new Form
         {
@@ -177,6 +194,13 @@ public class AppSeeder : IAppSeeder
             Width        = 1,
             DisplayOrder = 1,
             Elements     = [],
+            // Grid-snap coordinates (Phase 8) — seeded directly instead of leaving these null,
+            // which used to make the frontend's legacy-layout migration (deriveGridFromLegacy)
+            // give this lone block the section's FULL grid width the first time the form was
+            // opened in the designer. 4 matches DEFAULT_SECTION_COL_SPAN, the same default a
+            // manually-added section's first column already gets.
+            ColStart     = 1,
+            ColSpan      = 4,
         };
         var defaultSection = new FormSection
         {

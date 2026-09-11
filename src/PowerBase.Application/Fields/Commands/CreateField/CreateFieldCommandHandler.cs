@@ -71,17 +71,24 @@ public class CreateFieldCommandHandler
         // Validate per-type Settings JSON before touching the database.
         CreateFieldCommandValidator.ValidateSettings(command.TypeCode, command.Settings, _settingsRegistry);
 
+        // Leading/trailing whitespace is never meaningful here — trim server-side so a client that
+        // bypasses the UI (a direct API call) can't persist " Full Name " verbatim. NullIfBlank also
+        // collapses a whitespace-only Description down to "unset", matching what omitting it
+        // altogether means.
+        var label = command.Label.Trim();
+        var description = NullIfBlank(command.Description);
+
         // Reject Required/DefaultValue values the field's type doesn't support. IsUnique isn't settable
         // at creation time, so it's not part of this check here.
         var capErrors = FieldGeneralSettingsCapability.Validate(
-            command.TypeCode, command.Settings, command.Label, command.IsRequired, null, command.DefaultValue);
+            command.TypeCode, command.Settings, label, command.IsRequired, null, command.DefaultValue);
         if (capErrors.Count > 0)
             throw new ValidationException(capErrors.AsReadOnly());
 
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
 
-        if (await _fieldRepo.LabelExistsInTableAsync(table.Id, command.Label, ct: ct))
-            throw new DuplicateException("Field", "label", command.Label);
+        if (await _fieldRepo.LabelExistsInTableAsync(table.Id, label, ct: ct))
+            throw new DuplicateException("Field", "label", label);
 
         // Snapshot the table's existing fields before adding this one — used below to auto-advance
         // the Identifying Records picker slots (see AutoAdvanceRecordPickerAsync).
@@ -94,7 +101,7 @@ public class CreateFieldCommandHandler
         // changes. A brand-new field has no field-permission rows yet, so there is nothing to check here.
 
         var nextFid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
-        var generatedName = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, command.Label, isSystem: false, ct);
+        var generatedName = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, label, isSystem: false, ct);
 
         // Searchable/Sortable/Reportable/Filterable start from the field type's own defaults (see
         // FieldAdvancedSettingsCapability) rather than one fixed set for every type. Types outside
@@ -108,8 +115,8 @@ public class CreateFieldCommandHandler
             FieldTypeId = fieldType.Id,
             TypeCode = fieldType.Code,
             Name = generatedName,
-            Label = command.Label,
-            Description = command.Description,
+            Label = label,
+            Description = description,
             IsRequired = command.IsRequired,
             DefaultValue = command.DefaultValue,
             Fid = nextFid,
@@ -152,7 +159,7 @@ public class CreateFieldCommandHandler
         }
 
         await _auditRepo.LogActivityAsync(
-            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), $"Field added: {command.Label} To TableName : {table.Name}", appId: table.AppId, ct: ct);
+            AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), $"Field added: {label} To TableName : {table.Name}", appId: table.AppId, ct: ct);
 
         return new CreateFieldResult
         {
@@ -171,4 +178,6 @@ public class CreateFieldCommandHandler
             IsEncrypted = field.IsEncrypted,
         };
     }
+
+    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

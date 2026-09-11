@@ -11,7 +11,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
 {
     private const string SelectColumns = """
         r.Id, r.PublicId, r.AppTableId, r.OwnerId, r.Name, r.Description,
-        r.ReportType, r.Visibility, r.Definition, r.IsDefault, r.DisplayOrder,
+        r.ReportType, r.Visibility, r.Definition, r.IsDefault, r.IsDefaultSettingsRecord, r.DisplayOrder,
         r.IsDeleted, r.CreatedOn, r.CreatedBy, r.ModifiedOn, r.ModifiedBy, r.ViewEditFormId,
         f.PublicId AS ViewEditFormPublicId
         """;
@@ -48,6 +48,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE t.PublicId = @tablePublicId
           AND r.IsDeleted = 0
+          AND r.IsDefaultSettingsRecord = 0
           AND t.IsDeleted = 0
           AND (
               r.Visibility = 'Shared'
@@ -74,6 +75,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
           AND r.IsDeleted = 0
+          AND r.IsDefaultSettingsRecord = 0
           AND (
               r.Visibility = 'Shared'
               OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
@@ -94,6 +96,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         FROM meta.Report r
         WHERE r.AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
           AND r.IsDeleted = 0
+          AND r.IsDefaultSettingsRecord = 0
           AND (@search IS NULL OR r.Name LIKE @search OR r.ReportType LIKE @search OR r.Visibility LIKE @search)
           AND (
               r.Visibility = 'Shared'
@@ -113,6 +116,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         FROM meta.Report r
         WHERE r.AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
           AND r.IsDeleted = 0
+          AND r.IsDefaultSettingsRecord = 0
           AND (@search IS NULL OR r.Name LIKE @search)
           AND (
               r.Visibility = 'Shared'
@@ -132,6 +136,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE t.AppId = @appId
           AND r.IsDeleted = 0
+          AND r.IsDefaultSettingsRecord = 0
           AND (
               r.Visibility = 'Shared'
               OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
@@ -151,6 +156,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE t.AppId = @appId
           AND r.IsDeleted = 0
+          AND r.IsDefaultSettingsRecord = 0
         ORDER BY r.DisplayOrder, r.Name
         """;
 
@@ -160,6 +166,18 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
         WHERE r.AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
           AND r.IsDefault = 1
+          AND r.IsDeleted = 0
+        """;
+
+    // The hidden per-table row backing Default Report Settings — see IsDefaultSettingsRecord's
+    // doc comment. Distinct from GetDefaultByTableSql above (IsDefault = 1), which is a different
+    // report and a different concept.
+    private const string GetDefaultSettingsRecordSql = $"""
+        SELECT {SelectColumns}
+        FROM meta.Report r
+        LEFT JOIN meta.Form f ON f.Id = r.ViewEditFormId
+        WHERE r.AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
+          AND r.IsDefaultSettingsRecord = 1
           AND r.IsDeleted = 0
         """;
 
@@ -178,11 +196,11 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
     private const string InsertSql = """
         INSERT INTO meta.Report
             (AppTableId, OwnerId, Name, Description, ReportType, Visibility,
-             Definition, IsDefault, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
+             Definition, IsDefault, IsDefaultSettingsRecord, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES
             (@appTableId, @ownerId, @name, @description, @reportType, @visibility,
-             @definition, @isDefault, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
+             @definition, @isDefault, @isDefaultSettingsRecord, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
     private const string UpdateReportSql = """
@@ -339,6 +357,13 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
             new CommandDefinition(GetDefaultByTableSql, new { tablePublicId }, cancellationToken: ct));
     }
 
+    public async Task<Report?> GetDefaultSettingsRecordAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<Report>(
+            new CommandDefinition(GetDefaultSettingsRecordSql, new { tablePublicId }, cancellationToken: ct));
+    }
+
     public async Task<bool> BelongsToTableAsync(Guid tablePublicId, Guid reportPublicId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -360,6 +385,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
                 visibility = report.Visibility,
                 definition = report.Definition,
                 isDefault = report.IsDefault,
+                isDefaultSettingsRecord = report.IsDefaultSettingsRecord,
                 displayOrder = report.DisplayOrder,
                 createdBy = QueryContext.UserId,
             }, cancellationToken: ct));

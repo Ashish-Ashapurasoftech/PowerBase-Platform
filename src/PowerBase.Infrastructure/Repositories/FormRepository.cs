@@ -642,6 +642,26 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         var sourceLayout = await GetLayoutAsync(source.Id, ct);
         var sourcePages = await GetPagesAsync(source.Id, ct);
 
+        // Sections/blocks/elements need fresh PublicIds for the same reason pages already get
+        // them below — meta.FormSection/FormSectionBlock/FormElement.PublicId are each unique
+        // across the whole table, not scoped per form, so re-inserting sourceLayout as-is (the
+        // *original* form's rows) collides on UX_FormSection_PublicId the instant SaveLayoutAsync
+        // tries to insert the first section, since the source form's own row under that exact
+        // PublicId still exists. Mutated in place (not copied into new objects) so sectionPageLinks/
+        // elementPageLinks below — keyed by object reference — still resolve correctly.
+        foreach (var section in sourceLayout)
+        {
+            section.PublicId = Guid.NewGuid();
+            foreach (var block in section.Blocks)
+            {
+                block.PublicId = Guid.NewGuid();
+                foreach (var element in block.Elements)
+                {
+                    element.PublicId = Guid.NewGuid();
+                }
+            }
+        }
+
         var newForm = new Form
         {
             AppTableId        = source.AppTableId,

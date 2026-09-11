@@ -122,6 +122,7 @@ builder.Host.UseSerilog((ctx, cfg) => cfg.ReadFrom.Configuration(ctx.Configurati
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("Frontend", policy =>
@@ -483,6 +484,7 @@ builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();
 builder.Services.AddScoped<UpdateDefaultReportSettingsCommandHandler>();
 builder.Services.AddScoped<GetReportQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetOrCreateDefaultReportSettings.GetOrCreateDefaultReportSettingsQueryHandler>();
 builder.Services.AddScoped<GetDefaultReportSettingsQueryHandler>();
 builder.Services.AddScoped<ListReportsQueryHandler>();
 builder.Services.AddScoped<ListReportsByTableQueryHandler>();

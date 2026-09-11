@@ -12,6 +12,11 @@ public class Report
     public string Visibility { get; set; } = "Personal";
     public string Definition { get; set; } = "{}";
     public bool IsDefault { get; set; }
+    /// <summary>Marks the one hidden, per-table row that backs "Default Report Settings" — never
+    /// shown in any reports list, never selectable via "Set as default". Distinct from
+    /// <see cref="IsDefault"/>, which is about which report opens when a viewer opens the table.
+    /// See migration 055_add_report_default_settings_record.sql for why these had to be split.</summary>
+    public bool IsDefaultSettingsRecord { get; set; }
     public int DisplayOrder { get; set; }
     public bool IsDeleted { get; set; }
     public DateTime CreatedOn { get; set; }

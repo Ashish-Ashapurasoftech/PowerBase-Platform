@@ -35,6 +35,8 @@ public record ReportOptionsCommand(
     bool ShowViewIcon = true,
     bool ShowQuickPeekIcon = true,
     bool DisableBulkDelete = false,
+    bool DisableBulkUpdate = false,
+    bool DisableGridEdit = false,
     bool ShowDescriptionOnReportPage = false);
 
 public record ChartConfigCommand(

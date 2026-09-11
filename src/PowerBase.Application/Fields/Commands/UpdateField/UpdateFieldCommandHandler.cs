@@ -87,8 +87,12 @@ public class UpdateFieldCommandHandler
         // fixed allow-list (see SystemFieldSettingsPolicy). Coerced here, before every check below,
         // so the request body is never trusted for anything beyond what the UI actually offers —
         // this is the authoritative enforcement; the frontend hiding these controls is only UX.
-        var label = existing.IsSystem ? existing.Label! : command.Label;
-        var description = existing.IsSystem ? existing.Description : command.Description;
+        // Leading/trailing whitespace is never meaningful here — trim server-side so a client that
+        // bypasses the UI (a direct API call) can't persist " Full Name " verbatim. NullIfBlank also
+        // collapses a whitespace-only Description down to "unset", matching what omitting it
+        // altogether means.
+        var label = existing.IsSystem ? existing.Label! : command.Label.Trim();
+        var description = existing.IsSystem ? existing.Description : NullIfBlank(command.Description);
         var isRequired = existing.IsSystem ? false : command.IsRequired;
         var defaultValue = existing.IsSystem ? null : command.DefaultValue;
         var isUnique = existing.IsSystem ? false : command.IsUnique;
@@ -228,4 +232,6 @@ public class UpdateFieldCommandHandler
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
             $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
     }
+
+    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

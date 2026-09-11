@@ -264,6 +264,12 @@ public class RunReportQueryHandler
                 .Where(f => f.Fid.HasValue)
                 .GroupBy(f => (long)f.Fid!.Value)
                 .ToDictionary(g => g.Key, g => g.First());
+            // A report's own explicit Columns are never filtered by IsReportable here — Custom
+            // mode is deliberately allowed to keep or add a field that isn't reportable, and that
+            // holds even when this particular report is also the table's default report: what
+            // matters is THIS row's own ColumnsMode, not the IsDefault flag. (The reportable
+            // restriction only applies to what OTHER reports inherit from this row when they're
+            // in "Default columns" mode — see below.)
             selectedFields = definition.Columns
                 .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
                 .Select(id => fieldMap[id])
@@ -272,21 +278,37 @@ public class RunReportQueryHandler
 
         if (selectedFields.Count == 0 && definition.ColumnsMode == "Default")
         {
-            var defaultReport = await _reportRepo.GetDefaultByTableAsync(table.PublicId, ct);
-            var defaultColumnIds = defaultReport is null
-                ? []
-                : (JsonSerializer.Deserialize<ReportDefinition>(defaultReport.Definition) ?? new ReportDefinition()).Columns;
-
-            if (defaultColumnIds.Count > 0)
+            var defaultSettings = await _reportRepo.GetDefaultSettingsRecordAsync(table.PublicId, ct);
+            if (defaultSettings is not null)
             {
-                var fieldMap = allFields
-                    .Where(f => f.Fid.HasValue)
-                    .GroupBy(f => (long)f.Fid!.Value)
-                    .ToDictionary(g => g.Key, g => g.First());
-                selectedFields = defaultColumnIds
-                    .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id))
-                    .Select(id => fieldMap[id])
-                    .ToList();
+                var defaultColumnIds = (JsonSerializer.Deserialize<ReportDefinition>(defaultSettings.Definition) ?? new ReportDefinition()).Columns;
+
+                if (defaultColumnIds.Count > 0)
+                {
+                    var fieldMap = allFields
+                        .Where(f => f.Fid.HasValue)
+                        .GroupBy(f => (long)f.Fid!.Value)
+                        .ToDictionary(g => g.Key, g => g.First());
+                    selectedFields = defaultColumnIds
+                        // Same reasoning as above: the inherited-from list can only ever be reportable
+                        // fields, regardless of whatever stale ids the default report's own row still has.
+                        .Where(id => fieldMap.ContainsKey(id) && visibleFieldIds.Contains(id) && fieldMap[id].IsReportable)
+                        .Select(id => fieldMap[id])
+                        .ToList();
+                }
+                else
+                {
+                    // The default report exists but has never been explicitly configured — same
+                    // "all non-system fields" inference the Default Report Settings columns picker
+                    // shows before its first save (table-default-report-settings.component.ts's
+                    // initState()). Without this, a report merely inheriting an *unconfigured*
+                    // default fell through to the generic "every reportable field" fallback below —
+                    // which also pulls in Record ID#/Date Created/etc — instead of matching what the
+                    // settings page visually promises until someone actually saves it once.
+                    selectedFields = allFields
+                        .Where(f => f.Fid.HasValue && f.IsReportable && !f.IsSystem && visibleFieldIds.Contains((long)f.Fid!.Value))
+                        .ToList();
+                }
             }
         }
 
@@ -1055,10 +1077,19 @@ public class RunReportQueryHandler
     /// looked up (User/MultiUser group-by or series fields in Summary/Chart reports) — returns
     /// the value unchanged for every other field type, or if the id wasn't in the lookup
     /// (e.g. a deleted user).</summary>
+    /// <summary>
+    /// Returns "{id}|{name}" for a resolved User/MultiUser group/series value — same composite
+    /// convention GetDistinctFieldValuesQueryHandler already uses for the filter dropdown — so
+    /// the frontend can display the name while still holding the raw id it needs to build a
+    /// correct drilldown filter. The physical column stores the plain numeric core.[User].Id
+    /// (see MergeRuntimeFilters/BuildConditionClause), not the display name; a drilldown click
+    /// that submitted the display name back as the filter value always matched zero rows.
+    /// </summary>
     private static object? ResolveGroupOrSeriesValue(object? rawValue, IReadOnlyDictionary<long, string>? names)
     {
         if (names is null || rawValue is null) return rawValue;
-        return long.TryParse(rawValue.ToString(), out var id) && names.TryGetValue(id, out var name) ? name : rawValue;
+        var raw = rawValue.ToString()!;
+        return long.TryParse(raw, out var id) && names.TryGetValue(id, out var name) ? $"{raw}|{name}" : rawValue;
     }
 
     internal static async Task<IReadOnlyDictionary<long, string>> ResolveUserNamesAsync(
@@ -1102,5 +1133,49 @@ public class RunReportQueryHandler
         }
 
         return await userRepo.GetNamesByIdsAsync(ids, ct);
+    }
+
+    /// <summary>Sibling of <see cref="ResolveUserNamesAsync"/>, but resolves each User/MultiUser
+    /// field's internal long id to its public Guid instead of its display name. Used only by
+    /// GetRecordQueryHandler (the single-record fetch backing the Add/Edit Record form) — every
+    /// other read path (list/table, Summary/Chart, export) wants a ready-to-display name and keeps
+    /// using ResolveUserNamesAsync. The Edit form's User/MultiUser picker is keyed by userPublicId
+    /// (see AppUserPickerResponse / UserFieldValueResolver, which resolves the picker's submitted
+    /// Guid back to this same long id on save) — handing it a display name instead of a Guid left
+    /// the picker unable to match any option, showing empty ("Select User") no matter what was
+    /// actually saved. Deliberately does NOT cover CreatedBy/ModifiedBy — those are read-only
+    /// system columns never rendered through a picker, so they stay resolved to names via
+    /// ResolveUserNamesAsync regardless.</summary>
+    internal static async Task<IReadOnlyDictionary<long, Guid>> ResolveUserPublicIdsAsync(
+        IEnumerable<IReadOnlyDictionary<string, object?>> rows,
+        IReadOnlyList<AppField> fields,
+        IUserRepository userRepo,
+        CancellationToken ct)
+    {
+        var hasUserFields = fields.Any(f => f.TypeCode is "User" or "MultiUser");
+        if (!hasUserFields) return new Dictionary<long, Guid>();
+
+        var ids = new HashSet<long>();
+        foreach (var row in rows)
+        {
+            foreach (var f in fields.Where(f => f.TypeCode is "User" or "MultiUser" && f.Fid.HasValue))
+            {
+                var col = PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value);
+                if (!row.TryGetValue(col, out var val) || val is null) continue;
+                var str = val.ToString()!;
+                if (str.TrimStart().StartsWith('['))
+                {
+                    try
+                    {
+                        var parsed = System.Text.Json.JsonSerializer.Deserialize<List<long>>(str);
+                        if (parsed != null) foreach (var pid in parsed) ids.Add(pid);
+                    }
+                    catch { }
+                }
+                else if (long.TryParse(str, out var uid)) ids.Add(uid);
+            }
+        }
+
+        return await userRepo.GetPublicIdsByIdsAsync(ids, ct);
     }
 }

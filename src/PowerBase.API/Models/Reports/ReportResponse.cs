@@ -69,6 +69,8 @@ public class ReportOptionsDto
     public bool ShowViewIcon { get; init; } = true;
     public bool ShowQuickPeekIcon { get; init; } = true;
     public bool DisableBulkDelete { get; init; }
+    public bool DisableBulkUpdate { get; init; }
+    public bool DisableGridEdit { get; init; }
     public bool ShowDescriptionOnReportPage { get; init; }
 }
 

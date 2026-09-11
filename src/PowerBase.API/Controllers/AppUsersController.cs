@@ -58,6 +58,10 @@ public class AppUsersController : ControllerBase
         [FromQuery] bool sortDesc = false,
         [FromQuery] string? sortOrder = null,
         [FromQuery] string? role = null,
+        [FromQuery] string[]? accessTypes = null,
+        [FromQuery] string[]? roles = null,
+        [FromQuery] string[]? userPickers = null,
+        [FromQuery] string[]? groups = null,
         CancellationToken ct = default)
     {
         bool actualSortDesc = sortDesc || sortOrder?.ToLower() == "desc";
@@ -69,7 +73,11 @@ public class AppUsersController : ControllerBase
             Search: search,
             SortBy: sortBy,
             SortDesc: actualSortDesc,
-            Role: role), ct);
+            Role: role,
+            Roles: roles,
+            AccessTypes: accessTypes,
+            UserPickerFilters: userPickers,
+            Groups: groups), ct);
 
         var items = result.Items.Select(MapToListItemResponse).ToList();
         return Ok(new ApiListResponse<AppUserResponse>(items, result.Total, result.Page, result.PageSize));
@@ -90,6 +98,7 @@ public class AppUsersController : ControllerBase
             AddedOn = u.AddedOn.ToString("o"),
             IsOwner = u.IsOwner,
             IsFromGroup = u.IsFromGroup,
+            GroupName = u.GroupName,
         };
     }
 
@@ -113,6 +122,10 @@ public class AppUsersController : ControllerBase
         [FromQuery] bool sortDesc = false,
         [FromQuery] string? sortOrder = null,
         [FromQuery] string? role = null,
+        [FromQuery] string[]? accessTypes = null,
+        [FromQuery] string[]? roles = null,
+        [FromQuery] string[]? userPickers = null,
+        [FromQuery] string[]? groups = null,
         CancellationToken ct = default)
     {
         bool actualSortDesc = sortDesc || sortOrder?.ToLower() == "desc";
@@ -125,6 +138,10 @@ public class AppUsersController : ControllerBase
             SortBy: sortBy,
             SortDesc: actualSortDesc,
             Role: role,
+            Roles: roles,
+            AccessTypes: accessTypes,
+            UserPickerFilters: userPickers,
+            Groups: groups,
             IsExport: true), ct);
 
         var csvBuilder = new System.Text.StringBuilder();

@@ -12,11 +12,18 @@ public class RecordResult
     public long CreatedBy { get; init; }
     public Dictionary<string, object?> Fields { get; init; } = new();
 
+    // userPublicIds: when supplied, User/MultiUser fields resolve to this userPublicId Guid instead
+    // of the display name userNames would otherwise produce — see
+    // RunReportQueryHandler.ResolveUserPublicIdsAsync's doc comment for why (only
+    // GetRecordQueryHandler, backing the Add/Edit Record form's picker, needs this; every other
+    // caller leaves it null and keeps getting names). CreatedBy/ModifiedBy are unaffected either
+    // way — they always resolve via userNames.
     public static RecordResult FromRow(
         IReadOnlyDictionary<string, object?> row,
         IReadOnlyList<AppField> fields,
         IReadOnlyDictionary<long, string>? userNames = null,
-        IReadOnlyDictionary<long, object?>? computedValues = null)
+        IReadOnlyDictionary<long, object?>? computedValues = null,
+        IReadOnlyDictionary<long, Guid>? userPublicIds = null)
     {
         var fieldData = new Dictionary<string, object?>();
         foreach (var field in fields)
@@ -44,9 +51,15 @@ public class RecordResult
             }
             else if (row.TryGetValue(col, out var val))
             {
-                // Resolve internal user IDs to display names for User/MultiUser and system user fields
+                // Resolve internal user IDs to display names for User/MultiUser and system user
+                // fields — or, when userPublicIds is supplied (GetRecordQueryHandler only), to the
+                // picker-matching Guid instead for User/MultiUser (see the doc comment above).
                 var fid = (field.Fid ?? field.Id).ToString();
-                if (userNames != null && field.TypeCode is "User" or "MultiUser")
+                if (field.TypeCode is "User" or "MultiUser" && userPublicIds != null)
+                {
+                    fieldData[fid] = ResolveUserPublicId(val, userPublicIds);
+                }
+                else if (field.TypeCode is "User" or "MultiUser" && userNames != null)
                 {
                     fieldData[fid] = ResolveUserValue(val, userNames);
                 }
@@ -121,6 +134,28 @@ public class RecordResult
         // Single user — stored as long or GUID string; try long first
         if (long.TryParse(str, out var uid))
             return userNames.TryGetValue(uid, out var name) ? name : val;
+        return val;
+    }
+
+    /// <summary>Mirrors <see cref="ResolveUserValue"/>, but resolves to the userPublicId Guid
+    /// (as its string form, matching what the Add/Edit Record form's picker options are keyed by
+    /// — see AppUserPickerResponse.userPublicId) instead of a display name.</summary>
+    private static object? ResolveUserPublicId(object? val, IReadOnlyDictionary<long, Guid> userPublicIds)
+    {
+        if (val is null) return null;
+        var str = val.ToString()!;
+        if (str.TrimStart().StartsWith('['))
+        {
+            try
+            {
+                var ids = System.Text.Json.JsonSerializer.Deserialize<List<long>>(str);
+                if (ids != null)
+                    return ids.Select(id => userPublicIds.TryGetValue(id, out var pid) ? pid.ToString() : id.ToString()).ToList();
+            }
+            catch { }
+        }
+        if (long.TryParse(str, out var uid))
+            return userPublicIds.TryGetValue(uid, out var pid2) ? pid2.ToString() : val;
         return val;
     }
 }
