@@ -6,26 +6,9 @@ namespace PowerBase.Infrastructure.Pipelines;
 
 public static class DatabasePipelineQueueWakeNotifier
 {
-    private static TaskCompletionSource<bool>? _wakeTcs;
-    private static readonly object _lock = new();
+    private static readonly PipelineWakeSignal Signal = new();
 
-    public static Task WaitForJobAsync(CancellationToken ct)
-    {
-        lock (_lock)
-        {
-            if (_wakeTcs == null || _wakeTcs.Task.IsCompleted)
-            {
-                _wakeTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            }
-            return _wakeTcs.Task.WaitAsync(ct);
-        }
-    }
-
-    public static void Wake()
-    {
-        lock (_lock)
-        {
-            _wakeTcs?.TrySetResult(true);
-        }
-    }
+    public static Task WaitForJobAsync(CancellationToken ct) => Signal.WaitAsync(Timeout.InfiniteTimeSpan, ct);
+    public static Task WaitForJobAsync(TimeSpan timeout, CancellationToken ct) => Signal.WaitAsync(timeout, ct);
+    public static void Wake() => Signal.Wake();
 }

@@ -702,26 +702,9 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
 public static class PipelineOutboxWakeNotifier
 {
-    private static TaskCompletionSource<bool>? _wakeTcs;
-    private static readonly object _lock = new();
+    private static readonly PipelineWakeSignal Signal = new();
 
-    public static Task WaitForOutboxItemAsync(CancellationToken ct)
-    {
-        lock (_lock)
-        {
-            if (_wakeTcs == null || _wakeTcs.Task.IsCompleted)
-            {
-                _wakeTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            }
-            return _wakeTcs.Task.WaitAsync(ct);
-        }
-    }
-
-    public static void Wake()
-    {
-        lock (_lock)
-        {
-            _wakeTcs?.TrySetResult(true);
-        }
-    }
+    public static Task WaitForOutboxItemAsync(CancellationToken ct) => Signal.WaitAsync(Timeout.InfiniteTimeSpan, ct);
+    public static Task WaitForOutboxItemAsync(TimeSpan timeout, CancellationToken ct) => Signal.WaitAsync(timeout, ct);
+    public static void Wake() => Signal.Wake();
 }
