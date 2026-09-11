@@ -1,6 +1,7 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.ValueObjects;
 
 namespace PowerBase.Application.Records.Commands.MassUpdateRecords;
 
@@ -11,19 +12,22 @@ public class MassUpdateRecordsCommandHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
+    private readonly IAppRepository _appRepo;
 
     public MassUpdateRecordsCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IAppRepository appRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _enforcer = enforcer;
         _auditRepo = auditRepo;
+        _appRepo = appRepo;
     }
 
     public async Task<int> HandleAsync(MassUpdateRecordsCommand command, CancellationToken ct = default)
@@ -76,6 +80,11 @@ public class MassUpdateRecordsCommandHandler
         var idMap = await _recordRepo.GetIdsByPublicIdsMapAsync(table, command.RecordPublicIds, ct);
         var violations = new List<RecordConstraintViolation>();
 
+        // The app's configured Date Formatting doesn't vary per record — fetched once here rather
+        // than inside the per-record loop below.
+        var app = await _appRepo.GetByIdAsync(table.AppId, ct);
+        var dateFormat = AppFormattingSettings.GetDateFormatString(app.Formatting);
+
         foreach (var recordId in command.RecordPublicIds)
         {
             if (!idMap.ContainsKey(recordId))
@@ -112,7 +121,7 @@ public class MassUpdateRecordsCommandHandler
         foreach (var recordId in foundIds)
         {
             var recordViolations = await RecordConstraintValidator.CollectViolationsAsync(
-                table, fields, command.FieldValues, _recordRepo, isCreate: false, excludeRecordId: idMap[recordId], ct, recordId);
+                table, fields, command.FieldValues, _recordRepo, isCreate: false, excludeRecordId: idMap[recordId], ct, recordId, appDateFormat: dateFormat);
             violations.AddRange(recordViolations.Where(v => !(v.ConstraintType == "Unique" && inRequestDuplicateFids.Contains(v.FieldId))));
         }
 

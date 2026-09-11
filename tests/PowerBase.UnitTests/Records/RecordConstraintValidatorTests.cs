@@ -129,4 +129,112 @@ public class RecordConstraintValidatorTests
                 RecordConstraintValidator.ValidateAsync(table, [systemField, formulaField], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None))
             .Should().NotThrowAsync();
     }
+
+    // --- Date/DateTime format validation (appDateFormat) ---
+    // Covers the direct-API path: a client that bypasses the UI's own format-aware date input
+    // must be held to the same rules — the app's configured Date Formatting, '/' or '-' as an
+    // interchangeable separator, and no silent day/month misreading.
+
+    [Fact]
+    public async Task ValidateAsync_DateField_SlashSeparator_MatchesConfiguredFormat_DoesNotThrow()
+    {
+        var table = MakeTable();
+        var field = MakeField(1, typeCode: "Date");
+        var values = new Dictionary<long, object?> { [1L] = "11/26/2026" };
+
+        await FluentActions.Invoking(() =>
+                RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None, appDateFormat: "MM-DD-YYYY"))
+            .Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DateField_HyphenSeparator_MatchesConfiguredFormat_DoesNotThrow()
+    {
+        var table = MakeTable();
+        var field = MakeField(1, typeCode: "Date");
+        var values = new Dictionary<long, object?> { [1L] = "11-26-2026" };
+
+        await FluentActions.Invoking(() =>
+                RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None, appDateFormat: "MM-DD-YYYY"))
+            .Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DateField_DayMonthOrder_FollowsAppFormat_NotAmbientCulture()
+    {
+        // Under a DD-MM-YYYY app format, "05-04-2026" must resolve to April 5th, not May 4th —
+        // the exact day/month-swap bug invariant-culture DateTime.TryParse would otherwise cause.
+        var table = MakeTable();
+        var field = MakeField(1, typeCode: "Date");
+        var values = new Dictionary<long, object?> { [1L] = "05-04-2026" };
+
+        var violations = await RecordConstraintValidator.CollectViolationsAsync(
+            table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None, appDateFormat: "DD-MM-YYYY");
+
+        violations.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DateField_GarbageText_ThrowsWithClearMessage()
+    {
+        var table = MakeTable();
+        var field = MakeField(1, typeCode: "Date");
+        var values = new Dictionary<long, object?> { [1L] = "not-a-date" };
+
+        await FluentActions.Invoking(() =>
+                RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None, appDateFormat: "MM-DD-YYYY"))
+            .Should().ThrowAsync<ValidationException>();
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DateField_ImpossibleDate_Throws()
+    {
+        var table = MakeTable();
+        var field = MakeField(1, typeCode: "Date");
+        var values = new Dictionary<long, object?> { [1L] = "02-30-2026" }; // Feb 30 doesn't exist
+
+        await FluentActions.Invoking(() =>
+                RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None, appDateFormat: "MM-DD-YYYY"))
+            .Should().ThrowAsync<ValidationException>();
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DateField_IsoString_AcceptedRegardlessOfConfiguredFormat()
+    {
+        // The UI's own picker serializes a chosen date as ISO 8601 — must be accepted even when
+        // it doesn't textually match the app's configured *display* format.
+        var table = MakeTable();
+        var field = MakeField(1, typeCode: "DateTime");
+        var values = new Dictionary<long, object?> { [1L] = "2026-04-05T00:00:00Z" };
+
+        await FluentActions.Invoking(() =>
+                RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None, appDateFormat: "DD-MM-YYYY"))
+            .Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DateField_TypedDateTimeValue_PassesThroughUnchanged()
+    {
+        var table = MakeTable();
+        var field = MakeField(1, typeCode: "Date");
+        var values = new Dictionary<long, object?> { [1L] = new DateTime(2026, 4, 5) };
+
+        await FluentActions.Invoking(() =>
+                RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None, appDateFormat: "DD-MM-YYYY"))
+            .Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DateField_NoAppDateFormatProvided_FallsBackToDefault()
+    {
+        var table = MakeTable();
+        var field = MakeField(1, typeCode: "Date");
+        var values = new Dictionary<long, object?> { [1L] = "11-26-2026" };
+
+        // appDateFormat omitted entirely — existing callers that haven't been updated must still
+        // compile and validate against the domain default (MM-DD-YYYY).
+        await FluentActions.Invoking(() =>
+                RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None))
+            .Should().NotThrowAsync();
+    }
 }
