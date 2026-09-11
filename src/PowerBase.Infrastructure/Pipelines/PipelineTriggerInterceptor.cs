@@ -285,7 +285,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                                 if (triggerFields != null && triggerFields.Any())
                                 {
                                     var triggerFids = triggerFields.Select(f => ParseFid(f)).Where(x => x.HasValue).Select(x => x!.Value).ToList();
-                                    var changedFids = fields.Where(f => change.ChangedFieldIds.Contains(f.Id) && f.Fid.HasValue).Select(f => f.Fid!.Value).ToList();
+                                    var changedFids = fields.Where(f => f.Fid.HasValue && (change.ChangedFieldIds.Contains(f.Id) || change.ChangedFieldIds.Contains(f.Fid.Value))).Select(f => f.Fid!.Value).ToList();
                                     if (triggerFids.Intersect(changedFids).Any())
                                     {
                                         isCandidate = true;
@@ -670,6 +670,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         public List<string>? TriggerFields { get; set; }
         public List<string>? SubsequentFields { get; set; }
         public bool LimitRecords { get; set; }
+        [System.Text.Json.Serialization.JsonConverter(typeof(PowerBase.Application.Pipelines.RecordLimitJsonConverter))]
         public int? MaxRecords { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterRule>? Filters { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterGroup>? FilterGroups { get; set; }
@@ -702,26 +703,9 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
 public static class PipelineOutboxWakeNotifier
 {
-    private static TaskCompletionSource<bool>? _wakeTcs;
-    private static readonly object _lock = new();
+    private static readonly PipelineWakeSignal Signal = new();
 
-    public static Task WaitForOutboxItemAsync(CancellationToken ct)
-    {
-        lock (_lock)
-        {
-            if (_wakeTcs == null || _wakeTcs.Task.IsCompleted)
-            {
-                _wakeTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            }
-            return _wakeTcs.Task.WaitAsync(ct);
-        }
-    }
-
-    public static void Wake()
-    {
-        lock (_lock)
-        {
-            _wakeTcs?.TrySetResult(true);
-        }
-    }
+    public static Task WaitForOutboxItemAsync(CancellationToken ct) => Signal.WaitAsync(Timeout.InfiniteTimeSpan, ct);
+    public static Task WaitForOutboxItemAsync(TimeSpan timeout, CancellationToken ct) => Signal.WaitAsync(timeout, ct);
+    public static void Wake() => Signal.Wake();
 }

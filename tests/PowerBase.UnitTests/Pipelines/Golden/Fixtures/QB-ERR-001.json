@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-ERR-001",
+  "classification": "QB-DOC",
+  "description": "Catchable monitored failure skips remaining steps and invokes On Error",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/handle-errors",
+  "relevantHeading": "Handle errors > How Handle errors works",
+  "testPayload": {
+    "stepId": "QB-ERR-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

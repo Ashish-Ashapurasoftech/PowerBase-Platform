@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-EVT-004",
+  "classification": "QB-DOC",
+  "description": "Bulk event processing triggers single pipeline execution for batch operations",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/use-the-quickbase-channel",
+  "relevantHeading": "Quickbase > Triggers",
+  "testPayload": {
+    "stepId": "QB-EVT-004",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

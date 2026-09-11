@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-ERR-006",
+  "classification": "QB-DOC",
+  "description": "Iteration failure inside Loop does not propagate to enclosing outer Handle Errors",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/handle-errors",
+  "relevantHeading": "Handle errors > Loops",
+  "testPayload": {
+    "stepId": "QB-ERR-006",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

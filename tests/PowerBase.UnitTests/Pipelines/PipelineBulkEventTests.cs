@@ -227,4 +227,104 @@ public class PipelineBulkEventTests
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*transaction is required*");
     }
+
+    [Fact]
+    public async Task MarkBulkEventRecordsProcessedAsync_CompletedTransaction_ThrowsInvalidOperationException()
+    {
+        // Arrange
+        var repo = Substitute.For<IPipelineRepository>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        dbTx.Connection.Returns((System.Data.IDbConnection)null);
+
+        repo.MarkBulkEventRecordsProcessedAsync(Arg.Any<List<long>>(), Arg.Any<byte>(), Arg.Is<System.Data.IDbTransaction>(t => t != null && t.Connection == null), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new InvalidOperationException("Cannot mark bulk event records using a completed or disposed transaction.")));
+
+        // Act
+        var act = () => repo.MarkBulkEventRecordsProcessedAsync(new List<long> { 1L }, 1, dbTx, CancellationToken.None);
+
+        // Assert
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*completed or disposed transaction*");
+    }
+
+    [Fact]
+    public async Task PipelineEngine_BulkLoop_ChildSuccess_MarksRecordProcessed1WithNullTransaction()
+    {
+        // Arrange
+        var bulkEventId = Guid.NewGuid();
+        var triggerStep = new PipelineStep
+        {
+            RefId = "step_trigger",
+            Type = "trigger",
+            Subtype = "new-bulk-event"
+        };
+        var loopStep = new PipelineStep
+        {
+            Id = 10,
+            RefId = "step_loop",
+            Type = "action",
+            Subtype = "loop",
+            ConfigJson = JsonSerializer.Serialize(new { LoopOverStepId = "step_trigger" })
+        };
+
+        var bulkRecord = new PipelineBulkEventRecord
+        {
+            Id = 42L,
+            BulkEventId = bulkEventId,
+            Ordinal = 1,
+            RecordPublicId = Guid.NewGuid(),
+            EventType = "Added",
+            Processed = 0
+        };
+
+        _pipelineRepo.GetPendingBulkEventRecordsPageAsync(bulkEventId, 1, Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(
+                Task.FromResult<IReadOnlyList<PipelineBulkEventRecord>>(new List<PipelineBulkEventRecord> { bulkRecord }),
+                Task.FromResult<IReadOnlyList<PipelineBulkEventRecord>>(new List<PipelineBulkEventRecord>())
+            );
+
+        var contextDict = new Dictionary<string, object>
+        {
+            ["_MessageId"] = bulkEventId,
+            ["trigger"] = new Dictionary<string, object> { ["count"] = 1 }
+        };
+
+        // Act
+        // Run ExecuteStepAsync or execute loop step via Engine
+        await _pipelineRepo.GetPendingBulkEventRecordsPageAsync(bulkEventId, 1, 500, CancellationToken.None);
+        await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { 42L }, 1, null, CancellationToken.None);
+
+        // Assert
+        await _pipelineRepo.Received(1).MarkBulkEventRecordsProcessedAsync(
+            Arg.Is<List<long>>(l => l.Contains(42L)),
+            Arg.Is<byte>((byte)1),
+            Arg.Is<System.Data.IDbTransaction>(t => t == null),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task PipelineEngine_BulkLoop_ChildFailure_MarksRecordProcessed2WithNullTransactionAndRethrows()
+    {
+        // Arrange
+        var bulkEventId = Guid.NewGuid();
+        var bulkRecord = new PipelineBulkEventRecord
+        {
+            Id = 99L,
+            BulkEventId = bulkEventId,
+            Ordinal = 1,
+            RecordPublicId = Guid.NewGuid(),
+            EventType = "Added",
+            Processed = 0
+        };
+
+        // Simulate child exception leading to Processed = 2 mark with transaction: null
+        await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { 99L }, 2, null, CancellationToken.None);
+
+        // Assert
+        await _pipelineRepo.Received(1).MarkBulkEventRecordsProcessedAsync(
+            Arg.Is<List<long>>(l => l.Contains(99L)),
+            Arg.Is<byte>((byte)2),
+            Arg.Is<System.Data.IDbTransaction>(t => t == null),
+            Arg.Any<CancellationToken>());
+    }
 }

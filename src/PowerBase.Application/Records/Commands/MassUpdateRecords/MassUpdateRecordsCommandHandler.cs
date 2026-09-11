@@ -1,5 +1,7 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.Enums;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.ValueObjects;
 
@@ -12,6 +14,9 @@ public class MassUpdateRecordsCommandHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
+    private readonly IPipelineTriggerInterceptor _triggerInterceptor;
+    private readonly ITenantUnitOfWork _uow;
+    private readonly IQueryContext _queryContext;
     private readonly IAppRepository _appRepo;
 
     public MassUpdateRecordsCommandHandler(
@@ -20,6 +25,9 @@ public class MassUpdateRecordsCommandHandler
         IRecordRepository recordRepo,
         IRolePermissionEnforcer enforcer,
         IAuditRepository auditRepo,
+        IPipelineTriggerInterceptor triggerInterceptor,
+        ITenantUnitOfWork uow,
+        IQueryContext queryContext,
         IAppRepository appRepo)
     {
         _tableRepo = tableRepo;
@@ -27,6 +35,9 @@ public class MassUpdateRecordsCommandHandler
         _recordRepo = recordRepo;
         _enforcer = enforcer;
         _auditRepo = auditRepo;
+        _triggerInterceptor = triggerInterceptor;
+        _uow = uow;
+        _queryContext = queryContext;
         _appRepo = appRepo;
     }
 
@@ -128,12 +139,76 @@ public class MassUpdateRecordsCommandHandler
         if (violations.Count > 0)
             throw new RecordConstraintViolationException(violations);
 
-        var affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), command.FieldValues, ct);
+        // Pre-fetch snapshots for pipeline trigger interceptor before executing mass update
+        var recordChanges = new List<PipelineRecordChange>();
+        foreach (var recordPublicId in foundIds)
+        {
+            var beforeValues = new Dictionary<long, object?>();
+            var afterValues = new Dictionary<long, object?>();
+            var changedFieldIds = new List<long>();
 
-        await _auditRepo.LogActivityAsync(
-            AuditActions.Updated, AuditEntityTypes.Record, table.PublicId.ToString(),
-            $"{affected} record(s) mass-updated in {table.Name}", appId: table.AppId, ct: ct);
+            try
+            {
+                var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+                foreach (var f in fields)
+                {
+                    if (f.Fid.HasValue)
+                    {
+                        var colKey = PhysicalNaming.GetPhysicalColumnName(f);
+                        var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
+                        beforeValues[f.Id] = oldVal;
+                        beforeValues[f.Fid.Value] = oldVal;
 
-        return affected;
+                        if (command.FieldValues.TryGetValue(f.Fid.Value, out var newVal))
+                        {
+                            afterValues[f.Id] = newVal;
+                            afterValues[f.Fid.Value] = newVal;
+                            changedFieldIds.Add(f.Id);
+                        }
+                        else
+                        {
+                            afterValues[f.Id] = oldVal;
+                            afterValues[f.Fid.Value] = oldVal;
+                        }
+                    }
+                }
+
+                recordChanges.Add(new PipelineRecordChange(
+                    recordPublicId,
+                    beforeValues,
+                    afterValues,
+                    changedFieldIds,
+                    PipelineRecordEventType.Modified
+                ));
+            }
+            catch
+            {
+                // Skip if not found
+            }
+        }
+
+        await _uow.BeginAsync(ct);
+        try
+        {
+            if (recordChanges.Count > 0)
+            {
+                await _triggerInterceptor.InterceptBulkAsync(
+                    table, fields, recordChanges, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
+            }
+
+            var affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), command.FieldValues, ct);
+
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Updated, AuditEntityTypes.Record, table.PublicId.ToString(),
+                $"{affected} record(s) mass-updated in {table.Name}", appId: table.AppId, ct: ct);
+
+            await _uow.CommitAsync(ct);
+            return affected;
+        }
+        catch
+        {
+            await _uow.RollbackAsync(ct);
+            throw;
+        }
     }
 }

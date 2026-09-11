@@ -324,29 +324,10 @@ public class PipelineSchedulerWorker : BackgroundService
                             var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(utcNow, timeZoneInfo);
 
                             // Initialize NextRunOn if missing (fresh start or reactivation)
+                            // Initialize NextRunOn if missing (fresh start or reactivation)
                             if (!sched.NextRunOn.HasValue)
                             {
-                                try
-                                {
-                                    var scheduleInstance = CrontabSchedule.Parse(sched.CronExpression);
-                                    var startForNext = sched.LastRunOn.HasValue
-                                        ? TimeZoneInfo.ConvertTimeFromUtc(sched.LastRunOn.Value, timeZoneInfo)
-                                        : nowLocal.AddMinutes(-1);
-                                    var nextOccurrenceLocal = scheduleInstance.GetNextOccurrence(startForNext);
-                                    sched.NextRunOn = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextOccurrenceLocal, timeZoneInfo));
-                                }
-                                catch (ArgumentException)
-                                {
-                                    // POWERFLOWS SAFETY BEHAVIOR — QUICKBASE PARITY UNVERIFIED
-                                    // Defer nonexistent local hour (Spring Forward gap)
-                                    var startForNext = sched.LastRunOn.HasValue
-                                        ? TimeZoneInfo.ConvertTimeFromUtc(sched.LastRunOn.Value, timeZoneInfo).AddHours(1)
-                                        : nowLocal.AddHours(1);
-                                    var scheduleInstance = CrontabSchedule.Parse(sched.CronExpression);
-                                    var nextOccurrenceLocal = scheduleInstance.GetNextOccurrence(startForNext);
-                                    sched.NextRunOn = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextOccurrenceLocal, timeZoneInfo));
-                                    _logger.LogWarning("DST Spring Forward: skipped invalid local time for schedule {ScheduleId}, advanced next occurrence.", sched.Id);
-                                }
+                                sched.NextRunOn = TrimToMilliseconds(PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(sched, utcNow));
                                 await pipelineRepo.UpdateScheduleAsync(sched, transaction: null, ct);
                                 continue;
                             }
@@ -361,23 +342,8 @@ public class PipelineSchedulerWorker : BackgroundService
                             var latestOccurrenceUtc = TrimToMilliseconds(sched.NextRunOn.Value);
                             var latestOccurrenceLocal = TimeZoneInfo.ConvertTimeFromUtc(latestOccurrenceUtc, timeZoneInfo);
 
-                            // Compute NextRunOn strictly starting from nowLocal to prevent backlog/stampede
-                            DateTime nextRunUtc;
-                            try
-                            {
-                                var scheduleInstance2 = CrontabSchedule.Parse(sched.CronExpression);
-                                var nextRunLocal = scheduleInstance2.GetNextOccurrence(nowLocal);
-                                nextRunUtc = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo));
-                            }
-                            catch (ArgumentException)
-                            {
-                                // POWERFLOWS SAFETY BEHAVIOR — QUICKBASE PARITY UNVERIFIED
-                                // Defer nonexistent local hour (Spring Forward gap)
-                                var scheduleInstance2 = CrontabSchedule.Parse(sched.CronExpression);
-                                var nextRunLocal = scheduleInstance2.GetNextOccurrence(nowLocal.AddHours(1));
-                                nextRunUtc = TrimToMilliseconds(TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo));
-                                _logger.LogWarning("DST Spring Forward: skipped invalid local time for schedule {ScheduleId}, advanced next run time.", sched.Id);
-                            }
+                            // Compute NextRunOn strictly starting from now (utcNow) to prevent backlog/stampede
+                            DateTime nextRunUtc = TrimToMilliseconds(PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(sched, utcNow));
 
                             // Distributed CAS lock on schedule metadata
                             var pipeline = await pipelineRepo.GetByIdAsync(sched.PipelineId, ct);

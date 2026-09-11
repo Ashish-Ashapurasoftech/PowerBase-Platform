@@ -22,6 +22,7 @@ public class DatabaseQueueOptions
 {
     public int RelayPollingIntervalSeconds { get; set; } = 5;
     public int QueuePollingIntervalSeconds { get; set; } = 2;
+    public int RelayTenantConcurrency { get; set; } = 4;
     public int RelayBatchSize { get; set; } = 50;
     public int ExecutionBatchSize { get; set; } = 20;
     public int LeaseSeconds { get; set; } = 120;
