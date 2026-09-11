@@ -66,8 +66,12 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         var mappedEvent = PipelineEventMapper.Map(triggerEvent);
         if (mappedEvent == null) return;
 
-        var finalChangedIds = changedFieldIds?.ToList() ?? 
-            (triggerEvent == "record-updated" ? fieldValues.Keys.ToList() : new List<long>());
+        // Single-record writes report table FIDs; bulk changes use metadata IDs.
+        // Convert at this boundary rather than guessing both namespaces when matching.
+        var changedFids = changedFieldIds ?? fieldValues.Keys.ToList();
+        var finalChangedIds = triggerEvent == "record-updated"
+            ? fields.Where(f => f.Fid.HasValue && changedFids.Contains(f.Fid.Value)).Select(f => f.Id).Distinct().ToList()
+            : new List<long>();
 
         var finalBeforeValues = beforeValues ?? 
             (mappedEvent.Value == PipelineRecordEventType.Deleted ? fieldValues : new Dictionary<long, object?>());
@@ -259,11 +263,19 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                     //continue;
                 }
 
-                // Limit safety threshold check for single-record triggers
-                if (sub.LimitRecords && sub.TriggerSubtype != "new-bulk-event" && recordChanges.Count > (sub.MaxRecords ?? 1))
+                // Thresholds select the source batch; filters select records within it.
+                // Both boundaries are inclusive, and separate batches are never accumulated.
+                if (sub.LimitRecords)
                 {
-                    _logger.LogInformation("Pipeline {PipelineId}: Bulk mutation size {Count} exceeds maximum single-record trigger threshold {Max}. Skipping trigger generation.", sub.OwnerPipelineId, recordChanges.Count, sub.MaxRecords);
-                    continue;
+                    var limit = sub.MaxRecords ?? 1;
+                    var isBulk = sub.TriggerSubtype == "new-bulk-event";
+                    var outsideThreshold = isBulk ? recordChanges.Count < limit : recordChanges.Count > limit;
+                    if (outsideThreshold)
+                    {
+                        _logger.LogInformation("Pipeline {PipelineId}: Source batch size {Count} is outside {ThresholdType} threshold {Limit}. Skipping trigger generation.",
+                            sub.OwnerPipelineId, recordChanges.Count, isBulk ? "minimum" : "maximum", limit);
+                        continue;
+                    }
                 }
 
                 // Group changes that match trigger event filters
@@ -285,7 +297,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                                 if (triggerFields != null && triggerFields.Any())
                                 {
                                     var triggerFids = triggerFields.Select(f => ParseFid(f)).Where(x => x.HasValue).Select(x => x!.Value).ToList();
-                                    var changedFids = fields.Where(f => f.Fid.HasValue && (change.ChangedFieldIds.Contains(f.Id) || change.ChangedFieldIds.Contains(f.Fid.Value))).Select(f => f.Fid!.Value).ToList();
+                                    var changedFids = fields.Where(f => f.Fid.HasValue && change.ChangedFieldIds.Contains(f.Id)).Select(f => f.Fid!.Value).ToList();
                                     if (triggerFids.Intersect(changedFids).Any())
                                     {
                                         isCandidate = true;
@@ -344,13 +356,6 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                 // BRANCH A: On New Bulk Event Execution
                 if (sub.TriggerSubtype == "new-bulk-event")
                 {
-                    // Option B Minimum Threshold Evaluation
-                    if (sub.LimitRecords && matchingChanges.Count < (sub.MaxRecords ?? 1))
-                    {
-                        _logger.LogInformation("Pipeline {PipelineId}: Matching qualifying record count {Count} is below Minimum threshold {Min}. Skipping trigger runs.", sub.OwnerPipelineId, matchingChanges.Count, sub.MaxRecords);
-                        continue;
-                    }
-
                     var bulkEventId = Guid.NewGuid();
                     var ordinal = 1;
                     var stagingRecords = new List<PowerBase.Domain.Entities.PipelineBulkEventRecord>();

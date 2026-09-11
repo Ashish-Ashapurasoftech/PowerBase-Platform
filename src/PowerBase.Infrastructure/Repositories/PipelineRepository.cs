@@ -1586,7 +1586,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         const string sql = """
             SELECT Id, BulkEventId, Ordinal, RecordPublicId, EventType, BeforeValuesJson, AfterValuesJson, ChangedFieldsJson, Processed, CreatedOn
             FROM meta.PipelineBulkEventRecord
-            WHERE BulkEventId = @bulkEventId AND Processed = 0
+            WHERE BulkEventId = @bulkEventId AND Processed IN (0, 2)
             ORDER BY Ordinal ASC
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;

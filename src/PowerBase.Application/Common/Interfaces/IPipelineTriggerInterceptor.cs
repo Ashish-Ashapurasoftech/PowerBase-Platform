@@ -4,6 +4,7 @@ namespace PowerBase.Application.Common.Interfaces;
 
 public interface IPipelineTriggerInterceptor
 {
+    // changedFieldIds contains table FIDs for single-record writes.
     Task InterceptAsync(
         AppTable table,
         IReadOnlyList<AppField> fields,
@@ -14,6 +15,7 @@ public interface IPipelineTriggerInterceptor
         IReadOnlyDictionary<long, object?>? beforeValues = null,
         IReadOnlyList<long>? changedFieldIds = null);
 
+    // PipelineRecordChange.ChangedFieldIds contains internal AppField IDs.
     Task InterceptBulkAsync(
         AppTable table,
         IReadOnlyList<AppField> fields,

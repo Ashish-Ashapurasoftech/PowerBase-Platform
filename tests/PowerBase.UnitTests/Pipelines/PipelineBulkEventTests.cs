@@ -67,6 +67,37 @@ public class PipelineBulkEventTests
         );
     }
 
+    [Theory]
+    [InlineData(6, "Modified")]
+    [InlineData(10, "Modified")]
+    [InlineData(6, "Deleted")]
+    public void BulkRecordIdentityResolvesSavedLoopActionTarget(int count, string eventType)
+    {
+        var build = typeof(PipelineEngine).GetMethod("BuildBulkEventRecord", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        var evaluate = typeof(PipelineEngine).GetMethod("EvaluateTokens", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var ids = new HashSet<string>();
+        for (var i = 0; i < count; i++)
+        {
+            var record = new PipelineBulkEventRecord {
+                RecordPublicId = Guid.NewGuid(), EventType = eventType,
+                BeforeValuesJson = "{\"fid_8\":\"before\"}",
+                AfterValuesJson = "{\"fid_8\":\"after\",\"RecordPublicId\":\"wrong\"}"
+            };
+            var item = (Dictionary<string, object?>)build.Invoke(null, new object[] { record })!;
+            var payload = JsonSerializer.Serialize(new { steps = new { ref_8477 = new { item } } });
+            foreach (var property in new[] { "RecordPublicId", "id" })
+            {
+                var resolved = (string)evaluate.Invoke(_engine, new object?[] {
+                    "{{steps.ref_8477.item." + property + "}}", payload, null, null
+                })!;
+                resolved.Should().Be(record.RecordPublicId.ToString());
+            }
+            item["fid_8"]!.ToString().Should().Be(eventType == "Deleted" ? "before" : "after");
+            ids.Add(item["RecordPublicId"]!.ToString()!);
+        }
+        ids.Should().HaveCount(count);
+    }
+
     [Fact]
     public void Validator_NewBulkEvent_RequiresAtLeastOneEvent()
     {

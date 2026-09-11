@@ -26,6 +26,21 @@ using Scriban.Runtime;
 namespace PowerBase.Application.Pipelines;
 public class PipelineEngine : IPipelineEngine
 {
+    internal static Dictionary<string, object?> BuildBulkEventRecord(PipelineBulkEventRecord record)
+    {
+        var valuesJson = string.Equals(record.EventType, "Deleted", StringComparison.OrdinalIgnoreCase)
+            ? record.BeforeValuesJson : record.AfterValuesJson;
+        var result = string.IsNullOrWhiteSpace(valuesJson)
+            ? new Dictionary<string, object?>()
+            : JsonSerializer.Deserialize<Dictionary<string, object?>>(valuesJson) ?? new();
+        // Preserve Quickbase-style id and the identity used by saved action mappings.
+        // Staging identity wins over any similarly named field in the snapshot.
+        result["id"] = record.RecordPublicId.ToString();
+        result["RecordPublicId"] = record.RecordPublicId.ToString();
+        result["event_type"] = record.EventType;
+        return result;
+    }
+
     private readonly IPipelineRepository _pipelineRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IRecordWriteService _recordWriteService;
@@ -503,21 +518,8 @@ public class PipelineEngine : IPipelineEngine
                                 var recordsList = new List<Dictionary<string, object?>>();
                                 foreach (var r in bulkEventPreview)
                                 {
-                                    var recordObj = new Dictionary<string, object?>();
-                                    recordObj["id"] = r.RecordPublicId.ToString();
-                                    recordObj["event_type"] = r.EventType;
-                                    var valuesJson = r.EventType == "Deleted" ? r.BeforeValuesJson : r.AfterValuesJson;
-                                    if (!string.IsNullOrEmpty(valuesJson))
-                                    {
-                                        var valuesDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(valuesJson);
-                                        if (valuesDict != null)
-                                        {
-                                            foreach (var kvp in valuesDict)
-                                            {
-                                                recordObj[kvp.Key] = kvp.Value;
-                                            }
-                                        }
-                                    }
+                                    var recordObj = BuildBulkEventRecord(r);
+
                                     recordsList.Add(recordObj);
                                 }
 
@@ -1811,21 +1813,7 @@ public class PipelineEngine : IPipelineEngine
 
                     foreach (var r in pageRecords)
                     {
-                        var recordObj = new Dictionary<string, object?>();
-                        recordObj["id"] = r.RecordPublicId.ToString();
-                        recordObj["event_type"] = r.EventType;
-                        var valuesJson = r.EventType == "Deleted" ? r.BeforeValuesJson : r.AfterValuesJson;
-                        if (!string.IsNullOrEmpty(valuesJson))
-                        {
-                            var valuesDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(valuesJson);
-                            if (valuesDict != null)
-                            {
-                                foreach (var kvp in valuesDict)
-                                {
-                                    recordObj[kvp.Key] = kvp.Value;
-                                }
-                            }
-                        }
+                        var recordObj = BuildBulkEventRecord(r);
 
                         var loopScope = new Dictionary<string, object>
                         {
