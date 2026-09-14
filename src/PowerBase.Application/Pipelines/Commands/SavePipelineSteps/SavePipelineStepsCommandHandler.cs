@@ -236,6 +236,19 @@ public class SavePipelineStepsCommandHandler
                 ConfigJson = dto.ConfigJson
             };
             flatList.Add(step);
+            if (step.Subtype is "pipeline-called" or "call-another-pipeline")
+            {
+                try
+                {
+                    CallablePipelineDefinition.ValidateConfig(step.ConfigJson, step.Subtype == "call-another-pipeline");
+                    step.IsValidated = true;
+                }
+                catch (PipelineNonRetryableException)
+                {
+                    // Incomplete drafts may be saved, but never become activatable by trusting a client flag.
+                    step.IsValidated = false;
+                }
+            }
 
             if (dto.Children != null && dto.Children.Any())
             {

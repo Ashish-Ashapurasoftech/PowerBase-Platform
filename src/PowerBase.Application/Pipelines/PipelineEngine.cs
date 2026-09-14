@@ -344,6 +344,8 @@ public class PipelineEngine : IPipelineEngine
             }
 
             var eventName = task.TriggerEvent?.ToLowerInvariant() ?? "manual";
+            if (!isSkipped && eventName == "pipeline-called" && task.TriggeredBy != pipelineMeta!.CreatedBy)
+                throw new PipelineNonRetryableException("Callable execution must use the called pipeline owner's identity.");
             var normalizedEventName = eventName.Replace("-", "").Replace("_", "");
             if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent" or "webhook")
             {
@@ -1192,7 +1194,66 @@ public class PipelineEngine : IPipelineEngine
             }
         }
 
-        if (subtype == "look-up-record")
+        if (subtype == "call-another-pipeline")
+        {
+            var parentId = messageGuid == Guid.Empty
+                ? CallablePipelineDispatcher.CreateMessageId(Guid.Empty, step.PublicId, runId.ToString(), Guid.Empty) : messageGuid;
+            var priorDispatch = await idempotencyRepo.GetByExecutionKeyAsync(parentId, step.PublicId, executionPathHash, null, ct);
+            if (!string.IsNullOrEmpty(priorDispatch)) return priorDispatch;
+            var definition = CallablePipelineDefinition.ValidateConfig(step.ConfigJson, true);
+            using var config = JsonDocument.Parse(step.ConfigJson!);
+            var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var name in definition.Arguments)
+            {
+                var value = config.RootElement.GetProperty("arguments").GetProperty(name);
+                values[name] = value.ValueKind == JsonValueKind.String
+                    ? ResolveCallableValue(value.GetString(), payloadJson, executionPath, allSteps)
+                    : ConvertJsonElement(value);
+            }
+            var dispatcher = new CallablePipelineDispatcher(_pipelineRepo, _serviceProvider.GetRequiredService<IPipelineExecutionQueue>());
+            var messages = await dispatcher.DispatchAsync(_queryContext.TenantId, createdBy, step.PipelineId,
+                parentId, step.PublicId, executionPath, contextDict.GetValueOrDefault("_CorrelationId")?.ToString(),
+                contextDict.GetValueOrDefault("_Depth") is int depth ? depth : 1, definition, values, ct, _queryContext.PipelineChainJson);
+            stepRun.InputContext = JsonSerializer.Serialize(new { definition.Definition, Arguments = values });
+            var output = JsonSerializer.Serialize(new { Status = "Queued", MessageIds = messages });
+            try
+            {
+                await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
+                {
+                    MessageId = parentId, StepPublicId = step.PublicId, ExecutionPathHash = executionPathHash,
+                    ExecutionPath = executionPath, OutputJson = output
+                }, null, ct);
+            }
+            catch (Exception ex) when (IsUniqueConstraintViolation(ex))
+            {
+                var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(parentId, step.PublicId, executionPathHash, null, ct);
+                if (winningOutput != null) return winningOutput;
+                throw;
+            }
+            return output;
+        }
+        else if (subtype == "pipeline-called" && step.Type == "trigger")
+        {
+            var definition = CallablePipelineDefinition.ValidateConfig(step.ConfigJson, false);
+            using var payload = JsonDocument.Parse(payloadJson);
+            if (!payload.RootElement.TryGetProperty("trigger", out var envelope) ||
+                !envelope.TryGetProperty("CallDefinition", out var receivedDefinition) || receivedDefinition.GetString() != definition.Definition ||
+                !envelope.TryGetProperty("Arguments", out var args) || args.ValueKind != JsonValueKind.Object ||
+                !envelope.TryGetProperty("TriggerStepId", out var triggerId) || triggerId.GetInt64() != step.Id)
+                throw new PipelineNonRetryableException("Pipeline Called requires a matching callable invocation.");
+            var received = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var name in definition.Arguments)
+            {
+                if (!args.TryGetProperty(name, out var value)) throw new PipelineNonRetryableException($"Missing call argument: {name}.");
+                received[name] = ConvertJsonElement(value.Clone());
+            }
+            stepsDict[step.RefId] = received;
+            contextDict["trigger"] = received;
+            var output = JsonSerializer.Serialize(received);
+            stepRun.InputContext = output;
+            return output;
+        }
+        else if (subtype == "look-up-record")
         {
             var config = JsonSerializer.Deserialize<LookUpRecordStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             if (config == null || string.IsNullOrWhiteSpace(config.TablePublicId))
@@ -2870,6 +2931,17 @@ public class PipelineEngine : IPipelineEngine
             throw new PipelineStepException($"Source step '{stepRef}' referenced in condition token '{token}' could not be resolved.");
         }
 
+        if (sourceStep.Subtype == "pipeline-called")
+        {
+            var value = ResolveCallableValue(trimmedToken, payloadJson, null, allSteps);
+            return value switch
+            {
+                bool => "BOOLEAN",
+                byte or short or int or long or float or double or decimal => "NUMBER",
+                _ => "TEXT"
+            };
+        }
+
         // If source step is a Loop step, resolve table metadata from its loopOverStepId step
         if (sourceStep.Type == "loop" || sourceStep.Subtype == "for-each")
         {
@@ -3067,6 +3139,18 @@ public class PipelineEngine : IPipelineEngine
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
         if (string.IsNullOrEmpty(payloadJson)) return input;
+
+        var callableTrigger = allSteps?.FirstOrDefault(step => step.Subtype == "pipeline-called" && step.Type == "trigger");
+        if (callableTrigger != null)
+        {
+            var definition = CallablePipelineDefinition.ValidateConfig(callableTrigger.ConfigJson, false);
+            foreach (Match reference in Regex.Matches(input, @"\{\{\s*(?:steps\.)?([A-Za-z][A-Za-z0-9_]*)\.([A-Za-z][A-Za-z0-9_]*)"))
+            {
+                if ((reference.Groups[1].Value == callableTrigger.RefId || reference.Groups[1].Value == "trigger") &&
+                    !definition.Arguments.Contains(reference.Groups[2].Value, StringComparer.Ordinal))
+                    throw new PipelineStepException($"Callable argument '{reference.Groups[2].Value}' no longer exists.");
+            }
+        }
 
         // Structured fallback for legacy compatibility
         if (!string.IsNullOrEmpty(executionPath) && allSteps != null)
@@ -3310,6 +3394,23 @@ public class PipelineEngine : IPipelineEngine
             }
             return input;
         }
+    }
+
+    private object? ResolveCallableValue(string? input, string payloadJson, string? executionPath, List<PipelineStep>? allSteps)
+    {
+        // A complete field reference retains its JSON type; interpolated text remains text.
+        var match = Regex.Match(input ?? "", @"^\{\{\s*((?:steps\.|trigger\.|variables\.)?[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)\s*\}\}$");
+        if (!match.Success) return EvaluateTokens(input, payloadJson, executionPath, allSteps);
+        var path = match.Groups[1].Value;
+        if (allSteps?.Any(step => step.RefId == path.Split('.')[0]) == true) path = "steps." + path;
+        using var document = JsonDocument.Parse(payloadJson);
+        var value = document.RootElement;
+        foreach (var segment in path.Split('.'))
+        {
+            if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(segment, out value))
+                throw new PipelineStepException($"Call argument reference '{input}' is missing from the execution context.");
+        }
+        return ConvertJsonElement(value.Clone());
     }
 
     private string? ResolvePath(JsonElement root, string path)

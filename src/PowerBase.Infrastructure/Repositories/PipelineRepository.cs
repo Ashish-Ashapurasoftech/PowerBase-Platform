@@ -326,6 +326,24 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                 cancellationToken: ct));
     }
 
+    public async Task<IReadOnlyList<Pipeline>> FindCallablePipelinesAsync(long ownerId, string callDefinition, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var results = await connection.QueryAsync<Pipeline>(new CommandDefinition("""
+            SELECT p.* FROM meta.Pipeline p
+            WHERE p.CreatedBy = @ownerId AND p.IsDeleted = 0 AND p.IsActive = 1
+              AND EXISTS (
+                SELECT 1 FROM meta.PipelineStep s
+                WHERE s.PipelineId = p.Id AND s.IsDeleted = 0 AND s.IsValidated = 1
+                  AND s.ParentStepId IS NULL AND s.Type = 'trigger' AND s.Subtype = 'pipeline-called'
+                  AND LTRIM(RTRIM(JSON_VALUE(CASE WHEN ISJSON(s.ConfigJson) = 1 THEN s.ConfigJson ELSE '{}' END, '$.callDefinition')))
+                    COLLATE Latin1_General_100_BIN2 = @callDefinition COLLATE Latin1_General_100_BIN2
+              )
+            ORDER BY p.Id
+            """, new { ownerId, callDefinition }, cancellationToken: ct));
+        return results.AsList();
+    }
+
     public async Task<IReadOnlyList<Pipeline>> ListAllActiveAsync(CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);

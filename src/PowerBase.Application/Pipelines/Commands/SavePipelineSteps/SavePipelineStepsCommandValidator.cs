@@ -119,6 +119,9 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         var traversedRefIds = new HashSet<string>();
         foreach (var (step, parentRefId, branchType) in allStepsFlat)
         {
+            if ((step.Subtype == "pipeline-called" && (step.Type != "trigger" || step != firstStep)) ||
+                (step.Subtype == "call-another-pipeline" && step.Type != "action"))
+                context.AddFailure("Steps", "Pipeline Called must be the first root trigger; Call Another Pipeline must be an action.");
             // Rule 3 (Nested triggers check): If trigger, it must be at the root (parentRefId == null)
             if (step.Type == "trigger" && parentRefId != null)
             {

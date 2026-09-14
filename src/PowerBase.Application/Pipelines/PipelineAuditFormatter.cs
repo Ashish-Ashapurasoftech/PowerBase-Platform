@@ -298,7 +298,15 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             var inputDict = DeserializeJsonToDict(rawInputJson);
             var outputDict = DeserializeJsonToDict(rawOutputJson);
 
-            if (type == "trigger" && subtype == "new-bulk-event")
+            if (subtype is "pipeline-called" or "call-another-pipeline")
+            {
+                foreach (var entry in inputDict) friendlyInput[entry.Key] = entry.Value;
+                foreach (var entry in outputDict) friendlyOutput[entry.Key] = entry.Value;
+                logMessage = status == "Success"
+                    ? subtype == "pipeline-called" ? "Pipeline called; arguments received." : "Pipeline call queued."
+                    : $"Callable pipeline step {status.ToLowerInvariant()}.";
+            }
+            else if (type == "trigger" && subtype == "new-bulk-event")
             {
                 var count = inputDict.TryGetValue("Count", out var cVal) ? Convert.ToInt32(cVal) : 0;
                 var tableGuidStr = inputDict.TryGetValue("TablePublicId", out var tIdObj) ? tIdObj?.ToString() : null;
