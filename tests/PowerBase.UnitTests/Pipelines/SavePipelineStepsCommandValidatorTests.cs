@@ -120,6 +120,25 @@ public class SavePipelineStepsCommandValidatorTests
     }
 
     [Fact]
+    public async Task Validate_PrepareBulkUpsertAtStart_IsValid()
+    {
+        var prepare = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_prepare",
+            Type = "action",
+            Subtype = "prepare-bulk-upsert",
+            ConfigJson = "{\"tableId\":\"" + Guid.NewGuid() + "\",\"fields\":[\"fid_6\"],\"mergeField\":\"fid_3\"}",
+            IsValidated = true
+        };
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { prepare }, Array.Empty<byte>());
+
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Validate_InvalidFirstStepType_ReturnsError()
     {
         // Arrange
@@ -134,7 +153,7 @@ public class SavePipelineStepsCommandValidatorTests
 
         // Assert
         result.IsValid.Should().BeFalse();
-        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with either a Trigger step, a Search/Query step, or a Handle Errors step"));
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with either a Trigger step, a Search/Query step, a Handle Errors step, or Prepare Bulk Record Upsert"));
     }
 
     [Fact]

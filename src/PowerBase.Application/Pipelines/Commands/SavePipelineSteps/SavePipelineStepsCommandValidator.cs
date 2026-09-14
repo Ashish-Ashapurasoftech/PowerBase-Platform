@@ -24,14 +24,15 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             return;
         }
 
-        // Rule 1: Must begin with a Trigger, Search/Query step, or Handle Errors step at root index 0
+        // Rule 1: valid roots include ordinary trigger/query flows, error handling, and bulk upsert flows.
         var firstStep = steps[0];
-        bool isValidFirstStep = firstStep.Type == "trigger" || 
-                                (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
-                                (firstStep.Subtype == "handle-errors");
+        bool isValidFirstStep = firstStep.Type == "trigger" ||
+            (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
+            firstStep.Subtype == "handle-errors" ||
+            (firstStep.Type == "action" && firstStep.Subtype == "prepare-bulk-upsert");
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A pipeline must begin with either a Trigger step, a Search/Query step, or a Handle Errors step.");
+            context.AddFailure("Steps", "A pipeline must begin with either a Trigger step, a Search/Query step, a Handle Errors step, or Prepare Bulk Record Upsert.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();

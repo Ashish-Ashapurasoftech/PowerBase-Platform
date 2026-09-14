@@ -364,16 +364,20 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (normalizedEventName == "activation")
                 {
-                    if (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record"))
+                    var isQueryRoot = firstQueryStep?.Type == "query" && (firstQueryStep.Subtype == "search-records" || firstQueryStep.Subtype == "look-up-record");
+                    var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
+                    if (!isQueryRoot && !isPrepareBulkRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a query-first pipeline structure.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a query-first or Prepare Bulk Record Upsert-first pipeline structure.");
                     }
                 }
                 else if (normalizedEventName == "pipeline_schedule")
                 {
-                    if (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record"))
+                    var isQueryRoot = firstQueryStep?.Type == "query" && (firstQueryStep.Subtype == "search-records" || firstQueryStep.Subtype == "look-up-record");
+                    var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
+                    if (!isQueryRoot && !isPrepareBulkRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a query-first pipeline structure.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a query-first or Prepare Bulk Record Upsert-first pipeline structure.");
                     }
                     if (activeSteps.Any(s => s.Type == "trigger"))
                     {
@@ -2096,101 +2100,375 @@ public class PipelineEngine : IPipelineEngine
         else if (subtype == "prepare-bulk-upsert")
         {
             var config = JsonSerializer.Deserialize<PrepareBulkUpsertConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (config == null || string.IsNullOrWhiteSpace(config.TableLabel) || string.IsNullOrWhiteSpace(config.MergeKeyFid))
-                throw new InvalidOperationException("Prepare bulk upsert step configuration is invalid or missing table/merge key.");
+            var tableIdentifier = config?.GetTableIdentifier();
+            var mergeKeyIdentifier = config?.GetMergeKeyIdentifier();
+
+            if (string.IsNullOrWhiteSpace(tableIdentifier))
+                throw new InvalidOperationException("Prepare bulk upsert step configuration is invalid or missing table.");
+
+            if (string.IsNullOrWhiteSpace(mergeKeyIdentifier))
+                mergeKeyIdentifier = "3";
+
+            AppTable? table = null;
+            if (Guid.TryParse(tableIdentifier, out var tableGuid))
+            {
+                table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
+            }
+            else if (long.TryParse(tableIdentifier, out var tableId))
+            {
+                table = await tableRepo.GetByIdAsync(tableId, ct);
+            }
+            else if (Guid.TryParse(tableIdentifier.Trim('"'), out var strippedGuid))
+            {
+                table = await tableRepo.GetByPublicIdAsync(strippedGuid, ct);
+            }
+
+            if (table == null)
+                throw new InvalidOperationException($"Failed to resolve table: '{tableIdentifier}'");
+
+            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            var mergeField = ResolveBulkUpsertField(mergeKeyIdentifier, fields);
+
+            if (mergeField == null || !mergeField.Fid.HasValue)
+            {
+                if (mergeKeyIdentifier == "3" || mergeKeyIdentifier.Equals("fid_3", StringComparison.OrdinalIgnoreCase) ||
+                    mergeKeyIdentifier.Equals("Record ID", StringComparison.OrdinalIgnoreCase) ||
+                    mergeKeyIdentifier.Equals("Record ID#", StringComparison.OrdinalIgnoreCase) ||
+                    mergeKeyIdentifier.Equals("Id", StringComparison.OrdinalIgnoreCase))
+                {
+                    mergeField = fields.FirstOrDefault(f => f.Fid == 3) ?? new AppField { Fid = 3, Name = "Record ID#", TypeCode = "RecordId", IsSystem = true, PhysicalColumnName = "Id" };
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Failed to resolve merge key field: '{mergeKeyIdentifier}'");
+                }
+            }
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                TableLabel = config.TableLabel,
-                MergeKeyFid = config.MergeKeyFid
+                TableLabel = table.PublicId.ToString(),
+                MergeKeyFid = mergeField.Fid.HasValue ? $"fid_{mergeField.Fid.Value}" : mergeKeyIdentifier
             });
 
             var session = new BulkUpsertSession
             {
-                TableLabel = config.TableLabel,
-                MergeKeyFid = config.MergeKeyFid,
+                TableLabel = table.PublicId.ToString(),
+                MergeKeyFid = mergeField.Fid.HasValue ? $"fid_{mergeField.Fid.Value}" : mergeKeyIdentifier,
+                Table = table,
+                Fields = fields,
+                MergeField = mergeField,
+                SelectedFieldFids = config?.Fields?.Select(f => ResolveBulkUpsertField(f, fields).Fid).Where(f => f.HasValue).Select(f => (long)f!.Value).ToHashSet(),
                 Rows = new List<Dictionary<long, object?>>()
             };
 
             var sessions = GetOrCreateBulkUpsertSessions(contextDict);
             sessions[step.RefId] = session;
+            if (step.Id > 0) sessions[step.Id.ToString()] = session;
+            if (step.PublicId != Guid.Empty) sessions[step.PublicId.ToString()] = session;
 
             return JsonSerializer.Serialize(new { SessionId = step.RefId, Status = "Prepared" });
         }
         else if (subtype == "add-bulk-upsert-row")
         {
             var config = JsonSerializer.Deserialize<AddBulkUpsertRowConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (config == null || string.IsNullOrWhiteSpace(config.ParentUpsertStepRefId))
+            var parentRefId = config?.GetParentRefId()?.Replace("steps.", "");
+            if (string.IsNullOrWhiteSpace(parentRefId))
                 throw new InvalidOperationException("Add bulk upsert row step configuration is invalid or missing ParentUpsertStepRefId.");
 
-            var parentRefId = config.ParentUpsertStepRefId.Replace("steps.", "");
             var sessions = GetOrCreateBulkUpsertSessions(contextDict);
-            if (!sessions.TryGetValue(parentRefId, out var session))
-                throw new InvalidOperationException($"No bulk upsert session found for parent reference: '{config.ParentUpsertStepRefId}'");
+            BulkUpsertSession? parentSession = null;
+            var parentStep = allSteps?.FirstOrDefault(s => s.RefId == parentRefId || s.Id.ToString() == parentRefId || s.PublicId.ToString() == parentRefId);
 
-            var tableGuid = Guid.Parse(session.TableLabel);
-            var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
-            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            if (!sessions.TryGetValue(parentRefId, out parentSession))
+            {
+                if (parentStep != null && sessions.TryGetValue(parentStep.RefId, out var foundSession))
+                {
+                    parentSession = foundSession;
+                }
+            }
+
+            if (parentSession == null)
+                throw new InvalidOperationException($"No bulk upsert session found for parent reference: '{parentRefId}'");
+
+            bool isParentPrepare = parentStep != null ? parentStep.Subtype == "prepare-bulk-upsert" : (parentSession.RootSession == null && parentSession.IsCommittable);
+
+            // Zero-query row add: use cached table and fields from parentSession or root
+            var root = parentSession.RootSession ?? parentSession;
+            var table = root.Table;
+            var fields = root.Fields;
+            if (table == null || fields == null)
+            {
+                var tableGuid = Guid.Parse(root.TableLabel);
+                table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
+                fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+                root.Table = table;
+                root.Fields = fields;
+            }
 
             var rowValues = new Dictionary<long, object?>();
+            // A selected bulk-import column is present in every row, even when its mapping is blank.
+            if (root.SelectedFieldFids != null)
+            {
+                foreach (var field in fields.Where(f => f.Fid.HasValue && root.SelectedFieldFids.Contains(f.Fid.Value) && !f.IsSystem))
+                    rowValues[field.Fid!.Value] = ParseBulkUpsertValueType("", field.TypeCode);
+            }
+
             var resolvedMappings = new Dictionary<string, object?>();
-            if (config.FieldMappings != null)
+
+            // 1. Process FieldMappings if present
+            if (config?.FieldMappings != null)
             {
                 foreach (var mapping in config.FieldMappings)
                 {
                     if (string.IsNullOrWhiteSpace(mapping.Field)) continue;
-
-                    var field = fields.FirstOrDefault(f => 
-                        f.Name.Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) || 
-                        $"fid_{f.Id}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) ||
-                        $"fid_{f.Fid}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase));
-
+                    var field = ResolveBulkUpsertField(mapping.Field, fields);
                     if (field != null && field.Fid.HasValue)
                     {
-                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, field.Name);
+                        var resolvedValStr = mapping.Value != null ? EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps) : null;
+                        var parsedVal = mapping.Value != null ? ParseBulkUpsertValueType(resolvedValStr, field.TypeCode) : null;
                         rowValues[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
                 }
             }
 
+            // 2. Process RowValues if present (supports frontend contract)
+            if (config?.RowValues != null)
+            {
+                foreach (var kvp in config.RowValues)
+                {
+                    if (string.IsNullOrWhiteSpace(kvp.Key)) continue;
+                    var field = ResolveBulkUpsertField(kvp.Key, fields);
+                    if (field != null && field.Fid.HasValue)
+                    {
+                        var rawVal = kvp.Value;
+                        object? parsedVal;
+                        if (rawVal == null)
+                        {
+                            parsedVal = null;
+                        }
+                        else if (rawVal is JsonElement el)
+                        {
+                            if (el.ValueKind == JsonValueKind.Null)
+                            {
+                                parsedVal = null;
+                            }
+                            else if (el.ValueKind == JsonValueKind.String)
+                            {
+                                var resolvedValStr = EvaluateTokens(el.GetString(), payloadJson, executionPath, allSteps);
+                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                            }
+                            else
+                            {
+                                var resolvedValStr = EvaluateTokens(el.GetRawText(), payloadJson, executionPath, allSteps);
+                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                            }
+                        }
+                        else if (rawVal is string s)
+                        {
+                            var resolvedValStr = EvaluateTokens(s, payloadJson, executionPath, allSteps);
+                            parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                        }
+                        else
+                        {
+                            parsedVal = rawVal;
+                        }
+
+                        if (field.Fid.Value != 3 || (parsedVal != null && long.TryParse(parsedVal.ToString(), out var checkId) && checkId > 0))
+                        {
+                            rowValues[field.Fid.Value] = parsedVal;
+                            resolvedMappings[kvp.Key] = parsedVal;
+                        }
+                    }
+                }
+            }
+
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                ParentUpsertStepRefId = config.ParentUpsertStepRefId,
+                ParentUpsertStepRefId = parentRefId,
+                BulkRecordSetStepId = parentRefId,
                 FieldMappings = resolvedMappings
             });
 
-            session.Rows.Add(rowValues);
-            return JsonSerializer.Serialize(new { Status = "RowAdded", RowCount = session.Rows.Count });
+            if (isParentPrepare)
+            {
+                // Direct Add Row -> Prepare: contribute to root Prepare collection
+                parentSession.Rows.Add(rowValues);
+
+                var node = new BulkUpsertSession
+                {
+                    TableLabel = root.TableLabel,
+                    MergeKeyFid = root.MergeKeyFid,
+                    Table = root.Table,
+                    Fields = root.Fields,
+                    MergeField = root.MergeField,
+                    RootSession = root,
+                    IsCommittable = false
+                };
+
+                sessions[step.RefId] = node;
+                if (step.Id > 0) sessions[step.Id.ToString()] = node;
+                if (step.PublicId != Guid.Empty) sessions[step.PublicId.ToString()] = node;
+
+                return JsonSerializer.Serialize(new { Status = "RowAdded", RowCount = parentSession.Rows.Count });
+            }
+            else
+            {
+                // Add Row -> Add Row (Chaining / Fan-Out): contribute to shared downstream child collection
+                var targetCollection = parentSession.DownstreamChildCollection;
+                if (targetCollection == null)
+                {
+                    targetCollection = new BulkUpsertSession
+                    {
+                        TableLabel = root.TableLabel,
+                        MergeKeyFid = root.MergeKeyFid,
+                        Table = root.Table,
+                        Fields = root.Fields,
+                        MergeField = root.MergeField,
+                        RootSession = root,
+                        IsCommittable = true,
+                        Rows = new List<Dictionary<long, object?>>()
+                    };
+                    parentSession.DownstreamChildCollection = targetCollection;
+                }
+
+                targetCollection.Rows.Add(rowValues);
+
+                var node = new BulkUpsertSession
+                {
+                    TableLabel = root.TableLabel,
+                    MergeKeyFid = root.MergeKeyFid,
+                    Table = root.Table,
+                    Fields = root.Fields,
+                    MergeField = root.MergeField,
+                    RootSession = root,
+                    DownstreamChildCollection = targetCollection,
+                    IsCommittable = false
+                };
+
+                sessions[step.RefId] = node;
+                if (step.Id > 0) sessions[step.Id.ToString()] = node;
+                if (step.PublicId != Guid.Empty) sessions[step.PublicId.ToString()] = node;
+
+                return JsonSerializer.Serialize(new { Status = "RowAdded", RowCount = targetCollection.Rows.Count });
+            }
         }
         else if (subtype == "commit-upsert")
         {
             var config = JsonSerializer.Deserialize<CommitBulkUpsertConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (config == null || string.IsNullOrWhiteSpace(config.ParentUpsertStepRefId))
+            var parentRefId = config?.GetParentRefId()?.Replace("steps.", "");
+            if (string.IsNullOrWhiteSpace(parentRefId))
                 throw new InvalidOperationException("Commit bulk upsert step configuration is invalid or missing ParentUpsertStepRefId.");
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                ParentUpsertStepRefId = config.ParentUpsertStepRefId
+                ParentUpsertStepRefId = parentRefId,
+                BulkRecordSetStepId = parentRefId
             });
 
-            var parentRefId = config.ParentUpsertStepRefId.Replace("steps.", "");
             var sessions = GetOrCreateBulkUpsertSessions(contextDict);
-            if (!sessions.TryGetValue(parentRefId, out var session))
-                throw new InvalidOperationException($"No bulk upsert session found for parent reference: '{config.ParentUpsertStepRefId}'");
+            BulkUpsertSession? session = null;
+            string sessionKey = parentRefId;
 
-            var tableGuid = Guid.Parse(session.TableLabel);
-            var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
-            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            if (sessions.TryGetValue(parentRefId, out session))
+            {
+                sessionKey = parentRefId;
+            }
+            else
+            {
+                var refStep = allSteps?.FirstOrDefault(s => s.RefId == parentRefId || s.Id.ToString() == parentRefId || s.PublicId.ToString() == parentRefId);
+                if (refStep != null && sessions.TryGetValue(refStep.RefId, out session))
+                {
+                    sessionKey = refStep.RefId;
+                }
+            }
 
-            var mergeField = ResolvePipelineField(session.MergeKeyFid, fields);
+            if (session == null)
+                throw new InvalidOperationException($"No bulk upsert session found for parent reference: '{config?.GetParentRefId() ?? parentRefId}'");
 
-            if (!mergeField.Fid.HasValue)
-                throw new InvalidOperationException($"Failed to resolve merge key field: '{session.MergeKeyFid}'");
+            BulkUpsertSession? committableSession = null;
+            if (session.DownstreamChildCollection != null)
+            {
+                committableSession = session.DownstreamChildCollection;
+            }
+            else if (session.IsCommittable)
+            {
+                committableSession = session;
+            }
+
+            if (committableSession == null)
+            {
+                // Direct Add Row -> Prepare with no downstream child: commits 0 records
+                return JsonSerializer.Serialize(new
+                {
+                    Status = "Committed",
+                    inserted_count = 0,
+                    updated_count = 0,
+                    unchanged_count = 0,
+                    inserted_record_ids = Array.Empty<long>(),
+                    updated_record_ids = Array.Empty<long>(),
+                    total_rows = 0,
+                    total_failed = 0
+                });
+            }
+
+            session = committableSession;
+
+            var table = session.Table;
+            var fields = session.Fields;
+            if (table == null || fields == null)
+            {
+                var tableGuid = Guid.Parse(session.TableLabel);
+                table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
+                fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+                session.Table = table;
+                session.Fields = fields;
+            }
+
+            var mergeField = session.MergeField ?? ResolveBulkUpsertField(session.MergeKeyFid, fields);
+            if (mergeField == null || !mergeField.Fid.HasValue)
+            {
+                if (session.MergeKeyFid == "3" || session.MergeKeyFid.Equals("fid_3", StringComparison.OrdinalIgnoreCase) ||
+                    session.MergeKeyFid.Equals("Record ID", StringComparison.OrdinalIgnoreCase) ||
+                    session.MergeKeyFid.Equals("Record ID#", StringComparison.OrdinalIgnoreCase) ||
+                    session.MergeKeyFid.Equals("Id", StringComparison.OrdinalIgnoreCase))
+                {
+                    mergeField = fields.FirstOrDefault(f => f.Fid == 3) ?? new AppField { Fid = 3, Name = "Record ID#", TypeCode = "Numeric", IsSystem = true, PhysicalColumnName = "Id" };
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Failed to resolve merge key field: '{session.MergeKeyFid}'");
+                }
+            }
+
+            // MANDATORY CONDITION 3: STRICT IN-BATCH DUPLICATE DETECTION (In-Memory, BEFORE DB transaction)
+            var seenMergeKeys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < session.Rows.Count; i++)
+            {
+                var r = session.Rows[i];
+                if (r.TryGetValue(mergeField.Fid.Value, out var mVal) && mVal != null && !string.IsNullOrWhiteSpace(mVal.ToString()))
+                {
+                    var keyStr = mVal.ToString()!.Trim();
+                    if (seenMergeKeys.TryGetValue(keyStr, out var firstIndex))
+                    {
+                        sessions.Remove(sessionKey);
+                        throw new PipelineBulkUpsertException(
+                            "DUPLICATE_MERGE_KEY_IN_BATCH",
+                            $"Duplicate merge key '{keyStr}' found in batch at row {firstIndex + 1} and row {i + 1}.",
+                            rowIndex: i + 1,
+                            fieldFid: mergeField.Fid,
+                            fieldName: mergeField.Name
+                        );
+                    }
+                    seenMergeKeys[keyStr] = i;
+                }
+            }
 
             int inserted = 0;
             int updated = 0;
+            var createdRecordIds = new List<long>();
+            var updatedRecordIds = new List<long>();
             var addedChanges = new List<PipelineRecordChange>();
             var modifiedChanges = new List<PipelineRecordChange>();
 
+            // MANDATORY CONDITION 1: UNIFIED TRANSACTION CONNECTION
             await uow.BeginAsync(ct);
             try
             {
@@ -2198,54 +2476,229 @@ public class PipelineEngine : IPipelineEngine
                 if (!string.IsNullOrEmpty(cachedOutput))
                 {
                     await uow.CommitAsync(ct);
-                    sessions.Remove(parentRefId);
+                    sessions.Remove(sessionKey);
                     return cachedOutput;
                 }
 
-                var addedRecords = new List<(Guid PublicId, Dictionary<long, object?> Row, Dictionary<long, object?> ChangeValues)>();
+                var isMergeRecordId = (mergeField.IsSystem && string.Equals(mergeField.PhysicalColumnName, "Id", StringComparison.OrdinalIgnoreCase)) ||
+                                      (string.Equals(mergeField.TypeCode, "RecordId", StringComparison.OrdinalIgnoreCase));
+                var mergeColName = isMergeRecordId ? "Id" : PhysicalNaming.GetPhysicalColumnName(mergeField);
+
+                var candidateRecordIds = new HashSet<long>();
+                var candidateMergeKeys = new HashSet<object>();
 
                 foreach (var row in session.Rows)
                 {
-                    if (!row.TryGetValue(mergeField.Fid.Value, out var mergeVal) || mergeVal == null)
+                    if (row.TryGetValue(3, out var idVal) && idVal != null && !string.IsNullOrWhiteSpace(idVal.ToString()))
                     {
-                        var recordPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
-
-                        var changeValues = new Dictionary<long, object?>();
-                        foreach (var f in fields)
+                        if (long.TryParse(idVal.ToString(), out var parsedLongId) && parsedLongId > 0)
                         {
-                            if (f.Fid.HasValue && row.TryGetValue(f.Fid.Value, out var val))
-                                changeValues[f.Id] = val;
+                            candidateRecordIds.Add(parsedLongId);
                         }
-
-                        addedRecords.Add((recordPublicId, row, changeValues));
-                        inserted++;
-                        continue;
                     }
 
-                    var filterCondition = new FilterCondition
+                    if (row.TryGetValue(mergeField.Fid.Value, out var mkVal) && mkVal != null && !string.IsNullOrWhiteSpace(mkVal.ToString()))
                     {
-                        FieldId = mergeField.Fid.Value,
-                        Operator = "eq",
-                        Value = mergeVal.ToString()
-                    };
-                    var filterTree = new FilterGroup
-                    {
-                        Logic = "and",
-                        Nodes = new List<FilterNode> { new FilterNode { Condition = filterCondition } }
-                    };
-
-                    var existingRows = await recordRepo.ListAsync(table, fields, page: 1, pageSize: 1, filterTree: filterTree, ct: ct);
-                    if (existingRows != null && existingRows.Any())
-                    {
-                        var existingRow = existingRows.First();
-                        Guid? recordPublicId = null;
-                        if (existingRow.TryGetValue("publicId", out var pubIdObj) && pubIdObj is Guid)
+                        if (isMergeRecordId)
                         {
-                            recordPublicId = (Guid)pubIdObj;
+                            if (long.TryParse(mkVal.ToString(), out var parsedLongId) && parsedLongId > 0)
+                            {
+                                candidateRecordIds.Add(parsedLongId);
+                            }
                         }
-                        else if (existingRow.TryGetValue("id", out var idObj) && idObj is Guid)
+                        else
                         {
-                            recordPublicId = (Guid)idObj;
+                            candidateMergeKeys.Add(mkVal);
+                        }
+                    }
+                }
+
+                // Set-based / chunked lookup on uow.Transaction with UPDLOCK/HOLDLOCK concurrency hints
+                IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> rowsById = new Dictionary<long, IReadOnlyDictionary<string, object?>>();
+                if (candidateRecordIds.Count > 0)
+                {
+                    rowsById = await recordRepo.GetBulkUpsertRowsByIdsAsync(table, fields, candidateRecordIds.ToList(), uow.Transaction, ct);
+                }
+
+                IReadOnlyDictionary<object, IReadOnlyDictionary<string, object?>> rowsByMergeKey = new Dictionary<object, IReadOnlyDictionary<string, object?>>();
+                if (candidateMergeKeys.Count > 0 && !isMergeRecordId)
+                {
+                    rowsByMergeKey = await recordRepo.GetBulkUpsertRowsByColumnValuesAsync(table, fields, mergeColName, candidateMergeKeys.ToList(), uow.Transaction, ct);
+                }
+
+                IReadOnlyDictionary<string, object?>? FindByMergeKey(object? mkVal)
+                {
+                    if (mkVal == null) return null;
+                    var mkStr = mkVal.ToString();
+                    if (string.IsNullOrWhiteSpace(mkStr)) return null;
+
+                    if (isMergeRecordId)
+                    {
+                        if (long.TryParse(mkStr, out var parsedLongId) && rowsById.TryGetValue(parsedLongId, out var found))
+                        {
+                            return found;
+                        }
+                        return null;
+                    }
+
+                    if (rowsByMergeKey.TryGetValue(mkVal, out var directMatch))
+                        return directMatch;
+
+                    var trimmed = mkStr.Trim();
+                    if (rowsByMergeKey.TryGetValue(trimmed, out var trimmedMatch))
+                        return trimmedMatch;
+
+                    return null;
+                }
+
+                var writableFids = fields
+                    .Where(f => !f.IsSystem && f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode))
+                    .Select(f => (long)f.Fid!.Value)
+                    .ToHashSet();
+
+                var addedRecords = new List<(Guid PublicId, Dictionary<long, object?> Row, Dictionary<long, object?> ChangeValues)>();
+
+                // Process each row according to Plan V2 Cases 1–6
+                for (int i = 0; i < session.Rows.Count; i++)
+                {
+                    var row = session.Rows[i];
+
+                    long? suppliedRecordId = null;
+                    if (row.TryGetValue(3, out var rIdObj) && rIdObj != null && !string.IsNullOrWhiteSpace(rIdObj.ToString()) && long.TryParse(rIdObj.ToString(), out var rid) && rid > 0)
+                    {
+                        suppliedRecordId = rid;
+                    }
+
+                    object? suppliedMergeKey = null;
+                    if (row.TryGetValue(mergeField.Fid.Value, out var mKeyObj) && mKeyObj != null && !string.IsNullOrWhiteSpace(mKeyObj.ToString()))
+                    {
+                        suppliedMergeKey = mKeyObj;
+                    }
+
+                    bool recordIdProvided = suppliedRecordId.HasValue;
+                    bool mergeKeyProvided = suppliedMergeKey != null;
+
+                    IReadOnlyDictionary<string, object?>? recordA = null;
+                    if (recordIdProvided)
+                    {
+                        rowsById.TryGetValue(suppliedRecordId!.Value, out recordA);
+                    }
+
+                    IReadOnlyDictionary<string, object?>? recordB = null;
+                    if (mergeKeyProvided)
+                    {
+                        recordB = FindByMergeKey(suppliedMergeKey);
+                    }
+
+                    IReadOnlyDictionary<string, object?>? matchedExistingRow = null;
+
+                    if (recordIdProvided && mergeKeyProvided)
+                    {
+                        // CASE 5: Record ID supplied but does not exist in DB
+                        if (recordA == null)
+                        {
+                            sessions.Remove(sessionKey);
+                            throw new PipelineBulkUpsertException(
+                                "RECORD_ID_NOT_FOUND",
+                                $"Record ID {suppliedRecordId!.Value} was not found in Table '{table.Name}'.",
+                                rowIndex: i + 1,
+                                fieldFid: 3,
+                                fieldName: "Record ID#"
+                            );
+                        }
+
+                        long idA = Convert.ToInt64(recordA["Id"]);
+
+                        if (recordB != null)
+                        {
+                            long idB = Convert.ToInt64(recordB["Id"]);
+                            if (idA == idB)
+                            {
+                                // CASE 3: Both Record ID and Merge Key identify the SAME record -> UPDATE
+                                matchedExistingRow = recordA;
+                            }
+                            else
+                            {
+                                // CASE 4 / CASE 6 Collision: Record ID identifies Record A, Merge Key identifies Record B -> REJECT
+                                sessions.Remove(sessionKey);
+                                throw new PipelineBulkUpsertException(
+                                    "RECORD_ID_MERGE_KEY_MISMATCH",
+                                    $"Record ID {suppliedRecordId!.Value} (Record {idA}) and Merge Key '{suppliedMergeKey}' (Record {idB}) identify different records in Table '{table.Name}' at row {i + 1}.",
+                                    rowIndex: i + 1,
+                                    fieldFid: mergeField.Fid,
+                                    fieldName: mergeField.Name
+                                );
+                            }
+                        }
+                        else
+                        {
+                            // CASE 6: Record ID exists and incoming Merge Key is unused -> UPDATE Record A
+                            matchedExistingRow = recordA;
+                        }
+                    }
+                    else if (recordIdProvided && !mergeKeyProvided)
+                    {
+                        // CASE 1: Record ID only
+                        if (recordA != null)
+                        {
+                            matchedExistingRow = recordA; // UPDATE
+                        }
+                        else
+                        {
+                            sessions.Remove(sessionKey);
+                            throw new PipelineBulkUpsertException(
+                                "RECORD_ID_NOT_FOUND",
+                                $"Record ID {suppliedRecordId!.Value} was not found in Table '{table.Name}'.",
+                                rowIndex: i + 1,
+                                fieldFid: 3,
+                                fieldName: "Record ID#"
+                            );
+                        }
+                    }
+                    else if (!recordIdProvided && mergeKeyProvided)
+                    {
+                        // CASE 2: Merge Key only
+                        if (recordB != null)
+                        {
+                            matchedExistingRow = recordB; // UPDATE
+                        }
+                        else
+                        {
+                            matchedExistingRow = null; // INSERT
+                        }
+                    }
+                    else
+                    {
+                        // Neither provided -> INSERT
+                        matchedExistingRow = null;
+                    }
+
+                    // Remove non-writable (system / computed) fields from row before database writes
+                    var nonWritableKeys = row.Keys.Where(k => !writableFids.Contains(k)).ToList();
+                    foreach (var k in nonWritableKeys)
+                    {
+                        row.Remove(k);
+                    }
+
+                    if (matchedExistingRow != null)
+                    {
+                        // UPDATE (Cases 1, 2-update, 3, 6-update)
+                        Guid? recordPublicId = null;
+                        if (matchedExistingRow.TryGetValue("publicId", out var pubIdObj) && pubIdObj is Guid g1)
+                        {
+                            recordPublicId = g1;
+                        }
+                        else if (matchedExistingRow.TryGetValue("PublicId", out var pubIdObj2) && pubIdObj2 is Guid g2)
+                        {
+                            recordPublicId = g2;
+                        }
+                        else if (matchedExistingRow.TryGetValue("publicId", out var pStr) && Guid.TryParse(pStr?.ToString(), out var g3))
+                        {
+                            recordPublicId = g3;
+                        }
+                        else if (matchedExistingRow.TryGetValue("PublicId", out var pStr2) && Guid.TryParse(pStr2?.ToString(), out var g4))
+                        {
+                            recordPublicId = g4;
                         }
 
                         if (recordPublicId.HasValue)
@@ -2258,21 +2711,42 @@ public class PipelineEngine : IPipelineEngine
                             {
                                 if (f.Fid.HasValue)
                                 {
-                                    var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
-                                    var oldVal = existingRow.TryGetValue(colKey, out var ov) ? ov : null;
-                                    var newVal = row.TryGetValue(f.Fid.Value, out var nv) ? nv : null;
+                                    var colKey = PhysicalNaming.GetPhysicalColumnName(f);
+                                    var oldVal = matchedExistingRow.TryGetValue(colKey, out var ov) ? ov : (matchedExistingRow.TryGetValue($"fid_{f.Fid.Value}", out var ov2) ? ov2 : null);
                                     beforeValues[f.Id] = oldVal;
-                                    afterValues[f.Id] = newVal;
+                                    beforeValues[f.Fid.Value] = oldVal;
 
-                                    if (oldVal?.ToString() != newVal?.ToString())
+                                    if (row.ContainsKey(f.Fid.Value))
                                     {
-                                        changedFieldIds.Add(f.Id);
+                                        var newVal = row[f.Fid.Value];
+                                        afterValues[f.Id] = newVal;
+                                        afterValues[f.Fid.Value] = newVal;
+
+                                        if (!f.IsSystem && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && !AreValuesEqual(oldVal, newVal, f.TypeCode))
+                                        {
+                                            changedFieldIds.Add((long)f.Fid.Value);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        afterValues[f.Id] = oldVal;
+                                        afterValues[f.Fid.Value] = oldVal;
                                     }
                                 }
                             }
 
+                            // UPDATE in DB on uow.Transaction via recordWriteService (with sanitized row)
                             await recordWriteService.ApplyAsync(
-                                table, fields, recordPublicId.Value, row, AuditActions.Updated, "Record upserted via Pipeline bulk commit action step", ct, uow.Transaction, suppressInterception: true);
+                                table,
+                                fields,
+                                recordPublicId.Value,
+                                row,
+                                Domain.Constants.AuditActions.Updated,
+                                $"Pipeline '{step.PipelineId}' step '{step.Id}' updated record {recordPublicId.Value}",
+                                ct,
+                                uow.Transaction,
+                                suppressInterception: true
+                            );
 
                             modifiedChanges.Add(new PipelineRecordChange(
                                 recordPublicId.Value,
@@ -2281,44 +2755,56 @@ public class PipelineEngine : IPipelineEngine
                                 changedFieldIds,
                                 PipelineRecordEventType.Modified
                             ));
+
+                            if (matchedExistingRow.TryGetValue("Id", out var exId) && exId != null && long.TryParse(exId.ToString(), out var parsedExId))
+                            {
+                                updatedRecordIds.Add(parsedExId);
+                            }
+                            else if (suppliedRecordId.HasValue)
+                            {
+                                updatedRecordIds.Add(suppliedRecordId.Value);
+                            }
+
                             updated++;
                         }
                         else
                         {
-                            var createdId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
-
+                            var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
                             var changeValues = new Dictionary<long, object?>();
                             foreach (var f in fields)
                             {
                                 if (f.Fid.HasValue && row.TryGetValue(f.Fid.Value, out var val))
+                                {
                                     changeValues[f.Id] = val;
+                                    changeValues[f.Fid.Value] = val;
+                                }
                             }
-
-                            addedRecords.Add((createdId, row, changeValues));
+                            addedRecords.Add((createdPublicId, row, changeValues));
                             inserted++;
                         }
                     }
                     else
                     {
-                        var createdId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
-
+                        // INSERT (Cases 2-insert, 6-insert)
+                        var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
                         var changeValues = new Dictionary<long, object?>();
                         foreach (var f in fields)
                         {
                             if (f.Fid.HasValue && row.TryGetValue(f.Fid.Value, out var val))
+                            {
                                 changeValues[f.Id] = val;
+                                changeValues[f.Fid.Value] = val;
+                            }
                         }
-
-                        addedRecords.Add((createdId, row, changeValues));
+                        addedRecords.Add((createdPublicId, row, changeValues));
                         inserted++;
                     }
                 }
 
-                if (addedRecords.Any())
+                if (addedRecords.Count > 0)
                 {
                     var publicIds = addedRecords.Select(r => r.PublicId).ToList();
                     var publicIdToIdMap = await recordRepo.GetActiveRecordIdsByPublicIdsAsync(table, publicIds, uow.Transaction, ct);
-
                     var recordIdField = fields.FirstOrDefault(f => f.Fid == 3);
 
                     foreach (var (pubId, r, cv) in addedRecords)
@@ -2330,6 +2816,8 @@ public class PipelineEngine : IPipelineEngine
                             {
                                 cv[recordIdField.Id] = id;
                             }
+                            cv[3] = id;
+                            createdRecordIds.Add(id);
                         }
 
                         addedChanges.Add(new PipelineRecordChange(
@@ -2344,7 +2832,7 @@ public class PipelineEngine : IPipelineEngine
 
                 var commitUpsertBatchId = Guid.NewGuid();
                 var commitUpsertCorrelationId = Guid.NewGuid();
-                if (addedChanges.Any())
+                if (addedChanges.Count > 0)
                 {
                     await triggerInterceptor.InterceptBulkAsync(
                         table,
@@ -2356,7 +2844,7 @@ public class PipelineEngine : IPipelineEngine
                         ct
                     );
                 }
-                if (modifiedChanges.Any())
+                if (modifiedChanges.Count > 0)
                 {
                     await triggerInterceptor.InterceptBulkAsync(
                         table,
@@ -2369,7 +2857,21 @@ public class PipelineEngine : IPipelineEngine
                     );
                 }
 
-                var outputJson = JsonSerializer.Serialize(new { Committed = true, InsertedCount = inserted, UpdatedCount = updated });
+                var outputJson = JsonSerializer.Serialize(new
+                {
+                    committed = true,
+                    status = "Committed",
+                    inserted_count = inserted,
+                    updated_count = updated,
+                    total_records = inserted + updated,
+                    created_record_ids = createdRecordIds,
+                    updated_record_ids = updatedRecordIds,
+                    errors = Array.Empty<object>(),
+                    // CamelCase aliases for backwards compatibility
+                    insertedCount = inserted,
+                    updatedCount = updated,
+                    unchangedCount = 0
+                });
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
                 {
@@ -2381,12 +2883,13 @@ public class PipelineEngine : IPipelineEngine
                 }, uow.Transaction, ct);
 
                 await uow.CommitAsync(ct);
-                sessions.Remove(parentRefId);
+                sessions.Remove(sessionKey);
                 return outputJson;
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
                 await uow.RollbackAsync(ct);
+                sessions.Remove(sessionKey);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
                 throw;
@@ -2394,6 +2897,7 @@ public class PipelineEngine : IPipelineEngine
             catch
             {
                 await uow.RollbackAsync(ct);
+                sessions.Remove(sessionKey);
                 throw;
             }
         }
@@ -3841,6 +4345,56 @@ public class PipelineEngine : IPipelineEngine
         return valueStr; // Default to string
     }
 
+    private object? ParseBulkUpsertValueType(string? valueStr, string? typeCode)
+    {
+        if (valueStr == null) return null;
+
+        var normalizedCode = (typeCode ?? "TEXT").ToUpperInvariant();
+
+        // Text types preserve empty string ""
+        if (normalizedCode == "TEXT" ||
+            normalizedCode == "TEXTMULTILINE" ||
+            normalizedCode == "TEXT_MULTI_LINE" ||
+            normalizedCode == "RICHTEXT" ||
+            normalizedCode == "RICH_TEXT" ||
+            normalizedCode == "EMAIL" ||
+            normalizedCode == "URL" ||
+            normalizedCode == "PHONE" ||
+            normalizedCode == "PHONENUMBER" ||
+            normalizedCode == "STRING")
+        {
+            return valueStr;
+        }
+
+        // For non-text types, empty / whitespace strings become null
+        if (string.IsNullOrWhiteSpace(valueStr))
+        {
+            return null;
+        }
+
+        if (normalizedCode == "CHECKBOX" || normalizedCode == "BOOLEAN" || normalizedCode == "BOOL")
+        {
+            if (bool.TryParse(valueStr, out var bVal)) return bVal;
+            if (valueStr == "1") return true;
+            if (valueStr == "0") return false;
+            return null;
+        }
+
+        if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER", "DECIMAL", "INT", "RATING", "DURATION" }.Contains(normalizedCode))
+        {
+            if (decimal.TryParse(valueStr, out var dVal)) return dVal;
+            return null;
+        }
+
+        if (new[] { "DATE", "DATETIME", "DATE_TIME", "TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
+        {
+            if (DateTime.TryParse(valueStr, out var dtVal)) return dtVal;
+            return null;
+        }
+
+        return valueStr;
+    }
+
     private class CreateRecordStepConfig
     {
         public string? TableId { get; set; }
@@ -4045,19 +4599,53 @@ public class PipelineEngine : IPipelineEngine
 
     private class PrepareBulkUpsertConfig
     {
+        public List<string>? Fields { get; set; }
         public string? TableLabel { get; set; }
+        public string? Table { get; set; }
+        public string? TableId { get; set; }
+        public string? TablePublicId { get; set; }
+        public string? MergeField { get; set; }
         public string? MergeKeyFid { get; set; }
+        public string? MergeKeyField { get; set; }
+        public string? MergeKey { get; set; }
+
+        public string? GetTableIdentifier() =>
+            !string.IsNullOrWhiteSpace(TableLabel) ? TableLabel :
+            !string.IsNullOrWhiteSpace(TablePublicId) ? TablePublicId :
+            !string.IsNullOrWhiteSpace(TableId) ? TableId :
+            !string.IsNullOrWhiteSpace(Table) ? Table : null;
+
+        public string? GetMergeKeyIdentifier() =>
+            !string.IsNullOrWhiteSpace(MergeField) ? MergeField :
+            !string.IsNullOrWhiteSpace(MergeKeyFid) ? MergeKeyFid :
+            !string.IsNullOrWhiteSpace(MergeKeyField) ? MergeKeyField :
+            !string.IsNullOrWhiteSpace(MergeKey) ? MergeKey : null;
     }
 
     private class AddBulkUpsertRowConfig
     {
         public string? ParentUpsertStepRefId { get; set; }
+        public string? BulkRecordSetStepId { get; set; }
+        public string? ParentStepRefId { get; set; }
         public List<FieldMapping>? FieldMappings { get; set; }
+        public Dictionary<string, object?>? RowValues { get; set; }
+
+        public string? GetParentRefId() =>
+            !string.IsNullOrWhiteSpace(ParentUpsertStepRefId) ? ParentUpsertStepRefId :
+            !string.IsNullOrWhiteSpace(BulkRecordSetStepId) ? BulkRecordSetStepId :
+            !string.IsNullOrWhiteSpace(ParentStepRefId) ? ParentStepRefId : null;
     }
 
     private class CommitBulkUpsertConfig
     {
         public string? ParentUpsertStepRefId { get; set; }
+        public string? BulkRecordSetStepId { get; set; }
+        public string? ParentStepRefId { get; set; }
+
+        public string? GetParentRefId() =>
+            !string.IsNullOrWhiteSpace(ParentUpsertStepRefId) ? ParentUpsertStepRefId :
+            !string.IsNullOrWhiteSpace(BulkRecordSetStepId) ? BulkRecordSetStepId :
+            !string.IsNullOrWhiteSpace(ParentStepRefId) ? ParentStepRefId : null;
     }
 
     private class UploadFileStepConfig
@@ -4081,7 +4669,15 @@ public class PipelineEngine : IPipelineEngine
     {
         public string TableLabel { get; set; } = string.Empty;
         public string MergeKeyFid { get; set; } = string.Empty;
+        public AppTable? Table { get; set; }
+        public IReadOnlyList<AppField>? Fields { get; set; }
+        public AppField? MergeField { get; set; }
+        public HashSet<long>? SelectedFieldFids { get; set; }
         public List<Dictionary<long, object?>> Rows { get; set; } = new();
+
+        public bool IsCommittable { get; set; } = true;
+        public BulkUpsertSession? RootSession { get; set; }
+        public BulkUpsertSession? DownstreamChildCollection { get; set; }
     }
 
     private class FieldMapping
@@ -4089,6 +4685,40 @@ public class PipelineEngine : IPipelineEngine
         public string? Field { get; set; }
         [System.Text.Json.Serialization.JsonConverter(typeof(StringOrPrimitiveJsonConverter))]
         public string? Value { get; set; }
+    }
+
+    private static bool AreValuesEqual(object? val1, object? val2, string? typeCode)
+    {
+        if (val1 == null && val2 == null) return true;
+        if (val1 == null || val2 == null) return false;
+
+        var normalizedCode = (typeCode ?? "TEXT").ToUpperInvariant();
+
+        if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER", "DECIMAL", "INT" }.Contains(normalizedCode))
+        {
+            if (decimal.TryParse(val1.ToString(), out var d1) && decimal.TryParse(val2.ToString(), out var d2))
+            {
+                return d1 == d2;
+            }
+        }
+
+        if (new[] { "DATE", "DATETIME", "DATE_TIME", "TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
+        {
+            if (DateTime.TryParse(val1.ToString(), out var dt1) && DateTime.TryParse(val2.ToString(), out var dt2))
+            {
+                return dt1 == dt2;
+            }
+        }
+
+        if (normalizedCode == "BOOLEAN" || normalizedCode == "BOOL" || normalizedCode == "CHECKBOX")
+        {
+            if (bool.TryParse(val1.ToString(), out var b1) && bool.TryParse(val2.ToString(), out var b2))
+            {
+                return b1 == b2;
+            }
+        }
+
+        return string.Equals(val1.ToString()?.Trim(), val2.ToString()?.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     private static string MapUiOperatorToDbOperator(string? op)
@@ -4612,6 +5242,61 @@ public class PipelineEngine : IPipelineEngine
         }
     }
 
+    private static AppField ResolveBulkUpsertField(
+        string? fieldReference,
+        IReadOnlyList<AppField> fields)
+    {
+        if (string.IsNullOrWhiteSpace(fieldReference))
+        {
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Field reference cannot be null or empty.");
+        }
+
+        if (fieldReference.StartsWith("fid_", StringComparison.OrdinalIgnoreCase))
+        {
+            var fidStr = fieldReference.Substring(4);
+            if (int.TryParse(fidStr, out var fid))
+            {
+                var field = fields.FirstOrDefault(f => f.Fid == fid);
+                if (field != null) return field;
+            }
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with stable FID '{fidStr}' was not found in the target table.");
+        }
+        else if (fieldReference.StartsWith("f_", StringComparison.OrdinalIgnoreCase))
+        {
+            var fidStr = fieldReference.Substring(2);
+            if (int.TryParse(fidStr, out var fid))
+            {
+                var field = fields.FirstOrDefault(f => f.Fid == fid);
+                if (field != null) return field;
+            }
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with stable FID '{fidStr}' was not found in the target table.");
+        }
+        else if (int.TryParse(fieldReference, out var directFid))
+        {
+            var field = fields.FirstOrDefault(f => f.Fid == directFid);
+            if (field != null) return field;
+            var fieldByName = fields.FirstOrDefault(f => string.Equals(f.Name, fieldReference, StringComparison.OrdinalIgnoreCase));
+            if (fieldByName != null) return fieldByName;
+
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with stable FID '{fieldReference}' was not found in the target table.");
+        }
+        else
+        {
+            var field = fields.FirstOrDefault(f =>
+                string.Equals(f.Name, fieldReference, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(f.Label, fieldReference, StringComparison.OrdinalIgnoreCase) ||
+                (f.IsSystem && string.Equals(f.PhysicalColumnName, fieldReference, StringComparison.OrdinalIgnoreCase)));
+            if (field != null)
+            {
+                return field;
+            }
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with name '{fieldReference}' was not found in the target table.");
+        }
+    }
 
     public class RawStepAuditSnapshot
     {
@@ -4626,3 +5311,27 @@ public class PipelineEngine : IPipelineEngine
     }
 }
 
+public class PipelineBulkUpsertException : InvalidOperationException
+{
+    public string ErrorCode { get; }
+    public int? RowIndex { get; }
+    public int? FieldFid { get; }
+    public string? FieldName { get; }
+    public bool IsRetryable { get; }
+
+    public PipelineBulkUpsertException(
+        string errorCode,
+        string message,
+        int? rowIndex = null,
+        int? fieldFid = null,
+        string? fieldName = null,
+        bool isRetryable = false)
+        : base(message)
+    {
+        ErrorCode = errorCode;
+        RowIndex = rowIndex;
+        FieldFid = fieldFid;
+        FieldName = fieldName;
+        IsRetryable = isRetryable;
+    }
+}

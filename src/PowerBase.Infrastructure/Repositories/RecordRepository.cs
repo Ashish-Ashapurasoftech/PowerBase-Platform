@@ -294,6 +294,44 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return result;
     }
 
+    public async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetBulkUpsertRowsByIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> ids, IDbTransaction transaction, CancellationToken ct = default)
+    {
+        var rows = await GetBulkUpsertRowsByColumnValuesAsync(table, fields, "Id", ids.Cast<object>().ToArray(), transaction, ct);
+        return rows.Values.Distinct().ToDictionary(row => Convert.ToInt64(row["Id"]), row => row);
+    }
+
+    public async Task<IReadOnlyDictionary<object, IReadOnlyDictionary<string, object?>>> GetBulkUpsertRowsByColumnValuesAsync(
+        AppTable table, IReadOnlyList<AppField> fields, string columnName, IReadOnlyCollection<object> values, IDbTransaction transaction, CancellationToken ct = default)
+    {
+        var result = new Dictionary<object, IReadOnlyDictionary<string, object?>>();
+        if (values.Count == 0) return result;
+        if (columnName != "Id" && !fields.Any(f => PhysicalNaming.GetPhysicalColumnName(f) == columnName))
+            throw new ArgumentException("The merge column must belong to the target table.", nameof(columnName));
+
+        var connection = transaction.Connection ?? throw new InvalidOperationException("Bulk upsert requires an active transaction.");
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
+        var fieldCols = BuildFieldColumnList(fields);
+        var escapedColumnName = columnName.Replace("]", string.Concat(']', ']'));
+        foreach (var chunk in values.Distinct().Chunk(500))
+        {
+            var sql = $"""
+                SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+                FROM {PhysicalNaming.FullTableName(table.Id)} WITH (UPDLOCK, HOLDLOCK)
+                WHERE IsDeleted = 0 AND [{escapedColumnName}] IN @chunk
+                """;
+            var rows = await connection.QueryAsync(new CommandDefinition(sql, new { chunk }, transaction, cancellationToken: ct));
+            foreach (var row in rows)
+            {
+                IReadOnlyDictionary<string, object?> dict = ToDictionary(row);
+                await enc.DecryptRowAsync((IDictionary<string, object?>)dict, fields, ct);
+                if (dict.TryGetValue(columnName, out var value) && value is not null && value != DBNull.Value)
+                    result[value] = dict;
+            }
+        }
+        return result;
+    }
+
     public async Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
         IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,

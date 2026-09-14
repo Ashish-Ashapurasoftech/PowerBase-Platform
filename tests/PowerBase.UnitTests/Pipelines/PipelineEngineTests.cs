@@ -2217,13 +2217,8 @@ public class PipelineEngineTests
             }
         };
 
-        FilterGroup? capturedFilterTree = null;
-        _recordRepo.ListAsync(table, fields, Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup>(), Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
-            .Returns(x =>
-            {
-                capturedFilterTree = x.ArgAt<FilterGroup>(4);
-                return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(new List<IReadOnlyDictionary<string, object?>>());
-            });
+        _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(table, fields, Arg.Any<string>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
         var contextDict = new Dictionary<string, object>();
         var sessions = new Dictionary<string, PipelineEngine.BulkUpsertSession>
@@ -2240,11 +2235,13 @@ public class PipelineEngineTests
         })!;
 
         // Assert
-        capturedFilterTree.Should().NotBeNull();
-        var node = capturedFilterTree.Nodes.Should().ContainSingle().Subject;
-        node.Condition.Should().NotBeNull();
-        node.Condition!.FieldId.Should().Be(3); // Stable Fid = 3, not AppField.Id
-        node.Condition!.Value.Should().Be("MergeKeyValue");
+        await _recordRepo.Received(1).GetBulkUpsertRowsByColumnValuesAsync(
+            table,
+            fields,
+            "f_3", // Physical column for stable Fid = 3 (whereas Id = 3 has Fid = 15 -> f_15)
+            Arg.Is<IReadOnlyCollection<object>>(c => c.Contains("MergeKeyValue")),
+            Arg.Any<System.Data.IDbTransaction>(),
+            Arg.Any<CancellationToken>());
     }
 
     [Fact]

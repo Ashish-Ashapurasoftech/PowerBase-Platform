@@ -256,4 +256,58 @@ public class PipelineAuditFormatterTests
         result.OutputContextJson.Should().Contain("\"Executed Branch\":\"Yes\"");
         result.LogMessage.Should().Be("Condition matched. Executed the Yes branch.");
     }
+
+    [Fact]
+    public void FormatStepRun_CommitUpsert_WhenSuccess_FormatsInsertedAndUpdatedCounts()
+    {
+        // Arrange
+        var step = new PipelineStep
+        {
+            Id = 400,
+            Type = "action",
+            Subtype = "commit-upsert",
+            Label = "Commit Bulk Upsert",
+            RefId = "commit_1"
+        };
+
+        var rawInput = JsonSerializer.Serialize(new { ParentUpsertStepRefId = "prep_1" });
+        var rawOutput = JsonSerializer.Serialize(new { InsertedCount = 2, UpdatedCount = 1, Status = "Committed" });
+
+        // Act
+        var result = _formatter.FormatStepRun(step, rawInput, rawOutput, "Success", "corr_123", DateTime.UtcNow, DateTime.UtcNow);
+
+        // Assert
+        result.LogMessage.Should().Be("Committed bulk upsert. Inserted 2 records and updated 1 records.");
+        result.OutputContextJson.Should().Contain("\"Inserted Record Count\":2");
+        result.OutputContextJson.Should().Contain("\"Updated Record Count\":1");
+    }
+
+    [Fact]
+    public void FormatStepRun_CommitUpsert_WhenFailed_SurfacesActualErrorMessage()
+    {
+        // Arrange
+        var step = new PipelineStep
+        {
+            Id = 401,
+            Type = "action",
+            Subtype = "commit-upsert",
+            Label = "Commit Bulk Upsert",
+            RefId = "commit_1"
+        };
+
+        var rawInput = JsonSerializer.Serialize(new { ParentUpsertStepRefId = "prep_1" });
+        var rawOutput = JsonSerializer.Serialize(new
+        {
+            ErrorMessage = "Invalid column name 'f_3'.",
+            ExceptionType = "SqlException"
+        });
+
+        // Act
+        var result = _formatter.FormatStepRun(step, rawInput, rawOutput, "Failed", "corr_123", DateTime.UtcNow, DateTime.UtcNow);
+
+        // Assert
+        result.LogMessage.Should().Be("Failed to commit bulk upsert: Invalid column name 'f_3'.");
+        result.OutputContextJson.Should().Contain("Invalid column name");
+        result.OutputContextJson.Should().Contain("\"Status\":\"Failed\"");
+    }
 }

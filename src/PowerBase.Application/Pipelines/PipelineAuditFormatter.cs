@@ -958,7 +958,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             }
             else if (subtype == "add-bulk-upsert-row")
             {
-                var parentRefId = inputDict.TryGetValue("ParentUpsertStepRefId", out var pRef) ? pRef?.ToString() : string.Empty;
+                var parentRefId = inputDict.TryGetValue("ParentUpsertStepRefId", out var pRef) ? pRef?.ToString()
+                    : (inputDict.TryGetValue("BulkRecordSetStepId", out var bRef) ? bRef?.ToString()
+                    : (inputDict.TryGetValue("parentStepRefId", out var psRef) ? psRef?.ToString() : string.Empty));
                 
                 friendlyInput["Parent Bulk Session ID"] = parentRefId;
                 if (inputDict.TryGetValue("FieldMappings", out var fmObj) && fmObj != null)
@@ -974,17 +976,42 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             }
             else if (subtype == "commit-upsert")
             {
-                var parentRefId = inputDict.TryGetValue("ParentUpsertStepRefId", out var pRef) ? pRef?.ToString() : string.Empty;
+                var parentRefId = inputDict.TryGetValue("ParentUpsertStepRefId", out var pRef) ? pRef?.ToString()
+                    : (inputDict.TryGetValue("BulkRecordSetStepId", out var bRef) ? bRef?.ToString()
+                    : (inputDict.TryGetValue("parentStepRefId", out var psRef) ? psRef?.ToString() : string.Empty));
                 friendlyInput["Parent Bulk Session ID"] = parentRefId;
 
-                var inserted = outputDict.TryGetValue("InsertedCount", out var insObj) ? insObj?.ToString() : "0";
-                var updated = outputDict.TryGetValue("UpdatedCount", out var updObj) ? updObj?.ToString() : "0";
+                var isFailed = string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase);
+                var errorMsg = outputDict.TryGetValue("ErrorMessage", out var errObj) ? errObj?.ToString()
+                    : (outputDict.TryGetValue("Error", out var errObj2) ? errObj2?.ToString() : null);
 
-                friendlyOutput["Inserted Record Count"] = int.TryParse(inserted, out var ins) ? ins : 0;
-                friendlyOutput["Updated Record Count"] = int.TryParse(updated, out var upd) ? upd : 0;
-                friendlyOutput["Status"] = "Committed";
+                if (isFailed || !string.IsNullOrWhiteSpace(errorMsg))
+                {
+                    friendlyOutput["Status"] = "Failed";
+                    if (!string.IsNullOrWhiteSpace(errorMsg))
+                    {
+                        friendlyOutput["Error"] = errorMsg;
+                    }
+                    if (outputDict.TryGetValue("ExceptionType", out var exTypeObj) && exTypeObj != null)
+                    {
+                        friendlyOutput["ExceptionType"] = exTypeObj.ToString();
+                    }
 
-                logMessage = $"Committed bulk upsert. Inserted {inserted} records and updated {updated} records.";
+                    logMessage = !string.IsNullOrWhiteSpace(errorMsg)
+                        ? $"Failed to commit bulk upsert: {errorMsg}"
+                        : "Failed to commit bulk upsert.";
+                }
+                else
+                {
+                    var inserted = outputDict.TryGetValue("InsertedCount", out var insObj) ? insObj?.ToString() : "0";
+                    var updated = outputDict.TryGetValue("UpdatedCount", out var updObj) ? updObj?.ToString() : "0";
+
+                    friendlyOutput["Inserted Record Count"] = int.TryParse(inserted, out var ins) ? ins : 0;
+                    friendlyOutput["Updated Record Count"] = int.TryParse(updated, out var upd) ? upd : 0;
+                    friendlyOutput["Status"] = "Committed";
+
+                    logMessage = $"Committed bulk upsert. Inserted {inserted} records and updated {updated} records.";
+                }
             }
             else if (subtype == "upload-file")
             {

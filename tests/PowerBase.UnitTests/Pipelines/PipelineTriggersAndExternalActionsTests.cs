@@ -1064,8 +1064,9 @@ public class PipelineTriggersAndExternalActionsTests
         fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
 
         // Mock existing record to trigger update path
-        var existingRow = new Dictionary<string, object> { { "fid_101", "Inactive" }, { "publicId", Guid.NewGuid() } };
-        recordRepo.ListAsync(table, fields, 1, 1, Arg.Any<FilterGroup>(), null, null, Arg.Any<CancellationToken>()).Returns(new List<IReadOnlyDictionary<string, object>> { existingRow });
+        var existingRow = new Dictionary<string, object?> { { "f_101", "Active" }, { "publicId", Guid.NewGuid() }, { "id", 55L } };
+        recordRepo.GetBulkUpsertRowsByColumnValuesAsync(table, fields, "f_101", Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>> { ["Active"] = existingRow });
 
         var method = typeof(PipelineEngine).GetMethod("ExecuteStepAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         var task = (Task<string>)method!.Invoke(engine, new object[] { step, "{}", contextDict, new List<PipelineStep>(), new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "trigger_1", CancellationToken.None })!;
