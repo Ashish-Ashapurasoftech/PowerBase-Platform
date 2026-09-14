@@ -1461,7 +1461,7 @@ public class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
+                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, field.Name);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -1546,7 +1546,7 @@ public class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
+                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, field.Name);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -2147,7 +2147,7 @@ public class PipelineEngine : IPipelineEngine
                     if (field != null && field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
+                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, field.Name);
                         rowValues[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -3814,7 +3814,7 @@ public class PipelineEngine : IPipelineEngine
         }
     }
 
-    private object? ParseValueType(string valueStr, string typeCode)
+    private object? ParseValueType(string valueStr, string typeCode, string fieldName)
     {
         if (string.IsNullOrWhiteSpace(valueStr)) return null;
 
@@ -3825,17 +3825,17 @@ public class PipelineEngine : IPipelineEngine
             if (bool.TryParse(valueStr, out var bVal)) return bVal;
             if (valueStr == "1") return true;
             if (valueStr == "0") return false;
-            return false;
+            throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
-        if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER" }.Contains(normalizedCode))
+        if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER", "RATING", "DURATION" }.Contains(normalizedCode))
         {
             if (decimal.TryParse(valueStr, out var dVal)) return dVal;
-            return null;
+            throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
-        if (new[] { "DATE", "DATE_TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
+        if (new[] { "DATE", "DATE_TIME", "DATETIME", "TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
         {
             if (DateTime.TryParse(valueStr, out var dtVal)) return dtVal;
-            return null;
+            throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
 
         return valueStr; // Default to string

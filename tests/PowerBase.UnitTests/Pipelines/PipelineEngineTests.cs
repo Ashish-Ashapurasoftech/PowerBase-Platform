@@ -78,7 +78,7 @@ public class PipelineEngineTests
     private object? InvokeParseValueType(string valueStr, string typeCode)
     {
         var method = typeof(PipelineEngine).GetMethod("ParseValueType", BindingFlags.NonPublic | BindingFlags.Instance);
-        return method!.Invoke(_engine, new object?[] { valueStr, typeCode });
+        return method!.Invoke(_engine, new object?[] { valueStr, typeCode, "Test field" });
     }
 
     [Fact]
@@ -98,6 +98,29 @@ public class PipelineEngineTests
         InvokeParseValueType("123.45", "numeric").Should().Be(123.45m);
         InvokeParseValueType("2026-08-06T18:00:00Z", "date_time").Should().Be(DateTime.Parse("2026-08-06T18:00:00Z"));
         InvokeParseValueType("plain text", "text").Should().Be("plain text");
+        InvokeParseValueType("123", "text").Should().Be("123");
+        InvokeParseValueType("123", "Integer").Should().Be(123m);
+        InvokeParseValueType("0", "Boolean").Should().Be(false);
+        InvokeParseValueType("", "Number").Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData("Number")]
+    [InlineData("Integer")]
+    [InlineData("Currency")]
+    [InlineData("Percent")]
+    [InlineData("Rating")]
+    [InlineData("Duration")]
+    [InlineData("Date")]
+    [InlineData("DateTime")]
+    [InlineData("Time")]
+    [InlineData("Boolean")]
+    public void ParseValueType_InvalidValue_ThrowsCatchableValidationError(string typeCode)
+    {
+        var error = Assert.Throws<TargetInvocationException>(() => InvokeParseValueType("invalid", typeCode));
+        var conversionError = Assert.IsType<FormatException>(error.InnerException);
+        conversionError.Message.Should().Contain("Test field").And.Contain(typeCode);
+        PipelineEngine.IsCatchablePipelineStepError(conversionError).Should().BeTrue();
     }
 
     [Fact]
