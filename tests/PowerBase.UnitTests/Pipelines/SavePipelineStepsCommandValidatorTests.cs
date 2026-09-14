@@ -10,6 +10,31 @@ public class SavePipelineStepsCommandValidatorTests
 {
     private readonly SavePipelineStepsCommandValidator _validator = new();
 
+    [Fact]
+    public async System.Threading.Tasks.Task ErrorDetails_AreAvailableInNestedRecoveryButNotOutsideIt()
+    {
+        SavePipelineStepDto Mapping(string id) => new()
+        {
+            PublicId = Guid.NewGuid(), RefId = id, Type = "action", Subtype = "send-email",
+            ConfigJson = "{\"body\":\"{{ERROR.error_message}}\"}", IsValidated = true
+        };
+        var handler = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(), RefId = "handler", Type = "condition", Subtype = "handle-errors",
+            ConfigJson = "{\"fallbackAction\":\"handle\"}", IsValidated = true,
+            ErrorChildren = new() { new() {
+                PublicId = Guid.NewGuid(), RefId = "nested_condition", Type = "condition", Subtype = "condition",
+                IsValidated = true, Children = new() { Mapping("nested_then") }, ElseChildren = new() { Mapping("nested_else") }
+            } },
+            SuccessChildren = new() { Mapping("success") }
+        };
+        var result = await _validator.ValidateAsync(new SavePipelineStepsCommand(
+            Guid.NewGuid(), new() { CreateTriggerStep(), handler, Mapping("after") }, Array.Empty<byte>()));
+        var scopeErrors = System.Linq.Enumerable.Where(result.Errors, e => e.ErrorMessage.Contains("outside of an On error branch"));
+        scopeErrors.Should().HaveCount(2);
+        scopeErrors.Should().NotContain(e => e.ErrorMessage.Contains("nested_"));
+    }
+
     private static SavePipelineStepDto CreateTriggerStep(string refId = "ref_1") => new()
     {
         PublicId = Guid.NewGuid(),
