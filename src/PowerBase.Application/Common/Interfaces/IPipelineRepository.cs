@@ -27,6 +27,7 @@ public class SchedulerMetadataDto
 
 public interface IPipelineRepository
 {
+    Task<IReadOnlyList<AppField>> GetTableFieldsAsync(long tableId, CancellationToken ct = default);
     Task<SchedulerMetadataDto> GetSchedulerMetadataAsync(CancellationToken ct = default);
     Task<IReadOnlyList<long>> GetDeletedPipelineIdsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> GetPipelineStatesAsync(IEnumerable<long> ids, CancellationToken ct = default);

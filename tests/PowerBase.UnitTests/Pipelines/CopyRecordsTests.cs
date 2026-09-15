@@ -32,6 +32,26 @@ public class CopyRecordsTests
             new PipelineStep { Id = 1, Type = "action", Subtype = "copy-records", DisplayOrder = 1 }
         }));
     }
+
+    [Fact]
+    public void HandleErrors_WithCopyRecordsAsFirstMonitoredStep_CanBeScheduled()
+    {
+        var steps = new[]
+        {
+            new PipelineStep
+            {
+                Id = 1, Type = "control", Subtype = "handle-errors", DisplayOrder = 0
+            },
+            new PipelineStep
+            {
+                Id = 2, ParentStepId = 1, ParentBranch = "children", Type = "action",
+                Subtype = "copy-records", DisplayOrder = 0, IsValidated = true
+            }
+        };
+
+        Assert.True(PipelineScheduleEligibility.IsPipelineScheduleable(steps));
+    }
+
     private static AppField Field(int fid, string name, string type = "Text", bool unique = false) =>
         new() { Id = fid + 100, Fid = fid, Name = name, TypeCode = type, IsUnique = unique };
 
@@ -96,6 +116,20 @@ public class CopyRecordsTests
         config.DestinationFields = new() { "fid_3" };
         Assert.Throws<ValidationException>(() => config.ValidateFields(new[] { Field(6, "Source") }, new[] { Field(3, "Ordinary field") }));
         Assert.Equal("", new CopyRecordsDefinition().MergeField);
+    }
+
+    [Fact]
+    public void MergeAcceptsLegacyIdentityMetadataWithoutChangingSeedData()
+    {
+        var config = Config();
+        var primary = Field(73, "Renamed identity");
+        primary.IsSystem = true;
+        primary.PhysicalColumnName = "Id";
+        config.MergeField = "fid_73";
+        config.DestinationFields = new() { "fid_73" };
+        config.ValidateFields(new[] { Field(6, "Source") }, new[] { primary });
+        primary.PhysicalColumnName = "CreatedOn";
+        Assert.Throws<ValidationException>(() => config.ValidateFields(new[] { Field(6, "Source") }, new[] { primary }));
     }
 
     [Theory]

@@ -59,7 +59,9 @@ public sealed class CopyRecordsDefinition
         return matches[0];
     }
 
-    public static bool IsWritable(AppField field) => (field.IsPrimary || !field.IsSystem) && !PhysicalNaming.IsComputedTypeCode(field.TypeCode) && !IsAttachment(field);
+    public static bool IsPrimaryField(AppField field) => field.IsPrimary ||
+        (field.IsSystem && string.Equals(field.PhysicalColumnName, "Id", StringComparison.OrdinalIgnoreCase));
+    public static bool IsWritable(AppField field) => (IsPrimaryField(field) || !field.IsSystem) && !PhysicalNaming.IsComputedTypeCode(field.TypeCode) && !IsAttachment(field);
     public static bool IsAttachment(AppField field) =>
         field.TypeCode.Contains("File", StringComparison.OrdinalIgnoreCase) || field.TypeCode.Contains("Attachment", StringComparison.OrdinalIgnoreCase);
 
@@ -71,7 +73,7 @@ public sealed class CopyRecordsDefinition
         foreach (var fid in DestinationFields)
             if (!IsWritable(Field(fid, destination))) throw Error($"Destination field '{fid}' is read-only or an attachment.");
         var merge = Field(MergeField, destination);
-        if (!(merge.IsUnique || merge.IsPrimary) || !IsWritable(merge))
+        if (!(merge.IsUnique || IsPrimaryField(merge)) || !IsWritable(merge))
             throw Error("The merge field must be a unique or primary destination field.");
         if (!DestinationFields.Any(f => Field(f, destination).Fid == merge.Fid))
             throw Error("Map a source column to the selected merge field.");

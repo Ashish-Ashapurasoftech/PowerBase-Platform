@@ -25,6 +25,24 @@ namespace PowerBase.API.Controllers;
 [RequireAuth]
 public class PipelineConnectionsController : ControllerBase
 {
+    [HttpGet("pipelines/tables/{tableId:guid}/fields")]
+    public async Task<IActionResult> GetCurrentTenantFields(Guid tableId,
+        [FromServices] PowerBase.Application.Common.Interfaces.IAppAccessService access,
+        [FromServices] PowerBase.Application.Common.Interfaces.IAppTableRepository tables,
+        [FromServices] PowerBase.Application.Common.Interfaces.IPipelineRepository pipelines,
+        CancellationToken ct)
+    {
+        await access.RequirePermissionByTablePublicIdAsync(tableId, PowerBase.Domain.Constants.PermissionCodes.PowerFlowsRead, ct);
+        var table = await tables.GetByPublicIdAsync(tableId, ct);
+        var fields = await pipelines.GetTableFieldsAsync(table.Id, ct);
+        var items = fields.Select(f => new ConnectionFieldDto {
+            PublicId = f.PublicId, Name = f.Name, Label = f.Label, TypeCode = f.TypeCode,
+            Fid = f.Fid, Settings = f.Settings, DefaultValue = f.DefaultValue,
+            IsRequired = f.IsRequired, IsSystem = f.IsSystem, IsUnique = f.IsUnique, IsPrimary = f.IsPrimary
+        }).ToList();
+        return Ok(new ApiListResponse<ConnectionFieldDto>(items, items.Count, 1, items.Count));
+    }
+
     private readonly GetConnectionsQueryHandler _listHandler;
     private readonly CreateConnectionCommandHandler _createHandler;
     private readonly GetConnectionAppsQueryHandler _appsHandler;
