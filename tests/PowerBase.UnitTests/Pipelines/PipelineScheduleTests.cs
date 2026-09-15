@@ -81,8 +81,8 @@ public class PipelineScheduleTests
         {
             new PipelineStep
             {
-                Type = "action",
-                Subtype = "update-record",
+                Type = "control",
+                Subtype = "for-each",
                 DisplayOrder = 1,
                 IsValidated = true
             }
@@ -143,7 +143,7 @@ public class PipelineScheduleTests
         var validator = new UpdatePipelineScheduleCommandValidator();
         var command = new UpdatePipelineScheduleCommand(
             Guid.NewGuid(),
-            "weekly",
+            "custom",
             null,
             null,
             null,
@@ -164,7 +164,7 @@ public class PipelineScheduleTests
     }
 
     [Fact]
-    public async Task SaveSteps_IncompatibleStructure_DeletesSchedule()
+    public async Task SaveSteps_IncompatibleStructure_PreservesScheduleAndDeactivatesPipeline()
     {
         // Arrange
         var pipelineRepo = Substitute.For<IPipelineRepository>();
@@ -207,7 +207,14 @@ public class PipelineScheduleTests
         await handler.HandleAsync(command, CancellationToken.None);
 
         // Assert
-        await pipelineRepo.Received(1).DeleteScheduleAsync(schedule.PublicId, Arg.Any<CancellationToken>());
+        await pipelineRepo.DidNotReceive().DeleteScheduleAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await pipelineRepo.Received(1).SaveStepsAsync(
+            1L,
+            Arg.Any<IEnumerable<PipelineStep>>(),
+            Arg.Any<byte[]>(),
+            true,
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -1214,6 +1221,97 @@ public class PipelineScheduleTests
         var from = new DateTime(2026, 8, 27, 10, 0, 0, DateTimeKind.Utc);
         var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(schedule, from);
         next.Should().Be(new DateTime(2026, 8, 28, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Theory]
+    [InlineData("action", "update-record")]
+    [InlineData("action", "future-action")]
+    [InlineData("query", "future-query")]
+    public void Eligibility_AnyActionOrQueryFirstStep_IsScheduleEligible(string type, string subtype)
+    {
+        var steps = new List<PipelineStep>
+        {
+            new PipelineStep { Id = 1, Type = type, Subtype = subtype, DisplayOrder = 0, IsDeleted = false }
+        };
+
+        PowerBase.Application.Pipelines.PipelineScheduleEligibility.IsPipelineScheduleable(steps).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Monthly_RelativeWeekday_CalculatesFirstAndLastOccurrence()
+    {
+        var firstMonday = new PipelineSchedule
+        {
+            ScheduleType = "monthly", Interval = 1, RelativeWeek = 1, RelativeDay = 1,
+            TimeOfDay = new TimeSpan(9, 0, 0), CreatedOn = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc), TimeZone = "UTC"
+        };
+        var lastFriday = new PipelineSchedule
+        {
+            ScheduleType = "monthly", Interval = 1, RelativeWeek = 5, RelativeDay = 5,
+            TimeOfDay = new TimeSpan(9, 0, 0), CreatedOn = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc), TimeZone = "UTC"
+        };
+
+        PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(
+            firstMonday, new DateTime(2026, 9, 1, 1, 0, 0, DateTimeKind.Utc))
+            .Should().Be(new DateTime(2026, 9, 7, 9, 0, 0, DateTimeKind.Utc));
+        PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(
+            lastFriday, new DateTime(2026, 9, 1, 1, 0, 0, DateTimeKind.Utc))
+            .Should().Be(new DateTime(2026, 9, 25, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void OldMonthlySchedule_WithLargeInterval_StillFindsNextRun()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "monthly", Interval = 36, MonthDay = "1", TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeZone = "UTC"
+        };
+
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(
+            schedule, new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Utc));
+
+        next.Should().Be(new DateTime(2029, 1, 1, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void OldYearlySchedule_WithLargeInterval_StillFindsNextRun()
+    {
+        var schedule = new PipelineSchedule
+        {
+            ScheduleType = "yearly", Interval = 12, MonthOfYear = 1, MonthDay = "1", TimeOfDay = new TimeSpan(9, 0, 0),
+            CreatedOn = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc), TimeZone = "UTC"
+        };
+
+        var next = PowerBase.Application.Pipelines.ScheduleNextRunCalculator.CalculateNextRun(
+            schedule, new DateTime(2035, 1, 2, 0, 0, 0, DateTimeKind.Utc));
+
+        next.Should().Be(new DateTime(2044, 1, 1, 9, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Validator_UnknownTimeZone_Fails()
+    {
+        var validator = new UpdatePipelineScheduleCommandValidator();
+        var command = new UpdatePipelineScheduleCommand(
+            Guid.NewGuid(), "daily", 1, new TimeSpan(9, 0, 0), null, null, null, null, null,
+            "Not/A_Real_Time_Zone", "0 9 * * *");
+
+        var result = validator.Validate(command);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(error => error.PropertyName == "TimeZone");
+    }
+
+    [Fact]
+    public void Validator_BasicLastDaySchedule_DoesNotApplyCustomCronRestrictions()
+    {
+        var validator = new UpdatePipelineScheduleCommandValidator();
+        var command = new UpdatePipelineScheduleCommand(
+            Guid.NewGuid(), "monthly", 1, new TimeSpan(9, 0, 0), null, "last", null, null, null,
+            "UTC", "0 9 L * *");
+
+        validator.Validate(command).IsValid.Should().BeTrue();
     }
 
     [Fact]

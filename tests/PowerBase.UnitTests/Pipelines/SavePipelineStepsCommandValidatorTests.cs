@@ -153,7 +153,7 @@ public class SavePipelineStepsCommandValidatorTests
 
         // Assert
         result.IsValid.Should().BeFalse();
-        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with either a Trigger step, a Search/Query step, a Handle Errors step, or Prepare Bulk Record Upsert"));
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with a Trigger, Search/Query, Copy Records, Handle Errors, or Prepare Bulk Record Upsert step"));
     }
 
     [Fact]

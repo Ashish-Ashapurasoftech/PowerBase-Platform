@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using NCrontab;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -61,20 +60,6 @@ public class UpdatePipelineScheduleCommandHandler
         var nextRunUtc = ScheduleNextRunCalculator.CalculateNextRun(dummySchedule, DateTime.UtcNow);
 
         var pipeline = await _pipelineRepo.GetByPublicIdAsync(command.PipelinePublicId, ct);
-        bool scheduleChanged = schedule == null ||
-                               schedule.ScheduleType != command.ScheduleType ||
-                               schedule.Interval != command.Interval ||
-                               schedule.TimeOfDay != command.TimeOfDay ||
-                               schedule.Weekdays != command.Weekdays ||
-                               schedule.MonthDay != command.MonthDay ||
-                               schedule.MonthOfYear != command.MonthOfYear ||
-                               schedule.RelativeWeek != command.RelativeWeek ||
-                               schedule.RelativeDay != command.RelativeDay ||
-                               schedule.TimeZone != command.TimeZone ||
-                               schedule.CronExpression != command.CronExpression;
-
-        bool shouldDeactivate = pipeline.IsActive && scheduleChanged;
-
         if (schedule == null)
         {
             schedule = new PipelineSchedule

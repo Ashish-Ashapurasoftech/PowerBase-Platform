@@ -176,23 +176,9 @@ public class SavePipelineStepsCommandHandler
             await _queueRepo.PausePendingJobsAsync(_queryContext.TenantId, pipelineId, sentinelDate, ct);
         }
 
-        bool isCompatible = PipelineScheduleEligibility.IsPipelineScheduleable(flatList);
-
-        if (!isCompatible)
-        {
-            try
-            {
-                var schedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(pipelineId, ct);
-                if (schedule != null)
-                {
-                    await _pipelineRepo.DeleteScheduleAsync(schedule.PublicId, ct);
-                }
-            }
-            catch (NotFoundException)
-            {
-                // Already deleted or not found, safe to ignore
-            }
-        }
+        // Quickbase keeps the saved schedule when pipeline steps are edited. The step save
+        // above switches an active pipeline off, so no scheduled run is dispatched until the
+        // user completes the pipeline and explicitly enables/schedules it again.
     }
 
     private async Task ValidateStepsConfigAsync(List<SavePipelineStepDto> list, PipelineStepValidator stepValidator, CancellationToken ct)
@@ -209,6 +195,8 @@ public class SavePipelineStepsCommandHandler
             {
                 await stepValidator.ValidateNewEventStepAsync(dto.ConfigJson ?? string.Empty, ct);
             }
+            if (dto.Subtype == "copy-records" && dto.IsValidated)
+                await stepValidator.ValidateCopyRecordsStepAsync(dto.ConfigJson ?? "{}", ct);
             if (dto.Children != null) await ValidateStepsConfigAsync(dto.Children, stepValidator, ct);
             if (dto.ElseChildren != null) await ValidateStepsConfigAsync(dto.ElseChildren, stepValidator, ct);
             if (dto.SuccessChildren != null) await ValidateStepsConfigAsync(dto.SuccessChildren, stepValidator, ct);

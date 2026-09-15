@@ -9,6 +9,25 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
 {
+    public async Task<IReadOnlyList<AppField>> GetTableFieldsAsync(long tableId, CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT af.Id, af.PublicId, af.AppTableId, af.Name, af.Label,
+                   ft.Code AS TypeCode, af.Fid, af.PhysicalColumnName,
+                   af.Settings, af.DefaultValue, af.IsRequired, af.IsUnique,
+                   CAST(CASE WHEN af.IsPrimary = 1 OR
+                        (af.IsSystem = 1 AND af.PhysicalColumnName = 'Id')
+                        THEN 1 ELSE 0 END AS bit) AS IsPrimary,
+                   af.IsSystem, af.IsEncrypted, af.IsDeleted
+            FROM meta.AppField af
+            JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+            WHERE af.AppTableId = @tableId AND af.IsDeleted = 0
+            ORDER BY af.Id
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return (await connection.QueryAsync<AppField>(new CommandDefinition(sql, new { tableId }, cancellationToken: ct))).AsList();
+    }
+
     private const string PipelineColumns = "Id, PublicId, AppId, Name, Description, VariablesJson, IsActive, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
     
     private const string GetByPublicIdSql = $"""
