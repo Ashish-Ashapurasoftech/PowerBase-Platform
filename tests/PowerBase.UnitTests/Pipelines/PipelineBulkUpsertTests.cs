@@ -213,7 +213,8 @@ public class PipelineBulkUpsertTests
         // Assert: ApplyAsync called for update on _dbTx with suppressInterception: true
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, existingBobGuid, Arg.Any<IReadOnlyDictionary<long, object?>>(),
-            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true);
+            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
+            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         // Assert: InterceptBulkAsync called for inserted and modified changes
         await _triggerInterceptor.Received(1).InterceptBulkAsync(
@@ -455,7 +456,8 @@ public class PipelineBulkUpsertTests
 
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, existingGuid, Arg.Any<IReadOnlyDictionary<long, object?>>(),
-            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true);
+            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
+            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
         result.GetProperty("updated_count").GetInt32().Should().Be(1);
@@ -563,7 +565,8 @@ public class PipelineBulkUpsertTests
 
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, existingGuid, Arg.Any<IReadOnlyDictionary<long, object?>>(),
-            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true);
+            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
+            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
         result.GetProperty("updated_count").GetInt32().Should().Be(1);
@@ -687,7 +690,8 @@ public class PipelineBulkUpsertTests
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, existingGuid,
             Arg.Any<IReadOnlyDictionary<long, object?>>(),
-            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true);
+            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
+            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
         result.GetProperty("updated_count").GetInt32().Should().Be(1);
@@ -903,7 +907,8 @@ public class PipelineBulkUpsertTests
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, recordGuid,
             Arg.Is<IReadOnlyDictionary<long, object?>>(d => (string)d[6]! == "brandnew@example.com"),
-            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true);
+            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
+            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
         result.GetProperty("updated_count").GetInt32().Should().Be(1);
@@ -1071,7 +1076,8 @@ public class PipelineBulkUpsertTests
                 d[8] == null &&
                 d[10] == null
             ),
-            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true);
+            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
+            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
     }
 
     #endregion
@@ -1209,7 +1215,8 @@ public class PipelineBulkUpsertTests
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, existingGuid,
             Arg.Is<IReadOnlyDictionary<long, object?>>(d => (string)d[6]! == "existing@example.com" && (string)d[7]! == "Updated Hotel"),
-            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true);
+            AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
+            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
     }
 
     [Theory]

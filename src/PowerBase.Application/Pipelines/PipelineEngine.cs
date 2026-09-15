@@ -2770,7 +2770,8 @@ public class PipelineEngine : IPipelineEngine
                                 $"Pipeline '{step.PipelineId}' step '{step.Id}' updated record {recordPublicId.Value}",
                                 ct,
                                 uow.Transaction,
-                                suppressInterception: true
+                                suppressInterception: true,
+                                existingRecord: matchedExistingRow
                             );
 
                             modifiedChanges.Add(new PipelineRecordChange(
