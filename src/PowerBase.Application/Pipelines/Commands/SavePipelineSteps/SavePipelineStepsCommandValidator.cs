@@ -28,10 +28,11 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         var firstStep = steps[0];
         bool isValidFirstStep = firstStep.Type == "trigger" || 
                                 (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
+                                (firstStep.Type == "action" && firstStep.Subtype == "copy-records") ||
                                 (firstStep.Subtype == "handle-errors");
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A pipeline must begin with either a Trigger step, a Search/Query step, or a Handle Errors step.");
+            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Copy Records, or Handle Errors step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();

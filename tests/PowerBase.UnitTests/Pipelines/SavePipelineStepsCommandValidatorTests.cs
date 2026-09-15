@@ -134,7 +134,7 @@ public class SavePipelineStepsCommandValidatorTests
 
         // Assert
         result.IsValid.Should().BeFalse();
-        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with either a Trigger step, a Search/Query step, or a Handle Errors step"));
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with a Trigger, Search/Query, Copy Records, or Handle Errors step"));
     }
 
     [Fact]

@@ -198,6 +198,48 @@ public class PipelineStepValidator
         }
     }
 
+    public async Task ValidateCopyRecordsStepAsync(string configJson, CancellationToken ct)
+    {
+        var config = CopyRecordsDefinition.Read(configJson);
+        config.ValidateShape();
+        if (!Guid.TryParse(config.ConnectionPublicId, out var connectionId))
+            throw CopyRecordsDefinition.Error("Select a valid connection.");
+        async Task Validate(TargetTenantRepos repos)
+        {
+            var sourceId = CopyRecordsDefinition.TableId(config.SourceTable);
+            var destinationId = CopyRecordsDefinition.TableId(config.DestinationTable);
+            await repos.AppAccessService.RequirePermissionByTablePublicIdAsync(sourceId, PermissionCodes.RecordsRead, ct);
+            await repos.AppAccessService.RequirePermissionByTablePublicIdAsync(destinationId, PermissionCodes.RecordsCreate, ct);
+            await repos.AppAccessService.RequirePermissionByTablePublicIdAsync(destinationId, PermissionCodes.RecordsUpdate, ct);
+            var source = await repos.TableRepo.GetByPublicIdAsync(sourceId, ct);
+            var destination = await repos.TableRepo.GetByPublicIdAsync(destinationId, ct);
+            var sourceFields = await repos.FieldRepo.ListByTableAsync(source.Id, ct);
+            config.ValidateFields(sourceFields, await repos.FieldRepo.ListByTableAsync(destination.Id, ct));
+            // Dynamic query values are validated after evaluation at run time.
+            if (!(config.AdvancedQuery ?? "").Contains("{{")) CopyRecordsDefinition.ParseQuery(config.AdvancedQuery, sourceFields);
+        }
+        if (!SystemConnectionIds.Contains(connectionId))
+        {
+            var account = await TryResolveSavedAccountAsync(connectionId, ct);
+            if (account != null)
+            {
+                await using var repos = await OpenAccountReposAsync(account, ct);
+                await Validate(repos);
+                return;
+            }
+            var tenant = await _tenantRepo.GetTenantForUserAsync(connectionId, _queryContext.UserId, ct);
+            if (tenant == null) throw CopyRecordsDefinition.Error("Connection is inaccessible.");
+            if (tenant.Id != _queryContext.TenantId)
+            {
+                if (_targetScopeFactory == null) throw CopyRecordsDefinition.Error("Target connection validation is unavailable.");
+                await using var repos = await _targetScopeFactory(tenant.Id);
+                await Validate(repos);
+                return;
+            }
+        }
+        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService));
+    }
+
     public async Task ValidateNewEventStepAsync(string configJson, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(configJson))

@@ -364,16 +364,18 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (normalizedEventName == "activation")
                 {
-                    if (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record"))
+                    if (!(firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records") &&
+                        (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record")))
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a query-first pipeline structure.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query or Copy Records first step.");
                     }
                 }
                 else if (normalizedEventName == "pipeline_schedule")
                 {
-                    if (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record"))
+                    if (!(firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records") &&
+                        (firstQueryStep == null || firstQueryStep.Type != "query" || (firstQueryStep.Subtype != "search-records" && firstQueryStep.Subtype != "look-up-record")))
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a query-first pipeline structure.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a Search/Query or Copy Records first step.");
                     }
                     if (activeSteps.Any(s => s.Type == "trigger"))
                     {
@@ -1073,6 +1075,9 @@ public class PipelineEngine : IPipelineEngine
             scopedQueryContext.PipelineDepth = _queryContext.PipelineDepth;
             scopedQueryContext.PipelineChainJson = _queryContext.PipelineChainJson;
 
+            if (step.Subtype == "copy-records")
+                return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
+
             var accountRecordRepo = accountScopeHandle.GetRequiredService<IRecordRepository>();
             var accountTableRepo = accountScopeHandle.GetRequiredService<IAppTableRepository>();
             var accountFieldRepo = accountScopeHandle.GetRequiredService<IAppFieldRepository>();
@@ -1111,6 +1116,9 @@ public class PipelineEngine : IPipelineEngine
                     throw new UnauthorizedAccessException($"Execution authority user {createdBy} is not an active member of target tenant {targetTenantId}.");
                 }
 
+            if (step.Subtype == "copy-records")
+                return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
+
                 var scopedRecordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
                 var scopedTableRepo = scope.ServiceProvider.GetRequiredService<IAppTableRepository>();
                 var scopedFieldRepo = scope.ServiceProvider.GetRequiredService<IAppFieldRepository>();
@@ -1127,9 +1135,26 @@ public class PipelineEngine : IPipelineEngine
         }
         else
         {
+            if (step.Subtype == "copy-records")
+                return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
             return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
                 _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, _triggerInterceptor, _uow, _idempotencyRepo, _fileStorageService, _pipelineRecordSearchService, ct);
         }
+    }
+
+    private async Task<string> ExecuteCopyRecordsAsync(PipelineStep step, string payloadJson,
+        List<PipelineStep> allSteps, Dictionary<string, object> contextDict, string executionPath,
+        PipelineStepRun stepRun, IServiceProvider services, CancellationToken ct)
+    {
+        Guid messageId = contextDict.TryGetValue("_MessageId", out var value) && value is Guid id ? id : Guid.Empty;
+            var config = CopyRecordsDefinition.Read(step.ConfigJson ?? "{}");
+            var query = Regex.Replace(config.AdvancedQuery ?? "", @"\{\{.*?\}\}", match =>
+                EvaluateTokens(match.Value, payloadJson, executionPath, allSteps)
+                    .Replace("\\", "\\\\").Replace("'", "\\'"));
+            stepRun.InputContext = SerializeAndSanitizeAudit(new { config.SourceTable, config.DestinationTable,
+                config.SourceFields, config.DestinationFields, config.MergeField, config.TerminateOnError });
+            return await new CopyRecordsExecutor(services)
+                .ExecuteAsync(config, query, step.PublicId, messageId, executionPath, ct);
     }
 
     private static byte[] ComputeSha256Hash(string rawData)

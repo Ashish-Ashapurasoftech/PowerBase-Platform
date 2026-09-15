@@ -27,7 +27,7 @@ public static class PipelineScheduleEligibility
 
         var scheduleableSubtypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
             "search-records", "look-up-record", "create-record", "send-email", "send-email-outlook",
-            "make-request", "prepare-bulk-upsert"
+            "make-request", "prepare-bulk-upsert", "copy-records"
         };
 
         var firstSubtype = GetFirstExecutableSubtype(root, activeSteps);
