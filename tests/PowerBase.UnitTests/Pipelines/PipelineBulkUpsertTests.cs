@@ -1925,7 +1925,7 @@ public class PipelineBulkUpsertTests
     public void NonBulkParser_PreservesOriginalBlankValueBehavior(string value, string typeCode)
     {
         var method = typeof(PipelineEngine).GetMethod("ParseValueType", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
-        method.Invoke(_engine, new object[] { value, typeCode }).Should().BeNull();
+        method.Invoke(_engine, new object[] { value, typeCode, "Test Field" }).Should().BeNull();
     }
 
 }
