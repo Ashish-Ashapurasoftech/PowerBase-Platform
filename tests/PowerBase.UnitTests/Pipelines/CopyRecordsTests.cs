@@ -7,6 +7,7 @@ using PowerBase.Application.Pipelines;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Formula;
 
@@ -211,13 +212,13 @@ public class CopyRecordsTests
     }
 
     [Fact]
-    public void PrimaryMergeKey_MustBeMapped()
+    public void PrimaryMergeKey_CanBeUnmappedForInsert()
     {
         var key = Field(42, "Key");
         key.IsPrimary = true;
         var config = Config();
         config.MergeField = "fid_42";
-        Assert.Throws<ValidationException>(() => config.ValidateFields(new[] { Field(6, "Source") }, new[] { key, Field(9, "Value") }));
+        config.ValidateFields(new[] { Field(6, "Source") }, new[] { key, Field(9, "Value") });
     }
 
     [Fact]
@@ -298,6 +299,32 @@ public class CopyRecordsTests
         Assert.Equal(1, JsonDocument.Parse(first).RootElement.GetProperty("InsertedCount").GetInt32());
         await harness.Records.Received(1).CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>());
         Assert.Single(harness.Search.ReceivedCalls());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task UnmappedMergeKey_CopiesSelectedColumnsWithoutMatchingAndReplayDoesNotDuplicate(bool primary)
+    {
+        using var harness = new Harness();
+        harness.DestinationField.Fid = 42;
+        harness.DestinationField.IsPrimary = primary;
+        harness.DestinationField.IsSystem = primary;
+        harness.DestinationField.IsUnique = !primary;
+        harness.SourceFields.AddRange(new[] { Field(7, "number"), Field(8, "id") });
+        harness.DestinationFields.AddRange(new[] { Field(9, "name"), Field(10, "number"), Field(11, "id") });
+        harness.Config.SourceFields = new() { "fid_6", "fid_7", "fid_8" };
+        harness.Config.DestinationFields = new() { "fid_9", "fid_10", "fid_11" };
+        harness.Config.MergeField = "fid_42";
+        var first = await harness.Run();
+        Assert.Equal(1, JsonDocument.Parse(first).RootElement.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(0, JsonDocument.Parse(first).RootElement.GetProperty("UpdatedCount").GetInt32());
+        Assert.Equal(first, await harness.Run());
+        await harness.Records.Received(1).CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Is<IReadOnlyDictionary<long, object?>>(v => v.Count == 3 && v.ContainsKey(9) && v.ContainsKey(10) && v.ContainsKey(11) && !v.ContainsKey(42)),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>());
+        Assert.DoesNotContain(harness.Records.ReceivedCalls(), c => c.GetMethodInfo().Name == "ListAsync");
+        Assert.Empty(harness.Writes.ReceivedCalls());
     }
 
     [Fact]
@@ -415,6 +442,8 @@ public class CopyRecordsTests
         public IRecordWriteService Writes { get; } = Substitute.For<IRecordWriteService>();
         public IPipelineRecordSearchService Search { get; } = Substitute.For<IPipelineRecordSearchService>();
         public List<string> SourceValues { get; } = new() { "none" };
+        public List<AppField> SourceFields { get; } = new() { Field(6, "Source key") };
+        public List<AppField> DestinationFields { get; } = new();
         private readonly ServiceProvider provider;
         private readonly Guid step = Guid.NewGuid(), message = Guid.NewGuid();
         public Harness()
@@ -425,8 +454,9 @@ public class CopyRecordsTests
             var destination = new AppTable { Id = 2, AppId = 1, PublicId = Guid.Parse(Config.DestinationTable) };
             tables.GetByPublicIdAsync(source.PublicId, Arg.Any<CancellationToken>()).Returns(source);
             tables.GetByPublicIdAsync(destination.PublicId, Arg.Any<CancellationToken>()).Returns(destination);
-            fields.ListByTableAsync(1, Arg.Any<CancellationToken>()).Returns(new[] { Field(6, "Source key") });
-            fields.ListByTableAsync(2, Arg.Any<CancellationToken>()).Returns(new[] { DestinationField });
+            DestinationFields.Add(DestinationField);
+            fields.ListByTableAsync(1, Arg.Any<CancellationToken>()).Returns(_ => SourceFields);
+            fields.ListByTableAsync(2, Arg.Any<CancellationToken>()).Returns(_ => DestinationFields);
             var enforcer = Substitute.For<IRolePermissionEnforcer>();
             enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>()).Returns(new TableAccessContext { Unrestricted = true });
             var idempotency = Substitute.For<IPipelineStepIdempotencyRepository>();
@@ -451,7 +481,11 @@ public class CopyRecordsTests
         {
             await Task.CompletedTask;
             foreach (var page in SourceValues.Chunk(250))
-                yield return page.Select(value => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["PublicId"] = Guid.NewGuid(), ["f_6"] = value }).ToList();
+                yield return page.Select(value => {
+                    var row = SourceFields.ToDictionary(f => PhysicalNaming.GetPhysicalColumnName(f), f => (object?)value);
+                    row["PublicId"] = Guid.NewGuid();
+                    return (IReadOnlyDictionary<string, object?>)row;
+                }).ToList();
         }
         public Task<string> Run() => Run("");
         public Task<string> Run(string query) => new CopyRecordsExecutor(provider).ExecuteAsync(Config, query, step, message, "root", default);

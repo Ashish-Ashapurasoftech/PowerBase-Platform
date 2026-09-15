@@ -75,8 +75,6 @@ public sealed class CopyRecordsDefinition
         var merge = Field(MergeField, destination);
         if (!(merge.IsUnique || IsPrimaryField(merge)) || !IsWritable(merge))
             throw Error("The merge field must be a unique or primary destination field.");
-        if (!DestinationFields.Any(f => Field(f, destination).Fid == merge.Fid))
-            throw Error("Map a source column to the selected merge field.");
     }
 
     public static object? ConvertValue(object? value, AppField source, AppField destination)
