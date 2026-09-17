@@ -4,6 +4,7 @@ using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.ValueObjects;
 using PowerBase.Formula;
 
 namespace PowerBase.Application.Records.Commands.CreateRecord;
@@ -22,6 +23,7 @@ public class CreateRecordCommandHandler
     private readonly IUserRepository _userRepo;
     private readonly IMessagePublisher _messagePublisher;
     private readonly FormulaEngine _engine;
+    private readonly IAppRepository _appRepo;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -35,7 +37,8 @@ public class CreateRecordCommandHandler
         IQueryContext queryContext,
         IUserRepository userRepo,
         IMessagePublisher messagePublisher,
-        FormulaEngine engine)
+        FormulaEngine engine,
+        IAppRepository appRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -49,6 +52,7 @@ public class CreateRecordCommandHandler
         _userRepo = userRepo;
         _messagePublisher = messagePublisher;
         _engine = engine;
+        _appRepo = appRepo;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -105,9 +109,14 @@ public class CreateRecordCommandHandler
         // UserFieldValueResolver's doc comment for why.
         await UserFieldValueResolver.ResolveAsync(_userRepo, fields, effectiveValues, ct);
 
-        // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
-        // values about to be persisted, after defaults and reference-override resolution.
-        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: true, excludeRecordId: null, ct);
+        // Field-level Required / Unique / Format constraints (Quickbase-style) — checked against
+        // the final values about to be persisted, after defaults and reference-override
+        // resolution. The app's configured Date Formatting is looked up here (not hard-coded) so
+        // Date/DateTime text values sent by a client that bypasses the UI are validated against
+        // this specific app's format, not an arbitrary default.
+        var app = await _appRepo.GetByIdAsync(table.AppId, ct);
+        var dateFormat = AppFormattingSettings.GetDateFormatString(app.Formatting);
+        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: true, excludeRecordId: null, ct, appDateFormat: dateFormat);
 
         // Custom Data Rule — the table's own formula-based save gate (Add/Update only, never
         // Delete or other tables' writes). Runs after the built-in constraints above so a plain

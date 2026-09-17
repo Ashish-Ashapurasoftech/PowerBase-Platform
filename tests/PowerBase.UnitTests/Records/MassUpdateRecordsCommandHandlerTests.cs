@@ -19,6 +19,7 @@ public class MassUpdateRecordsCommandHandlerTests
 
     private readonly IPipelineTriggerInterceptor _triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
     private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
+    private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
     private readonly IMessagePublisher _messagePublisher = Substitute.For<IMessagePublisher>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
 
@@ -27,12 +28,14 @@ public class MassUpdateRecordsCommandHandlerTests
     private static AppField MakeField(int fid, bool isRequired = false, bool isUnique = false) =>
         new() { Id = fid, Fid = fid, Name = $"C_field{fid}", Label = $"Field {fid}", TypeCode = "Text", IsRequired = isRequired, IsUnique = isUnique };
 
-    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _messagePublisher);
+    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _appRepo, _messagePublisher);
 
     public MassUpdateRecordsCommandHandlerTests()
     {
         _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
             .Returns(new TableAccessContext { Unrestricted = true });
+        _appRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(call => new App { Id = call.ArgAt<long>(0) });
     }
 
     [Theory]
