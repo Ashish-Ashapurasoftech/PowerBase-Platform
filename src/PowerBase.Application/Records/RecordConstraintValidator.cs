@@ -75,7 +75,7 @@ public static class RecordConstraintValidator
                 continue;
 
             var fid = (long)field.Fid.Value;
-            var label = field.Label ?? field.Name;
+            var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
 
             if (!effectiveValues.TryGetValue(fid, out var value))
             {

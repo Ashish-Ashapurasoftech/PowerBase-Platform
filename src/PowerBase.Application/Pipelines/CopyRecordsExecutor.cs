@@ -115,7 +115,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         {
             var summary = JsonSerializer.Deserialize<Summary>(json)!;
             if (summary.ErrorCount > 0 && config.TerminateOnError == "Yes")
-                throw new PipelineNonRetryableException($"Copy Records completed with {summary.ErrorCount} user error(s); {summary.InsertedCount} inserted, {summary.UpdatedCount} updated. {summary.Errors.FirstOrDefault()}");
+                throw new PipelineNonRetryableException($"Copy Records: {summary.ErrorCount} {(summary.ErrorCount == 1 ? "record" : "records")} could not be copied ({summary.InsertedCount} inserted, {summary.UpdatedCount} updated). First error: {summary.Errors.FirstOrDefault()}");
             return json;
         }
         var complete = await Read("/complete");
@@ -209,7 +209,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                             var field = exported[i];
                             row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var value);
                             if (value.ValueKind == JsonValueKind.Undefined)
-                                throw CopyRecordsDefinition.Error($"Source field '{field.Name}' has no exported value.");
+                                throw CopyRecordsDefinition.Error($"Source field '{CopyRecordsDefinition.DisplayName(field)}' has no exported value.");
                             object? raw = value;
                             if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
                             {

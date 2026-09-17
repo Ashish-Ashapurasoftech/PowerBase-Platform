@@ -1548,7 +1548,7 @@ public class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, field.Name);
+                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -1633,7 +1633,7 @@ public class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, field.Name);
+                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -2482,7 +2482,7 @@ public class PipelineEngine : IPipelineEngine
                             $"Duplicate merge key '{keyStr}' found in batch at row {firstIndex + 1} and row {i + 1}.",
                             rowIndex: i + 1,
                             fieldFid: mergeField.Fid,
-                            fieldName: mergeField.Name
+                            fieldName: !string.IsNullOrWhiteSpace(mergeField.Label) ? mergeField.Label : mergeField.Name
                         );
                     }
                     seenMergeKeys[keyStr] = i;
@@ -2654,7 +2654,7 @@ public class PipelineEngine : IPipelineEngine
                                     $"Record ID {suppliedRecordId!.Value} (Record {idA}) and Merge Key '{suppliedMergeKey}' (Record {idB}) identify different records in Table '{table.Name}' at row {i + 1}.",
                                     rowIndex: i + 1,
                                     fieldFid: mergeField.Fid,
-                                    fieldName: mergeField.Name
+                                    fieldName: !string.IsNullOrWhiteSpace(mergeField.Label) ? mergeField.Label : mergeField.Name
                                 );
                             }
                         }
