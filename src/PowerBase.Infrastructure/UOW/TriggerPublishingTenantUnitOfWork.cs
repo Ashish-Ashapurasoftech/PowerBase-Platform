@@ -54,8 +54,14 @@ public class TriggerPublishingTenantUnitOfWork : ITenantUnitOfWork
 
     public async Task RollbackAsync(CancellationToken ct = default)
     {
-        await _inner.RollbackAsync(ct);
-        _postCommitActions.Clear();
+        try
+        {
+            await _inner.RollbackAsync(CancellationToken.None);
+        }
+        finally
+        {
+            _postCommitActions.Clear();
+        }
     }
 
     public void Dispose()

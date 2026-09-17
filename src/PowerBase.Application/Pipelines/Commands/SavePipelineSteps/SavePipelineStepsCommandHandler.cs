@@ -106,6 +106,10 @@ public class SavePipelineStepsCommandHandler
             _serviceProvider.GetService<IServiceScopeFactory>());
         await ValidateStepsConfigAsync(command.Steps, stepValidator, ct);
 
+        // Connection credentials live in encrypted PipelineConnection rows. Never persist a
+        // browser-side mode draft or secret value in the ordinary step configuration JSON.
+        SanitizeMakeRequestConfigs(command.Steps);
+
         var pipelineId = await _pipelineRepo.GetIdByPublicIdAsync(command.PipelinePublicId, ct);
         var pipeline = await _pipelineRepo.GetByPublicIdAsync(command.PipelinePublicId, ct);
 
@@ -176,23 +180,9 @@ public class SavePipelineStepsCommandHandler
             await _queueRepo.PausePendingJobsAsync(_queryContext.TenantId, pipelineId, sentinelDate, ct);
         }
 
-        bool isCompatible = PipelineScheduleEligibility.IsPipelineScheduleable(flatList);
-
-        if (!isCompatible)
-        {
-            try
-            {
-                var schedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(pipelineId, ct);
-                if (schedule != null)
-                {
-                    await _pipelineRepo.DeleteScheduleAsync(schedule.PublicId, ct);
-                }
-            }
-            catch (NotFoundException)
-            {
-                // Already deleted or not found, safe to ignore
-            }
-        }
+        // Quickbase keeps the saved schedule when pipeline steps are edited. The step save
+        // above switches an active pipeline off, so no scheduled run is dispatched until the
+        // user completes the pipeline and explicitly enables/schedules it again.
     }
 
     private async Task ValidateStepsConfigAsync(List<SavePipelineStepDto> list, PipelineStepValidator stepValidator, CancellationToken ct)
@@ -209,6 +199,8 @@ public class SavePipelineStepsCommandHandler
             {
                 await stepValidator.ValidateNewEventStepAsync(dto.ConfigJson ?? string.Empty, ct);
             }
+            if (dto.Subtype == "copy-records" && dto.IsValidated)
+                await stepValidator.ValidateCopyRecordsStepAsync(dto.ConfigJson ?? "{}", ct);
             if (dto.Children != null) await ValidateStepsConfigAsync(dto.Children, stepValidator, ct);
             if (dto.ElseChildren != null) await ValidateStepsConfigAsync(dto.ElseChildren, stepValidator, ct);
             if (dto.SuccessChildren != null) await ValidateStepsConfigAsync(dto.SuccessChildren, stepValidator, ct);
@@ -236,6 +228,19 @@ public class SavePipelineStepsCommandHandler
                 ConfigJson = dto.ConfigJson
             };
             flatList.Add(step);
+            if (step.Subtype is "pipeline-called" or "call-another-pipeline")
+            {
+                try
+                {
+                    CallablePipelineDefinition.ValidateConfig(step.ConfigJson, step.Subtype == "call-another-pipeline");
+                    step.IsValidated = true;
+                }
+                catch (PipelineNonRetryableException)
+                {
+                    // Incomplete drafts may be saved, but never become activatable by trusting a client flag.
+                    step.IsValidated = false;
+                }
+            }
 
             if (dto.Children != null && dto.Children.Any())
             {
@@ -257,6 +262,41 @@ public class SavePipelineStepsCommandHandler
                 var errorOrder = 0;
                 FlattenSteps(dto.ErrorChildren, stepPublicId, "errorChildren", ref errorOrder, flatList);
             }
+        }
+    }
+
+    private static void SanitizeMakeRequestConfigs(List<SavePipelineStepDto>? steps)
+    {
+        if (steps == null) return;
+        foreach (var step in steps)
+        {
+            if (step.Subtype == "make-request" && !string.IsNullOrWhiteSpace(step.ConfigJson))
+            {
+                try
+                {
+                    if (JsonNode.Parse(step.ConfigJson) is JsonObject config)
+                    {
+                        config.Remove("requestDrafts");
+                        if (!string.Equals(config["requestMode"]?.GetValue<string>(), "quickbase", StringComparison.OrdinalIgnoreCase)
+                            && Guid.TryParse(config["httpConnectionId"]?.GetValue<string>(), out _))
+                        {
+                            foreach (var key in new[] { "password", "bearerToken", "apiKeyValue", "jwtSigningKey", "oauthClientSecret", "oauthAccessToken", "oauthRefreshToken" })
+                                config.Remove(key);
+                            if (config["connectionHeaders"] is JsonArray headers)
+                                foreach (var header in headers.OfType<JsonObject>()) header["value"] = "";
+                        }
+                        step.ConfigJson = config.ToJsonString();
+                    }
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    // The validator reports malformed JSON; do not mask its validation result here.
+                }
+            }
+            SanitizeMakeRequestConfigs(step.Children);
+            SanitizeMakeRequestConfigs(step.ElseChildren);
+            SanitizeMakeRequestConfigs(step.SuccessChildren);
+            SanitizeMakeRequestConfigs(step.ErrorChildren);
         }
     }
 

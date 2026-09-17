@@ -29,7 +29,8 @@ public interface IRecordWriteService
         CancellationToken ct = default,
         System.Data.IDbTransaction? transaction = null,
         bool suppressInterception = false,
-        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
+        IReadOnlyDictionary<string, object?>? existingRecord = null);
 }
 
 public sealed class RecordWriteService : IRecordWriteService
@@ -111,13 +112,15 @@ public sealed class RecordWriteService : IRecordWriteService
         CancellationToken ct = default,
         System.Data.IDbTransaction? transaction = null,
         bool suppressInterception = false,
-        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
+        IReadOnlyDictionary<string, object?>? existingRecord = null)
     {
         // Reference fields must point at an existing parent record.
         var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
 
-        // Fetch old values before update so we can diff them
-        var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+        // Bulk upsert already loaded the row on its transaction. Reusing that snapshot avoids a
+        // second connection waiting on locks held by the bulk commit itself.
+        var oldRecord = existingRecord ?? await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
 
         var effectiveValues = new Dictionary<long, object?>(fieldValues);
         foreach (var kvp in refOverrides)

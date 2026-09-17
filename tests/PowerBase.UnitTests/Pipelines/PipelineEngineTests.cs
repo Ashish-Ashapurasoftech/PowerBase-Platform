@@ -31,6 +31,9 @@ public class PipelineEngineTests
     private readonly ILogger<PipelineEngine> _logger;
     private readonly IPipelineAuditFormatter _auditFormatter;
     private readonly IPipelineRecordSearchService _pipelineRecordSearchService;
+    private readonly IPipelineApiRequestDispatcher _apiRequestDispatcher;
+    private readonly ITenantRepository _tenantRepository;
+    private readonly IHttpClientFactory _httpClientFactory;
 
     public PipelineEngineTests()
     {
@@ -43,8 +46,13 @@ public class PipelineEngineTests
         _logger = Substitute.For<ILogger<PipelineEngine>>();
         _auditFormatter = Substitute.For<IPipelineAuditFormatter>();
         _pipelineRecordSearchService = Substitute.For<IPipelineRecordSearchService>();
+        _apiRequestDispatcher = Substitute.For<IPipelineApiRequestDispatcher>();
+        _tenantRepository = Substitute.For<ITenantRepository>();
+        _httpClientFactory = Substitute.For<IHttpClientFactory>();
+        _httpClientFactory.CreateClient(Arg.Any<string>()).Returns(_ => new HttpClient());
         var serviceProvider = Substitute.For<IServiceProvider>();
         serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(_pipelineRecordSearchService);
+        serviceProvider.GetService(typeof(IPipelineApiRequestDispatcher)).Returns(_apiRequestDispatcher);
 
         _engine = new PipelineEngine(
             _pipelineRepo,
@@ -53,7 +61,7 @@ public class PipelineEngineTests
             _tableRepo,
             _fieldRepo,
             Substitute.For<IEmailService>(),
-            Substitute.For<IHttpClientFactory>(),
+            _httpClientFactory,
             Substitute.For<IFileStorageService>(),
             Options.Create(_execOptions),
             _logger,
@@ -64,7 +72,7 @@ public class PipelineEngineTests
             Substitute.For<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             serviceProvider,
             Substitute.For<IAdminRepository>(),
-            Substitute.For<ITenantRepository>(),
+            _tenantRepository,
             Substitute.For<IPipelineStepIdempotencyRepository>()
         );
     }
@@ -78,7 +86,7 @@ public class PipelineEngineTests
     private object? InvokeParseValueType(string valueStr, string typeCode)
     {
         var method = typeof(PipelineEngine).GetMethod("ParseValueType", BindingFlags.NonPublic | BindingFlags.Instance);
-        return method!.Invoke(_engine, new object?[] { valueStr, typeCode });
+        return method!.Invoke(_engine, new object?[] { valueStr, typeCode, "Test field" });
     }
 
     [Fact]
@@ -98,6 +106,29 @@ public class PipelineEngineTests
         InvokeParseValueType("123.45", "numeric").Should().Be(123.45m);
         InvokeParseValueType("2026-08-06T18:00:00Z", "date_time").Should().Be(DateTime.Parse("2026-08-06T18:00:00Z"));
         InvokeParseValueType("plain text", "text").Should().Be("plain text");
+        InvokeParseValueType("123", "text").Should().Be("123");
+        InvokeParseValueType("123", "Integer").Should().Be(123m);
+        InvokeParseValueType("0", "Boolean").Should().Be(false);
+        InvokeParseValueType("", "Number").Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData("Number")]
+    [InlineData("Integer")]
+    [InlineData("Currency")]
+    [InlineData("Percent")]
+    [InlineData("Rating")]
+    [InlineData("Duration")]
+    [InlineData("Date")]
+    [InlineData("DateTime")]
+    [InlineData("Time")]
+    [InlineData("Boolean")]
+    public void ParseValueType_InvalidValue_ThrowsCatchableValidationError(string typeCode)
+    {
+        var error = Assert.Throws<TargetInvocationException>(() => InvokeParseValueType("invalid", typeCode));
+        var conversionError = Assert.IsType<FormatException>(error.InnerException);
+        conversionError.Message.Should().Contain("Test field").And.Contain(typeCode);
+        PipelineEngine.IsCatchablePipelineStepError(conversionError).Should().BeTrue();
     }
 
     [Fact]
@@ -1338,6 +1369,53 @@ public class PipelineEngineTests
         await act.Should().NotThrowAsync();
     }
 
+    [Theory]
+    [InlineData("manual")]
+    [InlineData("activation")]
+    [InlineData("pipeline_schedule")]
+    public async Task ExecuteAsync_MakeRequestAtStart_RunsForSupportedOnDemandEvents(string triggerEvent)
+    {
+        var connectionPublicId = Guid.NewGuid();
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = triggerEvent, TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false, CreatedBy = 42 });
+        _tenantRepository.GetTenantForUserAsync(connectionPublicId, 42, Arg.Any<CancellationToken>()).Returns(new Tenant());
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>
+        {
+            new()
+            {
+                Id = 10,
+                PipelineId = 1,
+                PublicId = Guid.NewGuid(),
+                RefId = "ref_request",
+                Type = "action",
+                Subtype = "make-request",
+                IsDeleted = false,
+                IsValidated = true,
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    requestMode = "quickbase",
+                    connectionPublicId,
+                    url = "/api/records",
+                    method = "GET"
+                })
+            }
+        });
+        _apiRequestDispatcher.SendAsync(Arg.Any<HttpRequestMessage>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
+            .Returns(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"records\":[]}", System.Text.Encoding.UTF8, "application/json")
+            });
+
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        await _apiRequestDispatcher.Received(1).SendAsync(
+            Arg.Is<HttpRequestMessage>(request => request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath == "/api/records"),
+            Arg.Any<IServiceProvider>(),
+            Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received().UpdateRunAsync(Arg.Is<PipelineRun>(run => run.Status == "Success"), Arg.Any<CancellationToken>());
+    }
+
     [Fact]
     public async Task PipelineCreateRecord_UsesActiveRecordLookup()
     {
@@ -2194,13 +2272,8 @@ public class PipelineEngineTests
             }
         };
 
-        FilterGroup? capturedFilterTree = null;
-        _recordRepo.ListAsync(table, fields, Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup>(), Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
-            .Returns(x =>
-            {
-                capturedFilterTree = x.ArgAt<FilterGroup>(4);
-                return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(new List<IReadOnlyDictionary<string, object?>>());
-            });
+        _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(table, fields, Arg.Any<string>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
         var contextDict = new Dictionary<string, object>();
         var sessions = new Dictionary<string, PipelineEngine.BulkUpsertSession>
@@ -2217,11 +2290,13 @@ public class PipelineEngineTests
         })!;
 
         // Assert
-        capturedFilterTree.Should().NotBeNull();
-        var node = capturedFilterTree.Nodes.Should().ContainSingle().Subject;
-        node.Condition.Should().NotBeNull();
-        node.Condition!.FieldId.Should().Be(3); // Stable Fid = 3, not AppField.Id
-        node.Condition!.Value.Should().Be("MergeKeyValue");
+        await _recordRepo.Received(1).GetBulkUpsertRowsByColumnValuesAsync(
+            table,
+            fields,
+            "f_3", // Physical column for stable Fid = 3 (whereas Id = 3 has Fid = 15 -> f_15)
+            Arg.Is<IReadOnlyCollection<object>>(c => c.Contains("MergeKeyValue")),
+            Arg.Any<System.Data.IDbTransaction>(),
+            Arg.Any<CancellationToken>());
     }
 
     [Fact]

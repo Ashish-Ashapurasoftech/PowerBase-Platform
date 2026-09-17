@@ -1,3 +1,5 @@
+using System.Data;
+using PowerBase.Application.Common.Models;
 using System.Globalization;
 using System.Text.Json;
 using FluentAssertions;
@@ -24,6 +26,8 @@ public class LinkExpirationEndToEndTests
     private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
     private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
     private readonly IRecordWriteService _writeService = Substitute.For<IRecordWriteService>();
+    private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
+    private readonly IMessagePublisher _messagePublisher = Substitute.For<IMessagePublisher>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IFormulaRuntimeContext _runtime = Substitute.For<IFormulaRuntimeContext>();
     private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
@@ -48,7 +52,8 @@ public class LinkExpirationEndToEndTests
 
         _writeService.ApplyAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(),
+            Arg.Any<IDbTransaction?>(), false, Arg.Any<Action<SearchIndexMessage>?>())
             .Returns(ci => Task.FromResult(ci.Arg<IReadOnlyDictionary<long, object?>>()));
     }
 
@@ -58,7 +63,7 @@ public class LinkExpirationEndToEndTests
         new FormulaEngine(), _queryContext, _runtime, _appRepo, _tableRepo, _fieldRepo, _recordRepo);
 
     private InvokeButtonActionCommandHandler CreateSut() => new(
-        _tableRepo, _fieldRepo, _recordRepo, _enforcer, _writeService, RealResolver(), _queryContext);
+        _tableRepo, _fieldRepo, _recordRepo, _enforcer, _writeService, RealResolver(), _queryContext, _uow, _messagePublisher);
 
     /// <summary>The exact settings JSON shape the Angular client persists (camelCase).</summary>
     private void SetupButtonWithRawSettingsJson(string settingsJson)
@@ -115,7 +120,8 @@ public class LinkExpirationEndToEndTests
 
         await _writeService.DidNotReceive().ApplyAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(),
+            Arg.Any<IDbTransaction?>(), false, Arg.Any<Action<SearchIndexMessage>?>());
     }
 
     [Theory]
