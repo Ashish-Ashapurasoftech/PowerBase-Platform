@@ -93,13 +93,23 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
 
         // Each receipt namespace belongs to one logical step execution, including loop path.
         var prefix = executionPath + "/copy";
-        var configurationHash = Convert.ToHexString(Hash(JsonSerializer.Serialize(new { config.SourceTable,
-            config.DestinationTable, config.SourceFields, config.DestinationFields, config.MergeField, Query = query })));
+        var configurationHash = Convert.ToHexString(Hash(JsonSerializer.Serialize(new
+        {
+            config.SourceTable,
+            config.DestinationTable,
+            config.SourceFields,
+            config.DestinationFields,
+            config.MergeField,
+            Query = query
+        })));
         Task<string?> Read(string suffix) => receipts.GetByExecutionKeyAsync(messageId, stepId, Hash(prefix + suffix), uow.Transaction, ct);
         Task Store(string suffix, string json) => receipts.InsertAsync(new PipelineStepIdempotencyLog
         {
-            MessageId = messageId, StepPublicId = stepId, ExecutionPath = prefix + suffix,
-            ExecutionPathHash = Hash(prefix + suffix), OutputJson = json
+            MessageId = messageId,
+            StepPublicId = stepId,
+            ExecutionPath = prefix + suffix,
+            ExecutionPathHash = Hash(prefix + suffix),
+            OutputJson = json
         }, uow.Transaction, ct);
         string Finish(string json)
         {
@@ -174,48 +184,6 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var remaining = TimeSpan.FromHours(1) - (DateTime.UtcNow - snapshot.StartedUtc);
         if (remaining <= TimeSpan.Zero) throw new PipelineNonRetryableException("Copy Records exceeded its one-hour execution limit.");
         timeout.CancelAfter(remaining);
-
-        Dictionary<long, object?> MapValues(IReadOnlyDictionary<string, JsonElement> row)
-        {
-            var values = new Dictionary<long, object?>();
-            for (var i = 0; i < exported.Count; i++)
-            {
-                var field = exported[i];
-                row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var value);
-                if (value.ValueKind == JsonValueKind.Undefined)
-                    throw CopyRecordsDefinition.Error($"Source field '{field.Name}' has no exported value.");
-                object? raw = value;
-                if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
-                {
-                    row.TryGetValue(PhysicalNaming.EndColumnName(field.Fid!.Value), out var end);
-                    raw = JsonSerializer.Serialize(new { start = value, end = end.ValueKind == JsonValueKind.Undefined ? (JsonElement?)null : end });
-                }
-                values[imported[i].Fid!.Value] = CopyRecordsDefinition.ConvertValue(raw, field, imported[i]);
-            }
-            return values;
-        }
-
-        // Quickbase's "terminate on error" behavior is all-or-nothing for incompatible mapped
-        // values. Validate every saved source page before opening the first destination write
-        // transaction so a later bad row cannot leave earlier rows committed.
-        if (config.TerminateOnError == "Yes")
-        {
-            try
-            {
-                for (var pageIndex = 0; pageIndex < snapshot.Pages; pageIndex++)
-                {
-                    var encrypted = await Read($"/snapshot/{pageIndex}") ?? throw new InvalidOperationException("Copy Records snapshot page is missing.");
-                    var json = await encryption.DecryptDataAsync(encrypted, snapshot.WrappedKey, queryContext.TenantId, source.AppId, ct);
-                    var rows = JsonSerializer.Deserialize<List<Dictionary<string, JsonElement>>>(json)!;
-                    foreach (var row in rows) _ = MapValues(row);
-                }
-            }
-            catch (ValidationException ex)
-            {
-                throw new PipelineNonRetryableException($"Copy Records stopped before writing destination records. {ex.Message}");
-            }
-        }
-
         long inserted = 0, updated = 0, errors = 0;
         var messages = new List<string>();
         for (var pageIndex = 0; pageIndex < snapshot.Pages; pageIndex++)
@@ -235,13 +203,30 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                     await uow.BeginAsync(ct);
                     try
                     {
-                        var values = MapValues(row);
+                        var values = new Dictionary<long, object?>();
+                        for (int i = 0; i < exported.Count; i++)
+                        {
+                            var field = exported[i];
+                            row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var value);
+                            if (value.ValueKind == JsonValueKind.Undefined)
+                                throw CopyRecordsDefinition.Error($"Source field '{field.Name}' has no exported value.");
+                            object? raw = value;
+                            if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
+                            {
+                                row.TryGetValue(PhysicalNaming.EndColumnName(field.Fid!.Value), out var end);
+                                raw = JsonSerializer.Serialize(new { start = value, end = end.ValueKind == JsonValueKind.Undefined ? (JsonElement?)null : end });
+                            }
+                            values[imported[i].Fid!.Value] = CopyRecordsDefinition.ConvertValue(raw, field, imported[i]);
+                        }
                         values.TryGetValue(merge.Fid!.Value, out var key);
                         IReadOnlyDictionary<string, object?>? existing = null;
                         if (key != null && !string.IsNullOrEmpty(Convert.ToString(key, CultureInfo.InvariantCulture)))
                         {
-                            var match = new FilterGroup { Nodes = new() { new() { Condition = new()
-                            { FieldId = merge.Fid.Value, Operator = "eq", Value = Convert.ToString(key, CultureInfo.InvariantCulture) } } } };
+                            var match = new FilterGroup
+                            {
+                                Nodes = new() { new() { Condition = new()
+                            { FieldId = merge.Fid.Value, Operator = "eq", Value = Convert.ToString(key, CultureInfo.InvariantCulture) } } }
+                            };
                             var found = await records.ListAsync(destination, destinationFields, page: 1, pageSize: 2, filterTree: match, ct: ct);
                             if (found.Count > 1) throw CopyRecordsDefinition.Error("The destination merge value matches more than one record.");
                             existing = found.FirstOrDefault();
