@@ -136,7 +136,7 @@ public class CreateRecordCommandHandler
         }
         catch
         {
-            await _uow.RollbackAsync(ct);
+            await _uow.RollbackAsync(CancellationToken.None);
             throw;
         }
 

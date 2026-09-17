@@ -106,6 +106,10 @@ public class SavePipelineStepsCommandHandler
             _serviceProvider.GetService<IServiceScopeFactory>());
         await ValidateStepsConfigAsync(command.Steps, stepValidator, ct);
 
+        // Connection credentials live in encrypted PipelineConnection rows. Never persist a
+        // browser-side mode draft or secret value in the ordinary step configuration JSON.
+        SanitizeMakeRequestConfigs(command.Steps);
+
         var pipelineId = await _pipelineRepo.GetIdByPublicIdAsync(command.PipelinePublicId, ct);
         var pipeline = await _pipelineRepo.GetByPublicIdAsync(command.PipelinePublicId, ct);
 
@@ -258,6 +262,41 @@ public class SavePipelineStepsCommandHandler
                 var errorOrder = 0;
                 FlattenSteps(dto.ErrorChildren, stepPublicId, "errorChildren", ref errorOrder, flatList);
             }
+        }
+    }
+
+    private static void SanitizeMakeRequestConfigs(List<SavePipelineStepDto>? steps)
+    {
+        if (steps == null) return;
+        foreach (var step in steps)
+        {
+            if (step.Subtype == "make-request" && !string.IsNullOrWhiteSpace(step.ConfigJson))
+            {
+                try
+                {
+                    if (JsonNode.Parse(step.ConfigJson) is JsonObject config)
+                    {
+                        config.Remove("requestDrafts");
+                        if (!string.Equals(config["requestMode"]?.GetValue<string>(), "quickbase", StringComparison.OrdinalIgnoreCase)
+                            && Guid.TryParse(config["httpConnectionId"]?.GetValue<string>(), out _))
+                        {
+                            foreach (var key in new[] { "password", "bearerToken", "apiKeyValue", "jwtSigningKey", "oauthClientSecret", "oauthAccessToken", "oauthRefreshToken" })
+                                config.Remove(key);
+                            if (config["connectionHeaders"] is JsonArray headers)
+                                foreach (var header in headers.OfType<JsonObject>()) header["value"] = "";
+                        }
+                        step.ConfigJson = config.ToJsonString();
+                    }
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    // The validator reports malformed JSON; do not mask its validation result here.
+                }
+            }
+            SanitizeMakeRequestConfigs(step.Children);
+            SanitizeMakeRequestConfigs(step.ElseChildren);
+            SanitizeMakeRequestConfigs(step.SuccessChildren);
+            SanitizeMakeRequestConfigs(step.ErrorChildren);
         }
     }
 

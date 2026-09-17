@@ -147,7 +147,7 @@ public class RecordHandlerTests
     }
 
     [Fact]
-    public async Task CreateRecord_UserDefaultValue_CurrentUser_ResolvesToRequestingUserPublicId()
+    public async Task CreateRecord_UserDefaultValue_CurrentUser_UsesInternalUserId()
     {
         var table = MakeTable();
         var field = new AppField { Id = 1, Fid = 1, Name = "Owner", TypeCode = "User", DefaultValue = "{\"mode\":\"CurrentUser\"}" };
@@ -163,7 +163,11 @@ public class RecordHandlerTests
 
         var result = await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?>()));
 
-        result.Fields["1"].Should().Be(currentUserPublicId.ToString());
+        // User columns store internal IDs so current-user filters match the saved value.
+        result.Fields["1"].Should().Be("42");
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Is<IReadOnlyDictionary<long, object?>>(values => Equals(values[1L], "42")),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     // --- UpdateRecordCommandHandler ---

@@ -109,7 +109,7 @@ public interface IRecordRepository
     /// Used by mass update, after constraint validation has already passed for every record.</summary>
     Task<int> MassUpdateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> recordIds,
-        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null, System.Data.IDbTransaction? transaction = null);
 
     Task DeleteAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
 

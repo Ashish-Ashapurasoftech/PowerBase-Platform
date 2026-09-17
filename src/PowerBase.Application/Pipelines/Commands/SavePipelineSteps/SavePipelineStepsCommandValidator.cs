@@ -24,15 +24,15 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             return;
         }
 
-        // Rule 1: valid roots include ordinary trigger/query flows, error handling, and bulk upsert flows.
+        // Rule 1: valid roots include trigger/query flows, Make Request, error handling, and bulk upsert flows.
         var firstStep = steps[0];
         bool isValidFirstStep = firstStep.Type == "trigger" ||
             (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
             firstStep.Subtype == "handle-errors" ||
-            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records"));
+            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request"));
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Copy Records, Handle Errors, or Prepare Bulk Record Upsert step.");
+            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, or Prepare Bulk Record Upsert step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();
@@ -122,6 +122,17 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         var traversedRefIds = new HashSet<string>();
         foreach (var (step, parentRefId, branchType) in allStepsFlat)
         {
+            if (step.Subtype == "make-request" && step.IsValidated)
+            {
+                try
+                {
+                    var request = MakeRequestDefinition.Read(step.ConfigJson ?? "{}");
+                    request.Validate();
+                    if (!request.IsPowerBase && !request.HttpConnectionId.HasValue)
+                        context.AddFailure("Steps", $"Make Request '{step.RefId}': Connect the HTTP account before saving a validated step.");
+                }
+                catch (Exception ex) { context.AddFailure("Steps", $"Make Request '{step.RefId}': {ex.Message}"); }
+            }
             if ((step.Subtype == "pipeline-called" && (step.Type != "trigger" || step != firstStep)) ||
                 (step.Subtype == "call-another-pipeline" && step.Type != "action"))
                 context.AddFailure("Steps", "Pipeline Called must be the first root trigger; Call Another Pipeline must be an action.");
@@ -556,4 +567,3 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         };
     }
 }
-

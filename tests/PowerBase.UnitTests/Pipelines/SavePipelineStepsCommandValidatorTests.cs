@@ -153,7 +153,7 @@ public class SavePipelineStepsCommandValidatorTests
 
         // Assert
         result.IsValid.Should().BeFalse();
-        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with a Trigger, Search/Query, Copy Records, Handle Errors, or Prepare Bulk Record Upsert step"));
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, or Prepare Bulk Record Upsert step"));
     }
 
     [Fact]
@@ -1091,5 +1091,48 @@ public class SavePipelineStepsCommandValidatorTests
 
         result.IsValid.Should().BeFalse();
         result.Errors.Should().Contain(e => e.ErrorMessage.Contains("cannot be nested inside container steps"));
+    }
+
+    [Fact]
+    public async Task Validate_ValidatedHttpRequestWithoutSavedConnection_ReturnsInvalid()
+    {
+        var request = CreateActionStep("ref_request");
+        request.Subtype = "make-request";
+        request.ConfigJson = "{\"requestMode\":\"http\",\"baseUrl\":\"https://example.com\",\"method\":\"GET\",\"expectedPayloadType\":\"JSON\"}";
+        request.IsValidated = true;
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { CreateTriggerStep("ref_trigger"), request }, Array.Empty<byte>());
+
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("Connect the HTTP account"));
+    }
+
+    [Fact]
+    public async Task Validate_ValidatedHttpRequestAtStartWithSavedConnection_ReturnsValid()
+    {
+        var request = CreateActionStep("ref_request");
+        request.Subtype = "make-request";
+        request.ConfigJson = $"{{\"requestMode\":\"http\",\"httpConnectionId\":\"{Guid.NewGuid()}\",\"baseUrl\":\"https://example.com\",\"method\":\"GET\",\"expectedPayloadType\":\"JSON\"}}";
+        request.IsValidated = true;
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { request }, Array.Empty<byte>());
+
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_ValidatedPowerBaseRequestAtStart_ReturnsValid()
+    {
+        var request = CreateActionStep("ref_request");
+        request.Subtype = "make-request";
+        request.ConfigJson = $"{{\"requestMode\":\"quickbase\",\"connectionPublicId\":\"{Guid.NewGuid()}\",\"url\":\"/api/records\",\"method\":\"GET\"}}";
+        request.IsValidated = true;
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { request }, Array.Empty<byte>());
+
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
     }
 }

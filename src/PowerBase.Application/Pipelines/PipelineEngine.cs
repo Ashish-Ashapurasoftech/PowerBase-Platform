@@ -367,9 +367,10 @@ public class PipelineEngine : IPipelineEngine
                     var isQueryRoot = firstQueryStep?.Type == "query" && (firstQueryStep.Subtype == "search-records" || firstQueryStep.Subtype == "look-up-record");
                     var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
                     var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
-                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot)
+                    var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
+                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query, Copy Records, or Prepare Bulk Record Upsert first step.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query, Make Request, Copy Records, or Prepare Bulk Record Upsert first step.");
                     }
                 }
                 else if (normalizedEventName == "pipeline_schedule")
@@ -377,9 +378,10 @@ public class PipelineEngine : IPipelineEngine
                     var isQueryRoot = firstQueryStep?.Type == "query" && (firstQueryStep.Subtype == "search-records" || firstQueryStep.Subtype == "look-up-record");
                     var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
                     var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
-                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot)
+                    var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
+                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a Search/Query, Copy Records, or Prepare Bulk Record Upsert first step.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a Search/Query, Make Request, Copy Records, or Prepare Bulk Record Upsert first step.");
                     }
                     if (activeSteps.Any(s => s.Type == "trigger"))
                     {
@@ -1030,6 +1032,14 @@ public class PipelineEngine : IPipelineEngine
             }
         }
 
+        var isPowerBaseRequest = step.Subtype == "make-request" && MakeRequestDefinition.Read(step.ConfigJson ?? "{}").IsPowerBase;
+        if (isPowerBaseRequest)
+        {
+            var requestConfig = MakeRequestDefinition.Read(step.ConfigJson ?? "{}");
+            connectionPublicId ??= requestConfig.Connection;
+            if (!Guid.TryParse(connectionPublicId, out var accountId) || PipelineStepValidator.SystemConnectionIds.Contains(accountId))
+                throw new PipelineNonRetryableException("A valid PowerBase account is required.");
+        }
         long createdBy = contextDict.TryGetValue("_CreatedBy", out var cbObj) && cbObj is long cbVal ? cbVal : 0L;
         Guid messageGuid = contextDict.TryGetValue("_MessageId", out var msgObj) && msgObj is Guid msgGuid ? msgGuid : Guid.Empty;
 
@@ -1068,6 +1078,12 @@ public class PipelineEngine : IPipelineEngine
             }
         }
 
+        if (isPowerBaseRequest && accountScope == null)
+        {
+            if (!Guid.TryParse(connectionPublicId, out var requestAccount) ||
+                await _tenantRepo.GetTenantForUserAsync(requestAccount, createdBy, ct) == null)
+                throw new UnauthorizedAccessException("The selected PowerBase account is unavailable to the pipeline owner.");
+        }
         if (accountScope != null)
         {
             // TargetTenantScopeHelper pins the realm, adopts the token owner's identity and
@@ -1082,6 +1098,8 @@ public class PipelineEngine : IPipelineEngine
             if (step.Subtype == "copy-records")
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
 
+            if (step.Subtype == "make-request")
+                return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
             var accountRecordRepo = accountScopeHandle.GetRequiredService<IRecordRepository>();
             var accountTableRepo = accountScopeHandle.GetRequiredService<IAppTableRepository>();
             var accountFieldRepo = accountScopeHandle.GetRequiredService<IAppFieldRepository>();
@@ -1123,6 +1141,8 @@ public class PipelineEngine : IPipelineEngine
             if (step.Subtype == "copy-records")
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
 
+                if (step.Subtype == "make-request")
+                    return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
                 var scopedRecordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
                 var scopedTableRepo = scope.ServiceProvider.GetRequiredService<IAppTableRepository>();
                 var scopedFieldRepo = scope.ServiceProvider.GetRequiredService<IAppFieldRepository>();
@@ -1159,6 +1179,44 @@ public class PipelineEngine : IPipelineEngine
                 config.SourceFields, config.DestinationFields, config.MergeField, config.TerminateOnError });
             return await new CopyRecordsExecutor(services)
                 .ExecuteAsync(config, query, step.PublicId, messageId, executionPath, ct);
+    }
+
+    private async Task<string> ExecuteMakeRequestAsync(PipelineStep step, string payloadJson, List<PipelineStep> allSteps,
+        Dictionary<string, object> context, string executionPath, PipelineStepRun stepRun, IServiceProvider services, CancellationToken ct)
+    {
+        var config = MakeRequestDefinition.Read(step.ConfigJson ?? "{}");
+        string Resolve(string? value) => EvaluateTokens(value, payloadJson, executionPath, allSteps);
+        if (!config.IsPowerBase && config.HttpConnectionId.HasValue)
+        {
+            var owner = context.GetValueOrDefault("_CreatedBy") is long id ? id : _queryContext.UserId;
+            var saved = await services.GetRequiredService<IRequestConnectionService>().ResolveAsync(config.HttpConnectionId.Value, step.PipelineId, owner, ct);
+            config.BaseUrl = saved.BaseUrl; config.ConnectionHeaders = saved.ConnectionHeaders; config.AuthType = saved.AuthType;
+            config.Username = saved.Username; config.Password = saved.Password; config.BearerToken = saved.BearerToken;
+            config.ApiKeyName = saved.ApiKeyName; config.ApiKeyValue = saved.ApiKeyValue; config.ApiKeyPlacement = saved.ApiKeyPlacement;
+            config.JwtAlg = saved.JwtAlg; config.JwtSigningKey = saved.JwtSigningKey; config.JwtHeaders = saved.JwtHeaders;
+            config.JwtClaims = saved.JwtClaims; config.JwtUseIat = saved.JwtUseIat; config.JwtExp = saved.JwtExp;
+            config.OAuthGrantType = saved.OAuthGrantType; config.OAuthTokenEndpoint = saved.OAuthTokenEndpoint;
+            config.OAuthClientId = saved.OAuthClientId; config.OAuthClientSecret = saved.OAuthClientSecret;
+            config.OAuthScope = saved.OAuthScope; config.OAuthClientAuth = saved.OAuthClientAuth; config.OAuthAccessToken = saved.OAuthAccessToken;
+        }
+        if (config.IsPowerBase && string.IsNullOrWhiteSpace(config.ConnectionPublicId ?? config.Connection))
+            throw new PipelineNonRetryableException("PowerBase requests require a connected account.");
+        // Redirects must never forward connection credentials to another endpoint.
+        using var client = _httpClientFactory.CreateClient("PipelineMakeRequest");
+        client.Timeout = TimeSpan.FromMinutes(5);
+        var executor = new MakeRequestExecutor((request, token) => config.IsPowerBase
+            ? services.GetRequiredService<IPipelineApiRequestDispatcher>().SendAsync(request, services, token)
+            : client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token));
+        stepRun.InputContext = SerializeAndSanitizeAudit(new { RequestMode = config.RequestMode ?? "http", Method = config.Method,
+            Url = config.IsPowerBase ? "PowerBase API" : new Uri(MakeRequestExecutor.BuildUrl(config, Resolve).GetLeftPart(UriPartial.Path)).ToString() });
+        MakeRequestResult result;
+        try { result = await executor.ExecuteAsync(config, Resolve, ct, audit => stepRun.InputContext = SerializeAndSanitizeAudit(audit, int.MaxValue)); }
+        catch (InvalidOperationException ex) { throw new PipelineNonRetryableException(ex.Message); }
+        catch (UnauthorizedAccessException ex) { throw new PipelineNonRetryableException(ex.Message); }
+        if (!context.TryGetValue("request_metadata", out var metadata) || metadata is not Dictionary<string, object> requests)
+            context["request_metadata"] = requests = new Dictionary<string, object>();
+        requests[step.RefId] = new { status_code = result.StatusCode, status_message = result.StatusMessage, response_headers = result.ResponseHeaders };
+        return result.OutputJson;
     }
 
     private static byte[] ComputeSha256Hash(string rawData)
@@ -1536,7 +1594,7 @@ public class PipelineEngine : IPipelineEngine
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
                 _logger.LogWarning(ex, "Create Record step {StepId} encountered unique constraint violation. Handling idempotency replay.", step.Id);
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
                 throw;
@@ -1544,7 +1602,7 @@ public class PipelineEngine : IPipelineEngine
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Create Record step {StepId} failed.", step.Id);
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 throw;
             }
         }
@@ -1616,14 +1674,14 @@ public class PipelineEngine : IPipelineEngine
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
                 throw;
             }
             catch
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 throw;
             }
         }
@@ -1689,14 +1747,14 @@ public class PipelineEngine : IPipelineEngine
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
                 throw;
             }
             catch
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 throw;
             }
         }
@@ -2065,62 +2123,7 @@ public class PipelineEngine : IPipelineEngine
         }
         else if (subtype == "make-request")
         {
-            var config = JsonSerializer.Deserialize<MakeRequestStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (config == null || string.IsNullOrWhiteSpace(config.Url))
-                throw new InvalidOperationException("Make request step configuration is invalid or missing URL.");
-
-            var resolvedUrl = EvaluateTokens(config.Url, payloadJson, executionPath, allSteps);
-            var method = string.IsNullOrWhiteSpace(config.Method) ? "GET" : config.Method.ToUpperInvariant();
-
-            var client = _httpClientFactory.CreateClient();
-            var request = new HttpRequestMessage(new HttpMethod(method), resolvedUrl);
-
-            var correlationId = contextDict.TryGetValue("_CorrelationId", out var corrObj) ? corrObj?.ToString() : null;
-            var depth = contextDict.TryGetValue("_Depth", out var dObj) && dObj is int dVal ? dVal : 1;
-
-            if (!string.IsNullOrEmpty(correlationId))
-            {
-                request.Headers.TryAddWithoutValidation("X-PowerBase-Correlation-Id", correlationId);
-            }
-            request.Headers.TryAddWithoutValidation("X-PowerBase-Depth", (depth + 1).ToString());
-
-            var resolvedHeaders = new List<HttpHeader>();
-            if (config.HeadersList != null)
-            {
-                foreach (var header in config.HeadersList)
-                {
-                    if (string.IsNullOrWhiteSpace(header.Name)) continue;
-                    var resolvedVal = EvaluateTokens(header.Value, payloadJson, executionPath, allSteps);
-                    request.Headers.TryAddWithoutValidation(header.Name, resolvedVal);
-                    resolvedHeaders.Add(new HttpHeader { Name = header.Name, Value = resolvedVal });
-                }
-            }
-
-            string? resolvedBody = null;
-            if (method == "POST" || method == "PUT" || method == "PATCH")
-            {
-                resolvedBody = EvaluateTokens(config.Body, payloadJson, executionPath, allSteps);
-                var contentType = string.IsNullOrWhiteSpace(config.ContentType) ? "application/json" : config.ContentType;
-                request.Content = new StringContent(resolvedBody, System.Text.Encoding.UTF8, contentType);
-            }
-
-            stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                Url = resolvedUrl,
-                Method = method,
-                Headers = resolvedHeaders,
-                ContentType = config.ContentType,
-                Body = resolvedBody
-            });
-
-            var response = await client.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                var errorContent = await response.Content.ReadAsStringAsync(ct);
-                throw new HttpRequestException($"HTTP Request failed with status code {response.StatusCode}: {errorContent}");
-            }
-
-            var responseBody = await response.Content.ReadAsStringAsync(ct);
-            return responseBody;
+            return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
         }
         else if (subtype == "prepare-bulk-upsert")
         {
@@ -2914,7 +2917,7 @@ public class PipelineEngine : IPipelineEngine
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 sessions.Remove(sessionKey);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
@@ -2922,7 +2925,7 @@ public class PipelineEngine : IPipelineEngine
             }
             catch
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 sessions.Remove(sessionKey);
                 throw;
             }
@@ -3101,14 +3104,14 @@ public class PipelineEngine : IPipelineEngine
                                 }
                                 catch (Exception ex) when (IsUniqueConstraintViolation(ex))
                                 {
-                                    await uow.RollbackAsync(ct);
+                                    await uow.RollbackAsync(CancellationToken.None);
                                     var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                                     if (winningOutput != null) return winningOutput;
                                     throw;
                                 }
                                 catch
                                 {
-                                    await uow.RollbackAsync(ct);
+                                    await uow.RollbackAsync(CancellationToken.None);
                                     throw;
                                 }
                             }
@@ -3669,6 +3672,7 @@ public class PipelineEngine : IPipelineEngine
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
         if (string.IsNullOrEmpty(payloadJson)) return input;
+        input = Regex.Replace(input, @"(?<=\{\{)\s*(?:steps\.)?([A-Za-z][A-Za-z0-9_]*)\._metadata\.", " request_metadata.$1.");
 
         var callableTrigger = allSteps?.FirstOrDefault(step => step.Subtype == "pipeline-called" && step.Type == "trigger");
         if (callableTrigger != null)

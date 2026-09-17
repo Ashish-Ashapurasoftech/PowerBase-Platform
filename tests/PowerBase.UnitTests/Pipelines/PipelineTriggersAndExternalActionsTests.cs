@@ -1074,7 +1074,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         // Verify writeService was called with suppressInterception = true
         await writeService.Received(1).ApplyAsync(
-            table, fields, Arg.Any<Guid>(), row, AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), dbTx, suppressInterception: true);
+            table, fields, Arg.Any<Guid>(), row, AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), dbTx, suppressInterception: true, existingRecord: existingRow);
 
         // Verify triggerInterceptor was called for bulk modified exactly once with UserId 1
         await triggerInterceptor.Received(1).InterceptBulkAsync(
@@ -1583,11 +1583,11 @@ public class PipelineTriggersAndExternalActionsTests
         recordRepo.GetByPublicIdAsync(table, fields, Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?> { ["f_6"] = "Old" });
 
-        recordRepo.MassUpdateAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>())
+        recordRepo.MassUpdateAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>(), Arg.Any<System.Data.IDbTransaction>())
             .Returns(2);
 
         var handler = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommandHandler(
-            tableRepo, fieldRepo, recordRepo, enforcer, auditRepo, triggerInterceptor, uow, queryContext);
+            tableRepo, fieldRepo, recordRepo, enforcer, auditRepo, triggerInterceptor, uow, queryContext, Substitute.For<IMessagePublisher>());
 
         var command = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommand(
             table.PublicId, new List<Guid> { recId1, recId2 }, new Dictionary<long, object?> { [6] = "New" });

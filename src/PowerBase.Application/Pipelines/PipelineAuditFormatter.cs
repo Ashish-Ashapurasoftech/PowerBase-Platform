@@ -891,33 +891,35 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     friendlyInput["Headers"] = AsDictionary(hObj);
                 }
 
-                if (inputDict.TryGetValue("Body", out var bdyObj) && bdyObj != null)
-                {
-                    var bdyStr = bdyObj.ToString() ?? string.Empty;
-                    friendlyInput["Body"] = bdyStr.Length > 200 ? bdyStr.Substring(0, 200) + "... [TRUNCATED]" : bdyStr;
-                }
+                if (inputDict.TryGetValue("Body", out var requestBody)) friendlyInput["Body"] = requestBody;
+                if (inputDict.TryGetValue("QueryParameters", out var query)) friendlyInput["Query Parameters"] = query;
+                if (inputDict.TryGetValue("RequestMode", out var mode)) friendlyInput["Request Mode"] = mode;
 
-                int httpStatusCode = 200;
-                if (outputDict.TryGetValue("HTTPStatus", out var hsObj) && hsObj != null && int.TryParse(hsObj.ToString(), out var hsVal))
+                // An absent response is not an HTTP 200 (for example DNS or timeout failures).
+                object? httpStatus = null;
+                if (inputDict.TryGetValue("HTTPStatus", out var actualStatus)) httpStatus = actualStatus;
+                else if (outputDict.TryGetValue("HTTPStatus", out var legacyStatus)) httpStatus = legacyStatus;
+                else if (outputDict.TryGetValue("HttpStatusCode", out var legacyCode)) httpStatus = legacyCode;
+                friendlyOutput["HTTP Status"] = httpStatus;
+                if (inputDict.TryGetValue("StatusMessage", out var statusMessage)) friendlyOutput["Status Message"] = statusMessage;
+                if (inputDict.TryGetValue("ResponseHeaders", out var responseHeaders)) friendlyOutput["Response Headers"] = responseHeaders;
+                if (inputDict.TryGetValue("ResponseSize", out var responseSize)) friendlyOutput["Response Size (bytes)"] = responseSize;
+                if (inputDict.TryGetValue("ResponseBody", out var responseBody)) friendlyOutput["Response Body"] = responseBody;
+                else if (status != "Failed" && rawOutputJson != null)
                 {
-                    httpStatusCode = hsVal;
+                    try { friendlyOutput["Response Body"] = JsonSerializer.Deserialize<JsonElement>(rawOutputJson); }
+                    catch (JsonException) { friendlyOutput["Response Body"] = rawOutputJson; }
                 }
-                else if (outputDict.TryGetValue("HttpStatusCode", out var hscObj) && hscObj != null && int.TryParse(hscObj.ToString(), out var hscVal))
+                if (inputDict.TryGetValue("ResponseBodyAvailable", out var available)) friendlyOutput["Response Body Available"] = available;
+                if (status == "Failed")
                 {
-                    httpStatusCode = hscVal;
+                    friendlyOutput["Error"] = outputDict.GetValueOrDefault("ErrorMessage");
+                    friendlyOutput["Exception Type"] = outputDict.GetValueOrDefault("ExceptionType");
                 }
-
-                long responseSize = 0;
-                if (rawOutputJson != null)
-                {
-                    responseSize = rawOutputJson.Length;
-                }
-
-                friendlyOutput["HTTP Status"] = httpStatusCode;
-                friendlyOutput["Response Size"] = responseSize;
-
-                logMessage = $"{method} request to {domain} completed with HTTP {httpStatusCode}.";
+                logMessage = $"{method} request to {domain} {(status == "Failed" ? "failed" : "completed")}" +
+                    (httpStatus == null ? " without an HTTP response." : $" with HTTP {httpStatus}.");
             }
+
             else if (subtype == "prepare-bulk-upsert")
             {
                 var tableGuidStr = inputDict.TryGetValue("TableLabel", out var tlObj) ? tlObj?.ToString() : null;
@@ -1080,8 +1082,8 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             { "TechnicalDetails", traceDetails }
         };
 
-        var inputJson = SerializeAndTruncate(finalInputContext);
-        var outputJson = SerializeAndTruncate(finalOutputContext);
+        var inputJson = SerializeAndTruncate(finalInputContext, step.Subtype == "make-request" ? int.MaxValue : 32000);
+        var outputJson = SerializeAndTruncate(finalOutputContext, step.Subtype == "make-request" ? int.MaxValue : 32000);
 
         return (inputJson, outputJson, logMessage);
     }

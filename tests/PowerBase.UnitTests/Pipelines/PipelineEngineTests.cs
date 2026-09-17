@@ -31,6 +31,9 @@ public class PipelineEngineTests
     private readonly ILogger<PipelineEngine> _logger;
     private readonly IPipelineAuditFormatter _auditFormatter;
     private readonly IPipelineRecordSearchService _pipelineRecordSearchService;
+    private readonly IPipelineApiRequestDispatcher _apiRequestDispatcher;
+    private readonly ITenantRepository _tenantRepository;
+    private readonly IHttpClientFactory _httpClientFactory;
 
     public PipelineEngineTests()
     {
@@ -43,8 +46,13 @@ public class PipelineEngineTests
         _logger = Substitute.For<ILogger<PipelineEngine>>();
         _auditFormatter = Substitute.For<IPipelineAuditFormatter>();
         _pipelineRecordSearchService = Substitute.For<IPipelineRecordSearchService>();
+        _apiRequestDispatcher = Substitute.For<IPipelineApiRequestDispatcher>();
+        _tenantRepository = Substitute.For<ITenantRepository>();
+        _httpClientFactory = Substitute.For<IHttpClientFactory>();
+        _httpClientFactory.CreateClient(Arg.Any<string>()).Returns(_ => new HttpClient());
         var serviceProvider = Substitute.For<IServiceProvider>();
         serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(_pipelineRecordSearchService);
+        serviceProvider.GetService(typeof(IPipelineApiRequestDispatcher)).Returns(_apiRequestDispatcher);
 
         _engine = new PipelineEngine(
             _pipelineRepo,
@@ -53,7 +61,7 @@ public class PipelineEngineTests
             _tableRepo,
             _fieldRepo,
             Substitute.For<IEmailService>(),
-            Substitute.For<IHttpClientFactory>(),
+            _httpClientFactory,
             Substitute.For<IFileStorageService>(),
             Options.Create(_execOptions),
             _logger,
@@ -64,7 +72,7 @@ public class PipelineEngineTests
             Substitute.For<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             serviceProvider,
             Substitute.For<IAdminRepository>(),
-            Substitute.For<ITenantRepository>(),
+            _tenantRepository,
             Substitute.For<IPipelineStepIdempotencyRepository>()
         );
     }
@@ -1359,6 +1367,53 @@ public class PipelineEngineTests
         // Act & Assert
         var act = () => _engine.ExecuteAsync(task, CancellationToken.None);
         await act.Should().NotThrowAsync();
+    }
+
+    [Theory]
+    [InlineData("manual")]
+    [InlineData("activation")]
+    [InlineData("pipeline_schedule")]
+    public async Task ExecuteAsync_MakeRequestAtStart_RunsForSupportedOnDemandEvents(string triggerEvent)
+    {
+        var connectionPublicId = Guid.NewGuid();
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = triggerEvent, TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false, CreatedBy = 42 });
+        _tenantRepository.GetTenantForUserAsync(connectionPublicId, 42, Arg.Any<CancellationToken>()).Returns(new Tenant());
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>
+        {
+            new()
+            {
+                Id = 10,
+                PipelineId = 1,
+                PublicId = Guid.NewGuid(),
+                RefId = "ref_request",
+                Type = "action",
+                Subtype = "make-request",
+                IsDeleted = false,
+                IsValidated = true,
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    requestMode = "quickbase",
+                    connectionPublicId,
+                    url = "/api/records",
+                    method = "GET"
+                })
+            }
+        });
+        _apiRequestDispatcher.SendAsync(Arg.Any<HttpRequestMessage>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
+            .Returns(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"records\":[]}", System.Text.Encoding.UTF8, "application/json")
+            });
+
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        await _apiRequestDispatcher.Received(1).SendAsync(
+            Arg.Is<HttpRequestMessage>(request => request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath == "/api/records"),
+            Arg.Any<IServiceProvider>(),
+            Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received().UpdateRunAsync(Arg.Is<PipelineRun>(run => run.Status == "Success"), Arg.Any<CancellationToken>());
     }
 
     [Fact]

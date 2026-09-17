@@ -628,6 +628,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error occurred during batch pipeline trigger interception.");
+            throw; // Do not commit the record mutation without its trigger events.
         }
     }
 
