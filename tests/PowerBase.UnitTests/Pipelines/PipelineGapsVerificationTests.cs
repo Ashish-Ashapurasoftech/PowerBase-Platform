@@ -162,6 +162,7 @@ public class PipelineGapsVerificationTests
             writeService,
             tableRepo,
             fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             Substitute.For<IFileStorageService>(),
