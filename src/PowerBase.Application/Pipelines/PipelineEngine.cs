@@ -958,6 +958,8 @@ public class PipelineEngine : IPipelineEngine
             }
             catch (Exception stepEx)
             {
+                _logger.LogError("Pipeline step {StepId} ({Subtype}) failed: {Reason}",
+                    step.Id, step.Subtype, SanitizeErrorMessage(stepEx.Message));
                 stepRun.Status = "Failed";
                 stepRun.CompletedOn = DateTime.UtcNow;
 
@@ -1548,7 +1550,10 @@ public class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name);
+                        // Quickbase single-record steps omit blank mappings instead of
+                        // writing NULL (which would clear an existing value on update).
+                        if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
+                        var parsedVal = ParseRecordMappingValue(resolvedValStr, field, mapping.Value);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -1633,7 +1638,8 @@ public class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name);
+                        if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
+                        var parsedVal = ParseRecordMappingValue(resolvedValStr, field, mapping.Value);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -3803,6 +3809,21 @@ public class PipelineEngine : IPipelineEngine
                 return match.Value;
             });
 
+            // Older editor versions prefixed Make Request response properties with fid_.
+            // Only translate that legacy spelling when the actual response has the
+            // unprefixed property; record FIDs and real fid_* response keys stay intact.
+            input = Regex.Replace(input, @"\{\{\s*steps\.([A-Za-z0-9_]+)\.fid_([A-Za-z_][A-Za-z0-9_]*)(?=[.\s|}])", match =>
+            {
+                var stepRef = match.Groups[1].Value;
+                var property = match.Groups[2].Value;
+                if (allSteps?.Any(step => step.RefId == stepRef && step.Subtype == "make-request") != true ||
+                    !stepsDict.TryGetValue(stepRef, out var output) || output is not JsonElement response ||
+                    response.ValueKind != JsonValueKind.Object || response.TryGetProperty("fid_" + property, out _) ||
+                    !response.TryGetProperty(property, out _))
+                    return match.Value;
+                return match.Value.Replace(".fid_" + property, "." + property, StringComparison.Ordinal);
+            });
+
             var context = new CustomTemplateContext(contextDict);
             context.MemberRenamer = member => member.Name;
 
@@ -4348,6 +4369,25 @@ public class PipelineEngine : IPipelineEngine
         }
     }
 
+    private object? ParseRecordMappingValue(string value, AppField field, string? expression)
+    {
+        var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
+        try { return ParseValueType(value, field.TypeCode, label); }
+        catch (FormatException ex)
+        {
+            // Refer to a dynamic source without recording its possibly sensitive value.
+            var token = Regex.Match(expression ?? "", @"^\{\{\s*([A-Za-z0-9_.]+)\s*\}\}$");
+            var source = token.Success ? $" from '{token.Groups[1].Value}'" : "";
+            var phoneFormatted = Regex.IsMatch(value.Trim(), @"^\+?\d[\d\s().]*-\d[\d\s().-]*$") &&
+                value.Count(char.IsDigit) >= 7;
+            var kind = value.TrimStart().StartsWith('{') ? "an object" :
+                value.TrimStart().StartsWith('[') ? "an array" :
+                phoneFormatted ? "phone-formatted text" : "text that cannot be converted";
+            var suggestion = phoneFormatted ? " Map phone values to a Phone or Text field." : "";
+            throw new PipelineMappingException($"Field '{label}' requires a valid {field.TypeCode} value, but its mapping{source} returned {kind}.{suggestion}", ex);
+        }
+    }
+
     private object? ParseValueType(string valueStr, string typeCode, string fieldName)
     {
         if (string.IsNullOrWhiteSpace(valueStr)) return null;
@@ -4363,7 +4403,8 @@ public class PipelineEngine : IPipelineEngine
         }
         if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER", "RATING", "DURATION" }.Contains(normalizedCode))
         {
-            if (decimal.TryParse(valueStr, out var dVal)) return dVal;
+            if (decimal.TryParse(valueStr, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var dVal) ||
+                decimal.TryParse(valueStr, out dVal)) return dVal;
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
         if (new[] { "DATE", "DATE_TIME", "DATETIME", "TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))

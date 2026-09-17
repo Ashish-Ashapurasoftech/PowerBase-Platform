@@ -159,6 +159,33 @@ public class PipelineRecordOwnerTests
     }
 
     [Fact]
+    public async Task InvalidRecordMapping_FailsQueueWithoutRetry()
+    {
+        var job = new PipelineQueue { Id = 31, TenantId = 10, PipelineId = 100, TriggeredBy = 99L,
+            MessageId = Guid.NewGuid(), ClaimToken = Guid.NewGuid() };
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>())
+            .Returns(new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true });
+        _userRepo.GetByIdAsync(99L, Arg.Any<CancellationToken>())
+            .Returns(new User { Id = 99L, IsActive = true });
+        _tenantRepo.IsActiveMemberAsync(99L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(99L, 10L, Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string> { "PowerFlows:read" });
+        var engine = (IPipelineEngine)_serviceProvider.GetService(typeof(IPipelineEngine))!;
+        engine.ExecuteAsync(Arg.Any<PipelineExecutionTask>(), Arg.Any<CancellationToken>())
+            .Returns<Task>(_ => throw new PipelineMappingException("Number mapping failed", new FormatException()));
+        var worker = new DatabasePipelineExecutionWorker(_serviceProvider,
+            Substitute.For<IControlConnectionFactory>(), Options.Create(new PipelineExecutionOptions()),
+            Substitute.For<ILogger<DatabasePipelineExecutionWorker>>());
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None })!;
+        await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value,
+            Arg.Is<string>(message => message.Contains("Number mapping failed")), Arg.Any<CancellationToken>());
+        await _queueRepo.DidNotReceive().ScheduleRetryAsync(Arg.Any<long>(), Arg.Any<string>(),
+            Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task OnNewEvent_CreateRecord_PreservesActor()
     {
         // Arrange
