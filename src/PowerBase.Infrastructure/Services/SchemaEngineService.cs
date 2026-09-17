@@ -134,25 +134,51 @@ public class SchemaEngineService : ISchemaEngineService
         var physicalTable = PhysicalNaming.FullTableName(table.Id);
         var physicalColumn = PhysicalNaming.ColumnName(field.Fid!.Value);
         var indexName = $"UX_{PhysicalNaming.TableName(table.Id)}_{physicalColumn}";
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
 
-        string sql;
+        // Text, Email, SingleSelect, etc. use NVARCHAR(MAX) in tenant databases. SQL Server
+        // cannot use a MAX column as an index key, so index a fixed-size digest instead.
+        // NULL/deleted values get a row-specific digest so they do not conflict.
+        var maxLength = await connection.ExecuteScalarAsync<short?>(new CommandDefinition($"""
+            SELECT c.max_length FROM sys.columns c
+            WHERE c.object_id = OBJECT_ID('{physicalTable}') AND c.name = '{physicalColumn}'
+            """, cancellationToken: ct));
+        if (maxLength is null)
+            throw new InvalidOperationException($"Physical column {physicalTable}.{physicalColumn} does not exist.");
+
+        var digestColumn = $"{physicalColumn}_unique_hash";
+        var usesDigest = maxLength == -1;
         if (enable)
         {
-            sql = $"""
-                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = '{indexName}')
+            if (usesDigest)
+            {
+                // SQL Server does not allow a filtered index on a computed column.
+                // Give deleted and NULL rows a digest based on Id instead.
+                await connection.ExecuteAsync(new CommandDefinition($"""
+                    IF COL_LENGTH('{physicalTable}', '{digestColumn}') IS NULL
+                        ALTER TABLE {physicalTable} ADD {digestColumn} AS
+                            (CASE WHEN {physicalColumn} IS NULL OR IsDeleted = 1
+                                THEN HASHBYTES('SHA2_256', 0x00 + CONVERT(VARBINARY(8), Id))
+                                ELSE HASHBYTES('SHA2_256', 0x01 + CONVERT(VARBINARY(MAX), {physicalColumn}))
+                            END) PERSISTED;
+                    """, cancellationToken: ct));
+            }
+
+            var keyColumn = usesDigest ? digestColumn : physicalColumn;
+            var filter = usesDigest ? "" : $" WHERE {physicalColumn} IS NOT NULL AND IsDeleted = 0";
+            await connection.ExecuteAsync(new CommandDefinition($"""
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID('{physicalTable}') AND name = '{indexName}')
                     CREATE UNIQUE NONCLUSTERED INDEX {indexName}
-                        ON {physicalTable}({physicalColumn})
-                        WHERE {physicalColumn} IS NOT NULL AND IsDeleted = 0;
-                """;
+                        ON {physicalTable}({keyColumn}){filter};
+                """, cancellationToken: ct));
         }
         else
         {
-            sql = $"DROP INDEX IF EXISTS {indexName} ON {physicalTable};";
+            await connection.ExecuteAsync(new CommandDefinition($"DROP INDEX IF EXISTS {indexName} ON {physicalTable};", cancellationToken: ct));
+            if (usesDigest)
+                await connection.ExecuteAsync(new CommandDefinition($"ALTER TABLE {physicalTable} DROP COLUMN IF EXISTS {digestColumn};", cancellationToken: ct));
         }
-
-        await using var connection = await _connectionFactory.CreateAsync(ct);
-        await connection.OpenAsync(ct);
-        await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
     }
 
     public async Task WidenIntColumnToDecimalIfNeededAsync(AppTable table, AppField field, CancellationToken ct = default)
