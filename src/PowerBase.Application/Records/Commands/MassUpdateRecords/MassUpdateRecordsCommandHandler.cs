@@ -1,5 +1,6 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Enums;
 using PowerBase.Domain.Exceptions;
@@ -12,6 +13,7 @@ public class MassUpdateRecordsCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IRelationshipRepository _relRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
@@ -24,6 +26,7 @@ public class MassUpdateRecordsCommandHandler
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
+        IRelationshipRepository relRepo,
         IRolePermissionEnforcer enforcer,
         IAuditRepository auditRepo,
         IPipelineTriggerInterceptor triggerInterceptor,
@@ -35,6 +38,7 @@ public class MassUpdateRecordsCommandHandler
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
+        _relRepo = relRepo;
         _enforcer = enforcer;
         _auditRepo = auditRepo;
         _triggerInterceptor = triggerInterceptor;
@@ -76,6 +80,13 @@ public class MassUpdateRecordsCommandHandler
             throw new ValidationException(
                 new Dictionary<string, string[]> { ["fields"] = [$"System fields cannot be mass-updated: {string.Join(", ", systemIds)}"] });
 
+        // Reference fields must point at an existing parent record; a value submitted as a
+        // human key is resolved to the parent row Id before any constraint check or persist.
+        var effectiveValues = new Dictionary<long, object?>(command.FieldValues);
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, effectiveValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
+        foreach (var kvp in refOverrides)
+            effectiveValues[kvp.Key] = kvp.Value;
+
         var access = await _enforcer.GetTableAccessAsync(table, fields, ct);
         if (!access.Unrestricted)
         {
@@ -114,10 +125,10 @@ public class MassUpdateRecordsCommandHandler
         var inRequestDuplicateFids = new HashSet<long>();
         if (foundIds.Count > 1)
         {
-            foreach (var field in fields.Where(f => f.Fid.HasValue && f.IsUnique && command.FieldValues.ContainsKey((long)f.Fid.Value)))
+            foreach (var field in fields.Where(f => f.Fid.HasValue && f.IsUnique && effectiveValues.ContainsKey((long)f.Fid.Value)))
             {
                 var fid = (long)field.Fid!.Value;
-                var value = command.FieldValues[fid];
+                var value = effectiveValues[fid];
                 var isBlank = value is null || (value is string s && string.IsNullOrWhiteSpace(s));
                 if (isBlank || PhysicalNaming.IsRangeTypeCode(field.TypeCode)) continue;
 
@@ -135,7 +146,7 @@ public class MassUpdateRecordsCommandHandler
         foreach (var recordId in foundIds)
         {
             var recordViolations = await RecordConstraintValidator.CollectViolationsAsync(
-                table, fields, command.FieldValues, _recordRepo, isCreate: false, excludeRecordId: idMap[recordId], ct, recordId, appDateFormat: dateFormat);
+                table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: idMap[recordId], ct, recordId, appDateFormat: dateFormat);
             violations.AddRange(recordViolations.Where(v => !(v.ConstraintType == "Unique" && inRequestDuplicateFids.Contains(v.FieldId))));
         }
 
@@ -162,7 +173,7 @@ public class MassUpdateRecordsCommandHandler
                         beforeValues[f.Id] = oldVal;
                         beforeValues[f.Fid.Value] = oldVal;
 
-                        if (command.FieldValues.TryGetValue(f.Fid.Value, out var newVal))
+                        if (effectiveValues.TryGetValue(f.Fid.Value, out var newVal))
                         {
                             afterValues[f.Id] = newVal;
                             afterValues[f.Fid.Value] = newVal;
@@ -201,7 +212,7 @@ public class MassUpdateRecordsCommandHandler
                     table, fields, recordChanges, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
             }
 
-            affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), command.FieldValues, ct, indexMessages.Add, _uow.Transaction);
+            affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), effectiveValues, ct, indexMessages.Add, _uow.Transaction);
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.Updated, AuditEntityTypes.Record, table.PublicId.ToString(),

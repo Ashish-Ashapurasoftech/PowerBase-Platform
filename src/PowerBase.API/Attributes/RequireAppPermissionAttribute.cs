@@ -6,7 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace PowerBase.API.Attributes;
 
-public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId, ByPagePublicId, ByPipelinePublicId, ByRoleId }
+public enum AppAccessResolver { ByAppId, ByAppPublicId, ByTableId, ByTablePublicId, ByReportPublicId, ByFormPublicId, ByFormRulePublicId, ByPagePublicId, ByPipelinePublicId, ByRoleId, ByRelationshipId }
 
 /// <summary>
 /// Requires the caller to be an app member (any role). Does NOT require a specific permission code.
@@ -164,6 +164,11 @@ internal class AppPermissionFilter : IAsyncActionFilter
                     var roleId = Guid.Parse(route["roleId"]!.ToString()!);
                     await _accessService.RequirePermissionByRolePublicIdAsync(roleId, _permissionCode, context.HttpContext.RequestAborted);
                     break;
+
+                case AppAccessResolver.ByRelationshipId:
+                    var relId = Guid.Parse(route["relId"]!.ToString()!);
+                    await _accessService.RequirePermissionByRelationshipPublicIdAsync(relId, _permissionCode, context.HttpContext.RequestAborted);
+                    break;
             }
         }
         catch (UnauthorizedActionException ex)
@@ -178,7 +183,7 @@ internal class AppPermissionFilter : IAsyncActionFilter
         catch (NotFoundException ex)
         {
             context.Result = new ObjectResult(new
-            {
+             {
                 error = new { code = "NOT_FOUND", message = ex.Message }
             })
             { StatusCode = StatusCodes.Status404NotFound };

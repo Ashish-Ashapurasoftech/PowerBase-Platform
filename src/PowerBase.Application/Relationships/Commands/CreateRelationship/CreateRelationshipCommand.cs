@@ -13,7 +13,14 @@ public record CreateRelationshipCommand(
     bool IsReferenceRequired,
     IReadOnlyList<CreateLookupSpec> Lookups,
     IReadOnlyList<CreateSummarySpec> Summaries,
-    int? ReferenceFieldFid = null);
+    int? ReferenceFieldFid = null,
+    /// <summary>
+    /// Fid of the parent field to use as the display key in the reference picker.
+    /// Null = standard key (Record ID# / table's global KeyFieldId).
+    /// This is purely a display choice — storage is always the parent's internal row Id.
+    /// </summary>
+    int? DisplayKeyFieldFid = null);
+
 
 /// <summary>A parent field to pull down onto the child as a Lookup. <paramref name="SourceFid"/> is the parent field's Fid.
 /// <paramref name="SourceSubField"/> optionally targets one JSON sub-key of a composite Address source field

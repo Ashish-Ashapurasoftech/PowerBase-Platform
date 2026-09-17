@@ -83,6 +83,11 @@ public class RecordResult
             }
         }
 
+        if (row.TryGetValue("Id", out var idVal) && idVal is not null)
+        {
+            fieldData["3"] = idVal;
+        }
+
         var createdBy = row.TryGetValue("CreatedBy", out var cb) && cb is not null ? Convert.ToInt64(cb) : 0L;
 
         // Forward synthetic ActionButton formula label/color keys.

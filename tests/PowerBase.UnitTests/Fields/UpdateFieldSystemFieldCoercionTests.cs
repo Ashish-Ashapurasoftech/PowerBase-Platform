@@ -31,20 +31,26 @@ public class UpdateFieldSystemFieldCoercionTests
     private readonly IMessagePublisher _messagePublisher = Substitute.For<IMessagePublisher>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IAzureSearchService _searchService = Substitute.For<IAzureSearchService>();
+    private readonly IFieldVersionRepository _fieldVersionRepo = Substitute.For<IFieldVersionRepository>();
     private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
     // No validators registered — every TypeCode's Settings JSON passes through unvalidated, same
     // pattern FieldHandlerTests.cs already uses; the point of these tests is the coercion layer,
     // not per-type shape validation (that's covered by FieldSettingsValidators' own tests).
     private readonly FieldSettingsValidatorRegistry _settingsRegistry = new(Array.Empty<IFieldSettingsValidator>());
 
-    private UpdateFieldCommandHandler MakeSut()
+    public UpdateFieldSystemFieldCoercionTests()
     {
-        var guard = new FieldSettingsGuard(_permRepo, _recordRepo, _settingsRegistry);
-        var versionService = new FieldVersionService(Substitute.For<IFieldVersionRepository>(), _queryContext);
-        return new UpdateFieldCommandHandler(
-            _tableRepo, _fieldRepo, _recordRepo, _auditRepo, _schemaEngine,
-            guard, versionService, _uow, _fieldTypeRepo, _messagePublisher, _queryContext, _searchService);
+        // NSubstitute auto-substitutes a non-null proxy for unconfigured interface-typed members —
+        // force this back to null so it matches what a real IUnitOfWork returns before BeginAsync,
+        // and what the tests' own UpdateAsync/CreateVersionIfChangedAsync verifications expect.
+        _uow.Transaction.Returns((IDbTransaction?)null);
     }
+
+    private UpdateFieldCommandHandler MakeSut() => new(
+        _tableRepo, _fieldRepo, _recordRepo, _auditRepo, _schemaEngine,
+        new FieldSettingsGuard(_permRepo, _recordRepo, _settingsRegistry),
+        new FieldVersionService(_fieldVersionRepo, _queryContext),
+        _uow, _fieldTypeRepo, _messagePublisher, _queryContext, _searchService);
 
     private AppTable MakeTable(long id = 5)
     {

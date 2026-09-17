@@ -14,6 +14,7 @@ public class CreateRecordCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IRelationshipRepository _relRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
     //private readonly IFormulaDefaultResolver _formulaDefaults;
@@ -29,6 +30,7 @@ public class CreateRecordCommandHandler
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
+        IRelationshipRepository relRepo,
         IRolePermissionEnforcer enforcer,
         IAuditRepository auditRepo,
         //IFormulaDefaultResolver formulaDefaults,
@@ -43,6 +45,7 @@ public class CreateRecordCommandHandler
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
+        _relRepo = relRepo;
         _enforcer = enforcer;
         _auditRepo = auditRepo;
         //_formulaDefaults = formulaDefaults;
@@ -83,8 +86,9 @@ public class CreateRecordCommandHandler
                 throw new UnauthorizedActionException("You do not have permission to write to one or more of the specified fields.");
         }
 
-        // Reference fields must point at an existing parent record.
-        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
+        // Reference fields must point at an existing parent record; a value submitted as a
+        // human key is resolved to the parent row Id here.
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
 
         // Inject default values for fields that were not submitted (e.g. hidden None-access fields).
         // This ensures required fields with defaults are always populated regardless of role restrictions.
