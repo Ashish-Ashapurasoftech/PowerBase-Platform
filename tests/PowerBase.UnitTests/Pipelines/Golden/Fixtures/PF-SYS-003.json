@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-SYS-003",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Execution worker node crash recovery using stale lock expiration timeout",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-SYS-003",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

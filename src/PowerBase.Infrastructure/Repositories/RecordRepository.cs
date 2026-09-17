@@ -9,6 +9,7 @@ using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.FieldSettings;
 using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Repositories;
@@ -297,6 +298,44 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return result;
     }
 
+    public async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetBulkUpsertRowsByIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> ids, IDbTransaction transaction, CancellationToken ct = default)
+    {
+        var rows = await GetBulkUpsertRowsByColumnValuesAsync(table, fields, "Id", ids.Cast<object>().ToArray(), transaction, ct);
+        return rows.Values.Distinct().ToDictionary(row => Convert.ToInt64(row["Id"]), row => row);
+    }
+
+    public async Task<IReadOnlyDictionary<object, IReadOnlyDictionary<string, object?>>> GetBulkUpsertRowsByColumnValuesAsync(
+        AppTable table, IReadOnlyList<AppField> fields, string columnName, IReadOnlyCollection<object> values, IDbTransaction transaction, CancellationToken ct = default)
+    {
+        var result = new Dictionary<object, IReadOnlyDictionary<string, object?>>();
+        if (values.Count == 0) return result;
+        if (columnName != "Id" && !fields.Any(f => PhysicalNaming.GetPhysicalColumnName(f) == columnName))
+            throw new ArgumentException("The merge column must belong to the target table.", nameof(columnName));
+
+        var connection = transaction.Connection ?? throw new InvalidOperationException("Bulk upsert requires an active transaction.");
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
+        var fieldCols = BuildFieldColumnList(fields);
+        var escapedColumnName = columnName.Replace("]", string.Concat(']', ']'));
+        foreach (var chunk in values.Distinct().Chunk(500))
+        {
+            var sql = $"""
+                SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+                FROM {PhysicalNaming.FullTableName(table.Id)} WITH (UPDLOCK, HOLDLOCK)
+                WHERE IsDeleted = 0 AND [{escapedColumnName}] IN @chunk
+                """;
+            var rows = await connection.QueryAsync(new CommandDefinition(sql, new { chunk }, transaction, cancellationToken: ct));
+            foreach (var row in rows)
+            {
+                IReadOnlyDictionary<string, object?> dict = ToDictionary(row);
+                await enc.DecryptRowAsync((IDictionary<string, object?>)dict, fields, ct);
+                if (dict.TryGetValue(columnName, out var value) && value is not null && value != DBNull.Value)
+                    result[value] = dict;
+            }
+        }
+        return result;
+    }
+
     public async Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
         IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
@@ -579,7 +618,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
             else
             {
-                parameters.Add(col, encryptedValues.TryGetValue((long)f.Fid.Value, out var ev) ? ev : values[(long)f.Fid.Value]);
+                var raw = values.TryGetValue((long)f.Fid.Value, out var rv2) ? rv2 : null;
+                parameters.Add(col, IsBlankForNonTextField(f, raw)
+                    ? null
+                    : (encryptedValues.TryGetValue((long)f.Fid.Value, out var ev) ? ev : raw));
             }
         }
 
@@ -675,7 +717,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             else
             {
                 setClauses.Add($"{col} = @{col}");
-                parameters.Add(col, valToBind);
+                parameters.Add(col, IsBlankForNonTextField(f, values[(long)f.Fid.Value]) ? null : valToBind);
             }
         }
 
@@ -727,7 +769,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     public async Task<int> MassUpdateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> recordIds,
-        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null, IDbTransaction? transaction = null)
     {
         var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
         if (relevantFields.Count == 0 || recordIds.Count == 0) return 0;
@@ -735,16 +777,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         Services.FieldEncryptionContext enc;
         IReadOnlyDictionary<long, object?> encryptedValues;
 
-        await using (var connectionForEnc = await ConnectionFactory.CreateAsync(ct))
-        {
-            enc = await GetEncryptionContextAsync(connectionForEnc, table.AppId, null, ct);
-            if (!enc.IsActive && (enc.IsAppEncrypted || relevantFields.Any(f => f.IsEncrypted)))
-            {
-                await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
-                await enc.EnsureDekAsync(tenantConn, null, ct);
-            }
-            encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
-        }
+        await using var ownedConnection = transaction == null ? await ConnectionFactory.CreateAsync(ct) : null;
+        var connection = transaction?.Connection ?? ownedConnection
+            ?? throw new InvalidOperationException("The mass update transaction has no active connection.");
+        enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
+        if (!enc.IsActive && (enc.IsAppEncrypted || relevantFields.Any(f => f.IsEncrypted)))
+            await enc.EnsureDekAsync(connection, transaction, ct);
+        encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
 
         var parameters = new DynamicParameters();
         parameters.Add("ids", recordIds);
@@ -764,28 +803,26 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
             else
             {
-                setClauses.Add($"{col} = @{col}"); parameters.Add(col, valToBind);
+                setClauses.Add($"{col} = @{col}");
+                parameters.Add(col, IsBlankForNonTextField(f, values[(long)f.Fid.Value]) ? null : valToBind);
             }
         }
 
-        // A single UPDATE statement is implicitly transactional in SQL Server — either every matched
-        // row is written or none is, satisfying the all-or-nothing requirement without an explicit
-        // BEGIN TRAN (and without needing per-record round trips, since every record gets the same values).
+        // Enlist the mutation in the same transaction as its pipeline outbox entries.
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET {string.Join(", ", setClauses)}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
             WHERE Id IN @ids AND IsDeleted = 0
             """;
 
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await ExecuteTranslatingUniqueViolationsAsync(() =>
-            connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)));
+            connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct)));
 
         // GAP #5: Re-index in Azure AI Search after Mass Update
         if (affected > 0 && fields.Any(f => f.IsSearchable || f.IsFilterable))
         {
             var publicIdsSql = $"SELECT PublicId FROM {PhysicalNaming.FullTableName(table.Id)} WHERE Id IN @ids";
-            var publicIds = await connection.QueryAsync<Guid>(new CommandDefinition(publicIdsSql, new { ids = recordIds }, cancellationToken: ct));
+            var publicIds = await connection.QueryAsync<Guid>(new CommandDefinition(publicIdsSql, new { ids = recordIds }, transaction, cancellationToken: ct));
 
             var searchableValues = fields
                 .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
@@ -919,29 +956,34 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
-        AppTable table, AppField groupByField,
+        AppTable table, IReadOnlyList<(AppField Field, string Mode)> groupByFields,
         IReadOnlyList<SummaryAggregation> aggregations,
         IReadOnlyList<AppField> allFields,
-        string groupByMode = "EqualValues",
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
         AppField? seriesField = null,
         string seriesMode = "EqualValues",
         CancellationToken ct = default)
     {
-        var groupCol = groupByField.IsSystem && !string.IsNullOrEmpty(groupByField.PhysicalColumnName)
-            ? groupByField.PhysicalColumnName!
-            : PhysicalNaming.ColumnName(groupByField.Fid!.Value);
-        var groupExpr = BuildGroupByExpr(groupCol, groupByMode, groupByField.TypeCode);
+        if (groupByFields.Count == 0) return [];
+
+        static string ColumnOf(AppField f) => f.IsSystem && !string.IsNullOrEmpty(f.PhysicalColumnName)
+            ? f.PhysicalColumnName!
+            : PhysicalNaming.ColumnName(f.Fid!.Value);
+
+        // Ordered "Rows" group levels (Summary's chained "Group by X, then by Y, ..." — Chart/
+        // legacy single-level Summary always pass a 1-element list here). Each level gets its own
+        // GroupValue{i} SELECT/GROUP BY/ORDER BY slot, all evaluated together with the optional
+        // crosstab/series dimension in one query.
+        var groupCols = groupByFields.Select(g => ColumnOf(g.Field)).ToList();
+        var groupExprs = groupByFields.Select((g, i) => BuildGroupByExpr(groupCols[i], g.Mode, g.Field.TypeCode)).ToList();
         var fieldMap = allFields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
 
         string? seriesExpr = null;
         string? seriesCol = null;
         if (seriesField is not null)
         {
-            seriesCol = seriesField.IsSystem && !string.IsNullOrEmpty(seriesField.PhysicalColumnName)
-                ? seriesField.PhysicalColumnName!
-                : PhysicalNaming.ColumnName(seriesField.Fid!.Value);
+            seriesCol = ColumnOf(seriesField);
             seriesExpr = BuildGroupByExpr(seriesCol, seriesMode, seriesField.TypeCode);
         }
 
@@ -970,25 +1012,42 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 ? aggField.PhysicalColumnName!
                 : PhysicalNaming.ColumnName((int)agg.FieldId);
             var alias = $"[{agg.Function}_{aggField.Name.Replace(" ", "_")}]";
+            // Number/Currency/Percent/Rating's "Treat blank values as 0 in calculations" Behavior
+            // Setting (defaults to true when unset — see NumericSettings.Validation) — SQL Server's
+            // SUM/AVG silently skip NULL rows by default, which is the opposite of "checked": that
+            // setting means a blank should count as 0 in both the sum and the average's denominator,
+            // not be excluded. ISNULL(...,0) makes that explicit; unchecked leaves the plain column
+            // so SUM/AVG's native NULL-skipping applies (blank genuinely excluded), matching the
+            // Table report's client-side footer (table-report-view.component.ts's
+            // formatAggregateForField, same setting, same semantics).
+            var sumAvgExpr = TreatBlankAsZero(aggField)
+                ? $"ISNULL(CAST({col} AS DECIMAL(18,4)), 0)"
+                : $"CAST({col} AS DECIMAL(18,4))";
             var clause = agg.Function switch
             {
-                "Sum" => $"SUM(CAST({col} AS DECIMAL(18,4))) AS {alias}",
-                "Avg" => $"AVG(CAST({col} AS DECIMAL(18,4))) AS {alias}",
+                "Sum" => $"SUM({sumAvgExpr}) AS {alias}",
+                "Avg" => $"AVG({sumAvgExpr}) AS {alias}",
                 "Min" => $"MIN({col}) AS {alias}",
                 "Max" => $"MAX({col}) AS {alias}",
                 "DistinctCount" => $"COUNT(DISTINCT {col}) AS {alias}",
                 "StdDev" => $"STDEV(CAST({col} AS DECIMAL(18,4))) AS {alias}",
                 "Median" => BuildMedianClause(tableName, outerAlias, medianAlias, col, alias, ownerWhere, filterWhere,
-                    groupCol, groupByMode, groupByField.TypeCode, seriesCol, seriesMode, seriesField?.TypeCode),
+                    groupCols.Select((c, i) => (c, groupByFields[i].Mode, groupByFields[i].Field.TypeCode)).ToList(),
+                    seriesCol, seriesMode, seriesField?.TypeCode),
                 _ => null,
             };
             if (clause is not null) aggClauses.Add(clause);
         }
 
-        var selectList = seriesExpr is null
-            ? $"{groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}"
-            : $"{groupExpr} AS GroupValue, {seriesExpr} AS SeriesValue, {string.Join(", ", aggClauses)}";
-        var groupByList = seriesExpr is null ? groupExpr : $"{groupExpr}, {seriesExpr}";
+        var groupSelectParts = groupExprs.Select((e, i) => $"{e} AS GroupValue{i}").ToList();
+        var selectParts = new List<string>(groupSelectParts);
+        if (seriesExpr is not null) selectParts.Add($"{seriesExpr} AS SeriesValue");
+        selectParts.AddRange(aggClauses);
+        var selectList = string.Join(", ", selectParts);
+
+        var groupByParts = new List<string>(groupExprs);
+        if (seriesExpr is not null) groupByParts.Add(seriesExpr);
+        var groupByList = string.Join(", ", groupByParts);
 
         var sql = $"""
             SELECT {selectList}
@@ -1001,6 +1060,24 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
         return rows.Select(ToDictionary).ToList();
+    }
+
+    /// <summary>Number/Currency/Percent/Rating's "Treat blank values as 0 in calculations" Behavior
+    /// Setting — defaults to true (matching <see cref="NumericSettings.TreatBlankAsZero"/>'s own
+    /// doc comment) when the field has no Settings JSON, no Validation block, or a malformed one.</summary>
+    private static bool TreatBlankAsZero(AppField field)
+    {
+        if (string.IsNullOrWhiteSpace(field.Settings)) return true;
+        try
+        {
+            var settings = JsonSerializer.Deserialize<NumericSettings>(
+                field.Settings, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return settings?.TreatBlankAsZero ?? true;
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
     }
 
     /// <summary>
@@ -1017,19 +1094,25 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private static string BuildMedianClause(
         string tableName, string outerAlias, string medianAlias,
         string col, string alias, string ownerWhere, string filterWhere,
-        string groupCol, string groupByMode, string groupTypeCode,
+        IReadOnlyList<(string Col, string Mode, string TypeCode)> groupLevels,
         string? seriesCol, string? seriesMode, string? seriesTypeCode)
     {
-        var groupOuter = BuildGroupByExpr($"{outerAlias}.{groupCol}", groupByMode, groupTypeCode);
-        var groupInner = BuildGroupByExpr($"{medianAlias}.{groupCol}", groupByMode, groupTypeCode);
-        var correlation = $"(({groupInner} = {groupOuter}) OR ({groupInner} IS NULL AND {groupOuter} IS NULL))";
+        var correlationParts = new List<string>();
+        foreach (var (groupCol, groupByMode, groupTypeCode) in groupLevels)
+        {
+            var groupOuter = BuildGroupByExpr($"{outerAlias}.{groupCol}", groupByMode, groupTypeCode);
+            var groupInner = BuildGroupByExpr($"{medianAlias}.{groupCol}", groupByMode, groupTypeCode);
+            correlationParts.Add($"(({groupInner} = {groupOuter}) OR ({groupInner} IS NULL AND {groupOuter} IS NULL))");
+        }
 
         if (seriesCol is not null)
         {
             var seriesOuter = BuildGroupByExpr($"{outerAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
             var seriesInner = BuildGroupByExpr($"{medianAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
-            correlation += $" AND (({seriesInner} = {seriesOuter}) OR ({seriesInner} IS NULL AND {seriesOuter} IS NULL))";
+            correlationParts.Add($"(({seriesInner} = {seriesOuter}) OR ({seriesInner} IS NULL AND {seriesOuter} IS NULL))");
         }
+
+        var correlation = string.Join(" AND ", correlationParts);
 
         return $"""
             (SELECT TOP (1) PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST({medianAlias}.{col} AS DECIMAL(18,4))) OVER ()
@@ -1158,6 +1241,20 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var joiner = group.Logic?.ToLowerInvariant() == "or" ? " OR " : " AND ";
         return string.Join(joiner, parts);
     }
+
+    /// <summary>
+    /// True when `rawValue` is a blank string being written to a field whose physical column
+    /// genuinely doesn't store text (numeric/date/bit/bigint) — SQL Server can't implicitly
+    /// convert an empty string to those types and throws ("Error converting data type nvarchar to
+    /// ..."), so this must resolve to a real NULL write instead of being handed to Dapper's
+    /// parameter binder as-is (which infers an NVARCHAR parameter from the C# string). Checked
+    /// against the RAW (pre-encryption) value — encrypting a blank string for e.g. a Number field
+    /// would otherwise produce non-empty ciphertext for what should just be a NULL column. Mirrors
+    /// SplitRangeValue's own "normalise empty strings to null" handling below, just for the plain
+    /// (non-range) field case that was missing it.
+    /// </summary>
+    private static bool IsBlankForNonTextField(AppField field, object? rawValue) =>
+        rawValue is string s && string.IsNullOrWhiteSpace(s) && !PhysicalNaming.IsTextStoringTypeCode(field.TypeCode);
 
     /// <summary>
     /// Splits a range field value (sent as JSON object or IDictionary) into start and end SQL parameters.

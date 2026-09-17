@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-EVT-001",
+  "classification": "QB-DOC",
+  "description": "On Record Created event triggers pipeline on record creation",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/use-the-quickbase-channel",
+  "relevantHeading": "Quickbase > Triggers",
+  "testPayload": {
+    "stepId": "QB-EVT-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

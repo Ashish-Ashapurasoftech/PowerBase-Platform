@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-REC-004",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Delete Record step output exposes DeletedRecordPublicId as Guid string",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-REC-004",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

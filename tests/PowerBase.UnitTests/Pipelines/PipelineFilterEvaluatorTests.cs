@@ -248,4 +248,65 @@ public class PipelineFilterEvaluatorTests
         var source4 = new Dictionary<long, object?> { [1] = "Ronak", [2] = 10, [3] = "VIP", [4] = "true" };
         groups.Any(g => PipelineFilterEvaluator.EvaluateGroup(g, source4, _fields)).Should().BeTrue();
     }
+
+    [Theory]
+    // Configured Right Date: 2026-09-07T00:00:00.000Z
+    // 1. Sep 6 23:59
+    [InlineData("2026-09-06T23:59:59Z", "is", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-06T23:59:59Z", "is-not", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-06T23:59:59Z", "after", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-06T23:59:59Z", "on-or-after", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-06T23:59:59Z", "before", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-06T23:59:59Z", "on-or-before", "2026-09-07T00:00:00Z", true)]
+    // 2. Sep 7 00:00
+    [InlineData("2026-09-07T00:00:00Z", "is", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-07T00:00:00Z", "is-not", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-07T00:00:00Z", "after", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-07T00:00:00Z", "on-or-after", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-07T00:00:00Z", "before", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-07T00:00:00Z", "on-or-before", "2026-09-07T00:00:00Z", true)]
+    // 3. Sep 7 16:18 (Critical same-day timestamp test!)
+    [InlineData("2026-09-07T16:18:00Z", "is", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-07T16:18:00Z", "is-not", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-07T16:18:00Z", "after", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-07T16:18:00Z", "on-or-after", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-07T16:18:00Z", "before", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-07T16:18:00Z", "on-or-before", "2026-09-07T00:00:00Z", true)]
+    // 4. Sep 7 23:59
+    [InlineData("2026-09-07T23:59:59Z", "is", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-07T23:59:59Z", "is-not", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-07T23:59:59Z", "after", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-07T23:59:59Z", "on-or-after", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-07T23:59:59Z", "before", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-07T23:59:59Z", "on-or-before", "2026-09-07T00:00:00Z", true)]
+    // 5. Sep 8 00:00
+    [InlineData("2026-09-08T00:00:00Z", "is", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-08T00:00:00Z", "is-not", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-08T00:00:00Z", "after", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-08T00:00:00Z", "on-or-after", "2026-09-07T00:00:00Z", true)]
+    [InlineData("2026-09-08T00:00:00Z", "before", "2026-09-07T00:00:00Z", false)]
+    [InlineData("2026-09-08T00:00:00Z", "on-or-before", "2026-09-07T00:00:00Z", false)]
+    public void EvaluateConditionOperator_DateOnlyOperators_CompleteTruthTable(
+        string left, string op, string right, bool expected)
+    {
+        PipelineFilterEvaluator.EvaluateConditionOperator(left, op, right, typeCategory: "DATE")
+            .Should().Be(expected);
+    }
+
+    [Fact]
+    public void EvaluateConditionOperator_DynamicDateOperands_SameDayDifferentTime_EvaluatesDateOnly()
+    {
+        // Left: 23:59 on Sept 7, Right: 00:01 on Sept 7
+        string left = "2026-09-07T23:59:00Z";
+        string right = "2026-09-07T00:01:00Z";
+
+        // AFTER should be false because calendar dates are identical
+        PipelineFilterEvaluator.EvaluateConditionOperator(left, "after", right, typeCategory: "DATE")
+            .Should().BeFalse();
+
+        // IS should be true because calendar dates are identical
+        PipelineFilterEvaluator.EvaluateConditionOperator(left, "is", right, typeCategory: "DATE")
+            .Should().BeTrue();
+    }
 }
+

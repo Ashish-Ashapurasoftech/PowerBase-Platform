@@ -43,18 +43,27 @@ public class UpdateTableCommandHandler
         if (command.Name.Length > 200)
             throw new ValidationException(new Dictionary<string, string[]> { ["Name"] = ["Name must be 200 characters or fewer."] });
 
+        // Leading/trailing whitespace is never meaningful here — trim server-side so a client that
+        // bypasses the UI (a direct API call) can't persist " Employee " verbatim. NullIfBlank also
+        // collapses a whitespace-only optional value down to "unset", matching what omitting it
+        // altogether means.
+        var name = command.Name.Trim();
+        var singularLabel = NullIfBlank(command.SingularLabel);
+        var pluralLabel = NullIfBlank(command.PluralLabel);
+        var description = NullIfBlank(command.Description);
+
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
         if (table == null)
             throw new NotFoundException("Table", command.TablePublicId);
 
         var changes = new List<string>();
-        if (table.Name != command.Name)
-            changes.Add($"Name to '{command.Name}'");
-        if (table.SingularLabel != command.SingularLabel)
-            changes.Add($"Singular Label to '{command.SingularLabel}'");
-        if (table.PluralLabel != command.PluralLabel)
-            changes.Add($"Plural Label to '{command.PluralLabel}'");
-        if (table.Description != command.Description)
+        if (table.Name != name)
+            changes.Add($"Name to '{name}'");
+        if (table.SingularLabel != singularLabel)
+            changes.Add($"Singular Label to '{singularLabel}'");
+        if (table.PluralLabel != pluralLabel)
+            changes.Add($"Plural Label to '{pluralLabel}'");
+        if (table.Description != description)
             changes.Add("Description");
         if (table.Icon != command.Icon)
             changes.Add($"Icon to '{command.Icon}'");
@@ -90,9 +99,9 @@ public class UpdateTableCommandHandler
         }
 
         var affected = await _tableRepo.UpdateAsync(
-            command.TablePublicId, command.Name,
-            command.SingularLabel, command.PluralLabel,
-            command.Description, command.Icon,
+            command.TablePublicId, name,
+            singularLabel, pluralLabel,
+            description, command.Icon,
             command.DefaultRecordPickerField1Id,
             command.DefaultRecordPickerField2Id,
             command.DefaultRecordPickerField3Id,
@@ -112,11 +121,13 @@ public class UpdateTableCommandHandler
         return new UpdateTableResult
         {
             PublicId = table.PublicId,
-            Name = command.Name,
-            SingularLabel = command.SingularLabel,
+            Name = name,
+            SingularLabel = singularLabel,
             Icon = command.Icon,
             IsShowInBar = command.IsShowInBar ?? table.IsShowInBar,
             CreatedOn = table.CreatedOn,
         };
     }
+
+    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-E2E-001",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Full E2E path: UI trigger -> SQL Outbox -> Worker Engine -> DB mutation",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-E2E-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

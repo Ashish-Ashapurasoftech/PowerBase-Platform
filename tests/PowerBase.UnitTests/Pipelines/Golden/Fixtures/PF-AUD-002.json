@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-AUD-002",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Engine persists step execution details in PipelineStepExecutionLog",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-AUD-002",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

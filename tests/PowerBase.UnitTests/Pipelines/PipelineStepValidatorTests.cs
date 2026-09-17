@@ -45,6 +45,39 @@ public class PipelineStepValidatorTests
         );
     }
 
+
+    [Theory]
+    [InlineData("10", true, true)]
+    [InlineData("\"10\"", true, true)]
+    [InlineData("\" 25 \"", true, true)]
+    [InlineData("2147483647", true, true)]
+    [InlineData("\"\"", false, true)]
+    [InlineData("null", false, true)]
+    [InlineData("\"\"", true, false)]
+    [InlineData("null", true, false)]
+    [InlineData("0", true, false)]
+    [InlineData("-1", true, false)]
+    [InlineData("1.5", true, false)]
+    [InlineData("\"abc\"", true, false)]
+    [InlineData("2147483648", true, false)]
+    [InlineData("true", true, false)]
+    public async Task Validate_RecordLimit_HandlesTextAndNumericInputs(string maximum, bool limited, bool valid)
+    {
+        var appGuid = Guid.NewGuid();
+        var tableGuid = Guid.NewGuid();
+        _appRepo.GetByPublicIdAsync(appGuid, Arg.Any<CancellationToken>()).Returns(new App { Id = 1 });
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 2, AppId = 1 });
+        var config = JsonSerializer.Serialize(new {
+            connectionPublicId = PipelineStepValidator.SystemConnectionIds.First().ToString(),
+            appPublicId = appGuid.ToString(), tablePublicId = tableGuid.ToString(),
+            triggerOnAdded = true, limitRecords = limited,
+            maxRecords = JsonSerializer.Deserialize<JsonElement>(maximum)
+        });
+        var act = () => _validator.ValidateNewEventStepAsync(config, CancellationToken.None);
+        if (valid) await act.Should().NotThrowAsync();
+        else await act.Should().ThrowAsync<ValidationException>().Where(e => e.Errors.ContainsKey("MaxRecords"));
+    }
+
     [Fact]
     public async Task Validate_EmptyConfig_ThrowsValidationException()
     {

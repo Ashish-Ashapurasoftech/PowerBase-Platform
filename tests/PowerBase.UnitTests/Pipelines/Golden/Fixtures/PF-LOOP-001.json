@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-LOOP-001",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Visual Loop container step exposes index, is_first, is_last",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-LOOP-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

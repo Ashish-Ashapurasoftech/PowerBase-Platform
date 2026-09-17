@@ -25,7 +25,7 @@ public static class ReferenceWriteValidator
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
-        IRelationshipRepository relRepo,
+        IRelationshipRepository? relRepo,
         CancellationToken ct)
     {
         var overrides = new Dictionary<long, object?>();

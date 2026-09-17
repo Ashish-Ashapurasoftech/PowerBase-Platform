@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-COND-003",
+  "classification": "QB-DOC",
+  "description": "Date and timestamp range comparison",
+  "verifiedLiveUrl": "https://help.quickbase.com/v1/docs/jinja-reference",
+  "relevantHeading": "Jinja reference > Filters",
+  "testPayload": {
+    "stepId": "QB-COND-003",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

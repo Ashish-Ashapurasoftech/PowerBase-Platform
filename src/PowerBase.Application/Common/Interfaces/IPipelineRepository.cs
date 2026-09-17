@@ -27,6 +27,7 @@ public class SchedulerMetadataDto
 
 public interface IPipelineRepository
 {
+    Task<IReadOnlyList<AppField>> GetTableFieldsAsync(long tableId, CancellationToken ct = default);
     Task<SchedulerMetadataDto> GetSchedulerMetadataAsync(CancellationToken ct = default);
     Task<IReadOnlyList<long>> GetDeletedPipelineIdsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> GetPipelineStatesAsync(IEnumerable<long> ids, CancellationToken ct = default);
@@ -36,6 +37,7 @@ public interface IPipelineRepository
     Task<IReadOnlyList<PipelineListItemDetail>> ListByUserPagedAsync(long userId, int page, int pageSize, string? search, string sortBy, bool sortDesc, bool? isActive, CancellationToken ct = default);
     Task<int> CountByUserAsync(long userId, string? search, bool? isActive, CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> ListAllActiveAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<Pipeline>> FindCallablePipelinesAsync(long ownerId, string callDefinition, CancellationToken ct = default);
     Task<(Guid PublicId, long Id)> CreateAsync(Pipeline pipeline, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<int> UpdateAsync(Pipeline pipeline, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task DeleteAsync(Guid publicId, CancellationToken ct = default);

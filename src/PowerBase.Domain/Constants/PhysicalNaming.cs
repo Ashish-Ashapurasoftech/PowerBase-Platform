@@ -47,4 +47,15 @@ public static class PhysicalNaming
     /// one helper instead of each re-deriving its own (and drifting, as happened before).</summary>
     public static bool IsActionButtonTypeCode(string typeCode) =>
         typeCode == "ActionButton" || typeCode.StartsWith("ActionButton_", StringComparison.Ordinal);
+
+    /// <summary>True for the non-computed TypeCodes whose physical column genuinely stores text
+    /// (NVARCHAR, including JSON-as-text for Select/File/Address) — an empty string is a
+    /// meaningful value there (an intentionally blank Text field, say). Every other non-computed
+    /// TypeCode's physical column is numeric/date/bit/bigint, where SQL Server can't implicitly
+    /// convert an empty string and throws ("Error converting data type nvarchar to ..."). See
+    /// RecordRepository's IsBlankForNonTextField, which uses this to turn a cleared grid/form cell
+    /// into a real NULL write for those types instead of handing SQL Server a blank string.</summary>
+    public static bool IsTextStoringTypeCode(string typeCode) =>
+        typeCode is "Text" or "TextMultiLine" or "RichText" or "Email" or "Phone" or "Url"
+            or "SingleSelect" or "MultiSelect" or "File" or "Address";
 }

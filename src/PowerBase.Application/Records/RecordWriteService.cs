@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
+using PowerBase.Domain.ValueObjects;
 using PowerBase.Formula;
 
 namespace PowerBase.Application.Records;
@@ -28,7 +29,8 @@ public interface IRecordWriteService
         CancellationToken ct = default,
         System.Data.IDbTransaction? transaction = null,
         bool suppressInterception = false,
-        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
+        IReadOnlyDictionary<string, object?>? existingRecord = null);
 }
 
 public sealed class RecordWriteService : IRecordWriteService
@@ -42,6 +44,7 @@ public sealed class RecordWriteService : IRecordWriteService
     private readonly IAuditRepository _auditRepo;
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly FormulaEngine _engine;
+    private readonly IAppRepository _appRepo;
 
     public RecordWriteService(
         IAppTableRepository tableRepo,
@@ -52,7 +55,8 @@ public sealed class RecordWriteService : IRecordWriteService
         IUserRepository userRepo,
         IAuditRepository auditRepo,
         IPipelineTriggerInterceptor triggerInterceptor,
-        FormulaEngine engine)
+        FormulaEngine engine,
+        IAppRepository appRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -63,6 +67,7 @@ public sealed class RecordWriteService : IRecordWriteService
         _auditRepo = auditRepo;
         _triggerInterceptor = triggerInterceptor;
         _engine = engine;
+        _appRepo = appRepo;
     }
 
     private static bool AreValuesEqual(object? val1, object? val2, string? typeCode)
@@ -110,14 +115,16 @@ public sealed class RecordWriteService : IRecordWriteService
         CancellationToken ct = default,
         System.Data.IDbTransaction? transaction = null,
         bool suppressInterception = false,
-        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
+        IReadOnlyDictionary<string, object?>? existingRecord = null)
     {
         // Reference fields must point at an existing parent record; a value submitted as a
         // human key is resolved to the parent row Id here.
         var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
 
-        // Fetch old values before update so we can diff them
-        var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+        // Bulk upsert already loaded the row on its transaction. Reusing that snapshot avoids a
+        // second connection waiting on locks held by the bulk commit itself.
+        var oldRecord = existingRecord ?? await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
 
         var effectiveValues = new Dictionary<long, object?>(fieldValues);
         foreach (var kvp in refOverrides)
@@ -128,10 +135,14 @@ public sealed class RecordWriteService : IRecordWriteService
         // actually stores. See UserFieldValueResolver's doc comment for why.
         await UserFieldValueResolver.ResolveAsync(_userRepo, fields, effectiveValues, ct);
 
-        // Field-level Required / Unique constraints (Quickbase-style) — checked against the final
-        // values about to be persisted, excluding this record itself from the Unique collision check.
+        // Field-level Required / Unique / Format constraints (Quickbase-style) — checked against
+        // the final values about to be persisted, excluding this record itself from the Unique
+        // collision check. The app's configured Date Formatting is looked up here so Date/DateTime
+        // text values from a client that bypasses the UI are validated against this app's format.
         var recordId = Convert.ToInt64(oldRecord["Id"]);
-        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct);
+        var app = await _appRepo.GetByIdAsync(table.AppId, ct);
+        var dateFormat = AppFormattingSettings.GetDateFormatString(app.Formatting);
+        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct, appDateFormat: dateFormat);
 
         // Custom Data Rule — same formula-based save gate as record creation (see
         // CreateRecordCommandHandler), covering both plain record edits and Action Button writes
@@ -140,10 +151,10 @@ public sealed class RecordWriteService : IRecordWriteService
 
         await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct, onIndexMessageCreated);
 
-        // Build before/after values and genuinely changed field IDs keyed by f.Id
+        // Build before/after values and genuinely changed field IDs for pipeline triggering
         var beforeValues = new Dictionary<long, object?>();
         var afterValues = new Dictionary<long, object?>();
-        var changedFieldIds = new List<long>();
+        var pipelineChangedFields = new List<AppField>();
 
         foreach (var f in fields)
         {
@@ -151,82 +162,88 @@ public sealed class RecordWriteService : IRecordWriteService
             {
                 var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                 var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
+
+                // Key by both Id and Fid for full evaluator & snapshot lookup compatibility
                 beforeValues[f.Id] = oldVal;
+                beforeValues[f.Fid.Value] = oldVal;
 
                 if (effectiveValues.TryGetValue(f.Fid.Value, out var newVal))
                 {
                     afterValues[f.Id] = newVal;
-                    if (!AreValuesEqual(oldVal, newVal, f.TypeCode))
+                    afterValues[f.Fid.Value] = newVal;
+
+                    if (!f.IsSystem && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode) && !AreValuesEqual(oldVal, newVal, f.TypeCode))
                     {
-                        changedFieldIds.Add(f.Id);
+                        pipelineChangedFields.Add(f);
                     }
                 }
                 else
                 {
                     afterValues[f.Id] = oldVal;
+                    afterValues[f.Fid.Value] = oldVal;
                 }
             }
         }
 
-        // Build field-level diff — only fields where value actually changed, keyed by display label
-        var candidateFields = fields.Where(f =>
-            f.Fid.HasValue && fieldValues.ContainsKey((long)f.Fid.Value) && !f.IsSystem && f.PhysicalColumnName is not null && f.IsAuditable).ToList();
+        // Canonical pipeline changedFieldIds strictly contains f.Fid.Value (never f.Id)
+        var changedFieldIds = pipelineChangedFields
+            .Select(f => (long)f.Fid!.Value)
+            .Distinct()
+            .ToList();
 
-        var actuallyChanged = candidateFields.Where(f =>
-        {
-            var colKey = PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value);
-            var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov?.ToString() : null;
-            var newVal = fieldValues.TryGetValue((long)f.Fid.Value, out var nv) ? nv?.ToString() : null;
-            return oldVal != newVal;
-        }).ToList();
+        // Separate audit logging from pipeline trigger change detection:
+        // Auditing only logs detailed field diffs for fields where IsAuditable == true
+        var auditableChangedFields = pipelineChangedFields.Where(f => f.IsAuditable).ToList();
 
-        if (actuallyChanged.Count == 0)
+        if (auditableChangedFields.Count == 0)
         {
-            // Nothing really changed — log a simple entry with no diff
+            // Log simple audit entry without diffs if no auditable fields changed
             await _auditRepo.LogActivityAsync(
                 auditAction, AuditEntityTypes.Record, recordPublicId.ToString(),
                 entityTitle,
                 appId: table.AppId, ct: ct);
-            return effectiveValues;
         }
-
-        // Resolve User-type fields: load app users once if any User field changed
-        Dictionary<string, string>? userNameMap = null;
-        if (actuallyChanged.Any(f => f.TypeCode == "User"))
+        else
         {
-            var appUsers = await _appUserRepo.ListByAppIdAsync(table.AppId, ct);
-            userNameMap = appUsers.ToDictionary(
-                u => u.PublicId.ToString(),
-                u => u.UserName,
-                StringComparer.OrdinalIgnoreCase);
+            // Resolve User-type fields: load app users once if any auditable User field changed
+            Dictionary<string, string>? userNameMap = null;
+            if (auditableChangedFields.Any(f => f.TypeCode == "User"))
+            {
+                var appUsers = await _appUserRepo.ListByAppIdAsync(table.AppId, ct);
+                userNameMap = appUsers.ToDictionary(
+                    u => u.PublicId.ToString(),
+                    u => u.UserName,
+                    StringComparer.OrdinalIgnoreCase);
+            }
+
+            string ResolveDisplay(AppField f, string? raw)
+            {
+                if (raw is null) return string.Empty;
+                if (f.TypeCode == "User" && userNameMap is not null && userNameMap.TryGetValue(raw, out var name))
+                    return name;
+                return raw;
+            }
+
+            var oldValuesDict = auditableChangedFields.ToDictionary(
+                f => f.Label ?? f.Name,
+                f => ResolveDisplay(f, oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var v) ? v?.ToString() : null)
+            );
+            var newValuesDict = auditableChangedFields.ToDictionary(
+                f => f.Label ?? f.Name,
+                f => ResolveDisplay(f, effectiveValues.TryGetValue((long)f.Fid!.Value, out var v) ? v?.ToString() : null)
+            );
+
+            await _auditRepo.LogActivityAsync(
+                auditAction, AuditEntityTypes.Record, recordPublicId.ToString(),
+                entityTitle,
+                appId: table.AppId,
+                oldValues: JsonSerializer.Serialize(oldValuesDict),
+                newValues: JsonSerializer.Serialize(newValuesDict),
+                ct: ct);
         }
 
-        string ResolveDisplay(AppField f, string? raw)
-        {
-            if (raw is null) return string.Empty;
-            if (f.TypeCode == "User" && userNameMap is not null && userNameMap.TryGetValue(raw, out var name))
-                return name;
-            return raw;
-        }
-
-        var oldValuesDict = actuallyChanged.ToDictionary(
-            f => f.Label ?? f.Name,
-            f => ResolveDisplay(f, oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value), out var v) ? v?.ToString() : null)
-        );
-        var newValuesDict = actuallyChanged.ToDictionary(
-            f => f.Label ?? f.Name,
-            f => ResolveDisplay(f, fieldValues.TryGetValue((long)f.Fid!.Value, out var v) ? v?.ToString() : null)
-        );
-
-        await _auditRepo.LogActivityAsync(
-            auditAction, AuditEntityTypes.Record, recordPublicId.ToString(),
-            entityTitle,
-            appId: table.AppId,
-            oldValues: JsonSerializer.Serialize(oldValuesDict),
-            newValues: JsonSerializer.Serialize(newValuesDict),
-            ct: ct);
-
-        if (!suppressInterception)
+        // Invoke pipeline trigger interceptor if any genuine pipeline field changed, independent of IsAuditable
+        if (pipelineChangedFields.Count > 0 && !suppressInterception)
         {
             await _triggerInterceptor.InterceptAsync(table, fields, recordPublicId, afterValues, "record-updated", ct, beforeValues, changedFieldIds);
         }

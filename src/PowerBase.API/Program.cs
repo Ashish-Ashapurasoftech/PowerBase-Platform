@@ -168,6 +168,16 @@ builder.Services.AddSwaggerGen(c =>
 // Infrastructure
 builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient();
+builder.Services.AddHttpClient("PipelineMakeRequest").ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    AllowAutoRedirect = false,
+    ConnectTimeout = TimeSpan.FromSeconds(10),
+    AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
+});
+builder.Services.AddSingleton<PowerBase.Application.Pipelines.IPipelineApiRequestDispatcher, PowerBase.API.Pipelines.PowerBaseApiRequestDispatcher>();
+builder.Services.AddDataProtection();
+builder.Services.AddScoped<PowerBase.API.Pipelines.RequestConnectionService>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.IRequestConnectionService>(services => services.GetRequiredService<PowerBase.API.Pipelines.RequestConnectionService>());
 var executionSection = builder.Configuration.GetSection("PipelineExecution");
 builder.Services.Configure<PowerBase.Application.Common.Configurations.PipelineExecutionOptions>(executionSection);
 

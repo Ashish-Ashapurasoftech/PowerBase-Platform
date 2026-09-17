@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-COND-001",
+  "classification": "UNKNOWN",
+  "description": "String equality comparison in condition logic",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "QB-COND-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": false
+  }
+}

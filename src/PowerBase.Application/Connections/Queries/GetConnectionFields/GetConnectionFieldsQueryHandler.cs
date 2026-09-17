@@ -39,10 +39,10 @@ public class GetConnectionFieldsQueryHandler
         await appAccess.RequirePermissionByTablePublicIdAsync(query.TablePublicId, PermissionCodes.PowerFlowsRead, ct);
 
         var tableRepo = targetScope.GetRequiredService<IAppTableRepository>();
-        var fieldRepo = targetScope.GetRequiredService<IAppFieldRepository>();
+        var fieldRepo = targetScope.GetRequiredService<IPipelineRepository>();
 
         var table = await tableRepo.GetByPublicIdAsync(query.TablePublicId, ct);
-        var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+        var fields = await fieldRepo.GetTableFieldsAsync(table.Id, ct);
 
         return fields.Select(f => new ConnectionFieldDto
         {
@@ -54,6 +54,8 @@ public class GetConnectionFieldsQueryHandler
             Settings = f.Settings,
             DefaultValue = f.DefaultValue,
             IsRequired = f.IsRequired,
+            IsUnique = f.IsUnique,
+            IsPrimary = f.IsPrimary,
             IsSystem = f.IsSystem
         }).ToList();
     }

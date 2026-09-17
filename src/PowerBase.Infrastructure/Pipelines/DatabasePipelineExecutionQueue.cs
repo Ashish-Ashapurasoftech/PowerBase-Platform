@@ -61,7 +61,11 @@ public class DatabasePipelineExecutionQueue : IPipelineExecutionQueue
 
             // 3. Determine QueueSource and TriggerStep information if available
             string queueSource = "Manual";
-            if (task.TriggerEvent == "webhook")
+            if (task.TriggerEvent == "pipeline-called")
+            {
+                queueSource = "Callable";
+            }
+            else if (task.TriggerEvent == "webhook")
             {
                 queueSource = "Webhook";
             }
@@ -78,7 +82,7 @@ public class DatabasePipelineExecutionQueue : IPipelineExecutionQueue
             long? triggerStepId = null;
             string? triggerStepRefId = null;
             
-            if (queueSource == "Webhook" || queueSource == "Schedule" || queueSource == "Event")
+            if (queueSource == "Webhook" || queueSource == "Schedule" || queueSource == "Event" || queueSource == "Callable")
             {
                 try
                 {
@@ -119,7 +123,7 @@ public class DatabasePipelineExecutionQueue : IPipelineExecutionQueue
                 TriggerTablePublicId = task.TriggerTablePublicId,
                 CorrelationId = correlationId,
                 Depth = task.Depth,
-                PipelineChain = task.CorrelationId ?? "[]",
+                PipelineChain = queueSource == "Callable" ? task.PipelineChain ?? "[]" : task.CorrelationId ?? "[]",
                 BatchId = null,
                 VariablesJson = task.VariablesJson,
                 PayloadVersion = "1.0",
@@ -146,6 +150,8 @@ public class DatabasePipelineExecutionQueue : IPipelineExecutionQueue
 
                     if (matches)
                     {
+                        // A caller may retry after the durable enqueue succeeded but before its step completed.
+                        if (queueSource == "Callable") return;
                         throw new MessageDeduplicatedException(messageId);
                     }
                     else

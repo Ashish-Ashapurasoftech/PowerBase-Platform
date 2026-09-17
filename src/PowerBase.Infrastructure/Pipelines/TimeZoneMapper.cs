@@ -11,6 +11,7 @@ public static class TimeZoneMapper
         { "America/Detroit", "Eastern Standard Time" },
         { "America/Kentucky/Louisville", "Eastern Standard Time" },
         { "America/Indiana/Indianapolis", "Eastern Standard Time" },
+        { "America/Toronto", "Eastern Standard Time" },
         { "America/Chicago", "Central Standard Time" },
         { "America/Indiana/Knox", "Central Standard Time" },
         { "America/North_Dakota/Center", "Central Standard Time" },
@@ -27,6 +28,12 @@ public static class TimeZoneMapper
         { "Europe/Berlin", "W. Europe Standard Time" },
         { "Asia/Kolkata", "India Standard Time" },
         { "Asia/Calcutta", "India Standard Time" },
+        { "Asia/Tokyo", "Tokyo Standard Time" },
+        { "Asia/Singapore", "Singapore Standard Time" },
+        { "Asia/Dubai", "Arabian Standard Time" },
+        { "America/Sao_Paulo", "E. South America Standard Time" },
+        { "Australia/Sydney", "AUS Eastern Standard Time" },
+        { "Pacific/Auckland", "New Zealand Standard Time" },
         { "UTC", "UTC" }
     };
 

@@ -26,11 +26,27 @@ using Scriban.Runtime;
 namespace PowerBase.Application.Pipelines;
 public class PipelineEngine : IPipelineEngine
 {
+    internal static Dictionary<string, object?> BuildBulkEventRecord(PipelineBulkEventRecord record)
+    {
+        var valuesJson = string.Equals(record.EventType, "Deleted", StringComparison.OrdinalIgnoreCase)
+            ? record.BeforeValuesJson : record.AfterValuesJson;
+        var result = string.IsNullOrWhiteSpace(valuesJson)
+            ? new Dictionary<string, object?>()
+            : JsonSerializer.Deserialize<Dictionary<string, object?>>(valuesJson) ?? new();
+        // Preserve Quickbase-style id and the identity used by saved action mappings.
+        // Staging identity wins over any similarly named field in the snapshot.
+        result["id"] = record.RecordPublicId.ToString();
+        result["RecordPublicId"] = record.RecordPublicId.ToString();
+        result["event_type"] = record.EventType;
+        return result;
+    }
+
     private readonly IPipelineRepository _pipelineRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IRecordWriteService _recordWriteService;
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
+    private readonly IRelationshipRepository _relRepo;
     private readonly IEmailService _emailService;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IFileStorageService _fileStorageService;
@@ -53,6 +69,7 @@ public class PipelineEngine : IPipelineEngine
         IRecordWriteService recordWriteService,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
+        IRelationshipRepository relRepo,
         IEmailService emailService,
         IHttpClientFactory httpClientFactory,
         IFileStorageService fileStorageService,
@@ -73,6 +90,7 @@ public class PipelineEngine : IPipelineEngine
         _recordWriteService = recordWriteService;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
+        _relRepo = relRepo;
         _emailService = emailService;
         _httpClientFactory = httpClientFactory;
         _fileStorageService = fileStorageService;
@@ -318,7 +336,19 @@ public class PipelineEngine : IPipelineEngine
 
             // Mismatch validation before execution starts
             var rootStep = activeSteps.FirstOrDefault(s => s.ParentStepId == null);
+            var firstQueryStep = rootStep;
+            while (firstQueryStep != null && firstQueryStep.Subtype == "handle-errors")
+            {
+                firstQueryStep = activeSteps
+                    .Where(s => s.ParentStepId == firstQueryStep.Id && string.Equals(s.ParentBranch, "children", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(s => s.DisplayOrder)
+                    .ThenBy(s => s.Id)
+                    .FirstOrDefault();
+            }
+
             var eventName = task.TriggerEvent?.ToLowerInvariant() ?? "manual";
+            if (!isSkipped && eventName == "pipeline-called" && task.TriggeredBy != pipelineMeta!.CreatedBy)
+                throw new PipelineNonRetryableException("Callable execution must use the called pipeline owner's identity.");
             var normalizedEventName = eventName.Replace("-", "").Replace("_", "");
             if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent" or "webhook")
             {
@@ -337,16 +367,24 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (normalizedEventName == "activation")
                 {
-                    if (rootStep == null || rootStep.Type != "query" || (rootStep.Subtype != "search-records" && rootStep.Subtype != "look-up-record"))
+                    var isQueryRoot = firstQueryStep?.Type == "query" && (firstQueryStep.Subtype == "search-records" || firstQueryStep.Subtype == "look-up-record");
+                    var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
+                    var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
+                    var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
+                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a query-first pipeline structure.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query, Make Request, Copy Records, or Prepare Bulk Record Upsert first step.");
                     }
                 }
                 else if (normalizedEventName == "pipeline_schedule")
                 {
-                    if (rootStep == null || rootStep.Type != "query" || (rootStep.Subtype != "search-records" && rootStep.Subtype != "look-up-record"))
+                    var isQueryRoot = firstQueryStep?.Type == "query" && (firstQueryStep.Subtype == "search-records" || firstQueryStep.Subtype == "look-up-record");
+                    var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
+                    var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
+                    var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
+                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a query-first pipeline structure.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a Search/Query, Make Request, Copy Records, or Prepare Bulk Record Upsert first step.");
                     }
                     if (activeSteps.Any(s => s.Type == "trigger"))
                     {
@@ -469,6 +507,12 @@ public class PipelineEngine : IPipelineEngine
                                         var selectedDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(selectedElement.GetRawText());
                                         if (selectedDict != null)
                                         {
+                                            if (triggerData.TryGetValue("RecordPublicId", out var recIdObj) && recIdObj != null)
+                                            {
+                                                selectedDict["RecordPublicId"] = recIdObj.ToString();
+                                                selectedDict["id"] = recIdObj.ToString();
+                                                selectedDict["publicId"] = recIdObj.ToString();
+                                            }
                                             stepsDict[refId] = selectedDict;
                                         }
                                     }
@@ -487,21 +531,8 @@ public class PipelineEngine : IPipelineEngine
                                 var recordsList = new List<Dictionary<string, object?>>();
                                 foreach (var r in bulkEventPreview)
                                 {
-                                    var recordObj = new Dictionary<string, object?>();
-                                    recordObj["id"] = r.RecordPublicId.ToString();
-                                    recordObj["event_type"] = r.EventType;
-                                    var valuesJson = r.EventType == "Deleted" ? r.BeforeValuesJson : r.AfterValuesJson;
-                                    if (!string.IsNullOrEmpty(valuesJson))
-                                    {
-                                        var valuesDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(valuesJson);
-                                        if (valuesDict != null)
-                                        {
-                                            foreach (var kvp in valuesDict)
-                                            {
-                                                recordObj[kvp.Key] = kvp.Value;
-                                            }
-                                        }
-                                    }
+                                    var recordObj = BuildBulkEventRecord(r);
+
                                     recordsList.Add(recordObj);
                                 }
 
@@ -796,7 +827,7 @@ public class PipelineEngine : IPipelineEngine
         CancellationToken ct)
     {
         var siblings = allSteps
-            .Where(s => s.ParentStepId == parentStepId && (parentStepId == null || s.ParentBranch == parentBranch))
+            .Where(s => s.ParentStepId == parentStepId && (parentStepId == null || string.Equals(s.ParentBranch, parentBranch, StringComparison.OrdinalIgnoreCase)))
             .OrderBy(s => s.DisplayOrder)
             .ToList();
 
@@ -1004,6 +1035,14 @@ public class PipelineEngine : IPipelineEngine
             }
         }
 
+        var isPowerBaseRequest = step.Subtype == "make-request" && MakeRequestDefinition.Read(step.ConfigJson ?? "{}").IsPowerBase;
+        if (isPowerBaseRequest)
+        {
+            var requestConfig = MakeRequestDefinition.Read(step.ConfigJson ?? "{}");
+            connectionPublicId ??= requestConfig.Connection;
+            if (!Guid.TryParse(connectionPublicId, out var accountId) || PipelineStepValidator.SystemConnectionIds.Contains(accountId))
+                throw new PipelineNonRetryableException("A valid PowerBase account is required.");
+        }
         long createdBy = contextDict.TryGetValue("_CreatedBy", out var cbObj) && cbObj is long cbVal ? cbVal : 0L;
         Guid messageGuid = contextDict.TryGetValue("_MessageId", out var msgObj) && msgObj is Guid msgGuid ? msgGuid : Guid.Empty;
 
@@ -1042,6 +1081,12 @@ public class PipelineEngine : IPipelineEngine
             }
         }
 
+        if (isPowerBaseRequest && accountScope == null)
+        {
+            if (!Guid.TryParse(connectionPublicId, out var requestAccount) ||
+                await _tenantRepo.GetTenantForUserAsync(requestAccount, createdBy, ct) == null)
+                throw new UnauthorizedAccessException("The selected PowerBase account is unavailable to the pipeline owner.");
+        }
         if (accountScope != null)
         {
             // TargetTenantScopeHelper pins the realm, adopts the token owner's identity and
@@ -1053,6 +1098,11 @@ public class PipelineEngine : IPipelineEngine
             scopedQueryContext.PipelineDepth = _queryContext.PipelineDepth;
             scopedQueryContext.PipelineChainJson = _queryContext.PipelineChainJson;
 
+            if (step.Subtype == "copy-records")
+                return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
+
+            if (step.Subtype == "make-request")
+                return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
             var accountRecordRepo = accountScopeHandle.GetRequiredService<IRecordRepository>();
             var accountTableRepo = accountScopeHandle.GetRequiredService<IAppTableRepository>();
             var accountFieldRepo = accountScopeHandle.GetRequiredService<IAppFieldRepository>();
@@ -1091,6 +1141,11 @@ public class PipelineEngine : IPipelineEngine
                     throw new UnauthorizedAccessException($"Execution authority user {createdBy} is not an active member of target tenant {targetTenantId}.");
                 }
 
+            if (step.Subtype == "copy-records")
+                return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
+
+                if (step.Subtype == "make-request")
+                    return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
                 var scopedRecordRepo = scope.ServiceProvider.GetRequiredService<IRecordRepository>();
                 var scopedTableRepo = scope.ServiceProvider.GetRequiredService<IAppTableRepository>();
                 var scopedFieldRepo = scope.ServiceProvider.GetRequiredService<IAppFieldRepository>();
@@ -1107,9 +1162,64 @@ public class PipelineEngine : IPipelineEngine
         }
         else
         {
+            if (step.Subtype == "copy-records")
+                return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
             return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
                 _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, _triggerInterceptor, _uow, _idempotencyRepo, _fileStorageService, _pipelineRecordSearchService, ct);
         }
+    }
+
+    private async Task<string> ExecuteCopyRecordsAsync(PipelineStep step, string payloadJson,
+        List<PipelineStep> allSteps, Dictionary<string, object> contextDict, string executionPath,
+        PipelineStepRun stepRun, IServiceProvider services, CancellationToken ct)
+    {
+        Guid messageId = contextDict.TryGetValue("_MessageId", out var value) && value is Guid id ? id : Guid.Empty;
+            var config = CopyRecordsDefinition.Read(step.ConfigJson ?? "{}");
+            var query = Regex.Replace(config.AdvancedQuery ?? "", @"\{\{.*?\}\}", match =>
+                EvaluateTokens(match.Value, payloadJson, executionPath, allSteps)
+                    .Replace("\\", "\\\\").Replace("'", "\\'"));
+            stepRun.InputContext = SerializeAndSanitizeAudit(new { config.SourceTable, config.DestinationTable,
+                config.SourceFields, config.DestinationFields, config.MergeField, config.TerminateOnError });
+            return await new CopyRecordsExecutor(services)
+                .ExecuteAsync(config, query, step.PublicId, messageId, executionPath, ct);
+    }
+
+    private async Task<string> ExecuteMakeRequestAsync(PipelineStep step, string payloadJson, List<PipelineStep> allSteps,
+        Dictionary<string, object> context, string executionPath, PipelineStepRun stepRun, IServiceProvider services, CancellationToken ct)
+    {
+        var config = MakeRequestDefinition.Read(step.ConfigJson ?? "{}");
+        string Resolve(string? value) => EvaluateTokens(value, payloadJson, executionPath, allSteps);
+        if (!config.IsPowerBase && config.HttpConnectionId.HasValue)
+        {
+            var owner = context.GetValueOrDefault("_CreatedBy") is long id ? id : _queryContext.UserId;
+            var saved = await services.GetRequiredService<IRequestConnectionService>().ResolveAsync(config.HttpConnectionId.Value, step.PipelineId, owner, ct);
+            config.BaseUrl = saved.BaseUrl; config.ConnectionHeaders = saved.ConnectionHeaders; config.AuthType = saved.AuthType;
+            config.Username = saved.Username; config.Password = saved.Password; config.BearerToken = saved.BearerToken;
+            config.ApiKeyName = saved.ApiKeyName; config.ApiKeyValue = saved.ApiKeyValue; config.ApiKeyPlacement = saved.ApiKeyPlacement;
+            config.JwtAlg = saved.JwtAlg; config.JwtSigningKey = saved.JwtSigningKey; config.JwtHeaders = saved.JwtHeaders;
+            config.JwtClaims = saved.JwtClaims; config.JwtUseIat = saved.JwtUseIat; config.JwtExp = saved.JwtExp;
+            config.OAuthGrantType = saved.OAuthGrantType; config.OAuthTokenEndpoint = saved.OAuthTokenEndpoint;
+            config.OAuthClientId = saved.OAuthClientId; config.OAuthClientSecret = saved.OAuthClientSecret;
+            config.OAuthScope = saved.OAuthScope; config.OAuthClientAuth = saved.OAuthClientAuth; config.OAuthAccessToken = saved.OAuthAccessToken;
+        }
+        if (config.IsPowerBase && string.IsNullOrWhiteSpace(config.ConnectionPublicId ?? config.Connection))
+            throw new PipelineNonRetryableException("PowerBase requests require a connected account.");
+        // Redirects must never forward connection credentials to another endpoint.
+        using var client = _httpClientFactory.CreateClient("PipelineMakeRequest");
+        client.Timeout = TimeSpan.FromMinutes(5);
+        var executor = new MakeRequestExecutor((request, token) => config.IsPowerBase
+            ? services.GetRequiredService<IPipelineApiRequestDispatcher>().SendAsync(request, services, token)
+            : client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token));
+        stepRun.InputContext = SerializeAndSanitizeAudit(new { RequestMode = config.RequestMode ?? "http", Method = config.Method,
+            Url = config.IsPowerBase ? "PowerBase API" : new Uri(MakeRequestExecutor.BuildUrl(config, Resolve).GetLeftPart(UriPartial.Path)).ToString() });
+        MakeRequestResult result;
+        try { result = await executor.ExecuteAsync(config, Resolve, ct, audit => stepRun.InputContext = SerializeAndSanitizeAudit(audit, int.MaxValue)); }
+        catch (InvalidOperationException ex) { throw new PipelineNonRetryableException(ex.Message); }
+        catch (UnauthorizedAccessException ex) { throw new PipelineNonRetryableException(ex.Message); }
+        if (!context.TryGetValue("request_metadata", out var metadata) || metadata is not Dictionary<string, object> requests)
+            context["request_metadata"] = requests = new Dictionary<string, object>();
+        requests[step.RefId] = new { status_code = result.StatusCode, status_message = result.StatusMessage, response_headers = result.ResponseHeaders };
+        return result.OutputJson;
     }
 
     private static byte[] ComputeSha256Hash(string rawData)
@@ -1174,7 +1284,66 @@ public class PipelineEngine : IPipelineEngine
             }
         }
 
-        if (subtype == "look-up-record")
+        if (subtype == "call-another-pipeline")
+        {
+            var parentId = messageGuid == Guid.Empty
+                ? CallablePipelineDispatcher.CreateMessageId(Guid.Empty, step.PublicId, runId.ToString(), Guid.Empty) : messageGuid;
+            var priorDispatch = await idempotencyRepo.GetByExecutionKeyAsync(parentId, step.PublicId, executionPathHash, null, ct);
+            if (!string.IsNullOrEmpty(priorDispatch)) return priorDispatch;
+            var definition = CallablePipelineDefinition.ValidateConfig(step.ConfigJson, true);
+            using var config = JsonDocument.Parse(step.ConfigJson!);
+            var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var name in definition.Arguments)
+            {
+                var value = config.RootElement.GetProperty("arguments").GetProperty(name);
+                values[name] = value.ValueKind == JsonValueKind.String
+                    ? ResolveCallableValue(value.GetString(), payloadJson, executionPath, allSteps)
+                    : ConvertJsonElement(value);
+            }
+            var dispatcher = new CallablePipelineDispatcher(_pipelineRepo, _serviceProvider.GetRequiredService<IPipelineExecutionQueue>());
+            var messages = await dispatcher.DispatchAsync(_queryContext.TenantId, createdBy, step.PipelineId,
+                parentId, step.PublicId, executionPath, contextDict.GetValueOrDefault("_CorrelationId")?.ToString(),
+                contextDict.GetValueOrDefault("_Depth") is int depth ? depth : 1, definition, values, ct, _queryContext.PipelineChainJson);
+            stepRun.InputContext = JsonSerializer.Serialize(new { definition.Definition, Arguments = values });
+            var output = JsonSerializer.Serialize(new { Status = "Queued", MessageIds = messages });
+            try
+            {
+                await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
+                {
+                    MessageId = parentId, StepPublicId = step.PublicId, ExecutionPathHash = executionPathHash,
+                    ExecutionPath = executionPath, OutputJson = output
+                }, null, ct);
+            }
+            catch (Exception ex) when (IsUniqueConstraintViolation(ex))
+            {
+                var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(parentId, step.PublicId, executionPathHash, null, ct);
+                if (winningOutput != null) return winningOutput;
+                throw;
+            }
+            return output;
+        }
+        else if (subtype == "pipeline-called" && step.Type == "trigger")
+        {
+            var definition = CallablePipelineDefinition.ValidateConfig(step.ConfigJson, false);
+            using var payload = JsonDocument.Parse(payloadJson);
+            if (!payload.RootElement.TryGetProperty("trigger", out var envelope) ||
+                !envelope.TryGetProperty("CallDefinition", out var receivedDefinition) || receivedDefinition.GetString() != definition.Definition ||
+                !envelope.TryGetProperty("Arguments", out var args) || args.ValueKind != JsonValueKind.Object ||
+                !envelope.TryGetProperty("TriggerStepId", out var triggerId) || triggerId.GetInt64() != step.Id)
+                throw new PipelineNonRetryableException("Pipeline Called requires a matching callable invocation.");
+            var received = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var name in definition.Arguments)
+            {
+                if (!args.TryGetProperty(name, out var value)) throw new PipelineNonRetryableException($"Missing call argument: {name}.");
+                received[name] = ConvertJsonElement(value.Clone());
+            }
+            stepsDict[step.RefId] = received;
+            contextDict["trigger"] = received;
+            var output = JsonSerializer.Serialize(received);
+            stepRun.InputContext = output;
+            return output;
+        }
+        else if (subtype == "look-up-record")
         {
             var config = JsonSerializer.Deserialize<LookUpRecordStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             if (config == null || string.IsNullOrWhiteSpace(config.TablePublicId))
@@ -1230,7 +1399,7 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (f.Fid.HasValue)
                 {
-                    var colName = PhysicalNaming.ColumnName(f.Fid.Value);
+                    var colName = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                     if (record.TryGetValue(colName, out var val))
                     {
                         norm[$"fid_{f.Fid.Value}"] = val;
@@ -1326,7 +1495,11 @@ public class PipelineEngine : IPipelineEngine
             {
                 var norm = new Dictionary<string, object?>();
                 if (record.TryGetValue("Id", out var searchIdVal)) norm["Id"] = searchIdVal;
-                if (record.TryGetValue("PublicId", out var searchPubIdVal)) norm["PublicId"] = searchPubIdVal;
+                if (record.TryGetValue("PublicId", out var searchPubIdVal))
+                {
+                    norm["PublicId"] = searchPubIdVal;
+                    norm["RecordPublicId"] = searchPubIdVal;
+                }
                 if (record.TryGetValue("CreatedOn", out var searchCoVal)) norm["CreatedOn"] = searchCoVal;
                 if (record.TryGetValue("CreatedBy", out var searchCbVal)) norm["CreatedBy"] = searchCbVal;
                 if (record.TryGetValue("ModifiedOn", out var searchMoVal)) norm["ModifiedOn"] = searchMoVal;
@@ -1336,8 +1509,8 @@ public class PipelineEngine : IPipelineEngine
                 {
                     if (f.Fid.HasValue)
                     {
-                        var colName = PhysicalNaming.ColumnName(f.Fid.Value);
-                        if (record.TryGetValue(colName, out var val))
+                        var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
+                        if (record.TryGetValue(colKey, out var val))
                         {
                             norm[$"fid_{f.Fid.Value}"] = val;
                         }
@@ -1378,7 +1551,7 @@ public class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
+                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, field.Name);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -1389,6 +1562,13 @@ public class PipelineEngine : IPipelineEngine
                 TableId = config.TableId,
                 FieldMappings = resolvedMappings
             });
+
+            // Resolve Reference field values: translate any human key or PublicId Guid to the
+            // parent's physical row Id before persisting — mirrors CreateRecordCommandHandler.
+            var refOverrides = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
+                fields, values, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
+            foreach (var kvp in refOverrides)
+                values[kvp.Key] = kvp.Value;
 
             Guid recordPublicId;
             await uow.BeginAsync(ct);
@@ -1424,7 +1604,7 @@ public class PipelineEngine : IPipelineEngine
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
                 _logger.LogWarning(ex, "Create Record step {StepId} encountered unique constraint violation. Handling idempotency replay.", step.Id);
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
                 throw;
@@ -1432,7 +1612,7 @@ public class PipelineEngine : IPipelineEngine
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Create Record step {StepId} failed.", step.Id);
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 throw;
             }
         }
@@ -1463,7 +1643,7 @@ public class PipelineEngine : IPipelineEngine
                     if (field.Fid.HasValue)
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
+                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode, field.Name);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -1504,14 +1684,14 @@ public class PipelineEngine : IPipelineEngine
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
                 throw;
             }
             catch
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 throw;
             }
         }
@@ -1577,14 +1757,14 @@ public class PipelineEngine : IPipelineEngine
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
                 throw;
             }
             catch
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
                 throw;
             }
         }
@@ -1599,40 +1779,66 @@ public class PipelineEngine : IPipelineEngine
 
             throw new PipelineStopExecutionException(string.IsNullOrWhiteSpace(reason) ? "Execution halted by pipeline stop action." : reason);
         }
-        else if (subtype == "condition")
+        else if (string.Equals(step.Type, "condition", StringComparison.OrdinalIgnoreCase) || string.Equals(step.Subtype, "condition", StringComparison.OrdinalIgnoreCase))
         {
             var config = JsonSerializer.Deserialize<ConditionStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             
             bool isMatched = false;
-            if (config?.RuleGroups != null && config.RuleGroups.Any())
-            {
-                isMatched = config.RuleGroups.All(g => EvaluateConditionGroup(g, payloadJson, executionPath, allSteps));
-                _logger.LogInformation("Condition step {StepId} resolved via recursive ruleGroups evaluation. Result: {Result}", step.Id, isMatched);
+            var resolvedAuditRules = new List<object>();
 
-                stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                    RuleGroups = config.RuleGroups.Select(g => new {
-                        g.LogicalOp,
-                        Rules = g.Rules?.Select(r => new {
-                            r.Type,
-                            Left = EvaluateTokens(r.Left, payloadJson, executionPath, allSteps),
-                            Op = r.Op,
-                            Right = EvaluateTokens(r.Right, payloadJson, executionPath, allSteps)
-                        })
-                    })
-                });
+            var activeGroups = config?.RuleGroups?.Where(g => !IsGroupCompletelyBlank(g)).ToList();
+            if (activeGroups == null || !activeGroups.Any())
+            {
+                if (!string.IsNullOrWhiteSpace(config?.LeftOperand))
+                {
+                    var left = EvaluateTokens(config.LeftOperand, payloadJson, executionPath, allSteps);
+                    var right = EvaluateTokens(config.RightOperand, payloadJson, executionPath, allSteps);
+                    var op = config.Operator ?? "equals";
+                    var typeCategory = await ResolveRuleTypeCategoryAsync(config.LeftOperand, payloadJson, allSteps, fieldRepo, tableRepo, ct);
+                    isMatched = PipelineFilterEvaluator.EvaluateConditionOperator(left, op, right, typeCategory, _logger);
+                    _logger.LogInformation("Condition step {StepId} resolved Left: '{Left}', Operator: '{Op}', Right: '{Right}'. Result: {Result}", step.Id, left, op, right, isMatched);
+
+                    stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                        LeftOperand = config.LeftOperand,
+                        LeftResolved = left,
+                        Operator = op,
+                        RightOperand = config.RightOperand,
+                        RightResolved = right,
+                        TypeCategory = typeCategory,
+                        Matched = isMatched
+                    });
+                }
+                else
+                {
+                    // Fail closed: no rule groups or all blank groups evaluate to false
+                    isMatched = false;
+                    _logger.LogInformation("Condition step {StepId} failed closed due to empty rule groups. Result: false", step.Id);
+                    stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                        RuleGroups = new object[0],
+                        Matched = false,
+                        Reason = "No active condition rule groups configured"
+                    });
+                }
             }
             else
             {
-                var left = EvaluateTokens(config?.LeftOperand, payloadJson, executionPath, allSteps);
-                var right = EvaluateTokens(config?.RightOperand, payloadJson, executionPath, allSteps);
-                var op = config?.Operator ?? "equals";
-                isMatched = EvaluateConditionOperator(left, op, right);
-                _logger.LogInformation("Condition step {StepId} resolved Left: '{Left}', Operator: '{Op}', Right: '{Right}'. Result: {Result}", step.Id, left, op, right, isMatched);
+                isMatched = await EvaluateConditionRuleGroupsAsync(activeGroups, payloadJson, executionPath, fieldRepo, tableRepo, allSteps, resolvedAuditRules, ct);
+                _logger.LogInformation("Condition step {StepId} resolved via recursive ruleGroups evaluation. Result: {Result}", step.Id, isMatched);
 
                 stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                    LeftOperand = left,
-                    Operator = op,
-                    RightOperand = right
+                    RuleGroups = activeGroups.Select(g => new {
+                        g.LogicalOp,
+                        Rules = g.Rules?.Select(r => new {
+                            r.Type,
+                            Left = r.Left,
+                            LeftResolved = EvaluateTokens(r.Left, payloadJson, executionPath, allSteps),
+                            Op = r.Op,
+                            Right = r.Right,
+                            RightResolved = EvaluateTokens(r.Right, payloadJson, executionPath, allSteps)
+                        })
+                    }),
+                    ResolvedRules = resolvedAuditRules,
+                    Matched = isMatched
                 });
             }
 
@@ -1640,6 +1846,93 @@ public class PipelineEngine : IPipelineEngine
             await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, branch, contextDict, stepsDict, snapshots, $"{executionPath}/{branch}", ct);
 
             return JsonSerializer.Serialize(new { Matched = isMatched, EvaluatedBranch = branch });
+        }
+        else if (subtype == "handle-errors")
+        {
+            var config = JsonSerializer.Deserialize<HandleErrorsStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var fallbackAction = (config?.FallbackAction?.ToLowerInvariant() == "ignore") ? "ignore" : "handle";
+
+            stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                FallbackAction = fallbackAction
+            });
+
+            _logger.LogInformation("Handle Errors step {StepId} started monitoring. Mode: {FallbackAction}", step.Id, fallbackAction);
+
+            bool monitoredSuccess = false;
+            Exception? caughtException = null;
+
+            try
+            {
+                await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/monitored", ct);
+                monitoredSuccess = true;
+            }
+            catch (Exception ex)
+            {
+                if (!IsCatchablePipelineStepError(ex))
+                {
+                    throw;
+                }
+                caughtException = ex;
+                monitoredSuccess = false;
+            }
+
+            if (monitoredSuccess)
+            {
+                if (fallbackAction == "handle")
+                {
+                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "successchildren", contextDict, stepsDict, snapshots, $"{executionPath}/on_success", ct);
+                }
+                return JsonSerializer.Serialize(new { Handled = false, Status = "Success" });
+            }
+            else
+            {
+                if (fallbackAction == "ignore")
+                {
+                    _logger.LogWarning("Monitored step in Handle Errors step {StepId} failed with error '{ErrorMessage}'. Fallback action is Ignore; resuming pipeline.", step.Id, caughtException?.Message);
+                    return JsonSerializer.Serialize(new { Handled = true, FallbackAction = "ignore", ErrorMessage = caughtException?.Message });
+                }
+
+                var failedSnap = snapshots.LastOrDefault(s => s.Status == "Failed");
+                var failedRefId = failedSnap?.Step.RefId ?? step.RefId;
+                var failedChannel = failedSnap?.Step.Type ?? "powerbase";
+                var failedSubtype = failedSnap?.Step.Subtype ?? "action";
+                var failedName = failedSnap?.Step.Label ?? "Action Step";
+                var sanitizedMsg = SanitizeErrorMessage(caughtException?.Message ?? "Unknown error");
+
+                var currentErrorDict = new Dictionary<string, object?>
+                {
+                    { "reference_id", failedRefId },
+                    { "channel", failedChannel },
+                    { "step", failedSubtype },
+                    { "name", failedName },
+                    { "error_message", sanitizedMsg }
+                };
+
+                object? prevStepsError = null;
+                object? prevContextError = null;
+                bool hadPrevStepsError = stepsDict.TryGetValue("ERROR", out prevStepsError);
+                bool hadPrevContextError = contextDict.TryGetValue("ERROR", out prevContextError);
+
+                try
+                {
+                    stepsDict["ERROR"] = currentErrorDict;
+                    contextDict["ERROR"] = currentErrorDict;
+
+                    _logger.LogInformation("Handle Errors step {StepId} executing On Error branch for failed step {FailedRefId}.", step.Id, failedRefId);
+
+                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "errorchildren", contextDict, stepsDict, snapshots, $"{executionPath}/on_error", ct);
+                }
+                finally
+                {
+                    if (hadPrevStepsError) stepsDict["ERROR"] = prevStepsError!;
+                    else stepsDict.Remove("ERROR");
+
+                    if (hadPrevContextError) contextDict["ERROR"] = prevContextError!;
+                    else contextDict.Remove("ERROR");
+                }
+
+                return JsonSerializer.Serialize(new { Handled = true, FallbackAction = "handle", FailedStepRefId = failedRefId, ErrorMessage = sanitizedMsg });
+            }
         }
         else if (subtype == "loop" || subtype == "for-each")
         {
@@ -1678,21 +1971,7 @@ public class PipelineEngine : IPipelineEngine
 
                     foreach (var r in pageRecords)
                     {
-                        var recordObj = new Dictionary<string, object?>();
-                        recordObj["id"] = r.RecordPublicId.ToString();
-                        recordObj["event_type"] = r.EventType;
-                        var valuesJson = r.EventType == "Deleted" ? r.BeforeValuesJson : r.AfterValuesJson;
-                        if (!string.IsNullOrEmpty(valuesJson))
-                        {
-                            var valuesDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(valuesJson);
-                            if (valuesDict != null)
-                            {
-                                foreach (var kvp in valuesDict)
-                                {
-                                    recordObj[kvp.Key] = kvp.Value;
-                                }
-                            }
-                        }
+                        var recordObj = BuildBulkEventRecord(r);
 
                         var loopScope = new Dictionary<string, object>
                         {
@@ -1704,26 +1983,29 @@ public class PipelineEngine : IPipelineEngine
 
                         stepsDict[step.RefId] = loopScope;
 
-                        // Create transaction for item-level checkpoint
-                        await _uow.BeginAsync(ct);
                         try
                         {
                             await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{r.Ordinal}", ct);
-                            
-                            // Mark item Processed = 1 (Success) in database
-                            await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 1, _uow.Transaction, ct);
-                            await _uow.CommitAsync(ct);
-                            processedCount++;
                         }
                         catch (Exception ex)
                         {
-                            await _uow.RollbackAsync(ct);
-                            
-                            // Mark item Processed = 2 (Failed) in database
-                            await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 2, null, ct);
+                            try
+                            {
+                                // Mark item Processed = 2 (Failed) in database using source tenant repository / fresh connection
+                                await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 2, transaction: null, ct);
+                            }
+                            catch (Exception markEx)
+                            {
+                                _logger.LogError(markEx, "Failed to update bulk event record status to Processed=2 for record {RecordId}", r.Id);
+                            }
+
                             _logger.LogError(ex, "Iteration failed for Ordinal {Ordinal} in bulk event Loop step {StepId}", r.Ordinal, step.Id);
                             throw; // Re-throw to cause pipeline execution to enter crash retry state, resuming from failure item
                         }
+
+                        // Mark item Processed = 1 (Success) in database using source tenant repository / fresh connection
+                        await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 1, transaction: null, ct);
+                        processedCount++;
                     }
                 }
 
@@ -1753,6 +2035,8 @@ public class PipelineEngine : IPipelineEngine
 
                 int index = 0;
                 int count = itemsList.Count;
+                int failedCount = 0;
+                Exception? firstIterationError = null;
 
                 stepsDict.TryGetValue(step.RefId, out var previousLoopScope);
 
@@ -1769,7 +2053,20 @@ public class PipelineEngine : IPipelineEngine
 
                     stepsDict[step.RefId] = loopScope;
 
-                    await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{index}", ct);
+                    try
+                    {
+                        await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{index}", ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (IsControlFlowOrInfrastructureException(ex))
+                        {
+                            throw;
+                        }
+                        failedCount++;
+                        firstIterationError ??= ex;
+                        _logger.LogWarning(ex, "Iteration {Index} failed in Loop step {StepId}. Continuing remaining items; the loop will be marked failed.", index, step.Id);
+                    }
 
                     _logger.LogInformation("Loop step {StepId} iteration {Index} completed.", step.Id, index);
                     index++;
@@ -1784,7 +2081,13 @@ public class PipelineEngine : IPipelineEngine
                     stepsDict.Remove(step.RefId);
                 }
 
-                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count });
+                if (failedCount > 0)
+                {
+                    //throw new InvalidOperationException($"Loop step '{step.RefId}' failed in {failedCount} of {count} iterations. First error: {firstIterationError?.Message}", firstIterationError);
+                    _logger.LogWarning("Loop step '{StepRefId}' completed with {FailedCount} of {TotalCount} failed iterations.", step.RefId, failedCount, count);
+                }
+
+                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count, FailedIterationCount = failedCount });
             }
         }
         else if (subtype == "send-email" || subtype == "send-email-outlook")
@@ -1830,161 +2133,380 @@ public class PipelineEngine : IPipelineEngine
         }
         else if (subtype == "make-request")
         {
-            var config = JsonSerializer.Deserialize<MakeRequestStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (config == null || string.IsNullOrWhiteSpace(config.Url))
-                throw new InvalidOperationException("Make request step configuration is invalid or missing URL.");
-
-            var resolvedUrl = EvaluateTokens(config.Url, payloadJson, executionPath, allSteps);
-            var method = string.IsNullOrWhiteSpace(config.Method) ? "GET" : config.Method.ToUpperInvariant();
-
-            var client = _httpClientFactory.CreateClient();
-            var request = new HttpRequestMessage(new HttpMethod(method), resolvedUrl);
-
-            var correlationId = contextDict.TryGetValue("_CorrelationId", out var corrObj) ? corrObj?.ToString() : null;
-            var depth = contextDict.TryGetValue("_Depth", out var dObj) && dObj is int dVal ? dVal : 1;
-
-            if (!string.IsNullOrEmpty(correlationId))
-            {
-                request.Headers.TryAddWithoutValidation("X-PowerBase-Correlation-Id", correlationId);
-            }
-            request.Headers.TryAddWithoutValidation("X-PowerBase-Depth", (depth + 1).ToString());
-
-            var resolvedHeaders = new List<HttpHeader>();
-            if (config.HeadersList != null)
-            {
-                foreach (var header in config.HeadersList)
-                {
-                    if (string.IsNullOrWhiteSpace(header.Name)) continue;
-                    var resolvedVal = EvaluateTokens(header.Value, payloadJson, executionPath, allSteps);
-                    request.Headers.TryAddWithoutValidation(header.Name, resolvedVal);
-                    resolvedHeaders.Add(new HttpHeader { Name = header.Name, Value = resolvedVal });
-                }
-            }
-
-            string? resolvedBody = null;
-            if (method == "POST" || method == "PUT" || method == "PATCH")
-            {
-                resolvedBody = EvaluateTokens(config.Body, payloadJson, executionPath, allSteps);
-                var contentType = string.IsNullOrWhiteSpace(config.ContentType) ? "application/json" : config.ContentType;
-                request.Content = new StringContent(resolvedBody, System.Text.Encoding.UTF8, contentType);
-            }
-
-            stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                Url = resolvedUrl,
-                Method = method,
-                Headers = resolvedHeaders,
-                ContentType = config.ContentType,
-                Body = resolvedBody
-            });
-
-            var response = await client.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                var errorContent = await response.Content.ReadAsStringAsync(ct);
-                throw new HttpRequestException($"HTTP Request failed with status code {response.StatusCode}: {errorContent}");
-            }
-
-            var responseBody = await response.Content.ReadAsStringAsync(ct);
-            return responseBody;
+            return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
         }
         else if (subtype == "prepare-bulk-upsert")
         {
             var config = JsonSerializer.Deserialize<PrepareBulkUpsertConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (config == null || string.IsNullOrWhiteSpace(config.TableLabel) || string.IsNullOrWhiteSpace(config.MergeKeyFid))
-                throw new InvalidOperationException("Prepare bulk upsert step configuration is invalid or missing table/merge key.");
+            var tableIdentifier = config?.GetTableIdentifier();
+            var mergeKeyIdentifier = config?.GetMergeKeyIdentifier();
+
+            if (string.IsNullOrWhiteSpace(tableIdentifier))
+                throw new InvalidOperationException("Prepare bulk upsert step configuration is invalid or missing table.");
+
+            if (string.IsNullOrWhiteSpace(mergeKeyIdentifier))
+                mergeKeyIdentifier = "3";
+
+            AppTable? table = null;
+            if (Guid.TryParse(tableIdentifier, out var tableGuid))
+            {
+                table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
+            }
+            else if (long.TryParse(tableIdentifier, out var tableId))
+            {
+                table = await tableRepo.GetByIdAsync(tableId, ct);
+            }
+            else if (Guid.TryParse(tableIdentifier.Trim('"'), out var strippedGuid))
+            {
+                table = await tableRepo.GetByPublicIdAsync(strippedGuid, ct);
+            }
+
+            if (table == null)
+                throw new InvalidOperationException($"Failed to resolve table: '{tableIdentifier}'");
+
+            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            var mergeField = ResolveBulkUpsertField(mergeKeyIdentifier, fields);
+
+            if (mergeField == null || !mergeField.Fid.HasValue)
+            {
+                if (mergeKeyIdentifier == "3" || mergeKeyIdentifier.Equals("fid_3", StringComparison.OrdinalIgnoreCase) ||
+                    mergeKeyIdentifier.Equals("Record ID", StringComparison.OrdinalIgnoreCase) ||
+                    mergeKeyIdentifier.Equals("Record ID#", StringComparison.OrdinalIgnoreCase) ||
+                    mergeKeyIdentifier.Equals("Id", StringComparison.OrdinalIgnoreCase))
+                {
+                    mergeField = fields.FirstOrDefault(f => f.Fid == 3) ?? new AppField { Fid = 3, Name = "Record ID#", TypeCode = "RecordId", IsSystem = true, PhysicalColumnName = "Id" };
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Failed to resolve merge key field: '{mergeKeyIdentifier}'");
+                }
+            }
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                TableLabel = config.TableLabel,
-                MergeKeyFid = config.MergeKeyFid
+                TableLabel = table.PublicId.ToString(),
+                MergeKeyFid = mergeField.Fid.HasValue ? $"fid_{mergeField.Fid.Value}" : mergeKeyIdentifier
             });
 
             var session = new BulkUpsertSession
             {
-                TableLabel = config.TableLabel,
-                MergeKeyFid = config.MergeKeyFid,
+                TableLabel = table.PublicId.ToString(),
+                MergeKeyFid = mergeField.Fid.HasValue ? $"fid_{mergeField.Fid.Value}" : mergeKeyIdentifier,
+                Table = table,
+                Fields = fields,
+                MergeField = mergeField,
+                SelectedFieldFids = config?.Fields?.Select(f => ResolveBulkUpsertField(f, fields).Fid).Where(f => f.HasValue).Select(f => (long)f!.Value).ToHashSet(),
                 Rows = new List<Dictionary<long, object?>>()
             };
 
             var sessions = GetOrCreateBulkUpsertSessions(contextDict);
             sessions[step.RefId] = session;
+            if (step.Id > 0) sessions[step.Id.ToString()] = session;
+            if (step.PublicId != Guid.Empty) sessions[step.PublicId.ToString()] = session;
 
             return JsonSerializer.Serialize(new { SessionId = step.RefId, Status = "Prepared" });
         }
         else if (subtype == "add-bulk-upsert-row")
         {
             var config = JsonSerializer.Deserialize<AddBulkUpsertRowConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (config == null || string.IsNullOrWhiteSpace(config.ParentUpsertStepRefId))
+            var parentRefId = config?.GetParentRefId()?.Replace("steps.", "");
+            if (string.IsNullOrWhiteSpace(parentRefId))
                 throw new InvalidOperationException("Add bulk upsert row step configuration is invalid or missing ParentUpsertStepRefId.");
 
-            var parentRefId = config.ParentUpsertStepRefId.Replace("steps.", "");
             var sessions = GetOrCreateBulkUpsertSessions(contextDict);
-            if (!sessions.TryGetValue(parentRefId, out var session))
-                throw new InvalidOperationException($"No bulk upsert session found for parent reference: '{config.ParentUpsertStepRefId}'");
+            BulkUpsertSession? parentSession = null;
+            var parentStep = allSteps?.FirstOrDefault(s => s.RefId == parentRefId || s.Id.ToString() == parentRefId || s.PublicId.ToString() == parentRefId);
 
-            var tableGuid = Guid.Parse(session.TableLabel);
-            var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
-            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            if (!sessions.TryGetValue(parentRefId, out parentSession))
+            {
+                if (parentStep != null && sessions.TryGetValue(parentStep.RefId, out var foundSession))
+                {
+                    parentSession = foundSession;
+                }
+            }
+
+            if (parentSession == null)
+                throw new InvalidOperationException($"No bulk upsert session found for parent reference: '{parentRefId}'");
+
+            bool isParentPrepare = parentStep != null ? parentStep.Subtype == "prepare-bulk-upsert" : (parentSession.RootSession == null && parentSession.IsCommittable);
+
+            // Zero-query row add: use cached table and fields from parentSession or root
+            var root = parentSession.RootSession ?? parentSession;
+            var table = root.Table;
+            var fields = root.Fields;
+            if (table == null || fields == null)
+            {
+                var tableGuid = Guid.Parse(root.TableLabel);
+                table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
+                fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+                root.Table = table;
+                root.Fields = fields;
+            }
 
             var rowValues = new Dictionary<long, object?>();
+            // A selected bulk-import column is present in every row, even when its mapping is blank.
+            if (root.SelectedFieldFids != null)
+            {
+                foreach (var field in fields.Where(f => f.Fid.HasValue && root.SelectedFieldFids.Contains(f.Fid.Value) && !f.IsSystem))
+                    rowValues[field.Fid!.Value] = ParseBulkUpsertValueType("", field.TypeCode);
+            }
+
             var resolvedMappings = new Dictionary<string, object?>();
-            if (config.FieldMappings != null)
+
+            // 1. Process FieldMappings if present
+            if (config?.FieldMappings != null)
             {
                 foreach (var mapping in config.FieldMappings)
                 {
                     if (string.IsNullOrWhiteSpace(mapping.Field)) continue;
-
-                    var field = fields.FirstOrDefault(f => 
-                        f.Name.Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) || 
-                        $"fid_{f.Id}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) ||
-                        $"fid_{f.Fid}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase));
-
+                    var field = ResolveBulkUpsertField(mapping.Field, fields);
                     if (field != null && field.Fid.HasValue)
                     {
-                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
-                        var parsedVal = ParseValueType(resolvedValStr, field.TypeCode);
+                        var resolvedValStr = mapping.Value != null ? EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps) : null;
+                        var parsedVal = mapping.Value != null ? ParseBulkUpsertValueType(resolvedValStr, field.TypeCode) : null;
                         rowValues[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
                 }
             }
 
+            // 2. Process RowValues if present (supports frontend contract)
+            if (config?.RowValues != null)
+            {
+                foreach (var kvp in config.RowValues)
+                {
+                    if (string.IsNullOrWhiteSpace(kvp.Key)) continue;
+                    var field = ResolveBulkUpsertField(kvp.Key, fields);
+                    if (field != null && field.Fid.HasValue)
+                    {
+                        var rawVal = kvp.Value;
+                        object? parsedVal;
+                        if (rawVal == null)
+                        {
+                            parsedVal = null;
+                        }
+                        else if (rawVal is JsonElement el)
+                        {
+                            if (el.ValueKind == JsonValueKind.Null)
+                            {
+                                parsedVal = null;
+                            }
+                            else if (el.ValueKind == JsonValueKind.String)
+                            {
+                                var resolvedValStr = EvaluateTokens(el.GetString(), payloadJson, executionPath, allSteps);
+                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                            }
+                            else
+                            {
+                                var resolvedValStr = EvaluateTokens(el.GetRawText(), payloadJson, executionPath, allSteps);
+                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                            }
+                        }
+                        else if (rawVal is string s)
+                        {
+                            var resolvedValStr = EvaluateTokens(s, payloadJson, executionPath, allSteps);
+                            parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                        }
+                        else
+                        {
+                            parsedVal = rawVal;
+                        }
+
+                        if (field.Fid.Value != 3 || (parsedVal != null && long.TryParse(parsedVal.ToString(), out var checkId) && checkId > 0))
+                        {
+                            rowValues[field.Fid.Value] = parsedVal;
+                            resolvedMappings[kvp.Key] = parsedVal;
+                        }
+                    }
+                }
+            }
+
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                ParentUpsertStepRefId = config.ParentUpsertStepRefId,
+                ParentUpsertStepRefId = parentRefId,
+                BulkRecordSetStepId = parentRefId,
                 FieldMappings = resolvedMappings
             });
 
-            session.Rows.Add(rowValues);
-            return JsonSerializer.Serialize(new { Status = "RowAdded", RowCount = session.Rows.Count });
+            if (isParentPrepare)
+            {
+                // Direct Add Row -> Prepare: contribute to root Prepare collection
+                parentSession.Rows.Add(rowValues);
+
+                var node = new BulkUpsertSession
+                {
+                    TableLabel = root.TableLabel,
+                    MergeKeyFid = root.MergeKeyFid,
+                    Table = root.Table,
+                    Fields = root.Fields,
+                    MergeField = root.MergeField,
+                    RootSession = root,
+                    IsCommittable = false
+                };
+
+                sessions[step.RefId] = node;
+                if (step.Id > 0) sessions[step.Id.ToString()] = node;
+                if (step.PublicId != Guid.Empty) sessions[step.PublicId.ToString()] = node;
+
+                return JsonSerializer.Serialize(new { Status = "RowAdded", RowCount = parentSession.Rows.Count });
+            }
+            else
+            {
+                // Add Row -> Add Row (Chaining / Fan-Out): contribute to shared downstream child collection
+                var targetCollection = parentSession.DownstreamChildCollection;
+                if (targetCollection == null)
+                {
+                    targetCollection = new BulkUpsertSession
+                    {
+                        TableLabel = root.TableLabel,
+                        MergeKeyFid = root.MergeKeyFid,
+                        Table = root.Table,
+                        Fields = root.Fields,
+                        MergeField = root.MergeField,
+                        RootSession = root,
+                        IsCommittable = true,
+                        Rows = new List<Dictionary<long, object?>>()
+                    };
+                    parentSession.DownstreamChildCollection = targetCollection;
+                }
+
+                targetCollection.Rows.Add(rowValues);
+
+                var node = new BulkUpsertSession
+                {
+                    TableLabel = root.TableLabel,
+                    MergeKeyFid = root.MergeKeyFid,
+                    Table = root.Table,
+                    Fields = root.Fields,
+                    MergeField = root.MergeField,
+                    RootSession = root,
+                    DownstreamChildCollection = targetCollection,
+                    IsCommittable = false
+                };
+
+                sessions[step.RefId] = node;
+                if (step.Id > 0) sessions[step.Id.ToString()] = node;
+                if (step.PublicId != Guid.Empty) sessions[step.PublicId.ToString()] = node;
+
+                return JsonSerializer.Serialize(new { Status = "RowAdded", RowCount = targetCollection.Rows.Count });
+            }
         }
         else if (subtype == "commit-upsert")
         {
             var config = JsonSerializer.Deserialize<CommitBulkUpsertConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (config == null || string.IsNullOrWhiteSpace(config.ParentUpsertStepRefId))
+            var parentRefId = config?.GetParentRefId()?.Replace("steps.", "");
+            if (string.IsNullOrWhiteSpace(parentRefId))
                 throw new InvalidOperationException("Commit bulk upsert step configuration is invalid or missing ParentUpsertStepRefId.");
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                ParentUpsertStepRefId = config.ParentUpsertStepRefId
+                ParentUpsertStepRefId = parentRefId,
+                BulkRecordSetStepId = parentRefId
             });
 
-            var parentRefId = config.ParentUpsertStepRefId.Replace("steps.", "");
             var sessions = GetOrCreateBulkUpsertSessions(contextDict);
-            if (!sessions.TryGetValue(parentRefId, out var session))
-                throw new InvalidOperationException($"No bulk upsert session found for parent reference: '{config.ParentUpsertStepRefId}'");
+            BulkUpsertSession? session = null;
+            string sessionKey = parentRefId;
 
-            var tableGuid = Guid.Parse(session.TableLabel);
-            var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
-            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            if (sessions.TryGetValue(parentRefId, out session))
+            {
+                sessionKey = parentRefId;
+            }
+            else
+            {
+                var refStep = allSteps?.FirstOrDefault(s => s.RefId == parentRefId || s.Id.ToString() == parentRefId || s.PublicId.ToString() == parentRefId);
+                if (refStep != null && sessions.TryGetValue(refStep.RefId, out session))
+                {
+                    sessionKey = refStep.RefId;
+                }
+            }
 
-            var mergeField = ResolvePipelineField(session.MergeKeyFid, fields);
+            if (session == null)
+                throw new InvalidOperationException($"No bulk upsert session found for parent reference: '{config?.GetParentRefId() ?? parentRefId}'");
 
-            if (!mergeField.Fid.HasValue)
-                throw new InvalidOperationException($"Failed to resolve merge key field: '{session.MergeKeyFid}'");
+            BulkUpsertSession? committableSession = null;
+            if (session.DownstreamChildCollection != null)
+            {
+                committableSession = session.DownstreamChildCollection;
+            }
+            else if (session.IsCommittable)
+            {
+                committableSession = session;
+            }
+
+            if (committableSession == null)
+            {
+                // Direct Add Row -> Prepare with no downstream child: commits 0 records
+                return JsonSerializer.Serialize(new
+                {
+                    Status = "Committed",
+                    inserted_count = 0,
+                    updated_count = 0,
+                    unchanged_count = 0,
+                    inserted_record_ids = Array.Empty<long>(),
+                    updated_record_ids = Array.Empty<long>(),
+                    total_rows = 0,
+                    total_failed = 0
+                });
+            }
+
+            session = committableSession;
+
+            var table = session.Table;
+            var fields = session.Fields;
+            if (table == null || fields == null)
+            {
+                var tableGuid = Guid.Parse(session.TableLabel);
+                table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
+                fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+                session.Table = table;
+                session.Fields = fields;
+            }
+
+            var mergeField = session.MergeField ?? ResolveBulkUpsertField(session.MergeKeyFid, fields);
+            if (mergeField == null || !mergeField.Fid.HasValue)
+            {
+                if (session.MergeKeyFid == "3" || session.MergeKeyFid.Equals("fid_3", StringComparison.OrdinalIgnoreCase) ||
+                    session.MergeKeyFid.Equals("Record ID", StringComparison.OrdinalIgnoreCase) ||
+                    session.MergeKeyFid.Equals("Record ID#", StringComparison.OrdinalIgnoreCase) ||
+                    session.MergeKeyFid.Equals("Id", StringComparison.OrdinalIgnoreCase))
+                {
+                    mergeField = fields.FirstOrDefault(f => f.Fid == 3) ?? new AppField { Fid = 3, Name = "Record ID#", TypeCode = "Numeric", IsSystem = true, PhysicalColumnName = "Id" };
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Failed to resolve merge key field: '{session.MergeKeyFid}'");
+                }
+            }
+
+            // MANDATORY CONDITION 3: STRICT IN-BATCH DUPLICATE DETECTION (In-Memory, BEFORE DB transaction)
+            var seenMergeKeys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < session.Rows.Count; i++)
+            {
+                var r = session.Rows[i];
+                if (r.TryGetValue(mergeField.Fid.Value, out var mVal) && mVal != null && !string.IsNullOrWhiteSpace(mVal.ToString()))
+                {
+                    var keyStr = mVal.ToString()!.Trim();
+                    if (seenMergeKeys.TryGetValue(keyStr, out var firstIndex))
+                    {
+                        sessions.Remove(sessionKey);
+                        throw new PipelineBulkUpsertException(
+                            "DUPLICATE_MERGE_KEY_IN_BATCH",
+                            $"Duplicate merge key '{keyStr}' found in batch at row {firstIndex + 1} and row {i + 1}.",
+                            rowIndex: i + 1,
+                            fieldFid: mergeField.Fid,
+                            fieldName: mergeField.Name
+                        );
+                    }
+                    seenMergeKeys[keyStr] = i;
+                }
+            }
 
             int inserted = 0;
             int updated = 0;
+            var createdRecordIds = new List<long>();
+            var updatedRecordIds = new List<long>();
             var addedChanges = new List<PipelineRecordChange>();
             var modifiedChanges = new List<PipelineRecordChange>();
 
+            // MANDATORY CONDITION 1: UNIFIED TRANSACTION CONNECTION
             await uow.BeginAsync(ct);
             try
             {
@@ -1992,54 +2514,229 @@ public class PipelineEngine : IPipelineEngine
                 if (!string.IsNullOrEmpty(cachedOutput))
                 {
                     await uow.CommitAsync(ct);
-                    sessions.Remove(parentRefId);
+                    sessions.Remove(sessionKey);
                     return cachedOutput;
                 }
 
-                var addedRecords = new List<(Guid PublicId, Dictionary<long, object?> Row, Dictionary<long, object?> ChangeValues)>();
+                var isMergeRecordId = (mergeField.IsSystem && string.Equals(mergeField.PhysicalColumnName, "Id", StringComparison.OrdinalIgnoreCase)) ||
+                                      (string.Equals(mergeField.TypeCode, "RecordId", StringComparison.OrdinalIgnoreCase));
+                var mergeColName = isMergeRecordId ? "Id" : PhysicalNaming.GetPhysicalColumnName(mergeField);
+
+                var candidateRecordIds = new HashSet<long>();
+                var candidateMergeKeys = new HashSet<object>();
 
                 foreach (var row in session.Rows)
                 {
-                    if (!row.TryGetValue(mergeField.Fid.Value, out var mergeVal) || mergeVal == null)
+                    if (row.TryGetValue(3, out var idVal) && idVal != null && !string.IsNullOrWhiteSpace(idVal.ToString()))
                     {
-                        var recordPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
-
-                        var changeValues = new Dictionary<long, object?>();
-                        foreach (var f in fields)
+                        if (long.TryParse(idVal.ToString(), out var parsedLongId) && parsedLongId > 0)
                         {
-                            if (f.Fid.HasValue && row.TryGetValue(f.Fid.Value, out var val))
-                                changeValues[f.Id] = val;
+                            candidateRecordIds.Add(parsedLongId);
                         }
-
-                        addedRecords.Add((recordPublicId, row, changeValues));
-                        inserted++;
-                        continue;
                     }
 
-                    var filterCondition = new FilterCondition
+                    if (row.TryGetValue(mergeField.Fid.Value, out var mkVal) && mkVal != null && !string.IsNullOrWhiteSpace(mkVal.ToString()))
                     {
-                        FieldId = mergeField.Fid.Value,
-                        Operator = "eq",
-                        Value = mergeVal.ToString()
-                    };
-                    var filterTree = new FilterGroup
-                    {
-                        Logic = "and",
-                        Nodes = new List<FilterNode> { new FilterNode { Condition = filterCondition } }
-                    };
-
-                    var existingRows = await recordRepo.ListAsync(table, fields, page: 1, pageSize: 1, filterTree: filterTree, ct: ct);
-                    if (existingRows != null && existingRows.Any())
-                    {
-                        var existingRow = existingRows.First();
-                        Guid? recordPublicId = null;
-                        if (existingRow.TryGetValue("publicId", out var pubIdObj) && pubIdObj is Guid)
+                        if (isMergeRecordId)
                         {
-                            recordPublicId = (Guid)pubIdObj;
+                            if (long.TryParse(mkVal.ToString(), out var parsedLongId) && parsedLongId > 0)
+                            {
+                                candidateRecordIds.Add(parsedLongId);
+                            }
                         }
-                        else if (existingRow.TryGetValue("id", out var idObj) && idObj is Guid)
+                        else
                         {
-                            recordPublicId = (Guid)idObj;
+                            candidateMergeKeys.Add(mkVal);
+                        }
+                    }
+                }
+
+                // Set-based / chunked lookup on uow.Transaction with UPDLOCK/HOLDLOCK concurrency hints
+                IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> rowsById = new Dictionary<long, IReadOnlyDictionary<string, object?>>();
+                if (candidateRecordIds.Count > 0)
+                {
+                    rowsById = await recordRepo.GetBulkUpsertRowsByIdsAsync(table, fields, candidateRecordIds.ToList(), uow.Transaction, ct);
+                }
+
+                IReadOnlyDictionary<object, IReadOnlyDictionary<string, object?>> rowsByMergeKey = new Dictionary<object, IReadOnlyDictionary<string, object?>>();
+                if (candidateMergeKeys.Count > 0 && !isMergeRecordId)
+                {
+                    rowsByMergeKey = await recordRepo.GetBulkUpsertRowsByColumnValuesAsync(table, fields, mergeColName, candidateMergeKeys.ToList(), uow.Transaction, ct);
+                }
+
+                IReadOnlyDictionary<string, object?>? FindByMergeKey(object? mkVal)
+                {
+                    if (mkVal == null) return null;
+                    var mkStr = mkVal.ToString();
+                    if (string.IsNullOrWhiteSpace(mkStr)) return null;
+
+                    if (isMergeRecordId)
+                    {
+                        if (long.TryParse(mkStr, out var parsedLongId) && rowsById.TryGetValue(parsedLongId, out var found))
+                        {
+                            return found;
+                        }
+                        return null;
+                    }
+
+                    if (rowsByMergeKey.TryGetValue(mkVal, out var directMatch))
+                        return directMatch;
+
+                    var trimmed = mkStr.Trim();
+                    if (rowsByMergeKey.TryGetValue(trimmed, out var trimmedMatch))
+                        return trimmedMatch;
+
+                    return null;
+                }
+
+                var writableFids = fields
+                    .Where(f => !f.IsSystem && f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode))
+                    .Select(f => (long)f.Fid!.Value)
+                    .ToHashSet();
+
+                var addedRecords = new List<(Guid PublicId, Dictionary<long, object?> Row, Dictionary<long, object?> ChangeValues)>();
+
+                // Process each row according to Plan V2 Cases 1–6
+                for (int i = 0; i < session.Rows.Count; i++)
+                {
+                    var row = session.Rows[i];
+
+                    long? suppliedRecordId = null;
+                    if (row.TryGetValue(3, out var rIdObj) && rIdObj != null && !string.IsNullOrWhiteSpace(rIdObj.ToString()) && long.TryParse(rIdObj.ToString(), out var rid) && rid > 0)
+                    {
+                        suppliedRecordId = rid;
+                    }
+
+                    object? suppliedMergeKey = null;
+                    if (row.TryGetValue(mergeField.Fid.Value, out var mKeyObj) && mKeyObj != null && !string.IsNullOrWhiteSpace(mKeyObj.ToString()))
+                    {
+                        suppliedMergeKey = mKeyObj;
+                    }
+
+                    bool recordIdProvided = suppliedRecordId.HasValue;
+                    bool mergeKeyProvided = suppliedMergeKey != null;
+
+                    IReadOnlyDictionary<string, object?>? recordA = null;
+                    if (recordIdProvided)
+                    {
+                        rowsById.TryGetValue(suppliedRecordId!.Value, out recordA);
+                    }
+
+                    IReadOnlyDictionary<string, object?>? recordB = null;
+                    if (mergeKeyProvided)
+                    {
+                        recordB = FindByMergeKey(suppliedMergeKey);
+                    }
+
+                    IReadOnlyDictionary<string, object?>? matchedExistingRow = null;
+
+                    if (recordIdProvided && mergeKeyProvided)
+                    {
+                        // CASE 5: Record ID supplied but does not exist in DB
+                        if (recordA == null)
+                        {
+                            sessions.Remove(sessionKey);
+                            throw new PipelineBulkUpsertException(
+                                "RECORD_ID_NOT_FOUND",
+                                $"Record ID {suppliedRecordId!.Value} was not found in Table '{table.Name}'.",
+                                rowIndex: i + 1,
+                                fieldFid: 3,
+                                fieldName: "Record ID#"
+                            );
+                        }
+
+                        long idA = Convert.ToInt64(recordA["Id"]);
+
+                        if (recordB != null)
+                        {
+                            long idB = Convert.ToInt64(recordB["Id"]);
+                            if (idA == idB)
+                            {
+                                // CASE 3: Both Record ID and Merge Key identify the SAME record -> UPDATE
+                                matchedExistingRow = recordA;
+                            }
+                            else
+                            {
+                                // CASE 4 / CASE 6 Collision: Record ID identifies Record A, Merge Key identifies Record B -> REJECT
+                                sessions.Remove(sessionKey);
+                                throw new PipelineBulkUpsertException(
+                                    "RECORD_ID_MERGE_KEY_MISMATCH",
+                                    $"Record ID {suppliedRecordId!.Value} (Record {idA}) and Merge Key '{suppliedMergeKey}' (Record {idB}) identify different records in Table '{table.Name}' at row {i + 1}.",
+                                    rowIndex: i + 1,
+                                    fieldFid: mergeField.Fid,
+                                    fieldName: mergeField.Name
+                                );
+                            }
+                        }
+                        else
+                        {
+                            // CASE 6: Record ID exists and incoming Merge Key is unused -> UPDATE Record A
+                            matchedExistingRow = recordA;
+                        }
+                    }
+                    else if (recordIdProvided && !mergeKeyProvided)
+                    {
+                        // CASE 1: Record ID only
+                        if (recordA != null)
+                        {
+                            matchedExistingRow = recordA; // UPDATE
+                        }
+                        else
+                        {
+                            sessions.Remove(sessionKey);
+                            throw new PipelineBulkUpsertException(
+                                "RECORD_ID_NOT_FOUND",
+                                $"Record ID {suppliedRecordId!.Value} was not found in Table '{table.Name}'.",
+                                rowIndex: i + 1,
+                                fieldFid: 3,
+                                fieldName: "Record ID#"
+                            );
+                        }
+                    }
+                    else if (!recordIdProvided && mergeKeyProvided)
+                    {
+                        // CASE 2: Merge Key only
+                        if (recordB != null)
+                        {
+                            matchedExistingRow = recordB; // UPDATE
+                        }
+                        else
+                        {
+                            matchedExistingRow = null; // INSERT
+                        }
+                    }
+                    else
+                    {
+                        // Neither provided -> INSERT
+                        matchedExistingRow = null;
+                    }
+
+                    // Remove non-writable (system / computed) fields from row before database writes
+                    var nonWritableKeys = row.Keys.Where(k => !writableFids.Contains(k)).ToList();
+                    foreach (var k in nonWritableKeys)
+                    {
+                        row.Remove(k);
+                    }
+
+                    if (matchedExistingRow != null)
+                    {
+                        // UPDATE (Cases 1, 2-update, 3, 6-update)
+                        Guid? recordPublicId = null;
+                        if (matchedExistingRow.TryGetValue("publicId", out var pubIdObj) && pubIdObj is Guid g1)
+                        {
+                            recordPublicId = g1;
+                        }
+                        else if (matchedExistingRow.TryGetValue("PublicId", out var pubIdObj2) && pubIdObj2 is Guid g2)
+                        {
+                            recordPublicId = g2;
+                        }
+                        else if (matchedExistingRow.TryGetValue("publicId", out var pStr) && Guid.TryParse(pStr?.ToString(), out var g3))
+                        {
+                            recordPublicId = g3;
+                        }
+                        else if (matchedExistingRow.TryGetValue("PublicId", out var pStr2) && Guid.TryParse(pStr2?.ToString(), out var g4))
+                        {
+                            recordPublicId = g4;
                         }
 
                         if (recordPublicId.HasValue)
@@ -2052,21 +2749,43 @@ public class PipelineEngine : IPipelineEngine
                             {
                                 if (f.Fid.HasValue)
                                 {
-                                    var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
-                                    var oldVal = existingRow.TryGetValue(colKey, out var ov) ? ov : null;
-                                    var newVal = row.TryGetValue(f.Fid.Value, out var nv) ? nv : null;
+                                    var colKey = PhysicalNaming.GetPhysicalColumnName(f);
+                                    var oldVal = matchedExistingRow.TryGetValue(colKey, out var ov) ? ov : (matchedExistingRow.TryGetValue($"fid_{f.Fid.Value}", out var ov2) ? ov2 : null);
                                     beforeValues[f.Id] = oldVal;
-                                    afterValues[f.Id] = newVal;
+                                    beforeValues[f.Fid.Value] = oldVal;
 
-                                    if (oldVal?.ToString() != newVal?.ToString())
+                                    if (row.ContainsKey(f.Fid.Value))
                                     {
-                                        changedFieldIds.Add(f.Id);
+                                        var newVal = row[f.Fid.Value];
+                                        afterValues[f.Id] = newVal;
+                                        afterValues[f.Fid.Value] = newVal;
+
+                                        if (!f.IsSystem && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && !AreValuesEqual(oldVal, newVal, f.TypeCode))
+                                        {
+                                            changedFieldIds.Add((long)f.Fid.Value);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        afterValues[f.Id] = oldVal;
+                                        afterValues[f.Fid.Value] = oldVal;
                                     }
                                 }
                             }
 
+                            // UPDATE in DB on uow.Transaction via recordWriteService (with sanitized row)
                             await recordWriteService.ApplyAsync(
-                                table, fields, recordPublicId.Value, row, AuditActions.Updated, "Record upserted via Pipeline bulk commit action step", ct, uow.Transaction, suppressInterception: true);
+                                table,
+                                fields,
+                                recordPublicId.Value,
+                                row,
+                                Domain.Constants.AuditActions.Updated,
+                                $"Pipeline '{step.PipelineId}' step '{step.Id}' updated record {recordPublicId.Value}",
+                                ct,
+                                uow.Transaction,
+                                suppressInterception: true,
+                                existingRecord: matchedExistingRow
+                            );
 
                             modifiedChanges.Add(new PipelineRecordChange(
                                 recordPublicId.Value,
@@ -2075,44 +2794,68 @@ public class PipelineEngine : IPipelineEngine
                                 changedFieldIds,
                                 PipelineRecordEventType.Modified
                             ));
+
+                            if (matchedExistingRow.TryGetValue("Id", out var exId) && exId != null && long.TryParse(exId.ToString(), out var parsedExId))
+                            {
+                                updatedRecordIds.Add(parsedExId);
+                            }
+                            else if (suppliedRecordId.HasValue)
+                            {
+                                updatedRecordIds.Add(suppliedRecordId.Value);
+                            }
+
                             updated++;
                         }
                         else
                         {
-                            var createdId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
+                            // Resolve Reference fields: translate human key / PublicId Guid to physical row Id.
+                            var insertRefOverrides1 = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
+                                fields, row, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
+                            foreach (var kvp in insertRefOverrides1)
+                                row[kvp.Key] = kvp.Value;
 
+                            var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
                             var changeValues = new Dictionary<long, object?>();
                             foreach (var f in fields)
                             {
                                 if (f.Fid.HasValue && row.TryGetValue(f.Fid.Value, out var val))
+                                {
                                     changeValues[f.Id] = val;
+                                    changeValues[f.Fid.Value] = val;
+                                }
                             }
-
-                            addedRecords.Add((createdId, row, changeValues));
+                            addedRecords.Add((createdPublicId, row, changeValues));
                             inserted++;
                         }
                     }
                     else
                     {
-                        var createdId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
+                        // INSERT (Cases 2-insert, 6-insert)
+                        // Resolve Reference fields: translate human key / PublicId Guid to physical row Id.
+                        var insertRefOverrides2 = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
+                            fields, row, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
+                        foreach (var kvp in insertRefOverrides2)
+                            row[kvp.Key] = kvp.Value;
 
+                        var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
                         var changeValues = new Dictionary<long, object?>();
                         foreach (var f in fields)
                         {
                             if (f.Fid.HasValue && row.TryGetValue(f.Fid.Value, out var val))
+                            {
                                 changeValues[f.Id] = val;
+                                changeValues[f.Fid.Value] = val;
+                            }
                         }
-
-                        addedRecords.Add((createdId, row, changeValues));
+                        addedRecords.Add((createdPublicId, row, changeValues));
                         inserted++;
                     }
                 }
 
-                if (addedRecords.Any())
+                if (addedRecords.Count > 0)
                 {
                     var publicIds = addedRecords.Select(r => r.PublicId).ToList();
                     var publicIdToIdMap = await recordRepo.GetActiveRecordIdsByPublicIdsAsync(table, publicIds, uow.Transaction, ct);
-
                     var recordIdField = fields.FirstOrDefault(f => f.Fid == 3);
 
                     foreach (var (pubId, r, cv) in addedRecords)
@@ -2124,6 +2867,8 @@ public class PipelineEngine : IPipelineEngine
                             {
                                 cv[recordIdField.Id] = id;
                             }
+                            cv[3] = id;
+                            createdRecordIds.Add(id);
                         }
 
                         addedChanges.Add(new PipelineRecordChange(
@@ -2138,7 +2883,7 @@ public class PipelineEngine : IPipelineEngine
 
                 var commitUpsertBatchId = Guid.NewGuid();
                 var commitUpsertCorrelationId = Guid.NewGuid();
-                if (addedChanges.Any())
+                if (addedChanges.Count > 0)
                 {
                     await triggerInterceptor.InterceptBulkAsync(
                         table,
@@ -2150,7 +2895,7 @@ public class PipelineEngine : IPipelineEngine
                         ct
                     );
                 }
-                if (modifiedChanges.Any())
+                if (modifiedChanges.Count > 0)
                 {
                     await triggerInterceptor.InterceptBulkAsync(
                         table,
@@ -2163,7 +2908,21 @@ public class PipelineEngine : IPipelineEngine
                     );
                 }
 
-                var outputJson = JsonSerializer.Serialize(new { Committed = true, InsertedCount = inserted, UpdatedCount = updated });
+                var outputJson = JsonSerializer.Serialize(new
+                {
+                    committed = true,
+                    status = "Committed",
+                    inserted_count = inserted,
+                    updated_count = updated,
+                    total_records = inserted + updated,
+                    created_record_ids = createdRecordIds,
+                    updated_record_ids = updatedRecordIds,
+                    errors = Array.Empty<object>(),
+                    // CamelCase aliases for backwards compatibility
+                    insertedCount = inserted,
+                    updatedCount = updated,
+                    unchangedCount = 0
+                });
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
                 {
@@ -2175,19 +2934,21 @@ public class PipelineEngine : IPipelineEngine
                 }, uow.Transaction, ct);
 
                 await uow.CommitAsync(ct);
-                sessions.Remove(parentRefId);
+                sessions.Remove(sessionKey);
                 return outputJson;
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
+                sessions.Remove(sessionKey);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
                 throw;
             }
             catch
             {
-                await uow.RollbackAsync(ct);
+                await uow.RollbackAsync(CancellationToken.None);
+                sessions.Remove(sessionKey);
                 throw;
             }
         }
@@ -2365,14 +3126,14 @@ public class PipelineEngine : IPipelineEngine
                                 }
                                 catch (Exception ex) when (IsUniqueConstraintViolation(ex))
                                 {
-                                    await uow.RollbackAsync(ct);
+                                    await uow.RollbackAsync(CancellationToken.None);
                                     var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                                     if (winningOutput != null) return winningOutput;
                                     throw;
                                 }
                                 catch
                                 {
-                                    await uow.RollbackAsync(ct);
+                                    await uow.RollbackAsync(CancellationToken.None);
                                     throw;
                                 }
                             }
@@ -2452,6 +3213,24 @@ public class PipelineEngine : IPipelineEngine
     {
         if (sourceVal == null) return null;
 
+        if (sourceVal is string str && !string.IsNullOrWhiteSpace(str))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(str);
+                var root = doc.RootElement.Clone();
+                if (root.ValueKind == JsonValueKind.Array)
+                {
+                    return root.EnumerateArray().Select(e => (object)e.Clone()).ToList();
+                }
+                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("records", out var recs) && recs.ValueKind == JsonValueKind.Array)
+                {
+                    return recs.EnumerateArray().Select(e => (object)e.Clone()).ToList();
+                }
+            }
+            catch { }
+        }
+
         if (sourceVal is JsonElement jsonEl)
         {
             if (jsonEl.ValueKind == JsonValueKind.Array)
@@ -2515,24 +3294,135 @@ public class PipelineEngine : IPipelineEngine
         return PipelineFilterEvaluator.EvaluateConditionOperator(leftVal, op, rightVal, logger: _logger);
     }
 
-    private bool EvaluateConditionGroup(ConditionRuleGroup group, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
+    private static bool IsRuleNodeCompletelyBlank(ConditionRuleNode rule)
     {
-        if (group.Rules == null || !group.Rules.Any()) return true;
+        if (rule == null) return true;
+        if (rule.Type == "nested")
+        {
+            if (rule.Groups == null || !rule.Groups.Any()) return true;
+            return rule.Groups.All(g => IsGroupCompletelyBlank(g));
+        }
+        return string.IsNullOrWhiteSpace(rule.Left) &&
+               (string.IsNullOrWhiteSpace(rule.Op) || rule.Op.Equals("equals", StringComparison.OrdinalIgnoreCase)) &&
+               string.IsNullOrWhiteSpace(rule.Right);
+    }
 
-        bool isAnd = group.LogicalOp.Equals("AND", StringComparison.OrdinalIgnoreCase);
+    private static bool IsGroupCompletelyBlank(ConditionRuleGroup group)
+    {
+        if (group == null || group.Rules == null || !group.Rules.Any()) return true;
+        return group.Rules.All(r => IsRuleNodeCompletelyBlank(r));
+    }
 
-        foreach (var rule in group.Rules)
+    private async Task<bool> EvaluateConditionRuleGroupsAsync(
+        List<ConditionRuleGroup> groups,
+        string payloadJson,
+        string? executionPath,
+        IAppFieldRepository fieldRepo,
+        IAppTableRepository tableRepo,
+        List<PipelineStep>? allSteps,
+        List<object> auditTrail,
+        CancellationToken ct)
+    {
+        if (groups == null || !groups.Any()) return false;
+        // Top-level RuleGroups are joined using OR / Any semantics
+        bool matchedAny = false;
+        foreach (var group in groups)
+        {
+            var res = await EvaluateConditionGroupAsync(group, payloadJson, executionPath, fieldRepo, tableRepo, allSteps, auditTrail, ct);
+            if (res) matchedAny = true;
+        }
+        return matchedAny;
+    }
+
+    private async Task<bool> EvaluateConditionGroupAsync(
+        ConditionRuleGroup group,
+        string payloadJson,
+        string? executionPath,
+        IAppFieldRepository fieldRepo,
+        IAppTableRepository tableRepo,
+        List<PipelineStep>? allSteps,
+        List<object> auditTrail,
+        CancellationToken ct)
+    {
+        if (group == null || group.Rules == null || !group.Rules.Any()) return false;
+
+        if (!string.IsNullOrWhiteSpace(group.LogicalOp) &&
+            !group.LogicalOp.Equals("AND", StringComparison.OrdinalIgnoreCase) &&
+            !group.LogicalOp.Equals("OR", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new PipelineStepException($"Invalid Condition LogicalOp '{group.LogicalOp}'. Allowed values are AND or OR.");
+        }
+
+        if (group.LogicalOp != null && string.IsNullOrWhiteSpace(group.LogicalOp))
+        {
+            throw new PipelineStepException($"Invalid Condition LogicalOp '{group.LogicalOp}'. Allowed values are AND or OR.");
+        }
+
+        var activeRules = group.Rules.Where(r => !IsRuleNodeCompletelyBlank(r)).ToList();
+        if (!activeRules.Any()) return false;
+
+        bool isAnd = group.LogicalOp?.Equals("AND", StringComparison.OrdinalIgnoreCase) == true;
+
+        foreach (var rule in activeRules)
         {
             bool ruleResult = false;
-            if (rule.Type == "rule")
+            if (rule.Type == "rule" || string.IsNullOrEmpty(rule.Type))
             {
-                var left = EvaluateTokens(rule.Left, payloadJson, executionPath, allSteps);
-                var right = EvaluateTokens(rule.Right, payloadJson, executionPath, allSteps);
-                ruleResult = EvaluateConditionOperator(left, rule.Op ?? "equals", right);
+                if (string.IsNullOrWhiteSpace(rule.Left) || string.IsNullOrWhiteSpace(rule.Op))
+                {
+                    ruleResult = false;
+                }
+                else
+                {
+                    var leftVal = EvaluateTokens(rule.Left, payloadJson, executionPath, allSteps);
+                    var rightVal = EvaluateTokens(rule.Right, payloadJson, executionPath, allSteps);
+
+                    var leftCategory = await ResolveRuleTypeCategoryAsync(rule.Left, payloadJson, allSteps, fieldRepo, tableRepo, ct);
+
+                    if (!string.IsNullOrWhiteSpace(rule.Right) && System.Text.RegularExpressions.Regex.IsMatch(rule.Right.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.)"))
+                    {
+                        var rightCategory = await ResolveRuleTypeCategoryAsync(rule.Right, payloadJson, allSteps, fieldRepo, tableRepo, ct);
+                        if (!leftCategory.Equals(rightCategory, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new PipelineStepException($"Incompatible dynamic operand types: Left operand '{rule.Left}' ({leftCategory}) vs Right operand '{rule.Right}' ({rightCategory}).");
+                        }
+                    }
+
+                    ruleResult = PipelineFilterEvaluator.EvaluateConditionOperator(leftVal, rule.Op ?? "equals", rightVal, leftCategory, _logger);
+
+                    auditTrail?.Add(new {
+                        Type = "rule",
+                        LeftToken = rule.Left,
+                        LeftResolved = leftVal,
+                        Op = rule.Op,
+                        RightToken = rule.Right,
+                        RightResolved = rightVal,
+                        TypeCategory = leftCategory,
+                        Matched = ruleResult
+                    });
+                }
             }
-            else if (rule.Type == "nested" && rule.Groups != null)
+            else if (rule.Type == "nested" && rule.Groups != null && rule.Groups.Any())
             {
-                ruleResult = rule.Groups.All(g => EvaluateConditionGroup(g, payloadJson, executionPath, allSteps));
+                var activeSubGroups = rule.Groups.Where(sg => !IsGroupCompletelyBlank(sg)).ToList();
+                if (activeSubGroups == null || !activeSubGroups.Any())
+                {
+                    ruleResult = false;
+                }
+                else
+                {
+                    // Nested rule.Groups sibling groups are joined using OR (Any) semantics
+                    ruleResult = false;
+                    foreach (var subGrp in activeSubGroups)
+                    {
+                        var subRes = await EvaluateConditionGroupAsync(subGrp, payloadJson, executionPath, fieldRepo, tableRepo, allSteps, auditTrail, ct);
+                        if (subRes) ruleResult = true;
+                    }
+                }
+            }
+            else
+            {
+                ruleResult = false; // Malformed / unknown rule type fails closed
             }
 
             if (isAnd && !ruleResult) return false;
@@ -2542,10 +3432,281 @@ public class PipelineEngine : IPipelineEngine
         return isAnd;
     }
 
+    private async Task<string> ResolveRuleTypeCategoryAsync(
+        string? token,
+        string payloadJson,
+        List<PipelineStep>? allSteps,
+        IAppFieldRepository fieldRepo,
+        IAppTableRepository tableRepo,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return "TEXT";
+
+        var trimmedToken = token.Trim();
+        bool isDynamicToken = System.Text.RegularExpressions.Regex.IsMatch(trimmedToken, @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
+        if (!isDynamicToken)
+        {
+            return "TEXT"; // Static literal value defaults to category TEXT
+        }
+
+        // Match {{steps.ref_1001.fid_5}}, {{steps.ref_loop.item.fid_5}}, {{ref_1001.fid_5}}, or {{trigger.fid_3}}
+        var match = System.Text.RegularExpressions.Regex.Match(trimmedToken, @"\{\{\s*(?:steps\.)?([a-zA-Z0-9_]+)(?:\.[a-zA-Z0-9_]+)*\.([a-zA-Z0-9_]+)\s*\}\}");
+        if (!match.Success)
+        {
+            match = System.Text.RegularExpressions.Regex.Match(trimmedToken, @"\{\{\s*(trigger)\.([a-zA-Z0-9_]+)\s*\}\}");
+        }
+
+        if (!match.Success)
+        {
+            throw new PipelineStepException($"Condition token '{token}' is malformed and could not be parsed.");
+        }
+
+        var stepRef = match.Groups[1].Value;
+        var fieldRef = match.Groups[2].Value;
+
+        PipelineStep? sourceStep = null;
+        if (allSteps != null && allSteps.Count > 0)
+        {
+            if (stepRef.Equals("trigger", StringComparison.OrdinalIgnoreCase))
+            {
+                sourceStep = allSteps.FirstOrDefault(s => s.Type == "trigger");
+            }
+            else
+            {
+                sourceStep = allSteps.FirstOrDefault(s => string.Equals(s.RefId, stepRef, StringComparison.OrdinalIgnoreCase) || string.Equals(s.Id.ToString(), stepRef, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
+        if (sourceStep == null || string.IsNullOrWhiteSpace(sourceStep.ConfigJson))
+        {
+            if (allSteps == null || allSteps.Count == 0 || (sourceStep != null && sourceStep.Type == "trigger"))
+            {
+                return "TEXT";
+            }
+            throw new PipelineStepException($"Source step '{stepRef}' referenced in condition token '{token}' could not be resolved.");
+        }
+
+        if (sourceStep.Subtype == "pipeline-called")
+        {
+            var value = ResolveCallableValue(trimmedToken, payloadJson, null, allSteps);
+            return value switch
+            {
+                bool => "BOOLEAN",
+                byte or short or int or long or float or double or decimal => "NUMBER",
+                _ => "TEXT"
+            };
+        }
+
+        // If source step is a Loop step, resolve table metadata from its loopOverStepId step
+        if (sourceStep.Type == "loop" || sourceStep.Subtype == "for-each")
+        {
+            string? loopOverStepId = null;
+            using (var loopDoc = JsonDocument.Parse(sourceStep.ConfigJson))
+            {
+                var loopRoot = loopDoc.RootElement;
+                if ((loopRoot.TryGetProperty("loopOverStepId", out var lProp) || loopRoot.TryGetProperty("LoopOverStepId", out lProp)) && lProp.ValueKind == JsonValueKind.String)
+                {
+                    loopOverStepId = lProp.GetString();
+                }
+            }
+
+            if (string.IsNullOrEmpty(loopOverStepId))
+            {
+                throw new PipelineStepException($"Loop step '{stepRef}' referenced in condition token '{token}' does not have a valid target step (loopOverStepId).");
+            }
+
+            var collectionStep = allSteps?.FirstOrDefault(s => string.Equals(s.RefId, loopOverStepId, StringComparison.OrdinalIgnoreCase) || string.Equals(s.Id.ToString(), loopOverStepId, StringComparison.OrdinalIgnoreCase));
+            if (collectionStep == null || string.IsNullOrWhiteSpace(collectionStep.ConfigJson))
+            {
+                throw new PipelineStepException($"Collection source step '{loopOverStepId}' referenced by loop step '{stepRef}' for token '{token}' could not be resolved.");
+            }
+
+            sourceStep = collectionStep;
+        }
+
+        Guid tablePublicId = Guid.Empty;
+        string? connectionPublicId = null;
+        using (var doc = JsonDocument.Parse(sourceStep.ConfigJson))
+        {
+            var root = doc.RootElement;
+            if (root.TryGetProperty("tableId", out var tProp) ||
+                root.TryGetProperty("tablePublicId", out tProp) ||
+                root.TryGetProperty("TableId", out tProp) ||
+                root.TryGetProperty("TablePublicId", out tProp))
+            {
+                if (tProp.ValueKind == JsonValueKind.String && Guid.TryParse(tProp.GetString(), out var g))
+                {
+                    tablePublicId = g;
+                }
+            }
+
+            if (root.TryGetProperty("connectionPublicId", out var cProp) ||
+                root.TryGetProperty("ConnectionPublicId", out cProp) ||
+                root.TryGetProperty("connection", out cProp) ||
+                root.TryGetProperty("Connection", out cProp))
+            {
+                if (cProp.ValueKind == JsonValueKind.String)
+                {
+                    connectionPublicId = cProp.GetString();
+                }
+            }
+        }
+
+        if (tablePublicId == Guid.Empty)
+        {
+            throw new PipelineStepException($"Table ID for source step '{sourceStep.RefId}' referenced in condition token '{token}' could not be found.");
+        }
+
+        IAppTableRepository effectiveTableRepo = tableRepo;
+        IAppFieldRepository effectiveFieldRepo = fieldRepo;
+        IDisposable? scopeToDispose = null;
+
+        if (Guid.TryParse(connectionPublicId, out var connectionGuid) && !PipelineStepValidator.SystemConnectionIds.Contains(connectionGuid))
+        {
+            var resolvedTenantId = await _adminRepo.GetTenantIdByPublicIdAsync(connectionGuid, ct);
+            if (resolvedTenantId.HasValue)
+            {
+                if (resolvedTenantId.Value != _queryContext.TenantId)
+                {
+                    var scope = _serviceScopeFactory.CreateScope();
+                    scopeToDispose = scope;
+                    var scopedQueryContext = scope.ServiceProvider.GetRequiredService<IQueryContext>();
+                    scopedQueryContext.SetTenantId(resolvedTenantId.Value);
+                    scopedQueryContext.IsPipelineExecution = _queryContext.IsPipelineExecution;
+                    scopedQueryContext.PipelineDepth = _queryContext.PipelineDepth;
+                    scopedQueryContext.PipelineChainJson = _queryContext.PipelineChainJson;
+                    scopedQueryContext.SetUserIdentity(
+                        _queryContext.UserId,
+                        _queryContext.IsSuperAdmin,
+                        _queryContext.UserName,
+                        _queryContext.UserEmail,
+                        _queryContext.Permissions,
+                        _queryContext.TenantRole);
+
+                    var scopedTenantRepo = scope.ServiceProvider.GetRequiredService<ITenantRepository>();
+                    long actingUserId = _queryContext.UserId;
+                    try
+                    {
+                        using var pDoc = JsonDocument.Parse(payloadJson);
+                        if (pDoc.RootElement.TryGetProperty("_CreatedBy", out var cbProp) && cbProp.TryGetInt64(out var cbVal))
+                        {
+                            actingUserId = cbVal;
+                        }
+                    }
+                    catch { }
+
+                    var isMember = await scopedTenantRepo.IsActiveMemberAsync(actingUserId, ct);
+                    if (!isMember)
+                    {
+                        throw new UnauthorizedAccessException($"Execution authority user {actingUserId} is not an active member of target tenant {resolvedTenantId.Value}.");
+                    }
+
+                    effectiveTableRepo = scope.ServiceProvider.GetRequiredService<IAppTableRepository>();
+                    effectiveFieldRepo = scope.ServiceProvider.GetRequiredService<IAppFieldRepository>();
+                }
+            }
+            else
+            {
+                var connectionScopeResolver = _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>();
+                if (connectionScopeResolver != null)
+                {
+                    long actingUserId = _queryContext.UserId;
+                    try
+                    {
+                        using var pDoc = JsonDocument.Parse(payloadJson);
+                        if (pDoc.RootElement.TryGetProperty("_CreatedBy", out var cbProp) && cbProp.TryGetInt64(out var cbVal))
+                        {
+                            actingUserId = cbVal;
+                        }
+                    }
+                    catch { }
+
+                    var accountScope = await connectionScopeResolver.TryResolveForUserAsync(connectionGuid, actingUserId, ct);
+                    if (accountScope != null)
+                    {
+                        var accountScopeHandle = await Connections.Common.TargetTenantScopeHelper.OpenAsync(_serviceScopeFactory, accountScope, ct);
+                        scopeToDispose = accountScopeHandle;
+                        effectiveTableRepo = accountScopeHandle.GetRequiredService<IAppTableRepository>();
+                        effectiveFieldRepo = accountScopeHandle.GetRequiredService<IAppFieldRepository>();
+                    }
+                    else
+                    {
+                        throw new PipelineStepException($"Connection '{connectionGuid}' referenced by source step '{sourceStep.RefId}' could not be resolved or access was denied.");
+                    }
+                }
+            }
+        }
+
+        try
+        {
+            var table = await effectiveTableRepo.GetByPublicIdAsync(tablePublicId, ct);
+            if (table == null)
+            {
+                throw new PipelineStepException($"Table '{tablePublicId}' referenced in condition step could not be found in metadata.");
+            }
+
+            var fields = await effectiveFieldRepo.ListByTableAsync(table.Id, ct);
+            if (fields == null || !fields.Any())
+            {
+                throw new PipelineStepException($"Fields for table '{table.Name}' could not be retrieved.");
+            }
+
+            AppField? matchedField = ResolvePipelineField(fieldRef, fields);
+
+            if (matchedField == null)
+            {
+                throw new PipelineStepException($"Field metadata for token '{token}' (field '{fieldRef}') could not be resolved.");
+            }
+
+            return PipelineFilterEvaluator.GetTypeCategory(matchedField.TypeCode);
+        }
+        finally
+        {
+            scopeToDispose?.Dispose();
+        }
+    }
+
+    public static AppField? ResolvePipelineField(string? fieldRef, IEnumerable<AppField>? fields)
+    {
+        if (string.IsNullOrWhiteSpace(fieldRef) || fields == null) return null;
+
+        // 1. Primary canonical format: fid_<FID> (e.g. fid_3, fid_15, fid_6)
+        if (fieldRef.StartsWith("fid_", StringComparison.OrdinalIgnoreCase) && int.TryParse(fieldRef.Substring(4), out var fidNum))
+        {
+            return fields.FirstOrDefault(f => f.Fid == fidNum);
+        }
+
+        // 2. Direct numeric FID
+        if (int.TryParse(fieldRef, out var directFid))
+        {
+            return fields.FirstOrDefault(f => f.Fid == directFid);
+        }
+
+        // 3. Fallback: match by Name, Label, PhysicalColumnName, or fid_<Id>
+        return fields.FirstOrDefault(f =>
+            string.Equals(f.Name, fieldRef, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(f.Label, fieldRef, StringComparison.OrdinalIgnoreCase) ||
+            (f.IsSystem && string.Equals(f.PhysicalColumnName, fieldRef, StringComparison.OrdinalIgnoreCase)) ||
+            $"fid_{f.Id}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase));
+    }
+
     private string EvaluateTokens(string? input, string payloadJson, string? executionPath = null, List<PipelineStep>? allSteps = null)
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
         if (string.IsNullOrEmpty(payloadJson)) return input;
+        input = Regex.Replace(input, @"(?<=\{\{)\s*(?:steps\.)?([A-Za-z][A-Za-z0-9_]*)\._metadata\.", " request_metadata.$1.");
+
+        var callableTrigger = allSteps?.FirstOrDefault(step => step.Subtype == "pipeline-called" && step.Type == "trigger");
+        if (callableTrigger != null)
+        {
+            var definition = CallablePipelineDefinition.ValidateConfig(callableTrigger.ConfigJson, false);
+            foreach (Match reference in Regex.Matches(input, @"\{\{\s*(?:steps\.)?([A-Za-z][A-Za-z0-9_]*)\.([A-Za-z][A-Za-z0-9_]*)"))
+            {
+                if ((reference.Groups[1].Value == callableTrigger.RefId || reference.Groups[1].Value == "trigger") &&
+                    !definition.Arguments.Contains(reference.Groups[2].Value, StringComparer.Ordinal))
+                    throw new PipelineStepException($"Callable argument '{reference.Groups[2].Value}' no longer exists.");
+            }
+        }
 
         // Structured fallback for legacy compatibility
         if (!string.IsNullOrEmpty(executionPath) && allSteps != null)
@@ -2553,7 +3714,7 @@ public class PipelineEngine : IPipelineEngine
             var pathParts = executionPath.Split('/');
             foreach (var part in pathParts)
             {
-                var loopStep = allSteps.FirstOrDefault(s => s.RefId == part && (s.Type == "loop" || s.Subtype == "for-each"));
+                var loopStep = allSteps.FirstOrDefault(s => (s.RefId == part || string.Equals(s.Id.ToString(), part, StringComparison.OrdinalIgnoreCase)) && (s.Type == "loop" || s.Subtype == "for-each"));
                 if (loopStep != null && !string.IsNullOrEmpty(loopStep.ConfigJson))
                 {
                     try
@@ -2565,8 +3726,12 @@ public class PipelineEngine : IPipelineEngine
                             var loopOverStepId = loopOverProp.GetString();
                             if (!string.IsNullOrEmpty(loopOverStepId))
                             {
-                                var targetPattern = $@"(?<=\b(?:steps\.)?)({Regex.Escape(loopOverStepId)})(?=\.(?!records\b)[a-zA-Z0-9_]+)";
-                                input = Regex.Replace(input, targetPattern, $"{loopStep.RefId}.item", RegexOptions.IgnoreCase);
+                                var targetStep = allSteps.FirstOrDefault(s => string.Equals(s.Id.ToString(), loopOverStepId, StringComparison.OrdinalIgnoreCase) || string.Equals(s.RefId, loopOverStepId, StringComparison.OrdinalIgnoreCase));
+                                if (targetStep != null)
+                                {
+                                    var targetPattern = $@"(?:\bsteps\.)?(?:{Regex.Escape(targetStep.RefId)}|{Regex.Escape(targetStep.Id.ToString())})(?=\.(?!records\b)[a-zA-Z0-9_]+)";
+                                    input = Regex.Replace(input, targetPattern, $"steps.{loopStep.RefId}.item", RegexOptions.IgnoreCase);
+                                }
                             }
                         }
                     }
@@ -2629,6 +3794,36 @@ public class PipelineEngine : IPipelineEngine
                 contextDict["trigger"] = triggerData;
                 stepsDict["trigger"] = triggerData;
             }
+
+            // Normalize legacy un-prefixed step tokens (e.g. {{ref_9356.fid_6}} -> {{steps.ref_9356.fid_6}})
+            input = System.Text.RegularExpressions.Regex.Replace(input, @"\{\{\s*([a-zA-Z0-9_]+)(\.[^|}]+?)(\s*\|.*)?\s*\}\}", match =>
+            {
+                var firstSegment = match.Groups[1].Value;
+                var rest = match.Groups[2].Value;
+                var filterPipe = match.Groups[3].Value;
+
+                if (firstSegment.Equals("steps", StringComparison.OrdinalIgnoreCase) ||
+                    firstSegment.Equals("trigger", StringComparison.OrdinalIgnoreCase) ||
+                    firstSegment.Equals("ERROR", StringComparison.Ordinal) ||
+                    firstSegment.Equals("variables", StringComparison.OrdinalIgnoreCase))
+                {
+                    return match.Value;
+                }
+
+                bool isValidStepRef = stepsDict.Keys.Any(k => string.Equals(k, firstSegment, StringComparison.OrdinalIgnoreCase));
+                if (!isValidStepRef && allSteps != null)
+                {
+                    isValidStepRef = allSteps.Any(s => string.Equals(s.RefId, firstSegment, StringComparison.OrdinalIgnoreCase) ||
+                                                       string.Equals(s.Id.ToString(), firstSegment, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (isValidStepRef)
+                {
+                    return "{{" + $"steps.{firstSegment}{rest}{filterPipe}" + "}}";
+                }
+
+                return match.Value;
+            });
 
             var context = new CustomTemplateContext(contextDict);
             context.MemberRenamer = member => member.Name;
@@ -2734,12 +3929,44 @@ public class PipelineEngine : IPipelineEngine
                 }
             });
 
+            bool isDynamicInput = System.Text.RegularExpressions.Regex.IsMatch(input.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
+            if (isDynamicInput && (string.IsNullOrEmpty(result) || result.Contains("{{") || result.Contains("[NOT_FOUND]")))
+            {
+                throw new PipelineStepException($"Failed to resolve dynamic token '{input}' in pipeline step execution context.");
+            }
+
             return result;
         }
-        catch
+        catch (PipelineStepException)
         {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            bool isDynamicInput = System.Text.RegularExpressions.Regex.IsMatch(input.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
+            if (isDynamicInput)
+            {
+                throw new PipelineStepException($"Failed to resolve dynamic token '{input}' in pipeline step execution context: {ex.Message}");
+            }
             return input;
         }
+    }
+
+    private object? ResolveCallableValue(string? input, string payloadJson, string? executionPath, List<PipelineStep>? allSteps)
+    {
+        // A complete field reference retains its JSON type; interpolated text remains text.
+        var match = Regex.Match(input ?? "", @"^\{\{\s*((?:steps\.|trigger\.|variables\.)?[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)\s*\}\}$");
+        if (!match.Success) return EvaluateTokens(input, payloadJson, executionPath, allSteps);
+        var path = match.Groups[1].Value;
+        if (allSteps?.Any(step => step.RefId == path.Split('.')[0]) == true) path = "steps." + path;
+        using var document = JsonDocument.Parse(payloadJson);
+        var value = document.RootElement;
+        foreach (var segment in path.Split('.'))
+        {
+            if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(segment, out value))
+                throw new PipelineStepException($"Call argument reference '{input}' is missing from the execution context.");
+        }
+        return ConvertJsonElement(value.Clone());
     }
 
     private string? ResolvePath(JsonElement root, string path)
@@ -3043,6 +4270,14 @@ public class PipelineEngine : IPipelineEngine
                         return true;
                     }
                 }
+                foreach (var p in el.EnumerateObject())
+                {
+                    if (string.Equals(p.Name, member, StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = ConvertJsonElement(p.Value)!;
+                        return true;
+                    }
+                }
             }
             return false;
         }
@@ -3094,6 +4329,14 @@ public class PipelineEngine : IPipelineEngine
                             return true;
                         }
                     }
+                    foreach (var p in el.EnumerateObject())
+                    {
+                        if (string.Equals(p.Name, member, StringComparison.OrdinalIgnoreCase))
+                        {
+                            value = ConvertJsonElement(p.Value)!;
+                            return true;
+                        }
+                    }
                 }
             }
             return false;
@@ -3127,7 +4370,7 @@ public class PipelineEngine : IPipelineEngine
         }
     }
 
-    private object? ParseValueType(string valueStr, string typeCode)
+    private object? ParseValueType(string valueStr, string typeCode, string fieldName)
     {
         if (string.IsNullOrWhiteSpace(valueStr)) return null;
 
@@ -3138,20 +4381,70 @@ public class PipelineEngine : IPipelineEngine
             if (bool.TryParse(valueStr, out var bVal)) return bVal;
             if (valueStr == "1") return true;
             if (valueStr == "0") return false;
-            return false;
+            throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
-        if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER" }.Contains(normalizedCode))
+        if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER", "RATING", "DURATION" }.Contains(normalizedCode))
+        {
+            if (decimal.TryParse(valueStr, out var dVal)) return dVal;
+            throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
+        }
+        if (new[] { "DATE", "DATE_TIME", "DATETIME", "TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
+        {
+            if (DateTime.TryParse(valueStr, out var dtVal)) return dtVal;
+            throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
+        }
+
+        return valueStr; // Default to string
+    }
+
+    private object? ParseBulkUpsertValueType(string? valueStr, string? typeCode)
+    {
+        if (valueStr == null) return null;
+
+        var normalizedCode = (typeCode ?? "TEXT").ToUpperInvariant();
+
+        // Text types preserve empty string ""
+        if (normalizedCode == "TEXT" ||
+            normalizedCode == "TEXTMULTILINE" ||
+            normalizedCode == "TEXT_MULTI_LINE" ||
+            normalizedCode == "RICHTEXT" ||
+            normalizedCode == "RICH_TEXT" ||
+            normalizedCode == "EMAIL" ||
+            normalizedCode == "URL" ||
+            normalizedCode == "PHONE" ||
+            normalizedCode == "PHONENUMBER" ||
+            normalizedCode == "STRING")
+        {
+            return valueStr;
+        }
+
+        // For non-text types, empty / whitespace strings become null
+        if (string.IsNullOrWhiteSpace(valueStr))
+        {
+            return null;
+        }
+
+        if (normalizedCode == "CHECKBOX" || normalizedCode == "BOOLEAN" || normalizedCode == "BOOL")
+        {
+            if (bool.TryParse(valueStr, out var bVal)) return bVal;
+            if (valueStr == "1") return true;
+            if (valueStr == "0") return false;
+            return null;
+        }
+
+        if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER", "DECIMAL", "INT", "RATING", "DURATION" }.Contains(normalizedCode))
         {
             if (decimal.TryParse(valueStr, out var dVal)) return dVal;
             return null;
         }
-        if (new[] { "DATE", "DATE_TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
+
+        if (new[] { "DATE", "DATETIME", "DATE_TIME", "TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
         {
             if (DateTime.TryParse(valueStr, out var dtVal)) return dtVal;
             return null;
         }
 
-        return valueStr; // Default to string
+        return valueStr;
     }
 
     private class CreateRecordStepConfig
@@ -3222,6 +4515,124 @@ public class PipelineEngine : IPipelineEngine
         public List<string>? Attachments { get; set; }
     }
 
+    private class HandleErrorsStepConfig
+    {
+        public string? FallbackAction { get; set; }
+    }
+
+    private static bool IsControlFlowOrInfrastructureException(Exception ex)
+    {
+        if (ex is PipelineStopExecutionException ||
+            ex is OperationCanceledException ||
+            ex is PipelineRecursionException)
+        {
+            return true;
+        }
+
+        var property = ex.GetType().GetProperty("Number");
+        if (property != null)
+        {
+            var number = property.GetValue(ex);
+            if (number is int intVal && intVal == 1205)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static bool IsCatchablePipelineStepError(Exception ex)
+    {
+        if (ex == null) return false;
+
+        if (IsControlFlowOrInfrastructureException(ex))
+        {
+            return false;
+        }
+
+        if (ex is PipelineStopExecutionException ||
+            ex is OperationCanceledException ||
+            ex is PipelineRunRunningException ||
+            ex is PowerBase.Domain.Exceptions.PipelineRecursionException ||
+            ex is PowerBase.Domain.Exceptions.PipelineNonRetryableException)
+        {
+            return false;
+        }
+
+        var curr = ex.InnerException;
+        while (curr != null)
+        {
+            if (curr is PipelineStopExecutionException ||
+                curr is OperationCanceledException ||
+                curr is PipelineRunRunningException ||
+                curr is PowerBase.Domain.Exceptions.PipelineRecursionException ||
+                curr is PowerBase.Domain.Exceptions.PipelineNonRetryableException)
+            {
+                return false;
+            }
+            curr = curr.InnerException;
+        }
+
+        if (ex is PowerBase.Domain.Exceptions.NotFoundException ||
+            ex is PowerBase.Domain.Exceptions.ValidationException ||
+            ex is PowerBase.Domain.Exceptions.UnauthorizedActionException ||
+            ex is InvalidOperationException ||
+            ex is ArgumentException ||
+            ex is FormatException ||
+            ex is KeyNotFoundException)
+        {
+            return true;
+        }
+
+        if (ex is System.Net.Http.HttpRequestException httpEx)
+        {
+            if (httpEx.InnerException is System.Net.Sockets.SocketException)
+            {
+                return false;
+            }
+
+            if (httpEx.StatusCode.HasValue)
+            {
+                var code = (int)httpEx.StatusCode.Value;
+                if (code == 400 || code == 401 || code == 403 || code == 404 || code == 409)
+                {
+                    return true;
+                }
+                return false;
+            }
+
+            var msg = httpEx.Message;
+            if (msg.Contains("status code 5") || msg.Contains("status code 429"))
+            {
+                return false;
+            }
+
+            if (msg.Contains("status code 400") || msg.Contains("status code 401") ||
+                msg.Contains("status code 403") || msg.Contains("status code 404") ||
+                msg.Contains("status code 409"))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        return false;
+    }
+
+    public static string SanitizeErrorMessage(string? msg)
+    {
+        if (string.IsNullOrWhiteSpace(msg)) return "An error occurred during step execution.";
+        var sanitized = msg;
+        if (sanitized.Contains("Bearer ", StringComparison.OrdinalIgnoreCase))
+            sanitized = System.Text.RegularExpressions.Regex.Replace(sanitized, @"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*", "Bearer [REDACTED]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (sanitized.Contains("Password=", StringComparison.OrdinalIgnoreCase))
+            sanitized = System.Text.RegularExpressions.Regex.Replace(sanitized, @"Password=[^;]+", "Password=[REDACTED]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return sanitized;
+    }
+
+
     private class MakeRequestStepConfig
     {
         public string? Url { get; set; }
@@ -3240,19 +4651,53 @@ public class PipelineEngine : IPipelineEngine
 
     private class PrepareBulkUpsertConfig
     {
+        public List<string>? Fields { get; set; }
         public string? TableLabel { get; set; }
+        public string? Table { get; set; }
+        public string? TableId { get; set; }
+        public string? TablePublicId { get; set; }
+        public string? MergeField { get; set; }
         public string? MergeKeyFid { get; set; }
+        public string? MergeKeyField { get; set; }
+        public string? MergeKey { get; set; }
+
+        public string? GetTableIdentifier() =>
+            !string.IsNullOrWhiteSpace(TableLabel) ? TableLabel :
+            !string.IsNullOrWhiteSpace(TablePublicId) ? TablePublicId :
+            !string.IsNullOrWhiteSpace(TableId) ? TableId :
+            !string.IsNullOrWhiteSpace(Table) ? Table : null;
+
+        public string? GetMergeKeyIdentifier() =>
+            !string.IsNullOrWhiteSpace(MergeField) ? MergeField :
+            !string.IsNullOrWhiteSpace(MergeKeyFid) ? MergeKeyFid :
+            !string.IsNullOrWhiteSpace(MergeKeyField) ? MergeKeyField :
+            !string.IsNullOrWhiteSpace(MergeKey) ? MergeKey : null;
     }
 
     private class AddBulkUpsertRowConfig
     {
         public string? ParentUpsertStepRefId { get; set; }
+        public string? BulkRecordSetStepId { get; set; }
+        public string? ParentStepRefId { get; set; }
         public List<FieldMapping>? FieldMappings { get; set; }
+        public Dictionary<string, object?>? RowValues { get; set; }
+
+        public string? GetParentRefId() =>
+            !string.IsNullOrWhiteSpace(ParentUpsertStepRefId) ? ParentUpsertStepRefId :
+            !string.IsNullOrWhiteSpace(BulkRecordSetStepId) ? BulkRecordSetStepId :
+            !string.IsNullOrWhiteSpace(ParentStepRefId) ? ParentStepRefId : null;
     }
 
     private class CommitBulkUpsertConfig
     {
         public string? ParentUpsertStepRefId { get; set; }
+        public string? BulkRecordSetStepId { get; set; }
+        public string? ParentStepRefId { get; set; }
+
+        public string? GetParentRefId() =>
+            !string.IsNullOrWhiteSpace(ParentUpsertStepRefId) ? ParentUpsertStepRefId :
+            !string.IsNullOrWhiteSpace(BulkRecordSetStepId) ? BulkRecordSetStepId :
+            !string.IsNullOrWhiteSpace(ParentStepRefId) ? ParentStepRefId : null;
     }
 
     private class UploadFileStepConfig
@@ -3276,7 +4721,15 @@ public class PipelineEngine : IPipelineEngine
     {
         public string TableLabel { get; set; } = string.Empty;
         public string MergeKeyFid { get; set; } = string.Empty;
+        public AppTable? Table { get; set; }
+        public IReadOnlyList<AppField>? Fields { get; set; }
+        public AppField? MergeField { get; set; }
+        public HashSet<long>? SelectedFieldFids { get; set; }
         public List<Dictionary<long, object?>> Rows { get; set; } = new();
+
+        public bool IsCommittable { get; set; } = true;
+        public BulkUpsertSession? RootSession { get; set; }
+        public BulkUpsertSession? DownstreamChildCollection { get; set; }
     }
 
     private class FieldMapping
@@ -3284,6 +4737,40 @@ public class PipelineEngine : IPipelineEngine
         public string? Field { get; set; }
         [System.Text.Json.Serialization.JsonConverter(typeof(StringOrPrimitiveJsonConverter))]
         public string? Value { get; set; }
+    }
+
+    private static bool AreValuesEqual(object? val1, object? val2, string? typeCode)
+    {
+        if (val1 == null && val2 == null) return true;
+        if (val1 == null || val2 == null) return false;
+
+        var normalizedCode = (typeCode ?? "TEXT").ToUpperInvariant();
+
+        if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER", "DECIMAL", "INT" }.Contains(normalizedCode))
+        {
+            if (decimal.TryParse(val1.ToString(), out var d1) && decimal.TryParse(val2.ToString(), out var d2))
+            {
+                return d1 == d2;
+            }
+        }
+
+        if (new[] { "DATE", "DATETIME", "DATE_TIME", "TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
+        {
+            if (DateTime.TryParse(val1.ToString(), out var dt1) && DateTime.TryParse(val2.ToString(), out var dt2))
+            {
+                return dt1 == dt2;
+            }
+        }
+
+        if (normalizedCode == "BOOLEAN" || normalizedCode == "BOOL" || normalizedCode == "CHECKBOX")
+        {
+            if (bool.TryParse(val1.ToString(), out var b1) && bool.TryParse(val2.ToString(), out var b2))
+            {
+                return b1 == b2;
+            }
+        }
+
+        return string.Equals(val1.ToString()?.Trim(), val2.ToString()?.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     private static string MapUiOperatorToDbOperator(string? op)
@@ -3807,6 +5294,62 @@ public class PipelineEngine : IPipelineEngine
         }
     }
 
+    private static AppField ResolveBulkUpsertField(
+        string? fieldReference,
+        IReadOnlyList<AppField> fields)
+    {
+        if (string.IsNullOrWhiteSpace(fieldReference))
+        {
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Field reference cannot be null or empty.");
+        }
+
+        if (fieldReference.StartsWith("fid_", StringComparison.OrdinalIgnoreCase))
+        {
+            var fidStr = fieldReference.Substring(4);
+            if (int.TryParse(fidStr, out var fid))
+            {
+                var field = fields.FirstOrDefault(f => f.Fid == fid);
+                if (field != null) return field;
+            }
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with stable FID '{fidStr}' was not found in the target table.");
+        }
+        else if (fieldReference.StartsWith("f_", StringComparison.OrdinalIgnoreCase))
+        {
+            var fidStr = fieldReference.Substring(2);
+            if (int.TryParse(fidStr, out var fid))
+            {
+                var field = fields.FirstOrDefault(f => f.Fid == fid);
+                if (field != null) return field;
+            }
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with stable FID '{fidStr}' was not found in the target table.");
+        }
+        else if (int.TryParse(fieldReference, out var directFid))
+        {
+            var field = fields.FirstOrDefault(f => f.Fid == directFid);
+            if (field != null) return field;
+            var fieldByName = fields.FirstOrDefault(f => string.Equals(f.Name, fieldReference, StringComparison.OrdinalIgnoreCase));
+            if (fieldByName != null) return fieldByName;
+
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with stable FID '{fieldReference}' was not found in the target table.");
+        }
+        else
+        {
+            var field = fields.FirstOrDefault(f =>
+                string.Equals(f.Name, fieldReference, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(f.Label, fieldReference, StringComparison.OrdinalIgnoreCase) ||
+                (f.IsSystem && string.Equals(f.PhysicalColumnName, fieldReference, StringComparison.OrdinalIgnoreCase)));
+            if (field != null)
+            {
+                return field;
+            }
+            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
+                $"Field with name '{fieldReference}' was not found in the target table.");
+        }
+    }
+
     public class RawStepAuditSnapshot
     {
         public PipelineStep Step { get; set; } = null!;
@@ -3820,3 +5363,27 @@ public class PipelineEngine : IPipelineEngine
     }
 }
 
+public class PipelineBulkUpsertException : InvalidOperationException
+{
+    public string ErrorCode { get; }
+    public int? RowIndex { get; }
+    public int? FieldFid { get; }
+    public string? FieldName { get; }
+    public bool IsRetryable { get; }
+
+    public PipelineBulkUpsertException(
+        string errorCode,
+        string message,
+        int? rowIndex = null,
+        int? fieldFid = null,
+        string? fieldName = null,
+        bool isRetryable = false)
+        : base(message)
+    {
+        ErrorCode = errorCode;
+        RowIndex = rowIndex;
+        FieldFid = fieldFid;
+        FieldName = fieldName;
+        IsRetryable = isRetryable;
+    }
+}

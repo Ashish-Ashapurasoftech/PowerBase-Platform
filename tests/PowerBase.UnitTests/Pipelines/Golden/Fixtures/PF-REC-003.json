@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-REC-003",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Update Record step output exposes ChangedFieldIds array",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-REC-003",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

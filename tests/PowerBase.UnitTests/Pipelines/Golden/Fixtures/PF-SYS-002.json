@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-SYS-002",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Outbox relay deduplication and idempotency locked via ProcessedAtUtc",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-SYS-002",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

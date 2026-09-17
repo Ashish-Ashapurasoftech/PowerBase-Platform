@@ -79,6 +79,10 @@ public class CopyPipelineCommandHandler
             // Save Pipeline
             var (newPublicId, newId) = await _pipelineRepo.CreateAsync(newPipeline, _uow.Transaction, ct);
 
+            // ConfigJson can reference both step public IDs and saved connection public IDs.
+            // Build one GUID map so copied steps only point at children of the copied pipeline.
+            var publicIdMap = new Dictionary<Guid, Guid>();
+
             // Duplicate connections
             foreach (var conn in sourceConnections)
             {
@@ -91,11 +95,11 @@ public class CopyPipelineCommandHandler
                     CreatedOn = DateTime.UtcNow,
                     CreatedBy = _queryContext.UserId
                 };
-                await _pipelineRepo.CreateConnectionAsync(newConn, _uow.Transaction, ct);
+                var (newConnectionPublicId, _) = await _pipelineRepo.CreateConnectionAsync(newConn, _uow.Transaction, ct);
+                publicIdMap[conn.PublicId] = newConnectionPublicId;
             }
 
             // Create step mapping tables
-            var publicIdMap = new Dictionary<Guid, Guid>();
             var refIdMap = new Dictionary<string, string>();
             var random = new Random();
             var generatedRefIds = new HashSet<string>();

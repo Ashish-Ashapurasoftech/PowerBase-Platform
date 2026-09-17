@@ -25,13 +25,26 @@ public static class PipelineScheduleEligibility
 
         var root = rootSteps[0];
 
-        // Check allow-list of executable root subtypes
-        var scheduleableSubtypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-            "search-records", "look-up-record", "create-record", "send-email", "send-email-outlook",
-            "make-request", "prepare-bulk-upsert"
-        };
-        if (string.IsNullOrEmpty(root.Subtype) || !scheduleableSubtypes.Contains(root.Subtype)) return false;
+        var firstExecutableStep = GetFirstExecutableStep(root, activeSteps);
+        return firstExecutableStep != null &&
+               (string.Equals(firstExecutableStep.Type, "action", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(firstExecutableStep.Type, "query", StringComparison.OrdinalIgnoreCase));
+    }
 
-        return true;
+    private static PipelineStep? GetFirstExecutableStep(PipelineStep current, List<PipelineStep> activeSteps)
+    {
+        if (current.Subtype == "handle-errors")
+        {
+            var firstChild = activeSteps
+                .Where(s => s.ParentStepId == current.Id && string.Equals(s.ParentBranch, "children", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(s => s.DisplayOrder)
+                .ThenBy(s => s.Id)
+                .FirstOrDefault();
+
+            if (firstChild == null) return null;
+            return GetFirstExecutableStep(firstChild, activeSteps);
+        }
+
+        return current;
     }
 }

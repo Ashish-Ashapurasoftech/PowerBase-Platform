@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-AUD-001",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Outbox Relay pipeline audit logs state transitions in TenantDB and ControlDB",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-AUD-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

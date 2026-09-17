@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-ERR-002",
+  "classification": "QB-DOC",
+  "description": "Ignore mode suppresses failure, logs warning, proceeds",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/handle-errors",
+  "relevantHeading": "Handle errors > Ignore mode",
+  "testPayload": {
+    "stepId": "QB-ERR-002",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

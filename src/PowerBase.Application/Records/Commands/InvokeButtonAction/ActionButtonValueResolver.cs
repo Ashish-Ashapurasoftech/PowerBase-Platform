@@ -76,7 +76,15 @@ public sealed class ActionButtonValueResolver : IActionButtonValueResolver
 
             case ValueSourceKinds.Field:
                 if (source.FieldFid is not int fid) return null;
-                return row.TryGetValue(PhysicalNaming.ColumnName(fid), out var v) ? v : null;
+                // Not PhysicalNaming.ColumnName(fid) directly — a system field (Date Created,
+                // Record Owner, …) stores under its own bespoke physical column, not the generic
+                // f_{fid} pattern (see PhysicalNaming.GetPhysicalColumnName). Using ColumnName(fid)
+                // here always missed system fields, e.g. Link Expiration Start = "Date Created"
+                // would silently resolve to null and the button would report the expiration as
+                // misconfigured even though it was set correctly.
+                var sourceField = fields.FirstOrDefault(f => f.Fid == fid);
+                if (sourceField is null) return null;
+                return row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(sourceField), out var v) ? v : null;
 
             case ValueSourceKinds.Formula:
                 return await ResolveFormulaAsync(source.Formula, table, fields, row, expectedType, ct);

@@ -298,7 +298,15 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             var inputDict = DeserializeJsonToDict(rawInputJson);
             var outputDict = DeserializeJsonToDict(rawOutputJson);
 
-            if (type == "trigger" && subtype == "new-bulk-event")
+            if (subtype is "pipeline-called" or "call-another-pipeline")
+            {
+                foreach (var entry in inputDict) friendlyInput[entry.Key] = entry.Value;
+                foreach (var entry in outputDict) friendlyOutput[entry.Key] = entry.Value;
+                logMessage = status == "Success"
+                    ? subtype == "pipeline-called" ? "Pipeline called; arguments received." : "Pipeline call queued."
+                    : $"Callable pipeline step {status.ToLowerInvariant()}.";
+            }
+            else if (type == "trigger" && subtype == "new-bulk-event")
             {
                 var count = inputDict.TryGetValue("Count", out var cVal) ? Convert.ToInt32(cVal) : 0;
                 var tableGuidStr = inputDict.TryGetValue("TablePublicId", out var tIdObj) ? tIdObj?.ToString() : null;
@@ -780,11 +788,15 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 logMessage = $@"Deleted record ""{recordDisplayName}"" from {tableName}.";
             }
-            else if (subtype == "condition")
+            else if (string.Equals(type, "condition", StringComparison.OrdinalIgnoreCase) || string.Equals(subtype, "condition", StringComparison.OrdinalIgnoreCase))
             {
+                if (inputDict.TryGetValue("ResolvedRules", out var rrObj) && rrObj != null)
+                {
+                    friendlyInput["Evaluated Rules"] = AsList(rrObj);
+                }
                 if (inputDict.TryGetValue("RuleGroups", out var rgObj) && rgObj != null)
                 {
-                    friendlyInput["Criteria"] = AsDictionary(rgObj);
+                    friendlyInput["Criteria"] = rgObj;
                 }
                 else
                 {
@@ -879,33 +891,35 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     friendlyInput["Headers"] = AsDictionary(hObj);
                 }
 
-                if (inputDict.TryGetValue("Body", out var bdyObj) && bdyObj != null)
-                {
-                    var bdyStr = bdyObj.ToString() ?? string.Empty;
-                    friendlyInput["Body"] = bdyStr.Length > 200 ? bdyStr.Substring(0, 200) + "... [TRUNCATED]" : bdyStr;
-                }
+                if (inputDict.TryGetValue("Body", out var requestBody)) friendlyInput["Body"] = requestBody;
+                if (inputDict.TryGetValue("QueryParameters", out var query)) friendlyInput["Query Parameters"] = query;
+                if (inputDict.TryGetValue("RequestMode", out var mode)) friendlyInput["Request Mode"] = mode;
 
-                int httpStatusCode = 200;
-                if (outputDict.TryGetValue("HTTPStatus", out var hsObj) && hsObj != null && int.TryParse(hsObj.ToString(), out var hsVal))
+                // An absent response is not an HTTP 200 (for example DNS or timeout failures).
+                object? httpStatus = null;
+                if (inputDict.TryGetValue("HTTPStatus", out var actualStatus)) httpStatus = actualStatus;
+                else if (outputDict.TryGetValue("HTTPStatus", out var legacyStatus)) httpStatus = legacyStatus;
+                else if (outputDict.TryGetValue("HttpStatusCode", out var legacyCode)) httpStatus = legacyCode;
+                friendlyOutput["HTTP Status"] = httpStatus;
+                if (inputDict.TryGetValue("StatusMessage", out var statusMessage)) friendlyOutput["Status Message"] = statusMessage;
+                if (inputDict.TryGetValue("ResponseHeaders", out var responseHeaders)) friendlyOutput["Response Headers"] = responseHeaders;
+                if (inputDict.TryGetValue("ResponseSize", out var responseSize)) friendlyOutput["Response Size (bytes)"] = responseSize;
+                if (inputDict.TryGetValue("ResponseBody", out var responseBody)) friendlyOutput["Response Body"] = responseBody;
+                else if (status != "Failed" && rawOutputJson != null)
                 {
-                    httpStatusCode = hsVal;
+                    try { friendlyOutput["Response Body"] = JsonSerializer.Deserialize<JsonElement>(rawOutputJson); }
+                    catch (JsonException) { friendlyOutput["Response Body"] = rawOutputJson; }
                 }
-                else if (outputDict.TryGetValue("HttpStatusCode", out var hscObj) && hscObj != null && int.TryParse(hscObj.ToString(), out var hscVal))
+                if (inputDict.TryGetValue("ResponseBodyAvailable", out var available)) friendlyOutput["Response Body Available"] = available;
+                if (status == "Failed")
                 {
-                    httpStatusCode = hscVal;
+                    friendlyOutput["Error"] = outputDict.GetValueOrDefault("ErrorMessage");
+                    friendlyOutput["Exception Type"] = outputDict.GetValueOrDefault("ExceptionType");
                 }
-
-                long responseSize = 0;
-                if (rawOutputJson != null)
-                {
-                    responseSize = rawOutputJson.Length;
-                }
-
-                friendlyOutput["HTTP Status"] = httpStatusCode;
-                friendlyOutput["Response Size"] = responseSize;
-
-                logMessage = $"{method} request to {domain} completed with HTTP {httpStatusCode}.";
+                logMessage = $"{method} request to {domain} {(status == "Failed" ? "failed" : "completed")}" +
+                    (httpStatus == null ? " without an HTTP response." : $" with HTTP {httpStatus}.");
             }
+
             else if (subtype == "prepare-bulk-upsert")
             {
                 var tableGuidStr = inputDict.TryGetValue("TableLabel", out var tlObj) ? tlObj?.ToString() : null;
@@ -946,7 +960,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             }
             else if (subtype == "add-bulk-upsert-row")
             {
-                var parentRefId = inputDict.TryGetValue("ParentUpsertStepRefId", out var pRef) ? pRef?.ToString() : string.Empty;
+                var parentRefId = inputDict.TryGetValue("ParentUpsertStepRefId", out var pRef) ? pRef?.ToString()
+                    : (inputDict.TryGetValue("BulkRecordSetStepId", out var bRef) ? bRef?.ToString()
+                    : (inputDict.TryGetValue("parentStepRefId", out var psRef) ? psRef?.ToString() : string.Empty));
                 
                 friendlyInput["Parent Bulk Session ID"] = parentRefId;
                 if (inputDict.TryGetValue("FieldMappings", out var fmObj) && fmObj != null)
@@ -962,17 +978,42 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             }
             else if (subtype == "commit-upsert")
             {
-                var parentRefId = inputDict.TryGetValue("ParentUpsertStepRefId", out var pRef) ? pRef?.ToString() : string.Empty;
+                var parentRefId = inputDict.TryGetValue("ParentUpsertStepRefId", out var pRef) ? pRef?.ToString()
+                    : (inputDict.TryGetValue("BulkRecordSetStepId", out var bRef) ? bRef?.ToString()
+                    : (inputDict.TryGetValue("parentStepRefId", out var psRef) ? psRef?.ToString() : string.Empty));
                 friendlyInput["Parent Bulk Session ID"] = parentRefId;
 
-                var inserted = outputDict.TryGetValue("InsertedCount", out var insObj) ? insObj?.ToString() : "0";
-                var updated = outputDict.TryGetValue("UpdatedCount", out var updObj) ? updObj?.ToString() : "0";
+                var isFailed = string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase);
+                var errorMsg = outputDict.TryGetValue("ErrorMessage", out var errObj) ? errObj?.ToString()
+                    : (outputDict.TryGetValue("Error", out var errObj2) ? errObj2?.ToString() : null);
 
-                friendlyOutput["Inserted Record Count"] = int.TryParse(inserted, out var ins) ? ins : 0;
-                friendlyOutput["Updated Record Count"] = int.TryParse(updated, out var upd) ? upd : 0;
-                friendlyOutput["Status"] = "Committed";
+                if (isFailed || !string.IsNullOrWhiteSpace(errorMsg))
+                {
+                    friendlyOutput["Status"] = "Failed";
+                    if (!string.IsNullOrWhiteSpace(errorMsg))
+                    {
+                        friendlyOutput["Error"] = errorMsg;
+                    }
+                    if (outputDict.TryGetValue("ExceptionType", out var exTypeObj) && exTypeObj != null)
+                    {
+                        friendlyOutput["ExceptionType"] = exTypeObj.ToString();
+                    }
 
-                logMessage = $"Committed bulk upsert. Inserted {inserted} records and updated {updated} records.";
+                    logMessage = !string.IsNullOrWhiteSpace(errorMsg)
+                        ? $"Failed to commit bulk upsert: {errorMsg}"
+                        : "Failed to commit bulk upsert.";
+                }
+                else
+                {
+                    var inserted = outputDict.TryGetValue("InsertedCount", out var insObj) ? insObj?.ToString() : "0";
+                    var updated = outputDict.TryGetValue("UpdatedCount", out var updObj) ? updObj?.ToString() : "0";
+
+                    friendlyOutput["Inserted Record Count"] = int.TryParse(inserted, out var ins) ? ins : 0;
+                    friendlyOutput["Updated Record Count"] = int.TryParse(updated, out var upd) ? upd : 0;
+                    friendlyOutput["Status"] = "Committed";
+
+                    logMessage = $"Committed bulk upsert. Inserted {inserted} records and updated {updated} records.";
+                }
             }
             else if (subtype == "upload-file")
             {
@@ -1041,8 +1082,8 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             { "TechnicalDetails", traceDetails }
         };
 
-        var inputJson = SerializeAndTruncate(finalInputContext);
-        var outputJson = SerializeAndTruncate(finalOutputContext);
+        var inputJson = SerializeAndTruncate(finalInputContext, step.Subtype == "make-request" ? int.MaxValue : 32000);
+        var outputJson = SerializeAndTruncate(finalOutputContext, step.Subtype == "make-request" ? int.MaxValue : 32000);
 
         return (inputJson, outputJson, logMessage);
     }

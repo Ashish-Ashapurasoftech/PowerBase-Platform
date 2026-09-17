@@ -1,7 +1,10 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Common.Models;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.Enums;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.ValueObjects;
 
 namespace PowerBase.Application.Records.Commands.MassUpdateRecords;
 
@@ -13,6 +16,11 @@ public class MassUpdateRecordsCommandHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
+    private readonly IPipelineTriggerInterceptor _triggerInterceptor;
+    private readonly ITenantUnitOfWork _uow;
+    private readonly IQueryContext _queryContext;
+    private readonly IAppRepository _appRepo;
+    private readonly IMessagePublisher _messagePublisher;
 
     public MassUpdateRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -20,7 +28,12 @@ public class MassUpdateRecordsCommandHandler
         IRecordRepository recordRepo,
         IRelationshipRepository relRepo,
         IRolePermissionEnforcer enforcer,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IPipelineTriggerInterceptor triggerInterceptor,
+        ITenantUnitOfWork uow,
+        IQueryContext queryContext,
+        IAppRepository appRepo,
+        IMessagePublisher messagePublisher)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -28,6 +41,11 @@ public class MassUpdateRecordsCommandHandler
         _relRepo = relRepo;
         _enforcer = enforcer;
         _auditRepo = auditRepo;
+        _triggerInterceptor = triggerInterceptor;
+        _uow = uow;
+        _queryContext = queryContext;
+        _appRepo = appRepo;
+        _messagePublisher = messagePublisher;
     }
 
     public async Task<int> HandleAsync(MassUpdateRecordsCommand command, CancellationToken ct = default)
@@ -87,6 +105,11 @@ public class MassUpdateRecordsCommandHandler
         var idMap = await _recordRepo.GetIdsByPublicIdsMapAsync(table, command.RecordPublicIds, ct);
         var violations = new List<RecordConstraintViolation>();
 
+        // The app's configured Date Formatting doesn't vary per record — fetched once here rather
+        // than inside the per-record loop below.
+        var app = await _appRepo.GetByIdAsync(table.AppId, ct);
+        var dateFormat = AppFormattingSettings.GetDateFormatString(app.Formatting);
+
         foreach (var recordId in command.RecordPublicIds)
         {
             if (!idMap.ContainsKey(recordId))
@@ -123,19 +146,87 @@ public class MassUpdateRecordsCommandHandler
         foreach (var recordId in foundIds)
         {
             var recordViolations = await RecordConstraintValidator.CollectViolationsAsync(
-                table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: idMap[recordId], ct, recordId);
+                table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: idMap[recordId], ct, recordId, appDateFormat: dateFormat);
             violations.AddRange(recordViolations.Where(v => !(v.ConstraintType == "Unique" && inRequestDuplicateFids.Contains(v.FieldId))));
         }
 
         if (violations.Count > 0)
             throw new RecordConstraintViolationException(violations);
 
-        var affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), effectiveValues, ct);
+        // Pre-fetch snapshots for pipeline trigger interceptor before executing mass update
+        var recordChanges = new List<PipelineRecordChange>();
+        foreach (var recordPublicId in foundIds)
+        {
+            var beforeValues = new Dictionary<long, object?>();
+            var afterValues = new Dictionary<long, object?>();
+            var changedFieldIds = new List<long>();
 
-        await _auditRepo.LogActivityAsync(
-            AuditActions.Updated, AuditEntityTypes.Record, table.PublicId.ToString(),
-            $"{affected} record(s) mass-updated in {table.Name}", appId: table.AppId, ct: ct);
+            try
+            {
+                var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+                foreach (var f in fields)
+                {
+                    if (f.Fid.HasValue)
+                    {
+                        var colKey = PhysicalNaming.GetPhysicalColumnName(f);
+                        var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
+                        beforeValues[f.Id] = oldVal;
+                        beforeValues[f.Fid.Value] = oldVal;
 
+                        if (effectiveValues.TryGetValue(f.Fid.Value, out var newVal))
+                        {
+                            afterValues[f.Id] = newVal;
+                            afterValues[f.Fid.Value] = newVal;
+                            changedFieldIds.Add(f.Id);
+                        }
+                        else
+                        {
+                            afterValues[f.Id] = oldVal;
+                            afterValues[f.Fid.Value] = oldVal;
+                        }
+                    }
+                }
+
+                recordChanges.Add(new PipelineRecordChange(
+                    recordPublicId,
+                    beforeValues,
+                    afterValues,
+                    changedFieldIds,
+                    PipelineRecordEventType.Modified
+                ));
+            }
+            catch (NotFoundException)
+            {
+                // Skip if not found
+            }
+        }
+
+        var indexMessages = new List<SearchIndexMessage>();
+        int affected;
+        await _uow.BeginAsync(ct);
+        try
+        {
+            if (recordChanges.Count > 0)
+            {
+                await _triggerInterceptor.InterceptBulkAsync(
+                    table, fields, recordChanges, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
+            }
+
+            affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), effectiveValues, ct, indexMessages.Add, _uow.Transaction);
+
+            await _auditRepo.LogActivityAsync(
+                AuditActions.Updated, AuditEntityTypes.Record, table.PublicId.ToString(),
+                $"{affected} record(s) mass-updated in {table.Name}", appId: table.AppId, ct: ct);
+
+            await _uow.CommitAsync(ct);
+        }
+        catch
+        {
+            await _uow.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+        if (indexMessages.Count > 0)
+            _ = _messagePublisher.PublishBatchAsync(indexMessages, default);
         return affected;
     }
 }

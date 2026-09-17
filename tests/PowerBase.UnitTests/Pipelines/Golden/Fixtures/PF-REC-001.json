@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-REC-001",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Look Up Record throws InvalidOperationException when no record is found",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-REC-001",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

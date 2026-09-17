@@ -9,6 +9,25 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
 {
+    public async Task<IReadOnlyList<AppField>> GetTableFieldsAsync(long tableId, CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT af.Id, af.PublicId, af.AppTableId, af.Name, af.Label,
+                   ft.Code AS TypeCode, af.Fid, af.PhysicalColumnName,
+                   af.Settings, af.DefaultValue, af.IsRequired, af.IsUnique,
+                   CAST(CASE WHEN af.IsPrimary = 1 OR
+                        (af.IsSystem = 1 AND af.PhysicalColumnName = 'Id')
+                        THEN 1 ELSE 0 END AS bit) AS IsPrimary,
+                   af.IsSystem, af.IsEncrypted, af.IsDeleted
+            FROM meta.AppField af
+            JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+            WHERE af.AppTableId = @tableId AND af.IsDeleted = 0
+            ORDER BY af.Id
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return (await connection.QueryAsync<AppField>(new CommandDefinition(sql, new { tableId }, cancellationToken: ct))).AsList();
+    }
+
     private const string PipelineColumns = "Id, PublicId, AppId, Name, Description, VariablesJson, IsActive, IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion";
     
     private const string GetByPublicIdSql = $"""
@@ -324,6 +343,24 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                     isActive
                 },
                 cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<Pipeline>> FindCallablePipelinesAsync(long ownerId, string callDefinition, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var results = await connection.QueryAsync<Pipeline>(new CommandDefinition("""
+            SELECT p.* FROM meta.Pipeline p
+            WHERE p.CreatedBy = @ownerId AND p.IsDeleted = 0 AND p.IsActive = 1
+              AND EXISTS (
+                SELECT 1 FROM meta.PipelineStep s
+                WHERE s.PipelineId = p.Id AND s.IsDeleted = 0 AND s.IsValidated = 1
+                  AND s.ParentStepId IS NULL AND s.Type = 'trigger' AND s.Subtype = 'pipeline-called'
+                  AND LTRIM(RTRIM(JSON_VALUE(CASE WHEN ISJSON(s.ConfigJson) = 1 THEN s.ConfigJson ELSE '{}' END, '$.callDefinition')))
+                    COLLATE Latin1_General_100_BIN2 = @callDefinition COLLATE Latin1_General_100_BIN2
+              )
+            ORDER BY p.Id
+            """, new { ownerId, callDefinition }, cancellationToken: ct));
+        return results.AsList();
     }
 
     public async Task<IReadOnlyList<Pipeline>> ListAllActiveAsync(CancellationToken ct = default)
@@ -1543,6 +1580,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         public List<string>? TriggerFields { get; set; }
         public List<string>? SubsequentFields { get; set; }
         public bool LimitRecords { get; set; }
+        [System.Text.Json.Serialization.JsonConverter(typeof(PowerBase.Application.Pipelines.RecordLimitJsonConverter))]
         public int? MaxRecords { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterRule>? Filters { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterGroup>? FilterGroups { get; set; }
@@ -1585,7 +1623,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         const string sql = """
             SELECT Id, BulkEventId, Ordinal, RecordPublicId, EventType, BeforeValuesJson, AfterValuesJson, ChangedFieldsJson, Processed, CreatedOn
             FROM meta.PipelineBulkEventRecord
-            WHERE BulkEventId = @bulkEventId AND Processed = 0
+            WHERE BulkEventId = @bulkEventId AND Processed IN (0, 2)
             ORDER BY Ordinal ASC
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;
@@ -1601,7 +1639,11 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
 
         if (transaction != null)
         {
-            await transaction.Connection!.ExecuteAsync(new CommandDefinition(sql, new { ids, processedStatus }, transaction, cancellationToken: ct));
+            if (transaction.Connection == null)
+            {
+                throw new InvalidOperationException("Cannot mark bulk event records using a completed or disposed transaction.");
+            }
+            await transaction.Connection.ExecuteAsync(new CommandDefinition(sql, new { ids, processedStatus }, transaction, cancellationToken: ct));
             return;
         }
 

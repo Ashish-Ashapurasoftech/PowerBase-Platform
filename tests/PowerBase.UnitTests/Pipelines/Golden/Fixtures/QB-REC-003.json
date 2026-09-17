@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-REC-003",
+  "classification": "QB-DOC",
+  "description": "Create Record creates new record in target table with assigned fields",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/use-the-quickbase-channel",
+  "relevantHeading": "Quickbase > Create Record",
+  "testPayload": {
+    "stepId": "QB-REC-003",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

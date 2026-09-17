@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-LOOP-002",
+  "classification": "QB-DOC",
+  "description": "Exposes Jinja loop variables loop.index0, loop.first, loop.last",
+  "verifiedLiveUrl": "https://help.quickbase.com/v1/docs/jinja-reference",
+  "relevantHeading": "Jinja reference > Loop variables",
+  "testPayload": {
+    "stepId": "QB-LOOP-002",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

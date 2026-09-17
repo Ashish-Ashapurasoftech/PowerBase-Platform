@@ -49,11 +49,8 @@ public class DatabasePipelineOutboxRelay : BackgroundService
         {
             try
             {
-                // Await wake notifier signal or timeout
-                await Task.WhenAny(
-                    PipelineOutboxWakeNotifier.WaitForOutboxItemAsync(stoppingToken),
-                    Task.Delay(TimeSpan.FromSeconds(_options.DatabaseQueue.RelayPollingIntervalSeconds), stoppingToken)
-                );
+                await PipelineOutboxWakeNotifier.WaitForOutboxItemAsync(
+                    TimeSpan.FromSeconds(_options.DatabaseQueue.RelayPollingIntervalSeconds), stoppingToken);
 
                 if (stoppingToken.IsCancellationRequested) break;
 
@@ -88,12 +85,15 @@ public class DatabasePipelineOutboxRelay : BackgroundService
             return;
         }
 
-        bool enqueuedAny = false;
 
         // 2. Relay outbox items for each tenant
-        foreach (var tenant in tenants)
+        await Parallel.ForEachAsync(tenants, new ParallelOptions
         {
-            if (ct.IsCancellationRequested) break;
+            MaxDegreeOfParallelism = Math.Max(1, _options.DatabaseQueue.RelayTenantConcurrency),
+            CancellationToken = ct
+        }, async (tenant, tenantCt) =>
+        {
+            var ct = tenantCt;
 
             try
             {
@@ -108,7 +108,8 @@ public class DatabasePipelineOutboxRelay : BackgroundService
                 
                 // Phase 1: Claim Transaction (commits lease immediately in Tenant DB)
                 IReadOnlyList<PipelineOutboxItem> claimed = await pipelineRepo.ClaimOutboxItemsAsync(_workerId, ct);
-                if (claimed.Count == 0) continue;
+                if (claimed.Count == 0) return;
+                PipelineOutboxWakeNotifier.Wake();
 
                 _logger.LogInformation("Relay Worker {WorkerId} claimed {Count} outbox items for tenant {TenantId}.", _workerId, claimed.Count, tenant.Id);
 
@@ -135,10 +136,11 @@ public class DatabasePipelineOutboxRelay : BackgroundService
                         try
                         {
                             await mainQueueRepo.EnqueueAsync(mainQueueJob, transaction: null, ct: ct);
+                            DatabasePipelineQueueWakeNotifier.Wake();
                             
                             // Phase 3: Tenant DB status completion marker update (short transaction)
                             await pipelineRepo.UpdateOutboxItemStatusAsync(item.Id, _workerId, 1, publishedOn: DateTime.UtcNow, ct: ct);
-                            enqueuedAny = true;
+                            DatabasePipelineQueueWakeNotifier.Wake();
                         }
                         catch (Exception dbEx)
                         {
@@ -157,7 +159,7 @@ public class DatabasePipelineOutboxRelay : BackgroundService
                                     // Verified duplicate relay success: mark outbox item published
                                     await pipelineRepo.UpdateOutboxItemStatusAsync(item.Id, _workerId, 1, publishedOn: DateTime.UtcNow, ct: ct);
                                     _logger.LogWarning("Caught duplicate MessageId {MessageId} in Main DB. Verified identities match; marked Tenant outbox item relayed.", item.MessageId);
-                                    enqueuedAny = true;
+                                    DatabasePipelineQueueWakeNotifier.Wake();
                                 }
                                 else
                                 {
@@ -184,13 +186,7 @@ public class DatabasePipelineOutboxRelay : BackgroundService
             {
                 _logger.LogError(ex, "Relay failed processing for tenant {TenantId}.", tenant.Id);
             }
-        }
-
-        // Wake worker if new jobs enqueued
-        if (enqueuedAny)
-        {
-            DatabasePipelineQueueWakeNotifier.Wake();
-        }
+        });
     }
 
     private sealed record TenantInfo(long Id, Guid PublicId);

@@ -33,6 +33,7 @@ public class ReportDefinitionDto
 
     public long? GroupByFieldId { get; init; }
     public string GroupByMode { get; init; } = "EqualValues";
+    public List<RowGroupLevelDto> RowGroupLevels { get; init; } = [];
     public bool HideTotals { get; init; }
     public bool? GroupDefaultCollapsed { get; init; }
     public bool GroupByDescending { get; init; }
@@ -62,12 +63,21 @@ public class SortGroupLevelDto
     public string GroupByMode { get; init; } = "EqualValues";
 }
 
+public class RowGroupLevelDto
+{
+    public long FieldId { get; init; }
+    public string GroupByMode { get; init; } = "EqualValues";
+}
+
 public class ReportOptionsDto
 {
     public string ColumnHeaderText { get; init; } = "Default";
     public bool ShowEditIcon { get; init; } = true;
     public bool ShowViewIcon { get; init; } = true;
     public bool ShowQuickPeekIcon { get; init; } = true;
+    /// <summary>This report's own Quick Peek form, overriding the table's default (Form.
+    /// IsQuickPeekForm) for THIS report only. null means "use the table default".</summary>
+    public Guid? QuickPeekFormId { get; init; }
     public bool DisableBulkDelete { get; init; }
     public bool DisableBulkUpdate { get; init; }
     public bool DisableGridEdit { get; init; }

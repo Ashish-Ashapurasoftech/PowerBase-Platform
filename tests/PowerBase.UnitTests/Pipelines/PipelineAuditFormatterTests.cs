@@ -41,6 +41,49 @@ public class PipelineAuditFormatterTests
         );
     }
 
+    [Theory]
+    [InlineData("http")]
+    [InlineData("quickbase")]
+    public void MakeRequestHistoryPreservesLargeStructuredResponseAndRedactsSecrets(string mode)
+    {
+        var body = new { items = Enumerable.Range(0, 100).Select(i => new { id = i, text = new string('x', 500) }), access_token = "private-token" };
+        var input = JsonSerializer.Serialize(new { RequestMode = mode, Method = "POST", Url = "https://example.com/api", HTTPStatus = 201,
+            StatusMessage = "Created", ResponseSize = 51000, ResponseBody = body, ResponseBodyAvailable = true,
+            ResponseHeaders = new Dictionary<string, string> { ["Content-Type"] = "application/json", ["Set-Cookie"] = "private-cookie" } });
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "make-request" }, input, "{}", "Success", "test", DateTime.UtcNow, DateTime.UtcNow);
+        using var parsed = JsonDocument.Parse(result.OutputContextJson);
+        var output = parsed.RootElement.GetProperty("Output");
+        Assert.Equal(201, output.GetProperty("HTTP Status").GetInt32());
+        Assert.Equal(100, output.GetProperty("Response Body").GetProperty("items").GetArrayLength());
+        Assert.Equal(500, output.GetProperty("Response Body").GetProperty("items")[99].GetProperty("text").GetString()!.Length);
+        Assert.DoesNotContain("private-token", result.OutputContextJson);
+        Assert.DoesNotContain("private-cookie", result.OutputContextJson);
+        Assert.DoesNotContain("TRUNCATED", result.OutputContextJson);
+    }
+
+    [Theory]
+    [InlineData("[1,2]")]
+    [InlineData("false")]
+    [InlineData("0")]
+    [InlineData("null")]
+    [InlineData("\"plain text\"")]
+    public void MakeRequestHistorySupportsLegacyResponseShapes(string body)
+    {
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "make-request" }, "{\"HTTPStatus\":200}", body, "Success", "test", null, null);
+        using var parsed = JsonDocument.Parse(result.OutputContextJson);
+        Assert.Equal(body, parsed.RootElement.GetProperty("Output").GetProperty("Response Body").GetRawText());
+    }
+
+    [Fact]
+    public void MakeRequestFailureDoesNotInventSuccessfulHttpStatus()
+    {
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "make-request" }, "{}", "{\"ErrorMessage\":\"DNS failed\"}", "Failed", "test", null, null);
+        using var parsed = JsonDocument.Parse(result.OutputContextJson);
+        Assert.Equal(JsonValueKind.Null, parsed.RootElement.GetProperty("Output").GetProperty("HTTP Status").ValueKind);
+        Assert.Equal("DNS failed", parsed.RootElement.GetProperty("Output").GetProperty("Error").GetString());
+        Assert.DoesNotContain("completed", result.LogMessage);
+    }
+
     [Fact]
     public async Task InitializeAsync_CachesNamesAndMetadata_WithoutCausingNPlusOneQueries()
     {
@@ -255,5 +298,59 @@ public class PipelineAuditFormatterTests
         result.OutputContextJson.Should().Contain("\"Matched\":true");
         result.OutputContextJson.Should().Contain("\"Executed Branch\":\"Yes\"");
         result.LogMessage.Should().Be("Condition matched. Executed the Yes branch.");
+    }
+
+    [Fact]
+    public void FormatStepRun_CommitUpsert_WhenSuccess_FormatsInsertedAndUpdatedCounts()
+    {
+        // Arrange
+        var step = new PipelineStep
+        {
+            Id = 400,
+            Type = "action",
+            Subtype = "commit-upsert",
+            Label = "Commit Bulk Upsert",
+            RefId = "commit_1"
+        };
+
+        var rawInput = JsonSerializer.Serialize(new { ParentUpsertStepRefId = "prep_1" });
+        var rawOutput = JsonSerializer.Serialize(new { InsertedCount = 2, UpdatedCount = 1, Status = "Committed" });
+
+        // Act
+        var result = _formatter.FormatStepRun(step, rawInput, rawOutput, "Success", "corr_123", DateTime.UtcNow, DateTime.UtcNow);
+
+        // Assert
+        result.LogMessage.Should().Be("Committed bulk upsert. Inserted 2 records and updated 1 records.");
+        result.OutputContextJson.Should().Contain("\"Inserted Record Count\":2");
+        result.OutputContextJson.Should().Contain("\"Updated Record Count\":1");
+    }
+
+    [Fact]
+    public void FormatStepRun_CommitUpsert_WhenFailed_SurfacesActualErrorMessage()
+    {
+        // Arrange
+        var step = new PipelineStep
+        {
+            Id = 401,
+            Type = "action",
+            Subtype = "commit-upsert",
+            Label = "Commit Bulk Upsert",
+            RefId = "commit_1"
+        };
+
+        var rawInput = JsonSerializer.Serialize(new { ParentUpsertStepRefId = "prep_1" });
+        var rawOutput = JsonSerializer.Serialize(new
+        {
+            ErrorMessage = "Invalid column name 'f_3'.",
+            ExceptionType = "SqlException"
+        });
+
+        // Act
+        var result = _formatter.FormatStepRun(step, rawInput, rawOutput, "Failed", "corr_123", DateTime.UtcNow, DateTime.UtcNow);
+
+        // Assert
+        result.LogMessage.Should().Be("Failed to commit bulk upsert: Invalid column name 'f_3'.");
+        result.OutputContextJson.Should().Contain("Invalid column name");
+        result.OutputContextJson.Should().Contain("\"Status\":\"Failed\"");
     }
 }

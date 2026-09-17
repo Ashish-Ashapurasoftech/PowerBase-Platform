@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-EVT-002",
+  "classification": "QB-DOC",
+  "description": "Trigger option allows monitoring specific fields",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/use-the-quickbase-channel",
+  "relevantHeading": "Quickbase > Trigger options",
+  "testPayload": {
+    "stepId": "QB-EVT-002",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

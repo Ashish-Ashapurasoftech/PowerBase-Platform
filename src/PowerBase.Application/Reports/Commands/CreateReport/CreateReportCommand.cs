@@ -23,11 +23,14 @@ public record CreateReportCommand(
     ChartConfigCommand? Chart = null,
     string ColumnsMode = "Custom",
     List<SortGroupLevelCommand>? TableSortGroup = null,
-    ReportOptionsCommand? Options = null);
+    ReportOptionsCommand? Options = null,
+    List<RowGroupLevelCommand>? RowGroupLevels = null);
 
 public record SummaryAggregationCommand(long FieldId, string Function, string DisplayAs = "Normal");
 
 public record SortGroupLevelCommand(long FieldId, bool Desc, bool IsGroup, string GroupByMode = "EqualValues");
+
+public record RowGroupLevelCommand(long FieldId, string GroupByMode = "EqualValues");
 
 public record ReportOptionsCommand(
     string ColumnHeaderText = "Default",
@@ -37,7 +40,8 @@ public record ReportOptionsCommand(
     bool DisableBulkDelete = false,
     bool DisableBulkUpdate = false,
     bool DisableGridEdit = false,
-    bool ShowDescriptionOnReportPage = false);
+    bool ShowDescriptionOnReportPage = false,
+    Guid? QuickPeekFormId = null);
 
 public record ChartConfigCommand(
     string ChartType,

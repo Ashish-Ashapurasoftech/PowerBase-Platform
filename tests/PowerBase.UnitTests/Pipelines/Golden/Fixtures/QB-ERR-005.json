@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-ERR-005",
+  "classification": "QB-DOC",
+  "description": "Explicit Stop Pipeline step is NOT treated as error by Handle Errors",
+  "verifiedLiveUrl": "https://help.quickbase.com/docs/handle-errors",
+  "relevantHeading": "Handle errors > Stop pipeline",
+  "testPayload": {
+    "stepId": "QB-ERR-005",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

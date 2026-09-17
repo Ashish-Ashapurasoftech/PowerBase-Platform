@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-COND-005",
+  "classification": "UNKNOWN",
+  "description": "Complex multi-clause nested AND/OR group evaluation",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "QB-COND-005",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": false
+  }
+}

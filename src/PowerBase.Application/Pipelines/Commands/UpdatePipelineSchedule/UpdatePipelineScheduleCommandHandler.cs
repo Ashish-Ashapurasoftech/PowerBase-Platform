@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using NCrontab;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -44,55 +43,23 @@ public class UpdatePipelineScheduleCommandHandler
 
         var schedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(pipelineId, ct);
 
-        // Resolve timezone info for NextRun calculation
-        TimeZoneInfo timeZoneInfo;
-        try
+        var dummySchedule = new PipelineSchedule
         {
-            timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(command.TimeZone);
-        }
-        catch
-        {
-            var map = new System.Collections.Generic.Dictionary<string, string>
-            {
-                { "America/New_York", "Eastern Standard Time" },
-                { "America/Chicago", "Central Standard Time" },
-                { "America/Denver", "Mountain Standard Time" },
-                { "America/Los_Angeles", "Pacific Standard Time" },
-                { "Asia/Kolkata", "India Standard Time" },
-                { "UTC", "UTC" }
-            };
-            if (map.TryGetValue(command.TimeZone, out var winId))
-            {
-                try { timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(winId); }
-                catch { timeZoneInfo = TimeZoneInfo.Utc; }
-            }
-            else
-            {
-                timeZoneInfo = TimeZoneInfo.Utc;
-            }
-        }
-
-        // Calculate next run time strictly from local now
-        var cron = CrontabSchedule.Parse(command.CronExpression);
-        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, timeZoneInfo);
-        var nextRunLocal = cron.GetNextOccurrence(nowLocal);
-        var nextRunUtc = TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo);
+            ScheduleType = command.ScheduleType,
+            Interval = command.Interval,
+            TimeOfDay = command.TimeOfDay,
+            Weekdays = command.Weekdays,
+            MonthDay = command.MonthDay,
+            MonthOfYear = command.MonthOfYear,
+            RelativeWeek = command.RelativeWeek,
+            RelativeDay = command.RelativeDay,
+            TimeZone = command.TimeZone,
+            CronExpression = command.CronExpression,
+            CreatedOn = schedule?.CreatedOn ?? DateTime.UtcNow
+        };
+        var nextRunUtc = ScheduleNextRunCalculator.CalculateNextRun(dummySchedule, DateTime.UtcNow);
 
         var pipeline = await _pipelineRepo.GetByPublicIdAsync(command.PipelinePublicId, ct);
-        bool scheduleChanged = schedule == null ||
-                               schedule.ScheduleType != command.ScheduleType ||
-                               schedule.Interval != command.Interval ||
-                               schedule.TimeOfDay != command.TimeOfDay ||
-                               schedule.Weekdays != command.Weekdays ||
-                               schedule.MonthDay != command.MonthDay ||
-                               schedule.MonthOfYear != command.MonthOfYear ||
-                               schedule.RelativeWeek != command.RelativeWeek ||
-                               schedule.RelativeDay != command.RelativeDay ||
-                               schedule.TimeZone != command.TimeZone ||
-                               schedule.CronExpression != command.CronExpression;
-
-        bool shouldDeactivate = pipeline.IsActive && scheduleChanged;
-
         if (schedule == null)
         {
             schedule = new PipelineSchedule
@@ -129,11 +96,11 @@ public class UpdatePipelineScheduleCommandHandler
             await _pipelineRepo.UpdateScheduleAsync(schedule, transaction: null, ct);
         }
 
-        // Auto-activate only if all steps are successfully validated
+        // Auto-activate if all steps are successfully validated, otherwise deactivate
         bool isAllStepsValidated = steps.Where(s => !s.IsDeleted).All(s => s.IsValidated);
-        if (isAllStepsValidated)
+        if (pipeline.IsActive != isAllStepsValidated)
         {
-            pipeline.IsActive = true;
+            pipeline.IsActive = isAllStepsValidated;
             pipeline.ModifiedOn = DateTime.UtcNow;
             pipeline.ModifiedBy = _queryContext.UserId;
             await _pipelineRepo.UpdateAsync(pipeline, null, ct);

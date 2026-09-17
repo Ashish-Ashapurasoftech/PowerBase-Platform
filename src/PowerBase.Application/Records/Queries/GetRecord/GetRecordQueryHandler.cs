@@ -76,7 +76,15 @@ public class GetRecordQueryHandler
 
         var visibleFields = access.VisibleFields;
         var row = await _recordRepo.GetByPublicIdAsync(table, visibleFields, query.RecordPublicId, ct);
+        // A single record fetched here backs the Add/Edit Record form's own picker for User/
+        // MultiUser fields — that picker is keyed by userPublicId Guid (see
+        // AppUserPickerResponse), not a display name, so this needs the Guid resolution
+        // (ResolveUserPublicIdsAsync), unlike every other read path (list/table, Summary/Chart,
+        // export) which wants a ready-to-display name instead. userNames is still resolved too —
+        // RecordResult.FromRow keeps using it for the read-only CreatedBy/ModifiedBy system
+        // columns regardless of userPublicIds.
         var userNames = await RunReportQueryHandler.ResolveUserNamesAsync([row], visibleFields, _userRepo, ct);
+        var userPublicIds = await RunReportQueryHandler.ResolveUserPublicIdsAsync([row], visibleFields, _userRepo, ct);
         var relational = await _relationalProjector.ProjectAsync(table, visibleFields, [row], ct);
         var computed = _formulaProjector.Project(visibleFields, [row], relational, table);
 
@@ -88,6 +96,6 @@ public class GetRecordQueryHandler
                 throw new NotFoundException("Record", query.RecordPublicId);
         }
 
-        return Records.RecordResult.FromRow(row, visibleFields, userNames, computed[0]);
+        return Records.RecordResult.FromRow(row, visibleFields, userNames, computed[0], userPublicIds);
     }
 }

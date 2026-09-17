@@ -24,4 +24,5 @@ public record UpdateReportCommand(
     ChartConfigCommand? Chart = null,
     string ColumnsMode = "Custom",
     List<SortGroupLevelCommand>? TableSortGroup = null,
-    ReportOptionsCommand? Options = null);
+    ReportOptionsCommand? Options = null,
+    List<RowGroupLevelCommand>? RowGroupLevels = null);

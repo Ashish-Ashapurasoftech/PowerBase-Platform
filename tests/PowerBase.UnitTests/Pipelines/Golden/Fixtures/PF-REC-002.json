@@ -1,0 +1,15 @@
+{
+  "contractId": "PF-REC-002",
+  "classification": "APPROVED-PF-CONTRACT",
+  "description": "Create Record step output exposes CreatedRecordPublicId as Guid string",
+  "verifiedLiveUrl": "",
+  "relevantHeading": "",
+  "testPayload": {
+    "stepId": "PF-REC-002",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

@@ -117,6 +117,14 @@ public class UpdatePipelineCommandHandler
             {
                 await stepValidator.ValidateNewEventStepAsync(step.ConfigJson ?? string.Empty, ct);
             }
+            foreach (var step in steps.Where(s => !s.IsDeleted && (s.Subtype == "pipeline-called" || s.Subtype == "call-another-pipeline")))
+            {
+                try { CallablePipelineDefinition.ValidateConfig(step.ConfigJson, step.Subtype == "call-another-pipeline"); }
+                catch (PipelineNonRetryableException ex)
+                {
+                    throw new ValidationException(new Dictionary<string, string[]> { ["Steps"] = new[] { ex.Message } });
+                }
+            }
         }
 
         if (!string.Equals(pipeline.Name, command.Name, StringComparison.OrdinalIgnoreCase))
@@ -153,37 +161,7 @@ public class UpdatePipelineCommandHandler
             var schedule = await _pipelineRepo.GetScheduleByPipelineIdAsync(pipeline.Id, ct);
             if (schedule != null)
             {
-                TimeZoneInfo timeZoneInfo;
-                try
-                {
-                    timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(schedule.TimeZone);
-                }
-                catch
-                {
-                    var map = new System.Collections.Generic.Dictionary<string, string>
-                    {
-                        { "America/New_York", "Eastern Standard Time" },
-                        { "America/Chicago", "Central Standard Time" },
-                        { "America/Denver", "Mountain Standard Time" },
-                        { "America/Los_Angeles", "Pacific Standard Time" },
-                        { "Asia/Kolkata", "India Standard Time" },
-                        { "UTC", "UTC" }
-                    };
-                    if (map.TryGetValue(schedule.TimeZone, out var winId))
-                    {
-                        try { timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(winId); }
-                        catch { timeZoneInfo = TimeZoneInfo.Utc; }
-                    }
-                    else
-                    {
-                        timeZoneInfo = TimeZoneInfo.Utc;
-                    }
-                }
-
-                var cron = NCrontab.CrontabSchedule.Parse(schedule.CronExpression);
-                var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, timeZoneInfo);
-                var nextRunLocal = cron.GetNextOccurrence(nowLocal);
-                var nextRunUtc = TimeZoneInfo.ConvertTimeToUtc(nextRunLocal, timeZoneInfo);
+                var nextRunUtc = ScheduleNextRunCalculator.CalculateNextRun(schedule, DateTime.UtcNow);
                 schedule.NextRunOn = nextRunUtc;
                 await _pipelineRepo.UpdateScheduleAsync(schedule, transaction: null, ct);
                 logger?.LogInformation("Pipeline {PipelineId} schedule NextRunOn recalculated on reactivation: {NextRunOn}", pipeline.Id, nextRunUtc);

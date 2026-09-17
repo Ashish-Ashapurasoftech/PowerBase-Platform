@@ -1,0 +1,15 @@
+{
+  "contractId": "QB-COND-004",
+  "classification": "QB-DOC",
+  "description": "is blank evaluates true for null or empty string",
+  "verifiedLiveUrl": "https://help.quickbase.com/v1/docs/jinja-reference",
+  "relevantHeading": "Jinja reference > Tests",
+  "testPayload": {
+    "stepId": "QB-COND-004",
+    "mode": "test"
+  },
+  "expectedOutput": {
+    "status": "Success",
+    "verified": true
+  }
+}

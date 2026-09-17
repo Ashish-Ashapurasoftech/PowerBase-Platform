@@ -668,7 +668,15 @@ public class RunReportQueryHandler
     /// cond.Value) into a literal date string, matching the same "resolve one layer above the SQL
     /// builder" shape as the other resolvers in this file. Anchored to UTC "now" — a known
     /// simplification, since no per-tenant/app timezone is tracked anywhere else in this codebase
-    /// either. Non-Date-group conditions and any other ValueMode pass through unchanged.</summary>
+    /// either. Non-Date-group conditions and any other ValueMode pass through unchanged.
+    ///
+    /// during/notDuring conditions (duringCurrent/duringPrevious/duringNext, "count:unit" in
+    /// Value — see the frontend's filter-condition-operators.ts) are a special case: unlike every
+    /// other tier here, they don't resolve to a single literal — they resolve to a RANGE, so the
+    /// condition NODE itself gets replaced with a small {gte,lte}/{lt,gt} GROUP instead (see
+    /// ResolveDuringCondition). This is transparent to every downstream consumer of the resolved
+    /// tree (the SQL builder, ODataFilterBuilder) since by the time they see it, "during"/
+    /// "notDuring" no longer exist — only the gt/gte/lt/lte operators they already support.</summary>
     internal static FilterGroup? ResolveDateValueModeConditions(FilterGroup? group)
     {
         if (group is null) return null;
@@ -676,12 +684,20 @@ public class RunReportQueryHandler
         return new FilterGroup
         {
             Logic = group.Logic,
-            Nodes = group.Nodes.Select(n => new FilterNode
-            {
-                Condition = n.Condition is null ? null : ResolveDateCondition(n.Condition, today),
-                Group = ResolveDateValueModeConditions(n.Group),
-            }).ToList(),
+            Nodes = group.Nodes.Select(n => ResolveDateNode(n, today)).ToList(),
         };
+    }
+
+    private static FilterNode ResolveDateNode(FilterNode n, DateTime today)
+    {
+        if (n.Condition is { } cond)
+        {
+            var duringGroup = ResolveDuringCondition(cond, today);
+            return duringGroup is not null
+                ? new FilterNode { Group = duringGroup }
+                : new FilterNode { Condition = ResolveDateCondition(cond, today) };
+        }
+        return new FilterNode { Group = ResolveDateValueModeConditions(n.Group) };
     }
 
     private static FilterCondition ResolveDateCondition(FilterCondition cond, DateTime today)
@@ -703,6 +719,95 @@ public class RunReportQueryHandler
             Value = resolved, ValueMode = "literal", ValueFieldId = null,
         };
     }
+
+    private static readonly HashSet<string> DuringUnits = new(StringComparer.OrdinalIgnoreCase)
+        { "day", "week", "month", "quarter", "year" };
+
+    /// <summary>Expands a during/notDuring condition into a literal date-range group — "is during"
+    /// becomes an AND of {gte start, lte end}, "is not during" an OR of {lt start, gt end}.
+    /// Returns null for every other operator, so ResolveDateNode falls back to the normal
+    /// single-literal ResolveDateCondition path unchanged.</summary>
+    private static FilterGroup? ResolveDuringCondition(FilterCondition cond, DateTime today)
+    {
+        var isDuring = string.Equals(cond.Operator, "during", StringComparison.OrdinalIgnoreCase);
+        var isNotDuring = string.Equals(cond.Operator, "notDuring", StringComparison.OrdinalIgnoreCase);
+        if (!isDuring && !isNotDuring) return null;
+
+        var (count, unit) = ParseDuringValue(cond.Value);
+        var (start, end) = ComputeDuringRange(cond.ValueMode, count, unit, today);
+        const string isoFormat = "yyyy-MM-dd";
+
+        FilterCondition Cond(string op, DateTime value) => new()
+        {
+            FieldId = cond.FieldId, SubField = cond.SubField,
+            Operator = op, Value = value.ToString(isoFormat), ValueMode = "literal",
+        };
+
+        return isDuring
+            ? new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = Cond("gte", start) }, new FilterNode { Condition = Cond("lte", end) }] }
+            : new FilterGroup { Logic = "or", Nodes = [new FilterNode { Condition = Cond("lt", start) }, new FilterNode { Condition = Cond("gt", end) }] };
+    }
+
+    /// <summary>FilterCondition.Value for during/notDuring is "count:unit" (e.g. "2:month") — see
+    /// DuringValue/parseDuringValue in the frontend's filter-condition-operators.ts. Malformed or
+    /// missing input falls back to 1 week, the same permissive-default spirit as a blank
+    /// pastDays/futureDays count elsewhere in this file.</summary>
+    private static (int Count, string Unit) ParseDuringValue(string? value)
+    {
+        var parts = (value ?? "").Split(':');
+        var unit = parts.Length == 2 && DuringUnits.Contains(parts[1]) ? parts[1] : "week";
+        var count = parts.Length >= 1 && int.TryParse(parts[0], out var c) && c > 0 ? c : 1;
+        return (count, unit);
+    }
+
+    /// <summary>Mirrors the frontend's pb-filter-value-control.component.ts duringRangePreview
+    /// computation exactly (startOfPeriod/addUnits/endOfPeriod) — kept in lockstep so the preview
+    /// shown at edit time matches what the report actually filters on at run time. "The previous/
+    /// next N &lt;unit&gt;" excludes the current, still-in-progress period (e.g. today inside this
+    /// week, "the previous 1 week" is the last full Mon-Sun week, not the 7 days ending today).</summary>
+    private static (DateTime Start, DateTime End) ComputeDuringRange(string? valueMode, int count, string unit, DateTime today)
+    {
+        var curStart = StartOfDuringPeriod(today, unit);
+        var curEnd = EndOfDuringPeriod(curStart, unit);
+
+        if (string.Equals(valueMode, "duringPrevious", StringComparison.OrdinalIgnoreCase))
+            return (AddDuringUnits(curStart, unit, -count), curStart.AddDays(-1));
+
+        if (string.Equals(valueMode, "duringNext", StringComparison.OrdinalIgnoreCase))
+            return (curEnd.AddDays(1), EndOfDuringPeriod(AddDuringUnits(curStart, unit, count), unit));
+
+        // duringCurrent, and any unrecognized ValueMode (same permissive fallback as the rest of
+        // this resolver: an unresolvable relative mode passes through as-is elsewhere; here there
+        // is no "as-is" to fall back to, so "the current period" is the safest default).
+        return (curStart, curEnd);
+    }
+
+    /// <summary>Monday-start week — matches RecordRepository.BuildGroupByExpr's existing "Week"
+    /// grouping convention (DATEADD(WEEK, DATEDIFF(WEEK, 0, col), 0), which floors to Monday
+    /// since SQL Server's day 0, 1900-01-01, was itself a Monday) — kept consistent with grouping
+    /// elsewhere in the SAME report builder rather than, say, Quickbase's own Sunday-start weeks.</summary>
+    private static DateTime StartOfDuringPeriod(DateTime d, string unit) => unit.ToLowerInvariant() switch
+    {
+        "day" => d.Date,
+        "month" => new DateTime(d.Year, d.Month, 1),
+        "quarter" => new DateTime(d.Year, ((d.Month - 1) / 3) * 3 + 1, 1),
+        "year" => new DateTime(d.Year, 1, 1),
+        _ => d.Date.AddDays(d.DayOfWeek == DayOfWeek.Sunday ? -6 : 1 - (int)d.DayOfWeek), // "week" + fallback
+    };
+
+    private static DateTime AddDuringUnits(DateTime d, string unit, int amount) => unit.ToLowerInvariant() switch
+    {
+        "day" => d.AddDays(amount),
+        "month" => d.AddMonths(amount),
+        "quarter" => d.AddMonths(amount * 3),
+        "year" => d.AddYears(amount),
+        _ => d.AddDays(amount * 7), // "week" + fallback
+    };
+
+    /// <summary>Last day of the SAME period that periodStart begins (periodStart must already be
+    /// period-aligned — i.e. come from StartOfDuringPeriod/AddDuringUnits-on-a-period-start, not
+    /// an arbitrary date).</summary>
+    private static DateTime EndOfDuringPeriod(DateTime periodStart, string unit) => AddDuringUnits(periodStart, unit, 1).AddDays(-1);
 
     internal async Task<FilterGroup?> ResolveUserFieldValuesAsync(
         FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
@@ -867,20 +972,16 @@ public class RunReportQueryHandler
         bool isMaskedPreview,
         CancellationToken ct)
     {
-        if (!definition.GroupByFieldId.HasValue)
-        {
-            // No group-by configured — return empty result
-            return new PagedReportRunResult { Page = page, PageSize = pageSize };
-        }
-
         var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
         var fieldMap = allFields
             .Where(f => f.Fid.HasValue)
             .GroupBy(f => (long)f.Fid!.Value)
             .ToDictionary(g => g.Key, g => g.First());
 
-        // If the group-by field is hidden, cannot produce a meaningful summary
-        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField) || !visibleFieldIds.Contains(definition.GroupByFieldId.Value))
+        // No group-by configured, or one of the Rows level fields is hidden/unknown — cannot
+        // produce a meaningful summary.
+        var rowGroupSpecs = ResolveRowGroupLevels(definition, fieldMap, visibleFieldIds);
+        if (rowGroupSpecs is null)
         {
             return new PagedReportRunResult { Page = page, PageSize = pageSize };
         }
@@ -930,24 +1031,26 @@ public class RunReportQueryHandler
             : [.. visibleAggregations, gaugeGoalAggregation];
 
         var rows = await _recordRepo.SummarizeAsync(
-            table, groupByField, aggregationsForQuery, allFields, definition.GroupByMode,
+            table, rowGroupSpecs, aggregationsForQuery, allFields,
             filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
             seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
 
         // SummarizeAsync groups by the raw stored value — for a User field that's the numeric
         // user ID, not a display name (unlike RunTableAsync's rows, which already go through
         // ResolveUserNamesAsync). Resolve here too so Summary/Chart categories and series show
-        // "Jane Doe" instead of "4".
-        IReadOnlyDictionary<long, string>? groupUserNames = null;
-        if (groupByField.TypeCode is "User" or "MultiUser")
+        // "Jane Doe" instead of "4". One lookup map per Rows level (a report can have several
+        // User-typed levels, or the same level's field could be User-typed at any position).
+        var rowGroupUserNames = new List<IReadOnlyDictionary<long, string>?>();
+        for (var i = 0; i < rowGroupSpecs.Count; i++)
         {
+            if (rowGroupSpecs[i].Field.TypeCode is not ("User" or "MultiUser")) { rowGroupUserNames.Add(null); continue; }
+            var levelKeyName = $"GroupValue{i}";
             var ids = rows
-                .Select(r => r.TryGetValue("GroupValue", out var v) ? v : null)
+                .Select(r => r.TryGetValue(levelKeyName, out var v) ? v : null)
                 .Where(v => v is not null && long.TryParse(v.ToString(), out _))
                 .Select(v => long.Parse(v!.ToString()!))
                 .ToHashSet();
-            if (ids.Count > 0)
-                groupUserNames = await _userRepo.GetNamesByIdsAsync(ids, ct);
+            rowGroupUserNames.Add(ids.Count > 0 ? await _userRepo.GetNamesByIdsAsync(ids, ct) : new Dictionary<long, string>());
         }
         IReadOnlyDictionary<long, string>? seriesUserNames = null;
         if (seriesField?.TypeCode is "User" or "MultiUser")
@@ -1008,14 +1111,29 @@ public class RunReportQueryHandler
             }
         }
 
-        // Remap SQL alias keys to unique row keys; apply percent transform where configured
-        var groupKey = (groupByField.Fid ?? groupByField.Id).ToString();
+        // Remap SQL alias keys to unique row keys; apply percent transform where configured.
+        // Single-level reports (every Chart report, and every Summary report saved before
+        // RowGroupLevels existed) keep the original bare-fieldId key — chart-config.util.ts's
+        // buildChartJsConfig hardcodes `catKey = String(groupByFieldId)` rather than looking the
+        // column up by its actual key, so changing this format for the single-level case breaks
+        // every chart. Only 2+ levels switch to "row{i}_{fieldId}": Rows allows the SAME field to
+        // appear at more than one level (e.g. "Category" as both level 2 and the last level),
+        // which a plain fieldId key would collide on — the index makes each level's slot unique
+        // (same convention as aggAliasToKey below), and is safe there since Chart/legacy-single
+        // code never reaches the multi-level path (ChartReportConfigValidator forbids
+        // RowGroupLevels outright).
+        var rowGroupKeys = rowGroupSpecs.Count == 1
+            ? [(rowGroupSpecs[0].Field.Fid ?? rowGroupSpecs[0].Field.Id).ToString()]
+            : rowGroupSpecs.Select((g, i) => $"row{i}_{g.Field.Fid ?? g.Field.Id}").ToList();
         var seriesKey = seriesField is not null ? (seriesField.Fid ?? seriesField.Id).ToString() : null;
         var items = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
-            fields[groupKey] = ResolveGroupOrSeriesValue(
-                row.TryGetValue("GroupValue", out var gv) ? gv : null, groupUserNames);
+            for (var i = 0; i < rowGroupSpecs.Count; i++)
+            {
+                fields[rowGroupKeys[i]] = ResolveGroupOrSeriesValue(
+                    row.TryGetValue($"GroupValue{i}", out var gv) ? gv : null, rowGroupUserNames[i]);
+            }
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
             if (seriesKey is not null)
                 fields[seriesKey] = ResolveGroupOrSeriesValue(
@@ -1031,14 +1149,17 @@ public class RunReportQueryHandler
             return new RecordResult { Id = Guid.Empty, CreatedOn = DateTime.UtcNow, Fields = fields };
         }).ToList();
 
-        // Synthetic columns: group-by field + Count + (Chart-only) series field + one per visible
-        // aggregation. Key must match the keys used in `fields` above, or the frontend can't look
-        // up the values by column — FieldId alone is NOT sufficient here (see aggAliasToKey above).
-        var columns = new List<ReportColumnInfo>
+        // Synthetic columns: one per Rows group level, then Count, then (optional) crosstab
+        // series field, then one per visible aggregation. Key must match the keys used in
+        // `fields` above, or the frontend can't look up the values by column — FieldId alone is
+        // NOT sufficient here (see rowGroupKeys/aggAliasToKey above).
+        var columns = new List<ReportColumnInfo>();
+        for (var i = 0; i < rowGroupSpecs.Count; i++)
         {
-            new() { FieldId = groupByField.Fid ?? groupByField.Id, Key = groupKey, Name = string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label, TypeCode = groupByField.TypeCode },
-            new() { FieldId = 0, Key = "0", Name = "Count", TypeCode = "Number" },
-        };
+            var f = rowGroupSpecs[i].Field;
+            columns.Add(new ReportColumnInfo { FieldId = f.Fid ?? f.Id, Key = rowGroupKeys[i], Name = string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, TypeCode = f.TypeCode });
+        }
+        columns.Add(new() { FieldId = 0, Key = "0", Name = "Count", TypeCode = "Number" });
         if (seriesField is not null)
         {
             columns.Add(new ReportColumnInfo { FieldId = seriesField.Fid ?? seriesField.Id, Key = seriesKey!, Name = string.IsNullOrWhiteSpace(seriesField.Label) ? seriesField.Name : seriesField.Label, TypeCode = seriesField.TypeCode });
@@ -1071,6 +1192,37 @@ public class RunReportQueryHandler
             IsDataMasked = isMaskedPreview,
             ResolvedGaugeGoalValue = resolvedGaugeGoalValue,
         };
+    }
+
+    /// <summary>Resolves Summary's "Rows" group levels — RowGroupLevels (the chained "Group by X,
+    /// then by Y, ...") when non-empty, else the legacy single GroupByFieldId/GroupByMode as a
+    /// 1-element list (same "empty means legacy fallback" convention TableSortGroup uses for
+    /// Table reports). Returns null when there's no grouping configured at all, or when any
+    /// level's field is unknown/hidden — RunSummaryAsync/ExportSummaryAsync treat null as "return
+    /// an empty result", matching the pre-existing single-field behavior. Shared with
+    /// ExportReportQueryHandler (same convention as ResolveUserNamesAsync below).</summary>
+    internal static List<(AppField Field, string Mode)>? ResolveRowGroupLevels(
+        ReportDefinition definition, Dictionary<long, AppField> fieldMap, HashSet<long> visibleFieldIds)
+    {
+        var rawLevels = new List<(long FieldId, string Mode)>();
+        if (definition.RowGroupLevels.Count > 0)
+        {
+            foreach (var l in definition.RowGroupLevels)
+                rawLevels.Add((l.FieldId, string.IsNullOrWhiteSpace(l.GroupByMode) ? "EqualValues" : l.GroupByMode));
+        }
+        else if (definition.GroupByFieldId.HasValue)
+        {
+            rawLevels.Add((definition.GroupByFieldId.Value, string.IsNullOrWhiteSpace(definition.GroupByMode) ? "EqualValues" : definition.GroupByMode));
+        }
+        if (rawLevels.Count == 0) return null;
+
+        var resolved = new List<(AppField Field, string Mode)>();
+        foreach (var (fieldId, mode) in rawLevels)
+        {
+            if (!fieldMap.TryGetValue(fieldId, out var field) || !visibleFieldIds.Contains(fieldId)) return null;
+            resolved.Add((field, mode));
+        }
+        return resolved;
     }
 
     /// <summary>Swaps a raw grouped/series value for its resolved display name when one was
@@ -1133,5 +1285,49 @@ public class RunReportQueryHandler
         }
 
         return await userRepo.GetNamesByIdsAsync(ids, ct);
+    }
+
+    /// <summary>Sibling of <see cref="ResolveUserNamesAsync"/>, but resolves each User/MultiUser
+    /// field's internal long id to its public Guid instead of its display name. Used only by
+    /// GetRecordQueryHandler (the single-record fetch backing the Add/Edit Record form) — every
+    /// other read path (list/table, Summary/Chart, export) wants a ready-to-display name and keeps
+    /// using ResolveUserNamesAsync. The Edit form's User/MultiUser picker is keyed by userPublicId
+    /// (see AppUserPickerResponse / UserFieldValueResolver, which resolves the picker's submitted
+    /// Guid back to this same long id on save) — handing it a display name instead of a Guid left
+    /// the picker unable to match any option, showing empty ("Select User") no matter what was
+    /// actually saved. Deliberately does NOT cover CreatedBy/ModifiedBy — those are read-only
+    /// system columns never rendered through a picker, so they stay resolved to names via
+    /// ResolveUserNamesAsync regardless.</summary>
+    internal static async Task<IReadOnlyDictionary<long, Guid>> ResolveUserPublicIdsAsync(
+        IEnumerable<IReadOnlyDictionary<string, object?>> rows,
+        IReadOnlyList<AppField> fields,
+        IUserRepository userRepo,
+        CancellationToken ct)
+    {
+        var hasUserFields = fields.Any(f => f.TypeCode is "User" or "MultiUser");
+        if (!hasUserFields) return new Dictionary<long, Guid>();
+
+        var ids = new HashSet<long>();
+        foreach (var row in rows)
+        {
+            foreach (var f in fields.Where(f => f.TypeCode is "User" or "MultiUser" && f.Fid.HasValue))
+            {
+                var col = PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value);
+                if (!row.TryGetValue(col, out var val) || val is null) continue;
+                var str = val.ToString()!;
+                if (str.TrimStart().StartsWith('['))
+                {
+                    try
+                    {
+                        var parsed = System.Text.Json.JsonSerializer.Deserialize<List<long>>(str);
+                        if (parsed != null) foreach (var pid in parsed) ids.Add(pid);
+                    }
+                    catch { }
+                }
+                else if (long.TryParse(str, out var uid)) ids.Add(uid);
+            }
+        }
+
+        return await userRepo.GetPublicIdsByIdsAsync(ids, ct);
     }
 }

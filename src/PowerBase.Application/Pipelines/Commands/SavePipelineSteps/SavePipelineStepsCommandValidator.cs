@@ -24,12 +24,15 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             return;
         }
 
-        // Rule 1: Must begin with exactly one Trigger or Search/Query step at root index 0
+        // Rule 1: valid roots include trigger/query flows, Make Request, error handling, and bulk upsert flows.
         var firstStep = steps[0];
-        bool isValidFirstStep = firstStep.Type == "trigger" || (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record"));
+        bool isValidFirstStep = firstStep.Type == "trigger" ||
+            (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
+            firstStep.Subtype == "handle-errors" ||
+            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request"));
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A pipeline must begin with either a Trigger step or a Search/Query step.");
+            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, or Prepare Bulk Record Upsert step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();
@@ -38,8 +41,9 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         // Traverse steps hierarchically to build lists and check structure
         var allStepsFlat = new List<(SavePipelineStepDto Step, string? ParentRefId, string? BranchType)>();
         var parentMap = new Dictionary<string, string>(); // childRefId -> parentRefId
+        var errorScope = new HashSet<string>();
 
-        void Traverse(List<SavePipelineStepDto> list, string? parentRefId, string? branchType)
+        void Traverse(List<SavePipelineStepDto> list, string? parentRefId, string? branchType, bool errorInScope = false)
         {
             if (list == null) return;
             foreach (var step in list)
@@ -47,6 +51,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                 allStepsFlat.Add((step, parentRefId, branchType));
                 if (!string.IsNullOrEmpty(step.RefId))
                 {
+                    if (errorInScope) errorScope.Add(step.RefId);
                     stepById[step.RefId] = step;
                     if (!string.IsNullOrEmpty(parentRefId))
                     {
@@ -60,10 +65,10 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                 }
 
                 // Check nested collections
-                if (step.Children != null) Traverse(step.Children, step.RefId, "children");
-                if (step.ElseChildren != null) Traverse(step.ElseChildren, step.RefId, "elseChildren");
-                if (step.SuccessChildren != null) Traverse(step.SuccessChildren, step.RefId, "successChildren");
-                if (step.ErrorChildren != null) Traverse(step.ErrorChildren, step.RefId, "errorChildren");
+                if (step.Children != null) Traverse(step.Children, step.RefId, "children", errorInScope);
+                if (step.ElseChildren != null) Traverse(step.ElseChildren, step.RefId, "elseChildren", errorInScope);
+                if (step.SuccessChildren != null) Traverse(step.SuccessChildren, step.RefId, "successChildren", errorInScope);
+                if (step.ErrorChildren != null) Traverse(step.ErrorChildren, step.RefId, "errorChildren", errorInScope || step.Subtype == "handle-errors");
             }
         }
 
@@ -117,6 +122,20 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         var traversedRefIds = new HashSet<string>();
         foreach (var (step, parentRefId, branchType) in allStepsFlat)
         {
+            if (step.Subtype == "make-request" && step.IsValidated)
+            {
+                try
+                {
+                    var request = MakeRequestDefinition.Read(step.ConfigJson ?? "{}");
+                    request.Validate();
+                    if (!request.IsPowerBase && !request.HttpConnectionId.HasValue)
+                        context.AddFailure("Steps", $"Make Request '{step.RefId}': Connect the HTTP account before saving a validated step.");
+                }
+                catch (Exception ex) { context.AddFailure("Steps", $"Make Request '{step.RefId}': {ex.Message}"); }
+            }
+            if ((step.Subtype == "pipeline-called" && (step.Type != "trigger" || step != firstStep)) ||
+                (step.Subtype == "call-another-pipeline" && step.Type != "action"))
+                context.AddFailure("Steps", "Pipeline Called must be the first root trigger; Call Another Pipeline must be an action.");
             // Rule 3 (Nested triggers check): If trigger, it must be at the root (parentRefId == null)
             if (step.Type == "trigger" && parentRefId != null)
             {
@@ -295,6 +314,15 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                     var refId = match.Groups[1].Value;
                     if (refId == "trigger" || refId.StartsWith("fid_")) continue;
 
+                     if (string.Equals(refId, "ERROR", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!errorScope.Contains(step.RefId))
+                        {
+                            context.AddFailure("Steps", $"Step '{step.RefId}' cannot reference ERROR object outside of an On error branch.");
+                        }
+                        continue;
+                    }
+
                     if (!traversedRefIds.Contains(refId))
                     {
                         context.AddFailure("Steps", $"Step '{step.RefId}' refers to a step '{refId}' in placeholder '{match.Value}' that does not exist or is not preceding.");
@@ -399,11 +427,143 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                 }
             }
 
+            if (string.Equals(step.Type, "condition", StringComparison.OrdinalIgnoreCase) || string.Equals(step.Subtype, "condition", StringComparison.OrdinalIgnoreCase))
+            {
+                if (step.IsValidated && !string.IsNullOrEmpty(step.ConfigJson))
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(step.ConfigJson);
+                        var root = doc.RootElement;
+
+                        bool hasRuleGroups = root.TryGetProperty("ruleGroups", out var rgProp) || root.TryGetProperty("RuleGroups", out rgProp);
+                        if (!hasRuleGroups || rgProp.ValueKind != JsonValueKind.Array || rgProp.GetArrayLength() == 0)
+                        {
+                            bool hasLegacyLeft = root.TryGetProperty("leftOperand", out var lProp) || root.TryGetProperty("LeftOperand", out lProp);
+                            if (!hasLegacyLeft || string.IsNullOrWhiteSpace(GetStringOrPrimitive(lProp)))
+                            {
+                                context.AddFailure("Steps", $"Condition step '{step.RefId}' must contain at least one valid rule group.");
+                            }
+                        }
+                        else
+                        {
+                            void ValidateGroupJson(JsonElement grp, string path)
+                            {
+                                if (grp.ValueKind != JsonValueKind.Object) return;
+
+                                if (grp.TryGetProperty("logicalOp", out var opProp) || grp.TryGetProperty("LogicalOp", out opProp))
+                                {
+                                    if (opProp.ValueKind == JsonValueKind.Null)
+                                    {
+                                        context.AddFailure("Steps", $"Condition step '{step.RefId}' contains invalid LogicalOp null. Allowed values are AND or OR.");
+                                    }
+                                    else
+                                    {
+                                        var opStr = opProp.GetString()?.Trim();
+                                        if (string.IsNullOrWhiteSpace(opStr) ||
+                                            (!opStr.Equals("AND", StringComparison.OrdinalIgnoreCase) &&
+                                             !opStr.Equals("OR", StringComparison.OrdinalIgnoreCase)))
+                                        {
+                                            context.AddFailure("Steps", $"Condition step '{step.RefId}' contains invalid LogicalOp '{opStr}'. Allowed values are AND or OR.");
+                                        }
+                                    }
+                                }
+
+                                if (grp.TryGetProperty("rules", out var rulesProp) && rulesProp.ValueKind == JsonValueKind.Array)
+                                {
+                                    foreach (var rule in rulesProp.EnumerateArray())
+                                    {
+                                        if (rule.ValueKind != JsonValueKind.Object) continue;
+                                        var rType = rule.TryGetProperty("type", out var tProp) ? tProp.GetString() : "rule";
+                                        if (rType == "nested")
+                                        {
+                                            if (rule.TryGetProperty("groups", out var subGrps) && subGrps.ValueKind == JsonValueKind.Array)
+                                            {
+                                                foreach (var subGrp in subGrps.EnumerateArray())
+                                                {
+                                                    ValidateGroupJson(subGrp, path + ".subGroup");
+                                                }
+                                            }
+                                        }
+                                        else
+                                        {
+                                            bool hasLeftProp = rule.TryGetProperty("left", out var leftProp);
+                                            bool hasRightProp = rule.TryGetProperty("right", out var rightProp);
+
+                                            if (hasLeftProp && (leftProp.ValueKind == JsonValueKind.Object || leftProp.ValueKind == JsonValueKind.Array))
+                                            {
+                                                context.AddFailure("Steps", $"Condition step '{step.RefId}' left operand contains invalid complex JSON structure.");
+                                            }
+                                            if (hasRightProp && (rightProp.ValueKind == JsonValueKind.Object || rightProp.ValueKind == JsonValueKind.Array))
+                                            {
+                                                context.AddFailure("Steps", $"Condition step '{step.RefId}' right operand contains invalid complex JSON structure.");
+                                            }
+
+                                            string? left = hasLeftProp ? GetStringOrPrimitive(leftProp) : null;
+                                            string? op = rule.TryGetProperty("op", out var oProp) ? oProp.GetString() : null;
+                                            string? right = hasRightProp ? GetStringOrPrimitive(rightProp) : null;
+
+                                            if (string.IsNullOrWhiteSpace(left))
+                                            {
+                                                context.AddFailure("Steps", $"Condition step '{step.RefId}' rule is missing left operand.");
+                                            }
+                                            if (string.IsNullOrWhiteSpace(op))
+                                            {
+                                                context.AddFailure("Steps", $"Condition step '{step.RefId}' rule is missing operator.");
+                                            }
+
+                                            // Validate token references in left/right
+                                            void ValidateTokenRef(string token, string operandName)
+                                            {
+                                                var match = System.Text.RegularExpressions.Regex.Match(token, @"\{\{\s*(?:steps\.)?([a-zA-Z0-9_]+)");
+                                                if (match.Success)
+                                                {
+                                                    var refId = match.Groups[1].Value;
+                                                    if (refId != "trigger" && !traversedRefIds.Contains(refId))
+                                                    {
+                                                        context.AddFailure("Steps", $"Condition step '{step.RefId}' {operandName} refers to step '{refId}' that is not preceding or does not exist.");
+                                                    }
+                                                }
+                                            }
+
+                                            if (!string.IsNullOrWhiteSpace(left)) ValidateTokenRef(left, "left operand");
+                                            if (!string.IsNullOrWhiteSpace(right)) ValidateTokenRef(right, "right operand");
+                                        }
+                                    }
+                                }
+                            }
+
+                            foreach (var grp in rgProp.EnumerateArray())
+                            {
+                                ValidateGroupJson(grp, "ruleGroups");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        context.AddFailure("Steps", $"Condition step '{step.RefId}' has invalid JSON configuration: {ex.Message}");
+                    }
+                }
+            }
+
             if (!string.IsNullOrEmpty(step.RefId))
             {
                 traversedRefIds.Add(step.RefId);
             }
         }
     }
-}
 
+    private static string? GetStringOrPrimitive(JsonElement element)
+    {
+        return element.ValueKind switch
+        {
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number => element.GetRawText(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            JsonValueKind.Null => null,
+            JsonValueKind.Undefined => null,
+            _ => null
+        };
+    }
+}

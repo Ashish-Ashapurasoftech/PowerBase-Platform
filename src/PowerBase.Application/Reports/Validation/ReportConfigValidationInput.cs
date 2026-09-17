@@ -27,6 +27,7 @@ public sealed class ReportConfigValidationInput
     public string ColumnsMode { get; init; } = "Custom";
     public List<SortGroupLevelCommand> TableSortGroup { get; init; } = [];
     public ReportOptionsCommand? Options { get; init; }
+    public List<RowGroupLevelCommand> RowGroupLevels { get; init; } = [];
 
     public static ReportConfigValidationInput FromCreate(CreateReportCommand command) => new()
     {
@@ -46,6 +47,7 @@ public sealed class ReportConfigValidationInput
         ColumnsMode = command.ColumnsMode,
         TableSortGroup = command.TableSortGroup ?? [],
         Options = command.Options,
+        RowGroupLevels = command.RowGroupLevels ?? [],
     };
 
     public static ReportConfigValidationInput FromUpdate(UpdateReportCommand command) => new()
@@ -66,5 +68,6 @@ public sealed class ReportConfigValidationInput
         ColumnsMode = command.ColumnsMode,
         TableSortGroup = command.TableSortGroup ?? [],
         Options = command.Options,
+        RowGroupLevels = command.RowGroupLevels ?? [],
     };
 }

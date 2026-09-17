@@ -26,7 +26,7 @@ public class DatabasePipelineExecutionWorker : BackgroundService
     private readonly PipelineExecutionOptions _options;
     private readonly ILogger<DatabasePipelineExecutionWorker> _logger;
     private readonly string _workerId;
-    
+
     private readonly ConcurrentDictionary<string, Task> _activeTasks = new();
     private static readonly ConcurrentDictionary<long, SemaphoreSlim> TenantSemaphores = new();
 
@@ -67,64 +67,12 @@ public class DatabasePipelineExecutionWorker : BackgroundService
         {
             try
             {
-                // Await wake signal or timeout
-                await Task.WhenAny(
-                    DatabasePipelineQueueWakeNotifier.WaitForJobAsync(stoppingToken),
-                    Task.Delay(TimeSpan.FromSeconds(_options.DatabaseQueue.QueuePollingIntervalSeconds), stoppingToken)
-                );
+                await DatabasePipelineQueueWakeNotifier.WaitForJobAsync(
+                    TimeSpan.FromSeconds(_options.DatabaseQueue.QueuePollingIntervalSeconds), stoppingToken);
 
                 if (stoppingToken.IsCancellationRequested) break;
-
-                // 1. Query eligible tenants based on process-local semaphore limit
                 var eligibleTenants = await GetEligibleTenantsAsync(stoppingToken);
-
-                // 2. Reclaim expired Processing leases directly
-                await ReclaimExpiredLeasesAsync(eligibleTenants, stoppingToken);
-
-                if (eligibleTenants.Count == 0)
-                {
-                    continue;
-                }
-
-                // 3. Claim new Pending jobs
-                IReadOnlyList<PipelineQueue> claimed;
-                using (var scope = _serviceProvider.CreateScope())
-                {
-                    var queueRepo = scope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
-                    claimed = await queueRepo.ClaimPendingJobsAsync(
-                        _workerId,
-                        _options.DatabaseQueue.ExecutionBatchSize,
-                        _options.DatabaseQueue.LeaseSeconds,
-                        eligibleTenants,
-                        stoppingToken);
-                }
-
-                foreach (var job in claimed)
-                {
-                    if (stoppingToken.IsCancellationRequested) break;
-                    
-                    // Dispatch execution in separate background task
-                    var taskKey = job.PublicId.ToString();
-                    var tcs = new TaskCompletionSource<bool>();
-                    _activeTasks[taskKey] = tcs.Task;
-
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await ProcessJobAsync(job, stoppingToken);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Fatal execution error for job {Id} (MessageId: {MessageId}).", job.Id, job.MessageId);
-                        }
-                        finally
-                        {
-                            _activeTasks.TryRemove(taskKey, out _);
-                            tcs.SetResult(true);
-                        }
-                    }, stoppingToken);
-                }
+                await DispatchAvailableJobsAsync(eligibleTenants, stoppingToken);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -142,55 +90,61 @@ public class DatabasePipelineExecutionWorker : BackgroundService
         }
     }
 
-    private async Task ReclaimExpiredLeasesAsync(List<long> eligibleTenantIds, CancellationToken ct)
+    private async Task DispatchAvailableJobsAsync(List<long> eligibleTenantIds, CancellationToken ct)
     {
-        try
+        foreach (var tenantId in eligibleTenantIds)
         {
-            IReadOnlyList<PipelineQueue> reclaimed;
-            using (var scope = _serviceProvider.CreateScope())
+            ct.ThrowIfCancellationRequested();
+            try
             {
+                var semaphore = TenantSemaphores.GetOrAdd(tenantId,
+                    _ => new SemaphoreSlim(_options.PerInstanceTenantConcurrencyLimit, _options.PerInstanceTenantConcurrencyLimit));
+                var capacity = Math.Min(semaphore.CurrentCount, _options.DatabaseQueue.ExecutionBatchSize);
+                if (capacity <= 0) continue;
+
+                using var scope = _serviceProvider.CreateScope();
                 var queueRepo = scope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
-                reclaimed = await queueRepo.ReclaimExpiredJobsAsync(
-                    _workerId,
-                    _options.DatabaseQueue.ExecutionBatchSize,
-                    _options.DatabaseQueue.LeaseSeconds,
-                    eligibleTenantIds,
-                    ct);
+                // Claim only jobs that can start now. Waiting behind a semaphore after
+                // claiming lets leases expire before their heartbeat has even started.
+                var reclaimed = await queueRepo.ReclaimExpiredJobsAsync(
+                    _workerId, capacity, _options.DatabaseQueue.LeaseSeconds, [tenantId], ct);
+                foreach (var job in reclaimed.Where(j => j.Status != "Failed")) DispatchJob(job, ct);
+
+                capacity = Math.Min(semaphore.CurrentCount, _options.DatabaseQueue.ExecutionBatchSize);
+                if (capacity <= 0) continue;
+                var pending = await queueRepo.ClaimPendingJobsAsync(
+                    _workerId, capacity, _options.DatabaseQueue.LeaseSeconds, [tenantId], ct);
+                foreach (var job in pending) DispatchJob(job, ct);
             }
-
-            foreach (var job in reclaimed)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex)
             {
-                if (job.Status == "Failed")
-                {
-                    _logger.LogWarning("Reclaimed job {Id} (MessageId: {MessageId}) exceeded max attempts and is now Failed.", job.Id, job.MessageId);
-                    continue;
-                }
-
-                var taskKey = job.PublicId.ToString();
-                var tcs = new TaskCompletionSource<bool>();
-                _activeTasks[taskKey] = tcs.Task;
-
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await ProcessJobAsync(job, ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Fatal error running reclaimed job {Id}.", job.Id);
-                    }
-                    finally
-                    {
-                        _activeTasks.TryRemove(taskKey, out _);
-                        tcs.SetResult(true);
-                    }
-                }, ct);
+                _logger.LogError(ex, "Failed claiming pipeline jobs for tenant {TenantId}.", tenantId);
             }
         }
-        catch (Exception ex)
+    }
+
+    private void DispatchJob(PipelineQueue job, CancellationToken ct)
+    {
+        var taskKey = job.PublicId.ToString();
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_activeTasks.TryAdd(taskKey, completion.Task)) return;
+        // Start inline so ProcessJobAsync reserves tenant capacity before another
+        // batch is claimed. Async database I/O does not need Task.Run.
+        _ = RunAsync();
+
+        async Task RunAsync()
         {
-            _logger.LogError(ex, "Failed during expired job reclamation run.");
+            try { await ProcessJobAsync(job, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            catch (Exception ex) { _logger.LogError(ex, "Fatal execution error for job {Id}.", job.Id); }
+            finally
+            {
+                _activeTasks.TryRemove(taskKey, out _);
+                completion.TrySetResult(true);
+                // Immediately refill the slot instead of waiting for the next poll.
+                DatabasePipelineQueueWakeNotifier.Wake();
+            }
         }
     }
 
@@ -234,6 +188,9 @@ public class DatabasePipelineExecutionWorker : BackgroundService
 
         var semaphore = TenantSemaphores.GetOrAdd(job.TenantId, _ => new SemaphoreSlim(_options.PerInstanceTenantConcurrencyLimit, _options.PerInstanceTenantConcurrencyLimit));
         await semaphore.WaitAsync(ct);
+
+        _logger.LogInformation("Starting queued pipeline job {JobId} for tenant {TenantId}. Queue wait: {QueueWaitMs} ms, attempt: {AttemptCount}.",
+            job.Id, job.TenantId, (DateTime.UtcNow - job.CreatedOn).TotalMilliseconds, job.AttemptCount);
 
         CancellationTokenSource heartbeatCts = new();
         Task? heartbeatTask = null;

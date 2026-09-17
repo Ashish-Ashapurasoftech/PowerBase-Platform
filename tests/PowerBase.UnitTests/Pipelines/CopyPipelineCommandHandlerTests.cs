@@ -226,12 +226,12 @@ public class CopyPipelineCommandHandlerTests
             .Returns((Guid.NewGuid(), 2L));
         _pipelineRepo.GetRowVersionAsync(2L, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new byte[] { 1 });
-        _pipelineRepo.GetStepsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
-            .Returns(new List<PipelineStep>());
-
+        var originalConnectionPublicId = Guid.NewGuid();
+        var copiedConnectionPublicId = Guid.NewGuid();
         var originalConnection = new PipelineConnection
         {
             Id = 50L,
+            PublicId = originalConnectionPublicId,
             PipelineId = sourceId,
             Name = "My Outlook",
             Type = "outlook",
@@ -239,6 +239,22 @@ public class CopyPipelineCommandHandlerTests
         };
         _pipelineRepo.GetConnectionsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
             .Returns(new List<PipelineConnection> { originalConnection });
+        _pipelineRepo.CreateConnectionAsync(Arg.Any<PipelineConnection>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns((copiedConnectionPublicId, 51L));
+        _pipelineRepo.GetStepsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
+            .Returns(new List<PipelineStep>
+            {
+                new()
+                {
+                    Id = 60L,
+                    PublicId = Guid.NewGuid(),
+                    PipelineId = sourceId,
+                    RefId = "ref_2001",
+                    Type = "action",
+                    Subtype = "make-request",
+                    ConfigJson = $"{{\"requestMode\":\"http\",\"httpConnectionId\":\"{originalConnectionPublicId}\"}}"
+                }
+            });
 
         var command = new CopyPipelineCommand(sourcePublicId);
 
@@ -251,6 +267,64 @@ public class CopyPipelineCommandHandlerTests
             Arg.Any<IDbTransaction>(),
             Arg.Any<CancellationToken>()
         );
+        await _pipelineRepo.Received(1).SaveStepsAsync(
+            2L,
+            Arg.Is<List<PipelineStep>>(steps => steps.Count == 1 &&
+                (steps[0].ConfigJson ?? "").Contains(copiedConnectionPublicId.ToString()) &&
+                !(steps[0].ConfigJson ?? "").Contains(originalConnectionPublicId.ToString())),
+            Arg.Any<byte[]>(),
+            false,
+            Arg.Any<IDbTransaction>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleAsync_MultipleConnections_ShouldRemapEachReferenceAndPreserveUnknownGuids()
+    {
+        var sourceId = 11L;
+        var copiedPipelineId = 12L;
+        var sourcePublicId = Guid.NewGuid();
+        var sourceHttpA = Guid.NewGuid();
+        var sourceHttpB = Guid.NewGuid();
+        var copiedHttpA = Guid.NewGuid();
+        var copiedHttpB = Guid.NewGuid();
+        var unrelatedGuid = Guid.NewGuid();
+
+        _pipelineRepo.GetByPublicIdAsync(sourcePublicId, Arg.Any<CancellationToken>())
+            .Returns(new Pipeline { Id = sourceId, PublicId = sourcePublicId, AppId = 10L, Name = "Requests" });
+        _pipelineRepo.GetPipelineNamesForUserAsync(999L, Arg.Any<CancellationToken>()).Returns(new List<string>());
+        _pipelineRepo.CreateAsync(Arg.Any<Pipeline>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns((Guid.NewGuid(), copiedPipelineId));
+        _pipelineRepo.GetRowVersionAsync(copiedPipelineId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new byte[] { 1 });
+        _pipelineRepo.GetConnectionsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
+            .Returns(new List<PipelineConnection>
+            {
+                new() { Id = 1, PublicId = sourceHttpA, PipelineId = sourceId, Name = "HTTP A", Type = "http-request", CredentialsJson = "encrypted-a" },
+                new() { Id = 2, PublicId = sourceHttpB, PipelineId = sourceId, Name = "HTTP B", Type = "http-request", CredentialsJson = "encrypted-b" }
+            });
+        _pipelineRepo.CreateConnectionAsync(Arg.Any<PipelineConnection>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(call => call.Arg<PipelineConnection>().Name == "HTTP A" ? (copiedHttpA, 101L) : (copiedHttpB, 102L));
+        _pipelineRepo.GetStepsByPipelineIdAsync(sourceId, Arg.Any<CancellationToken>())
+            .Returns(new List<PipelineStep>
+            {
+                new() { Id = 20, PublicId = Guid.NewGuid(), PipelineId = sourceId, RefId = "ref_a", Type = "action", Subtype = "make-request", ConfigJson = $"{{\"httpConnectionId\":\"{sourceHttpA}\",\"correlationId\":\"{unrelatedGuid}\"}}" },
+                new() { Id = 21, PublicId = Guid.NewGuid(), PipelineId = sourceId, RefId = "ref_b", Type = "action", Subtype = "make-request", ConfigJson = $"{{\"httpConnectionId\":\"{sourceHttpB}\"}}" }
+            });
+
+        await _handler.HandleAsync(new CopyPipelineCommand(sourcePublicId), CancellationToken.None);
+
+        await _pipelineRepo.Received(1).SaveStepsAsync(
+            copiedPipelineId,
+            Arg.Is<List<PipelineStep>>(steps =>
+                steps.Count == 2 &&
+                steps.Any(step => (step.ConfigJson ?? "").Contains(unrelatedGuid.ToString()) && (step.ConfigJson ?? "").Contains(copiedHttpA.ToString())) &&
+                steps.Any(step => (step.ConfigJson ?? "").Contains(copiedHttpB.ToString())) &&
+                steps.All(step => !(step.ConfigJson ?? "").Contains(sourceHttpA.ToString()) && !(step.ConfigJson ?? "").Contains(sourceHttpB.ToString()))),
+            Arg.Any<byte[]>(),
+            false,
+            Arg.Any<IDbTransaction>(),
+            Arg.Any<CancellationToken>());
     }
 
     [Fact]
