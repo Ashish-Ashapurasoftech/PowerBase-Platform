@@ -148,6 +148,7 @@ public class PipelineEngine : IPipelineEngine
         long runId = 0;
         PipelineRun? run = null;
         Guid? messageGuid = null;
+        bool resumingPause = false;
 
         if (!string.IsNullOrEmpty(task.MessageId) && Guid.TryParse(task.MessageId, out var parsedMsgId))
         {
@@ -191,7 +192,7 @@ public class PipelineEngine : IPipelineEngine
                 if (run != null)
                 {
                     runId = run.Id;
-                    if (run.Status == "Success" || run.Status == "Skipped")
+                    if (run.Status == "Success" || run.Status == "Skipped" || run.Status == "Stopped")
                     {
                         _logger.LogInformation("Pipeline execution {MessageId} already completed with status {Status}. Skipping.", messageGuid.Value, run.Status);
                         suppressScope.Complete();
@@ -231,6 +232,19 @@ public class PipelineEngine : IPipelineEngine
                         if (!claimed)
                         {
                             _logger.LogWarning("Failed to claim failed run retry for {MessageId}. Skipping.", messageGuid.Value);
+                            suppressScope.Complete();
+                            return;
+                        }
+                        run = await _pipelineRepo.GetRunByMessageIdAsync(messageGuid.Value, ct);
+                    }
+                    else if (run.Status == "Waiting")
+                    {
+                        resumingPause = true;
+                        // Claim waiting run back to running
+                        var claimed = await _pipelineRepo.ClaimWaitingRunAsync(messageGuid.Value, workerId, ct);
+                        if (!claimed)
+                        {
+                            _logger.LogWarning("Failed to claim waiting run for {MessageId}. Skipping.", messageGuid.Value);
                             suppressScope.Complete();
                             return;
                         }
@@ -368,9 +382,10 @@ public class PipelineEngine : IPipelineEngine
                     var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
                     var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
                     var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
-                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot)
+                    var isPauseRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "pause";
+                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot && !isPauseRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query, Make Request, Copy Records, or Prepare Bulk Record Upsert first step.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query, Make Request, Copy Records, Prepare Bulk Record Upsert, or Pause first step.");
                     }
                 }
                 else if (normalizedEventName == "pipeline_schedule")
@@ -379,9 +394,10 @@ public class PipelineEngine : IPipelineEngine
                     var isPrepareBulkRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "prepare-bulk-upsert";
                     var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
                     var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
-                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot)
+                    var isPauseRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "pause";
+                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot && !isPauseRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a Search/Query, Make Request, Copy Records, or Prepare Bulk Record Upsert first step.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a Search/Query, Make Request, Copy Records, Prepare Bulk Record Upsert, or Pause first step.");
                     }
                     if (activeSteps.Any(s => s.Type == "trigger"))
                     {
@@ -478,6 +494,7 @@ public class PipelineEngine : IPipelineEngine
                 contextDict["_Depth"] = task.Depth;
                 contextDict["_CreatedBy"] = pipelineMeta.CreatedBy;
                 contextDict["_MessageId"] = messageGuid ?? Guid.Empty;
+                contextDict["_ResumeAfterPause"] = resumingPause;
                 var stepsDict = new Dictionary<string, object>();
                 contextDict["steps"] = stepsDict;
 
@@ -587,6 +604,12 @@ public class PipelineEngine : IPipelineEngine
                 await ExecuteSiblingStepsAsync(runId, activeSteps, null, null, contextDict, stepsDict, snapshots, "root", ct);
                 txSuccess = true;
             }
+            catch (PowerBase.Domain.Exceptions.PipelineWaitException)
+            {
+                // Pausing preserves all steps completed so far; they were not rolled back.
+                txSuccess = true;
+                throw;
+            }
             finally
             {
                 var executionTimeMs = sw.ElapsedMilliseconds;
@@ -685,6 +708,39 @@ public class PipelineEngine : IPipelineEngine
                 suppressScope.Complete();
             }
             _logger.LogInformation("Pipeline {PipelineId} execution completed successfully.", task.PipelineId);
+        }
+        catch (PowerBase.Domain.Exceptions.PipelineWaitException waitEx)
+        {
+            using (var suppressScope = new TransactionScope(TransactionScopeOption.Suppress, TransactionScopeAsyncFlowOption.Enabled))
+            {
+                bool holdLease = true;
+                if (messageGuid.HasValue)
+                {
+                    var freshRun = await _pipelineRepo.GetRunByMessageIdAsync(messageGuid.Value, ct);
+                    if (freshRun == null || freshRun.LockedBy != workerId) holdLease = false;
+                }
+
+                if (holdLease)
+                {
+                    run.Status = "Waiting";
+                    run.ErrorMessage = $"Paused until {waitEx.ResumeDate:O}";
+                    run.LockedBy = null;
+                    run.LockedUntil = null;
+                    // Intentionally leave CompletedOn unchanged/null because it's not complete.
+                    await _pipelineRepo.UpdateRunAsync(run, ct);
+
+                    await _pipelineRepo.UpdateRunAttemptAsync(new PipelineRunAttempt
+                    {
+                        Id = attemptId,
+                        PipelineRunId = run.Id,
+                        AttemptNumber = run.AttemptCount,
+                        Status = "Waiting",
+                        LastError = $"Paused until {waitEx.ResumeDate:O}"
+                    }, ct);
+                }
+                suppressScope.Complete();
+            }
+            throw; // Bubble up to queue worker
         }
         catch (PipelineStopExecutionException stopEx)
         {
@@ -840,6 +896,24 @@ public class PipelineEngine : IPipelineEngine
                 throw new PipelineStopExecutionException("Execution halted: Pipeline was deactivated.");
             }
 
+            var currentPath = $"{executionPath}/{step.RefId}";
+            var replayable = step.Type is "action" or "query" or "trigger"
+                && step.Subtype is not ("pause" or "prepare-bulk-upsert" or "commit-upsert");
+            var messageId = contextDict.TryGetValue("_MessageId", out var messageObj) && messageObj is Guid guid
+                ? guid : Guid.Empty;
+            var pathHash = ComputeSha256Hash(currentPath);
+            if (replayable && messageId != Guid.Empty &&
+                contextDict.TryGetValue("_ResumeAfterPause", out var resumeObj) && resumeObj is true)
+            {
+                var previousOutput = await _idempotencyRepo.GetByExecutionKeyAsync(messageId, step.PublicId, pathHash, null, ct);
+                if (previousOutput != null)
+                {
+                    if (step.Type != "trigger" && !string.IsNullOrEmpty(step.RefId))
+                        stepsDict[step.RefId] = JsonSerializer.Deserialize<object>(previousOutput)!;
+                    continue;
+                }
+            }
+
             var stepRun = new PipelineStepRun
             {
                 PipelineRunId = runId,
@@ -858,12 +932,24 @@ public class PipelineEngine : IPipelineEngine
             }
 
             var corrId = contextDict.TryGetValue("_CorrelationId", out var cIdObj) ? cIdObj?.ToString() ?? string.Empty : string.Empty;
-            var currentPath = $"{executionPath}/{step.RefId}";
 
             try
             {
                 var contextJson = JsonSerializer.Serialize(contextDict);
                 var output = await ExecuteStepAsync(step, contextJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, currentPath, ct);
+
+                if (replayable && messageId != Guid.Empty && output != null &&
+                    await _idempotencyRepo.GetByExecutionKeyAsync(messageId, step.PublicId, pathHash, null, ct) == null)
+                {
+                    await _idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
+                    {
+                        MessageId = messageId,
+                        StepPublicId = step.PublicId,
+                        ExecutionPathHash = pathHash,
+                        ExecutionPath = currentPath,
+                        OutputJson = output
+                    }, null, ct);
+                }
 
                 if (step.Type == "trigger")
                 {
@@ -921,6 +1007,39 @@ public class PipelineEngine : IPipelineEngine
                         stepsDict[step.RefId] = output;
                     }
                 }
+            }
+            catch (PowerBase.Domain.Exceptions.PipelineWaitException waitEx)
+            {
+                stepRun.Status = "Waiting";
+                stepRun.CompletedOn = DateTime.UtcNow;
+
+                var output = JsonSerializer.Serialize(new { Status = "Waiting", ResumeDate = waitEx.ResumeDate });
+                snapshots.Add(new RawStepAuditSnapshot
+                {
+                    Step = step,
+                    StepRun = stepRun,
+                    RawInputJson = stepRun.InputContext,
+                    RawOutputJson = output,
+                    Status = stepRun.Status,
+                    StartedOn = stepRun.StartedOn,
+                    CompletedOn = stepRun.CompletedOn.Value
+                });
+
+                using (var suppressScope = new TransactionScope(TransactionScopeOption.Suppress, TransactionScopeAsyncFlowOption.Enabled))
+                {
+                    await _pipelineRepo.UpdateStepRunAsync(new PipelineStepRun
+                    {
+                        Id = stepRun.Id,
+                        PipelineRunId = stepRun.PipelineRunId,
+                        StepId = stepRun.StepId,
+                        Status = stepRun.Status,
+                        StartedOn = stepRun.StartedOn,
+                        CompletedOn = stepRun.CompletedOn,
+                        LogMessage = $"Step paused until {waitEx.ResumeDate:O}"
+                    }, ct);
+                    suppressScope.Complete();
+                }
+                throw;
             }
             catch (PipelineStopExecutionException stopEx)
             {
@@ -1281,6 +1400,45 @@ public class PipelineEngine : IPipelineEngine
                 _logger.LogInformation("Idempotent replay match found for step {StepPublicId} at path {Path}. Returning cached output.", step.PublicId, executionPath);
                 return cachedOutput;
             }
+        }
+        else if (subtype == "pause")
+        {
+            var cachedOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
+            if (!string.IsNullOrEmpty(cachedOutput))
+            {
+                var cached = JsonSerializer.Deserialize<Dictionary<string, object>>(cachedOutput);
+                if (cached != null && cached.TryGetValue("ResumeDate", out var rdObj) && DateTime.TryParse(rdObj.ToString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var resumeDate))
+                {
+                    if (DateTime.UtcNow >= resumeDate)
+                    {
+                        _logger.LogInformation("Pause step {StepPublicId} wait condition satisfied.", step.PublicId);
+                        return JsonSerializer.Serialize(new { Status = "Success" });
+                    }
+                    else
+                    {
+                        _logger.LogInformation("Pause step {StepPublicId} still waiting until {ResumeDate}.", step.PublicId, resumeDate);
+                        throw new PowerBase.Domain.Exceptions.PipelineWaitException(resumeDate);
+                    }
+                }
+                throw new InvalidOperationException("Saved pause resume date is invalid; refusing to restart the timer.");
+            }
+
+            var delay = PowerBase.Application.Common.Models.PauseStepConfig.ParseDuration(step.ConfigJson);
+            var calculatedResumeDate = DateTime.UtcNow.Add(delay);
+
+            var outputJson = JsonSerializer.Serialize(new { Status = "Waiting", ResumeDate = calculatedResumeDate });
+            stepRun.InputContext = JsonSerializer.Serialize(new { DurationSeconds = delay.TotalSeconds });
+
+            await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
+            {
+                MessageId = messageGuid,
+                StepPublicId = step.PublicId,
+                ExecutionPathHash = executionPathHash,
+                ExecutionPath = executionPath,
+                OutputJson = outputJson
+            }, null, ct);
+
+            throw new PowerBase.Domain.Exceptions.PipelineWaitException(calculatedResumeDate);
         }
 
         if (subtype == "call-another-pipeline")
@@ -4563,6 +4721,7 @@ public class PipelineEngine : IPipelineEngine
     private static bool IsControlFlowOrInfrastructureException(Exception ex)
     {
         if (ex is PipelineStopExecutionException ||
+            ex is PowerBase.Domain.Exceptions.PipelineWaitException ||
             ex is OperationCanceledException ||
             ex is PipelineRecursionException)
         {

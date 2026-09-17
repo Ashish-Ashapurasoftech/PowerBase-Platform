@@ -395,6 +395,11 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                         await queueRepo.MarkSucceededAsync(job.Id, _workerId, claimToken, ct);
                     }
                 }
+                catch (PowerBase.Domain.Exceptions.PipelineWaitException waitEx)
+                {
+                    _logger.LogInformation("Pipeline execution paused for Job {Id} until {ResumeDate}.", job.Id, waitEx.ResumeDate);
+                    await queueRepo.ScheduleWaitAsync(job.Id, _workerId, claimToken, waitEx.ResumeDate, ct);
+                }
                 catch (Exception ex) when (ex is PowerBase.Domain.Exceptions.PipelineNonRetryableException or PowerBase.Application.Pipelines.PipelineMappingException ||
                     ex.InnerException is PowerBase.Domain.Exceptions.PipelineNonRetryableException or PowerBase.Application.Pipelines.PipelineMappingException)
                 {

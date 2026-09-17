@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using PowerBase.Application.Common.Models;
 
 namespace PowerBase.Application.Pipelines.Commands.SavePipelineSteps;
 
@@ -29,10 +30,10 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         bool isValidFirstStep = firstStep.Type == "trigger" ||
             (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
             firstStep.Subtype == "handle-errors" ||
-            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request"));
+            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause"));
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, or Prepare Bulk Record Upsert step.");
+            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, Prepare Bulk Record Upsert, or Pause step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();
@@ -132,6 +133,16 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                         context.AddFailure("Steps", $"Make Request '{step.RefId}': Connect the HTTP account before saving a validated step.");
                 }
                 catch (Exception ex) { context.AddFailure("Steps", $"Make Request '{step.RefId}': {ex.Message}"); }
+            }
+            if (step.Subtype == "pause" && step.IsValidated)
+            {
+                if (step.Type != "action")
+                    context.AddFailure("Steps", $"Pause step '{step.RefId}' must be an action.");
+                try { PauseStepConfig.ParseDuration(step.ConfigJson); }
+                catch (ArgumentException ex)
+                {
+                    context.AddFailure("Steps", $"Pause step '{step.RefId}': {ex.Message}");
+                }
             }
             if ((step.Subtype == "pipeline-called" && (step.Type != "trigger" || step != firstStep)) ||
                 (step.Subtype == "call-another-pipeline" && step.Type != "action"))

@@ -3,12 +3,50 @@ using PowerBase.Application.Pipelines.Commands.SavePipelineSteps;
 using Xunit;
 using System;
 using System.Collections.Generic;
+using PowerBase.Application.Common.Models;
+using PowerBase.Application.Pipelines;
+using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.UnitTests.Pipelines;
 
 public class SavePipelineStepsCommandValidatorTests
 {
     private readonly SavePipelineStepsCommandValidator _validator = new();
+
+    [Theory]
+    [InlineData("{\"duration\":1,\"unit\":\"seconds\"}", 1)]
+    [InlineData("{\"duration\":30,\"unit\":\"minutes\"}", 1800)]
+    [InlineData("{\"duration\":0.5,\"unit\":\"minutes\"}", 30)]
+    [InlineData("{\"duration\":10}", 10)]
+    [InlineData("{\"durationText\":\"5m\",\"duration\":10,\"unit\":\"seconds\"}", 300)]
+    [InlineData("{\"durationText\":\"2m 30s\"}", 150)]
+    [InlineData("{\"durationText\":\"4 minutes, 56 seconds\"}", 296)]
+    [InlineData("{\"durationText\":\"4:13\"}", 253)]
+    public void PauseDuration_ValidConfig_UsesExpectedSeconds(string json, int seconds)
+    {
+        PauseStepConfig.ParseDuration(json).TotalSeconds.Should().Be(seconds);
+    }
+
+    [Theory]
+    [InlineData("{\"duration\":0,\"unit\":\"seconds\"}")]
+    [InlineData("{\"duration\":31,\"unit\":\"minutes\"}")]
+    [InlineData("{\"duration\":1,\"unit\":\"days\"}")]
+    [InlineData("{\"duration\":2,\"unit\":\"unknown\"}")]
+    [InlineData("{\"durationText\":\"30 min, 30 sec\"}")]
+    [InlineData("{\"durationText\":\"5m nonsense\",\"duration\":10}")]
+    [InlineData("invalid json")]
+    public async System.Threading.Tasks.Task PauseDuration_InvalidConfig_FailsValidation(string json)
+    {
+        var pause = new SavePipelineStepDto { PublicId = Guid.NewGuid(), RefId = "pause", Type = "action", Subtype = "pause", ConfigJson = json, IsValidated = true };
+        var result = await _validator.ValidateAsync(new SavePipelineStepsCommand(Guid.NewGuid(), new() { pause }, Array.Empty<byte>()));
+        result.IsValid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void PauseWait_IsControlFlow_NotCatchableStepError()
+    {
+        PipelineEngine.IsCatchablePipelineStepError(new PipelineWaitException(DateTime.UtcNow.AddSeconds(1))).Should().BeFalse();
+    }
 
     [Fact]
     public async System.Threading.Tasks.Task ErrorDetails_AreAvailableInNestedRecoveryButNotOutsideIt()
@@ -153,7 +191,7 @@ public class SavePipelineStepsCommandValidatorTests
 
         // Assert
         result.IsValid.Should().BeFalse();
-        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, or Prepare Bulk Record Upsert step"));
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("A pipeline must begin with"));
     }
 
     [Fact]

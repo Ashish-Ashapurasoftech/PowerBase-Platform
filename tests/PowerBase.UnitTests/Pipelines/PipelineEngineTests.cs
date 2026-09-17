@@ -16,6 +16,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.DependencyInjection;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
+using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.UnitTests.Pipelines;
 
@@ -34,6 +35,7 @@ public class PipelineEngineTests
     private readonly IPipelineApiRequestDispatcher _apiRequestDispatcher;
     private readonly ITenantRepository _tenantRepository;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IPipelineStepIdempotencyRepository _idempotencyRepo;
 
     public PipelineEngineTests()
     {
@@ -50,6 +52,7 @@ public class PipelineEngineTests
         _tenantRepository = Substitute.For<ITenantRepository>();
         _httpClientFactory = Substitute.For<IHttpClientFactory>();
         _httpClientFactory.CreateClient(Arg.Any<string>()).Returns(_ => new HttpClient());
+        _idempotencyRepo = Substitute.For<IPipelineStepIdempotencyRepository>();
         var serviceProvider = Substitute.For<IServiceProvider>();
         serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(_pipelineRecordSearchService);
         serviceProvider.GetService(typeof(IPipelineApiRequestDispatcher)).Returns(_apiRequestDispatcher);
@@ -73,7 +76,7 @@ public class PipelineEngineTests
             serviceProvider,
             Substitute.For<IAdminRepository>(),
             _tenantRepository,
-            Substitute.For<IPipelineStepIdempotencyRepository>()
+            _idempotencyRepo
         );
     }
 
@@ -87,6 +90,62 @@ public class PipelineEngineTests
     {
         var method = typeof(PipelineEngine).GetMethod("ParseValueType", BindingFlags.NonPublic | BindingFlags.Instance);
         return method!.Invoke(_engine, new object?[] { valueStr, typeCode, "Test field" });
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PauseThenResume_ContinuesAtFollowingStep()
+    {
+        var messageId = Guid.NewGuid();
+        PipelineRun? storedRun = null;
+        var savedOutputs = new Dictionary<Guid, string>();
+        var task = new PipelineExecutionTask
+        {
+            PipelineId = 1, TenantId = 1, TriggerEvent = "manual", TriggerPayloadJson = "{}",
+            MessageId = messageId.ToString(), WorkerId = "pause-test-worker"
+        };
+        var preceding = new PipelineStep
+        {
+            Id = 3, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "preceding",
+            Type = "trigger", Subtype = "schedule"
+        };
+        var pause = new PipelineStep
+        {
+            Id = 1, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "pause",
+            Type = "action", Subtype = "pause", DisplayOrder = 1, ConfigJson = "{\"duration\":1,\"unit\":\"seconds\"}"
+        };
+        var following = new PipelineStep
+        {
+            Id = 2, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "following",
+            Type = "trigger", Subtype = "schedule", DisplayOrder = 2
+        };
+        _pipelineRepo.GetRunByMessageIdAsync(messageId, Arg.Any<CancellationToken>()).Returns(_ => storedRun);
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>())
+            .Returns(call => { storedRun = call.Arg<PipelineRun>(); return (Guid.NewGuid(), 1L); });
+        _pipelineRepo.ClaimWaitingRunAsync(messageId, "pause-test-worker", Arg.Any<CancellationToken>())
+            .Returns(_ => { storedRun!.LockedBy = "pause-test-worker"; storedRun.Status = "Running"; return true; });
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>())
+            .Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>())
+            .Returns(new List<PipelineStep> { preceding, pause, following });
+        _pipelineRepo.CreateRunAttemptAsync(Arg.Any<PipelineRunAttempt>(), Arg.Any<CancellationToken>()).Returns(1L);
+        _pipelineRepo.CreateStepRunAsync(Arg.Any<PipelineStepRun>(), Arg.Any<CancellationToken>()).Returns(1L);
+        _idempotencyRepo.GetByExecutionKeyAsync(messageId, Arg.Any<Guid>(), Arg.Any<byte[]>(), null, Arg.Any<CancellationToken>())
+            .Returns(call => savedOutputs.GetValueOrDefault(call.ArgAt<Guid>(1)));
+        _idempotencyRepo.When(x => x.InsertAsync(Arg.Any<PipelineStepIdempotencyLog>(), null, Arg.Any<CancellationToken>()))
+            .Do(call => { var entry = call.Arg<PipelineStepIdempotencyLog>(); savedOutputs[entry.StepPublicId] = entry.OutputJson; });
+
+        var wait = await Assert.ThrowsAsync<PipelineWaitException>(() => _engine.ExecuteAsync(task, CancellationToken.None));
+        wait.ResumeDate.Should().BeAfter(DateTime.UtcNow);
+        storedRun!.Status.Should().Be("Waiting");
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 3), Arg.Any<CancellationToken>());
+        await _pipelineRepo.DidNotReceive().CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 2), Arg.Any<CancellationToken>());
+
+        // Simulate the queue waking after the stored resume date without sleeping in the test.
+        savedOutputs[pause.PublicId] = JsonSerializer.Serialize(new { Status = "Waiting", ResumeDate = DateTime.UtcNow.AddSeconds(-1) });
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+        storedRun.Status.Should().Be("Success");
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 3), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 2), Arg.Any<CancellationToken>());
     }
 
     [Fact]
