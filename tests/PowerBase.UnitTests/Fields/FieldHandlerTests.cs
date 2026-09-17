@@ -2,6 +2,7 @@ using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Commands.CreateField;
+using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Queries.ListFields;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Domain.Constants;
@@ -21,6 +22,9 @@ public class FieldHandlerTests
     private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
     private readonly FieldSettingsValidatorRegistry _settingsRegistry = new(Array.Empty<IFieldSettingsValidator>());
     private readonly IFieldNameResolver _fieldNameResolver = Substitute.For<IFieldNameResolver>();
+    private readonly FieldSettingsGuard _guard = new(
+        Substitute.For<IAppRolePermissionRepository>(), Substitute.For<IRecordRepository>(),
+        new FieldSettingsValidatorRegistry(Array.Empty<IFieldSettingsValidator>()));
 
     private static AppTable MakeTable(long id = 5) => new() { Id = id, PublicId = Guid.NewGuid(), Name = "T" };
     private static FieldType MakeFieldType() => new() { Id = 1, Code = "Text", SqlDataType = "NVARCHAR(500)" };
@@ -35,7 +39,7 @@ public class FieldHandlerTests
     }
 
     private CreateFieldCommandHandler MakeSut() =>
-        new(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo, _formRepo, _settingsRegistry, _fieldNameResolver);
+        new(_tableRepo, _fieldRepo, _fieldTypeRepo, _schemaEngine, _queryContext, _auditRepo, _formRepo, _settingsRegistry, _fieldNameResolver, _guard);
 
     // --- CreateFieldCommandHandler ---
 
