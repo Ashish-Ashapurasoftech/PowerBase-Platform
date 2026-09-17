@@ -181,7 +181,11 @@ public class CopyRecordsTests
         for (var attempt = 0; attempt < 2; attempt++)
         {
             if (setting == "Yes")
-                Assert.Contains("cannot convert value to Number", (await Assert.ThrowsAsync<PipelineNonRetryableException>(harness.Run)).Message);
+            {
+                var message = (await Assert.ThrowsAsync<PipelineNonRetryableException>(harness.Run)).Message;
+                Assert.Contains("1 record could not be copied (0 inserted, 0 updated)", message);
+                Assert.Contains("First error: Destination field 'Destination key' needs a valid number from source field 'Source key'.", message);
+            }
             else
             {
                 var result = JsonDocument.Parse(await harness.Run()).RootElement;
@@ -212,7 +216,7 @@ public class CopyRecordsTests
         var destination = Field(9, "c_number", "Number");
         destination.Label = "Number";
         var error = Assert.Throws<ValidationException>(() => CopyRecordsDefinition.ConvertValue("abc", source, destination));
-        Assert.Contains("'Number'", error.Message);
+        Assert.Contains("Destination field 'Number' needs a valid number from source field 'Name'", error.Message);
         Assert.DoesNotContain("c_number", error.Message);
         var config = Config();
         config.SourceFields.Add("fid_7");
