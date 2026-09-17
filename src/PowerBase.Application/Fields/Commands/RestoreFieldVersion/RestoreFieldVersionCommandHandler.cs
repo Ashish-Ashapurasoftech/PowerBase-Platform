@@ -95,6 +95,9 @@ public class RestoreFieldVersionCommandHandler
         _guard.ValidateSettingsAndCapabilities(
             existing.TypeCode, target.Settings, target.Settings ?? existing.Settings,
             label, target.IsRequired, target.IsUnique, target.DefaultValue);
+
+        var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
+        _guard.ValidateActionButtonTargets(existing.TypeCode, target.Settings, tableFields, existing.Id);
         await _guard.ValidateRequiredHasDefaultOrNoRestrictedRolesAsync(existing.Id, label, target.IsRequired, target.DefaultValue, ct);
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, target.IsUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, target.IsEncrypted, ct);

@@ -34,26 +34,52 @@ public class GetParentOptionsQueryHandler
         var parent = await _tableRepo.GetByIdAsync(rel.ParentTableId, ct);
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
 
-        var labelFields = ResolveLabelFields(parent, parentFields);
-        var headers = labelFields.Select(f => f.Label ?? f.Name).ToList();
-        var options = await _recordRepo.SearchForReferenceAsync(parent, labelFields, search, take == 0 ? 50 : take, ct);
-
-        // Default key: SearchForReferenceAsync already returns the row Id as text — nothing to do.
-        // Custom key: swap each option's Id (currently the row Id) for the table's key-field value,
-        // since that's what actually gets stored in the child's reference column.
-        var keyField = await KeyFieldResolver.ResolveAsync(parent, _fieldRepo, ct);
-        if (keyField is not null && options.Count > 0)
+        // The picker column shows the relationship's display key so it matches what the grid,
+        // record view, and filter show (see KeyFieldResolver.ResolveDisplayKey): per-relationship
+        // DisplayKeyFieldId override → parent table KeyFieldId → the table's configured picker
+        // fields (Record ID# tables keep the friendly multi-column label instead of raw ids).
+        //
+        // When an override/virtual key is used (displayKey is not null), we show:
+        //   column 1 = the key field itself (e.g. StatusCode: "C", "IP", "P")
+        //   column 2+ = the table's configured descriptive picker fields (e.g. StatusName: "Completed", "In Progress")
+        // This lets users see BOTH the key code AND a human-readable description so they can make
+        // an informed selection.  For the standard Record ID# key, we fall back to ResolveLabelFields
+        // which already returns descriptive picker fields (no raw Id column cluttering the UI).
+        var displayKey = KeyFieldResolver.ResolveDisplayKey(rel, parent, parentFields);
+        IReadOnlyList<AppField> labelFields;
+        AppField? primaryLabelField = null;
+        if (displayKey is not null)
         {
-            var rowIds = options.Select(o => long.Parse(o.Id)).ToList();
-            var col = KeyFieldResolver.ColumnName(keyField);
-            var keyValues = await _recordRepo.GetColumnValuesByIdsAsync(parent, col, rowIds, ct);
-            options = options
-                .Select(o => keyValues.TryGetValue(long.Parse(o.Id), out var kv)
-                    ? new ReferenceOption { Id = KeyFieldResolver.FormatForSubmit(kv), Value1 = o.Value1, Value2 = o.Value2, Value3 = o.Value3 }
-                    : o)
-                .Where(o => !string.IsNullOrEmpty(o.Id)) // drop rows whose key value is blank — unusable as a reference
+            // Start with the key field, then append descriptive picker fields (excluding the key
+            // itself to avoid duplication). Cap at 3 total — SearchForReferenceAsync only
+            // projects Value1, Value2, Value3.
+            var descriptiveFields = ResolveLabelFields(parent, parentFields)
+                .Where(f => f.Id != displayKey.Id)
+                .Take(2)   // key takes slot 1, so descriptive can fill at most slots 2 & 3
                 .ToList();
+            var combined = new List<AppField> { displayKey };
+            combined.AddRange(descriptiveFields);
+            labelFields = combined;
+
+            // The closed-input text (ReferenceOption.Label) always reads like the standard Record
+            // ID# key does: the parent's descriptive/picker field, never the raw override key value
+            // (e.g. a phone number). The key field still shows as column 1 in the multi-column list
+            // above so users can see both while picking; falls back to the key field itself only if
+            // the parent has no separate descriptive field configured.
+            primaryLabelField = descriptiveFields.FirstOrDefault() ?? displayKey;
         }
+        else
+        {
+            labelFields = ResolveLabelFields(parent, parentFields);
+        }
+
+        var headers = labelFields.Select(f => f.Label ?? f.Name).ToList();
+
+        // The reference column always stores the parent row Id, so the picker always submits it
+        // (option.Id). SearchForReferenceAsync already returns the row Id as text; DisplayKeyFieldId
+        // only changes which column is shown as the label (labelFields above).
+        var options = await _recordRepo.SearchForReferenceAsync(
+            parent, labelFields, search, take == 0 ? 50 : take, primaryLabelField, ct);
 
         return new GetParentOptionsResult(headers, options);
     }

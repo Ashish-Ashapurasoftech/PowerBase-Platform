@@ -118,7 +118,8 @@ public class ReportsController : ControllerBase
             MapChartConfig(request.Chart),
             request.ColumnsMode,
             request.TableSortGroup.Select(l => new SortGroupLevelCommand(l.FieldId, l.Desc, l.IsGroup, l.GroupByMode)).ToList(),
-            MapOptions(request.Options));
+            MapOptions(request.Options),
+            request.RowGroupLevels.Select(l => new RowGroupLevelCommand(l.FieldId, l.GroupByMode)).ToList());
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
@@ -230,7 +231,8 @@ public class ReportsController : ControllerBase
             MapChartConfig(request.Chart),
             request.ColumnsMode,
             request.TableSortGroup.Select(l => new SortGroupLevelCommand(l.FieldId, l.Desc, l.IsGroup, l.GroupByMode)).ToList(),
-            MapOptions(request.Options));
+            MapOptions(request.Options),
+            request.RowGroupLevels.Select(l => new RowGroupLevelCommand(l.FieldId, l.GroupByMode)).ToList());
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
     }
@@ -508,6 +510,11 @@ public class ReportsController : ControllerBase
             }).ToList(),
             GroupByFieldId = r.Definition.GroupByFieldId,
             GroupByMode = r.Definition.GroupByMode,
+            RowGroupLevels = r.Definition.RowGroupLevels.Select(l => new RowGroupLevelDto
+            {
+                FieldId = l.FieldId,
+                GroupByMode = l.GroupByMode,
+            }).ToList(),
             HideTotals = r.Definition.HideTotals,
             GroupDefaultCollapsed = r.Definition.GroupDefaultCollapsed,
             GroupByDescending = r.Definition.GroupByDescending,
@@ -532,6 +539,7 @@ public class ReportsController : ControllerBase
                 ShowEditIcon = r.Definition.Options.ShowEditIcon,
                 ShowViewIcon = r.Definition.Options.ShowViewIcon,
                 ShowQuickPeekIcon = r.Definition.Options.ShowQuickPeekIcon,
+                QuickPeekFormId = r.Definition.Options.QuickPeekFormId,
                 DisableBulkDelete = r.Definition.Options.DisableBulkDelete,
                 DisableBulkUpdate = r.Definition.Options.DisableBulkUpdate,
                 DisableGridEdit = r.Definition.Options.DisableGridEdit,
@@ -616,7 +624,7 @@ public class ReportsController : ControllerBase
     private static ReportOptionsCommand? MapOptions(ReportOptionsRequest? req) =>
         req is null ? null : new ReportOptionsCommand(
             req.ColumnHeaderText, req.ShowEditIcon, req.ShowViewIcon, req.ShowQuickPeekIcon, req.DisableBulkDelete,
-            req.DisableBulkUpdate, req.DisableGridEdit, req.ShowDescriptionOnReportPage);
+            req.DisableBulkUpdate, req.DisableGridEdit, req.ShowDescriptionOnReportPage, req.QuickPeekFormId);
 
     // ── Chart config mapping helpers ──────────────────────────────────────────
 

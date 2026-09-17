@@ -61,10 +61,22 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
         CommonReportValidationHelpers.ForbidIfPopulated(input.SortFields.Count > 0, "sortFields", "Chart", errors);
         CommonReportValidationHelpers.ForbidIfPopulated(input.TableSortGroup.Count > 0, "tableSortGroup", "Chart", errors);
         CommonReportValidationHelpers.ForbidIfPopulated(input.Options is not null, "options", "Chart", errors);
+        CommonReportValidationHelpers.ForbidIfPopulated(input.RowGroupLevels.Count > 0, "rowGroupLevels", "Chart", errors);
 
         CommonReportValidationHelpers.RequirePopulated(input.Chart is not null, "chart", "Chart", errors);
         if (input.Chart is not null)
             ValidateChart(input.Chart, validFieldIds, fieldMap, errors);
+
+        // Series/Group by and multiple data values are mutually exclusive — buildChartJsConfig
+        // (frontend) only ever plots the FIRST aggregation once a series is set, silently
+        // dropping the rest. The report-builder UI already prevents configuring both together
+        // (hides the Series section once 2+ data values exist), but that's a client-side
+        // convenience only — reject it here too so a direct API call, another future UI surface,
+        // or a still-conflicting old saved report can't produce a config part of which is
+        // silently ignored at render time.
+        if (input.Chart?.SeriesFieldId is not null && input.Aggregations.Count > 1)
+            CommonReportValidationHelpers.AddError(errors, "chart.seriesFieldId",
+                "A chart with Series / Group by configured can only have one data value — remove the extra data values, or remove the series field.");
 
         return errors;
     }

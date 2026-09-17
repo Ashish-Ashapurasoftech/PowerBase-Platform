@@ -46,6 +46,7 @@ public class PipelineEngine : IPipelineEngine
     private readonly IRecordWriteService _recordWriteService;
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
+    private readonly IRelationshipRepository _relRepo;
     private readonly IEmailService _emailService;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IFileStorageService _fileStorageService;
@@ -68,6 +69,7 @@ public class PipelineEngine : IPipelineEngine
         IRecordWriteService recordWriteService,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
+        IRelationshipRepository relRepo,
         IEmailService emailService,
         IHttpClientFactory httpClientFactory,
         IFileStorageService fileStorageService,
@@ -88,6 +90,7 @@ public class PipelineEngine : IPipelineEngine
         _recordWriteService = recordWriteService;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
+        _relRepo = relRepo;
         _emailService = emailService;
         _httpClientFactory = httpClientFactory;
         _fileStorageService = fileStorageService;
@@ -1723,6 +1726,13 @@ public class PipelineEngine : IPipelineEngine
                 FieldMappings = resolvedMappings
             });
 
+            // Resolve Reference field values: translate any human key or PublicId Guid to the
+            // parent's physical row Id before persisting — mirrors CreateRecordCommandHandler.
+            var refOverrides = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
+                fields, values, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
+            foreach (var kvp in refOverrides)
+                values[kvp.Key] = kvp.Value;
+
             Guid recordPublicId;
             await uow.BeginAsync(ct);
             try
@@ -2962,6 +2972,12 @@ public class PipelineEngine : IPipelineEngine
                         }
                         else
                         {
+                            // Resolve Reference fields: translate human key / PublicId Guid to physical row Id.
+                            var insertRefOverrides1 = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
+                                fields, row, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
+                            foreach (var kvp in insertRefOverrides1)
+                                row[kvp.Key] = kvp.Value;
+
                             var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
                             var changeValues = new Dictionary<long, object?>();
                             foreach (var f in fields)
@@ -2979,6 +2995,12 @@ public class PipelineEngine : IPipelineEngine
                     else
                     {
                         // INSERT (Cases 2-insert, 6-insert)
+                        // Resolve Reference fields: translate human key / PublicId Guid to physical row Id.
+                        var insertRefOverrides2 = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
+                            fields, row, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
+                        foreach (var kvp in insertRefOverrides2)
+                            row[kvp.Key] = kvp.Value;
+
                         var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
                         var changeValues = new Dictionary<long, object?>();
                         foreach (var f in fields)

@@ -223,7 +223,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     public async Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
-        AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take, CancellationToken ct = default)
+        AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
+        AppField? primaryLabelField = null, CancellationToken ct = default)
     {
         take = Math.Clamp(take, 1, 200);
 
@@ -254,6 +255,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (labelFields.Count > 2) selectCols.Add($"{LabelColumnExpr(labelFields[2])} AS Value3");
         
         if (labelFields.Count == 0) selectCols.Add($"{searchColExpr} AS Value1");
+
+        var labelExpr = primaryLabelField is not null ? LabelColumnExpr(primaryLabelField) : searchColExpr;
+        selectCols.Add($"{labelExpr} AS Label");
 
         var sql = $"""
             SELECT TOP (@take) {string.Join(", ", selectCols)}
@@ -952,29 +956,34 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
-        AppTable table, AppField groupByField,
+        AppTable table, IReadOnlyList<(AppField Field, string Mode)> groupByFields,
         IReadOnlyList<SummaryAggregation> aggregations,
         IReadOnlyList<AppField> allFields,
-        string groupByMode = "EqualValues",
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
         AppField? seriesField = null,
         string seriesMode = "EqualValues",
         CancellationToken ct = default)
     {
-        var groupCol = groupByField.IsSystem && !string.IsNullOrEmpty(groupByField.PhysicalColumnName)
-            ? groupByField.PhysicalColumnName!
-            : PhysicalNaming.ColumnName(groupByField.Fid!.Value);
-        var groupExpr = BuildGroupByExpr(groupCol, groupByMode, groupByField.TypeCode);
+        if (groupByFields.Count == 0) return [];
+
+        static string ColumnOf(AppField f) => f.IsSystem && !string.IsNullOrEmpty(f.PhysicalColumnName)
+            ? f.PhysicalColumnName!
+            : PhysicalNaming.ColumnName(f.Fid!.Value);
+
+        // Ordered "Rows" group levels (Summary's chained "Group by X, then by Y, ..." — Chart/
+        // legacy single-level Summary always pass a 1-element list here). Each level gets its own
+        // GroupValue{i} SELECT/GROUP BY/ORDER BY slot, all evaluated together with the optional
+        // crosstab/series dimension in one query.
+        var groupCols = groupByFields.Select(g => ColumnOf(g.Field)).ToList();
+        var groupExprs = groupByFields.Select((g, i) => BuildGroupByExpr(groupCols[i], g.Mode, g.Field.TypeCode)).ToList();
         var fieldMap = allFields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
 
         string? seriesExpr = null;
         string? seriesCol = null;
         if (seriesField is not null)
         {
-            seriesCol = seriesField.IsSystem && !string.IsNullOrEmpty(seriesField.PhysicalColumnName)
-                ? seriesField.PhysicalColumnName!
-                : PhysicalNaming.ColumnName(seriesField.Fid!.Value);
+            seriesCol = ColumnOf(seriesField);
             seriesExpr = BuildGroupByExpr(seriesCol, seriesMode, seriesField.TypeCode);
         }
 
@@ -1023,16 +1032,22 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 "DistinctCount" => $"COUNT(DISTINCT {col}) AS {alias}",
                 "StdDev" => $"STDEV(CAST({col} AS DECIMAL(18,4))) AS {alias}",
                 "Median" => BuildMedianClause(tableName, outerAlias, medianAlias, col, alias, ownerWhere, filterWhere,
-                    groupCol, groupByMode, groupByField.TypeCode, seriesCol, seriesMode, seriesField?.TypeCode),
+                    groupCols.Select((c, i) => (c, groupByFields[i].Mode, groupByFields[i].Field.TypeCode)).ToList(),
+                    seriesCol, seriesMode, seriesField?.TypeCode),
                 _ => null,
             };
             if (clause is not null) aggClauses.Add(clause);
         }
 
-        var selectList = seriesExpr is null
-            ? $"{groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}"
-            : $"{groupExpr} AS GroupValue, {seriesExpr} AS SeriesValue, {string.Join(", ", aggClauses)}";
-        var groupByList = seriesExpr is null ? groupExpr : $"{groupExpr}, {seriesExpr}";
+        var groupSelectParts = groupExprs.Select((e, i) => $"{e} AS GroupValue{i}").ToList();
+        var selectParts = new List<string>(groupSelectParts);
+        if (seriesExpr is not null) selectParts.Add($"{seriesExpr} AS SeriesValue");
+        selectParts.AddRange(aggClauses);
+        var selectList = string.Join(", ", selectParts);
+
+        var groupByParts = new List<string>(groupExprs);
+        if (seriesExpr is not null) groupByParts.Add(seriesExpr);
+        var groupByList = string.Join(", ", groupByParts);
 
         var sql = $"""
             SELECT {selectList}
@@ -1079,19 +1094,25 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private static string BuildMedianClause(
         string tableName, string outerAlias, string medianAlias,
         string col, string alias, string ownerWhere, string filterWhere,
-        string groupCol, string groupByMode, string groupTypeCode,
+        IReadOnlyList<(string Col, string Mode, string TypeCode)> groupLevels,
         string? seriesCol, string? seriesMode, string? seriesTypeCode)
     {
-        var groupOuter = BuildGroupByExpr($"{outerAlias}.{groupCol}", groupByMode, groupTypeCode);
-        var groupInner = BuildGroupByExpr($"{medianAlias}.{groupCol}", groupByMode, groupTypeCode);
-        var correlation = $"(({groupInner} = {groupOuter}) OR ({groupInner} IS NULL AND {groupOuter} IS NULL))";
+        var correlationParts = new List<string>();
+        foreach (var (groupCol, groupByMode, groupTypeCode) in groupLevels)
+        {
+            var groupOuter = BuildGroupByExpr($"{outerAlias}.{groupCol}", groupByMode, groupTypeCode);
+            var groupInner = BuildGroupByExpr($"{medianAlias}.{groupCol}", groupByMode, groupTypeCode);
+            correlationParts.Add($"(({groupInner} = {groupOuter}) OR ({groupInner} IS NULL AND {groupOuter} IS NULL))");
+        }
 
         if (seriesCol is not null)
         {
             var seriesOuter = BuildGroupByExpr($"{outerAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
             var seriesInner = BuildGroupByExpr($"{medianAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
-            correlation += $" AND (({seriesInner} = {seriesOuter}) OR ({seriesInner} IS NULL AND {seriesOuter} IS NULL))";
+            correlationParts.Add($"(({seriesInner} = {seriesOuter}) OR ({seriesInner} IS NULL AND {seriesOuter} IS NULL))");
         }
+
+        var correlation = string.Join(" AND ", correlationParts);
 
         return $"""
             (SELECT TOP (1) PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST({medianAlias}.{col} AS DECIMAL(18,4))) OVER ()
@@ -1725,37 +1746,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
     }
 
-    public async Task RewriteReferenceColumnAsync(
-        AppTable childTable, string oldColumn, string newColumn,
-        IReadOnlyDictionary<object, object?> oldToNewValue, CancellationToken ct = default)
-    {
-        if (oldToNewValue.Count == 0) return;
-
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        // Chunked to stay well under SQL Server's ~2100-parameter limit (2 params per mapped row).
-        const int chunkSize = 500;
-        foreach (var chunk in oldToNewValue.Chunk(chunkSize))
-        {
-            var parameters = new DynamicParameters();
-            var valueRows = new List<string>(chunk.Length);
-            for (var i = 0; i < chunk.Length; i++)
-            {
-                parameters.Add($"oldId{i}", chunk[i].Key);
-                parameters.Add($"newVal{i}", chunk[i].Value ?? (object)DBNull.Value);
-                valueRows.Add($"(@oldId{i}, @newVal{i})");
-            }
-
-            var sql = $"""
-                UPDATE t SET t.{newColumn} = m.NewValue
-                FROM {PhysicalNaming.FullTableName(childTable.Id)} t
-                JOIN (VALUES {string.Join(", ", valueRows)}) AS m(OldParentId, NewValue) ON t.{oldColumn} = m.OldParentId
-                WHERE t.IsDeleted = 0
-                """;
-            await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
-        }
-    }
-
-        public async Task<bool> HasAnyRecordsAsync(AppTable table, CancellationToken ct = default)
+    public async Task<bool> HasAnyRecordsAsync(AppTable table, CancellationToken ct = default)
     {
         var sql = $"""
             SELECT CAST(CASE WHEN EXISTS (

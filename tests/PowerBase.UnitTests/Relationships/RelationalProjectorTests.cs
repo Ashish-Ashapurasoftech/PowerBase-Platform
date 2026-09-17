@@ -12,8 +12,9 @@ public class RelationalProjectorTests
     private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
     private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
     private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
+    private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
 
-    private RelationalProjector NewProjector() => new(_tableRepo, _fieldRepo, _recordRepo);
+    private RelationalProjector NewProjector() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo);
 
     private static AppField Field(int fid, string name, string typeCode, string? settings = null) => new()
     {
@@ -95,6 +96,64 @@ public class RelationalProjectorTests
 
         result[0][21].Should().Be(true);    // parent 1 has children
         result[1][21].Should().Be(false);   // parent 2 has none → Exists defaults to false
+    }
+
+    [Fact]
+    public async Task Reference_projects_relationship_display_key_value_over_table_key()
+    {
+        // Child fid 10 → parent 99 via relationship 1. Relationship overrides the display key to
+        // parent fid 6 ("Code"); the parent table's own KeyFieldId points at fid 5 ("Name").
+        var childFields = new List<AppField> { Field(10, "Department", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}") };
+        var childRows = Rows(
+            new Dictionary<string, object?> { ["Id"] = 1L, [PhysicalNaming.ColumnName(10)] = 42L },
+            new Dictionary<string, object?> { ["Id"] = 2L, [PhysicalNaming.ColumnName(10)] = null });
+
+        var parentTable = new AppTable { Id = 99, Name = "Department", KeyFieldId = 5 };
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(parentTable);
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>())
+            .Returns(new List<AppField> { Field(5, "Name", "Text"), Field(6, "Code", "Text") });
+        _relRepo.ListByChildTableAsync(7, Arg.Any<CancellationToken>())
+            .Returns(new List<Relationship> { new() { Id = 1, ReferenceFid = 10, ParentTableId = 99, ChildTableId = 7, DisplayKeyFieldId = 6 } });
+        _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>
+            {
+                [42L] = new Dictionary<string, object?> { [PhysicalNaming.ColumnName(5)] = "Engineering", [PhysicalNaming.ColumnName(6)] = "ENG" },
+            });
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 7 }, childFields, childRows);
+
+        result[0][10].Should().Be("ENG");     // linked → relationship display key ("Code"), not "Name"
+        result[1].Should().NotContainKey(10); // unlinked → nothing projected (stored NULL shows as null)
+    }
+
+    [Fact]
+    public async Task Reference_falls_back_to_table_key_then_record_id()
+    {
+        // No per-relationship display key. Parent table key = fid 5 → projects "Name".
+        var childFields = new List<AppField> { Field(10, "Department", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}") };
+        var childRows = Rows(new Dictionary<string, object?> { ["Id"] = 1L, [PhysicalNaming.ColumnName(10)] = 42L });
+
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 99, Name = "Department", KeyFieldId = 5 });
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>()).Returns(new List<AppField> { Field(5, "Name", "Text") });
+        _relRepo.ListByChildTableAsync(7, Arg.Any<CancellationToken>())
+            .Returns(new List<Relationship> { new() { Id = 1, ReferenceFid = 10, ParentTableId = 99, ChildTableId = 7, DisplayKeyFieldId = null } });
+        _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { [42L] = new Dictionary<string, object?> { [PhysicalNaming.ColumnName(5)] = "Engineering" } });
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 7 }, childFields, childRows);
+
+        result[0][10].Should().Be("Engineering");
+
+        // And with no table key either: Record ID# ⇒ nothing projected, the stored row Id shows as-is.
+        _tableRepo.GetByIdAsync(98, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 98, Name = "Team" });
+        _fieldRepo.ListByTableAsync(98, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
+        var refToPlainParent = new List<AppField> { Field(12, "Team", "Reference", "{\"relationshipId\":2,\"parentTableId\":98}") };
+        var rows2 = Rows(new Dictionary<string, object?> { ["Id"] = 1L, [PhysicalNaming.ColumnName(12)] = 7L });
+        _relRepo.ListByChildTableAsync(7, Arg.Any<CancellationToken>())
+            .Returns(new List<Relationship> { new() { Id = 2, ReferenceFid = 12, ParentTableId = 98, ChildTableId = 7 } });
+
+        var result2 = await NewProjector().ProjectAsync(new AppTable { Id = 7 }, refToPlainParent, rows2);
+        result2[0].Should().NotContainKey(12);
     }
 
     [Fact]

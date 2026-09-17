@@ -110,6 +110,9 @@ public class UpdateFieldCommandHandler
         _guard.ValidateSettingsAndCapabilities(
             existing.TypeCode, settings, settings ?? existing.Settings, label, isRequired, isUnique, defaultValue);
 
+        var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
+        _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
+
         // ── Numeric family "Display As" type switch ─────────────────────────────
         // Number/Currency/Percent/Rating share one settings shape (NumericSettings) with a
         // DisplayAs member. When it names a different TypeCode within that same family, the

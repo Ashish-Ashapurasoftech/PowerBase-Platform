@@ -54,6 +54,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var enforcer = services.GetRequiredService<IRolePermissionEnforcer>();
         var queryContext = services.GetRequiredService<IQueryContext>();
         var records = services.GetRequiredService<IRecordRepository>();
+        var relRepo = services.GetService<IRelationshipRepository>();
         var writes = services.GetRequiredService<IRecordWriteService>();
         var search = services.GetRequiredService<IPipelineRecordSearchService>();
         var receipts = services.GetRequiredService<IPipelineStepIdempotencyRepository>();
@@ -257,7 +258,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                                 if (!values.ContainsKey(field.Fid!.Value) && !string.IsNullOrWhiteSpace(field.DefaultValue))
                                     values[field.Fid.Value] = await DefaultValue(field, queryContext, ct);
                             }
-                            var overrides = await ReferenceWriteValidator.ValidateAsync(destinationFields, values, tableRepo, fieldRepo, records, ct);
+                            var overrides = await ReferenceWriteValidator.ValidateAsync(destinationFields, values, tableRepo, fieldRepo, records, relRepo, ct);
                             foreach (var pair in overrides) values[pair.Key] = pair.Value;
                             await UserFieldValueResolver.ResolveAsync(services.GetRequiredService<IUserRepository>(), destinationFields, values, ct);
                             await RecordConstraintValidator.ValidateAsync(destination, destinationFields, values, records, true, null, ct);

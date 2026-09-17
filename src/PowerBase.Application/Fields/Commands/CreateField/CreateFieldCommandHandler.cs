@@ -1,5 +1,6 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Commands;
+using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -35,6 +36,7 @@ public class CreateFieldCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
     private readonly IFieldNameResolver _fieldNameResolver;
+    private readonly FieldSettingsGuard _guard;
 
     public CreateFieldCommandHandler(
         IAppTableRepository tableRepo,
@@ -45,7 +47,8 @@ public class CreateFieldCommandHandler
         IAuditRepository auditRepo,
         IFormRepository formRepo,
         FieldSettingsValidatorRegistry settingsRegistry,
-        IFieldNameResolver fieldNameResolver)
+        IFieldNameResolver fieldNameResolver,
+        FieldSettingsGuard guard)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -56,6 +59,7 @@ public class CreateFieldCommandHandler
         _formRepo = formRepo;
         _settingsRegistry = settingsRegistry;
         _fieldNameResolver = fieldNameResolver;
+        _guard = guard;
     }
 
     public async Task<CreateFieldResult> HandleAsync(CreateFieldCommand command, CancellationToken ct = default)
@@ -93,6 +97,8 @@ public class CreateFieldCommandHandler
         // Snapshot the table's existing fields before adding this one — used below to auto-advance
         // the Identifying Records picker slots (see AutoAdvanceRecordPickerAsync).
         var existingFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
+
+        _guard.ValidateActionButtonTargets(command.TypeCode, command.Settings, existingFields, selfFieldId: null);
 
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(command.TypeCode, ct)
             ?? throw new NotFoundException("FieldType", command.TypeCode);

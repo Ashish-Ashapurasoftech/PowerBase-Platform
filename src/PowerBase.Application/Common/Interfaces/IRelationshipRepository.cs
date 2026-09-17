@@ -12,6 +12,10 @@ public interface IRelationshipRepository
     /// <summary>Repoint the relationship at a new Reference field (Set Key cascade rewire).</summary>
     Task UpdateReferenceFieldAsync(long id, long referenceFieldId, int referenceFid, CancellationToken ct = default);
 
+    /// <summary>Change this relationship's own display key override (null = back to Standard key).
+    /// Scoped to this one relationship only — does not touch the parent table's global KeyFieldId.</summary>
+    Task UpdateDisplayKeyFieldAsync(long id, long? displayKeyFieldId, CancellationToken ct = default);
+
     Task<Relationship?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<Relationship?> GetByIdAsync(long id, CancellationToken ct = default);
 

@@ -9,6 +9,11 @@ public class CreateRelationshipRequest
     public bool IsReferenceRequired { get; set; }
     /// <summary>null ⇒ create a new Reference field; set ⇒ convert the existing child field with this Fid into the reference.</summary>
     public int? ReferenceFieldFid { get; set; }
+    /// <summary>
+    /// Fid of the parent field to display in the reference picker (Task 6 — display key override).
+    /// null ⇒ Standard key (Record ID# / table's global KeyFieldId). Must be a unique field.
+    /// </summary>
+    public int? DisplayKeyFieldFid { get; set; }
     public List<LookupSpecRequest> Lookups { get; set; } = new();
     public List<SummarySpecRequest> Summaries { get; set; } = new();
 }

@@ -24,10 +24,17 @@ public class ReportDefinition
     // New filter tree (supersedes Filters when set)
     public FilterGroup? FilterTree { get; set; }
 
-    // Used by Table (single-field Group panel — legacy fallback once TableSortGroup is set) and Summary (Rows).
+    // Used by Table (single-field Group panel — legacy fallback once TableSortGroup is set) and
+    // Summary (Rows — legacy fallback once RowGroupLevels is set, same convention).
     public long? GroupByFieldId { get; set; }
     /// <summary>EqualValues (default), FirstWord, FirstLetter</summary>
     public string GroupByMode { get; set; } = "EqualValues";
+    /// <summary>Summary-only: ordered "Rows" group levels ("Group by X, then by Y, then by Z,
+    /// ...") — supersedes GroupByFieldId/GroupByMode above when non-empty, same "empty means
+    /// legacy fallback" convention Table's TableSortGroup uses. Independent of, and combines
+    /// with, Chart's SeriesFieldId (the crosstab "Columns" dimension) — RunSummaryAsync groups
+    /// by every level here plus the crosstab field together in one query.</summary>
+    public List<RowGroupLevel> RowGroupLevels { get; set; } = [];
     public bool HideTotals { get; set; }
     /// <summary>null = "Default report setting" (renders the same as false/Expanded, but keeps
     /// that choice distinguishable from an explicit "Expanded by default" pick), true = Collapsed
@@ -81,6 +88,10 @@ public class ReportOptions
     /// <summary>Only meaningful when the table has a Quick Peek form configured (Form.
     /// IsQuickPeekForm) — otherwise the icon never shows regardless of this flag.</summary>
     public bool ShowQuickPeekIcon { get; set; } = true;
+    /// <summary>This report's own Quick Peek form, overriding the table's default (Form.
+    /// IsQuickPeekForm) for THIS report only. null means "use the table default" — see
+    /// GetQuickPeekFormQueryHandler / the frontend's loadQuickPeekFormDefinition().</summary>
+    public Guid? QuickPeekFormId { get; set; }
     public bool DisableBulkDelete { get; set; }
     /// <summary>Hides the "Mass Update" bulk-edit action from the selection toolbar.</summary>
     public bool DisableBulkUpdate { get; set; }
@@ -122,6 +133,15 @@ public class FilterCondition
     public string? ValueMode { get; set; }
     /// <summary>Only meaningful when ValueMode == "field" — the other field on this table to compare against.</summary>
     public long? ValueFieldId { get; set; }
+}
+
+// ── Summary: chained Rows group levels ────────────────────────────────────────
+
+public class RowGroupLevel
+{
+    public long FieldId { get; set; }
+    /// <summary>EqualValues (default), FirstWord, FirstLetter, ... same semantics as GroupByMode.</summary>
+    public string GroupByMode { get; set; } = "EqualValues";
 }
 
 // ── Sort ─────────────────────────────────────────────────────────────────────

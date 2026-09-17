@@ -1,5 +1,7 @@
+using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.FieldSettings;
@@ -13,6 +15,8 @@ namespace PowerBase.Application.Fields.Common;
 /// second, drifting copy of these checks.</summary>
 public class FieldSettingsGuard
 {
+    private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
+
     private readonly IAppRolePermissionRepository _permRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
@@ -79,6 +83,80 @@ public class FieldSettingsGuard
                 ["IsUnique"] = [$"Cannot make '{label}' unique — duplicate values already exist. Remove duplicates first."]
             });
         }
+    }
+
+    /// <summary>Validates an ActionButton's configured Capture/Timestamp/Bool-Gate/IP-Capture/
+    /// Location/Add-Data/Prompt-Source Fid references against the table's actual fields: each must
+    /// exist, must not be a system or computed field (the same rule InvokeButtonActionCommandHandler
+    /// enforces as "defense in depth" at click time — this catches it at save time instead so a
+    /// misconfiguration surfaces immediately rather than on first use), and must be one of the
+    /// TypeCodes that slot can actually hold (e.g. Timestamp Field must be Date/DateTime, not
+    /// Number — mirrors the frontend's ActionButtonSettingsPanelComponent field pickers). A no-op
+    /// for every other field type or malformed/absent Settings (already rejected elsewhere by the
+    /// shape-only ActionButtonSettingsValidator). Throws ValidationException.</summary>
+    public void ValidateActionButtonTargets(
+        string typeCode, string? settings, IReadOnlyList<AppField> tableFields, long? selfFieldId)
+    {
+        if (!PhysicalNaming.IsActionButtonTypeCode(typeCode) || string.IsNullOrWhiteSpace(settings))
+            return;
+
+        ActionButtonSettings? parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<ActionButtonSettings>(settings, JsonOpts);
+        }
+        catch (JsonException)
+        {
+            return;
+        }
+        if (parsed is null) return;
+
+        var byFid = tableFields.Where(f => f.Fid.HasValue).ToDictionary(f => f.Fid!.Value);
+        var errors = new Dictionary<string, string[]>();
+
+        void CheckTarget(string field, int? fid, string[]? allowedTypeCodes)
+        {
+            if (fid is not int f) return;
+            if (f == selfFieldId)
+            {
+                errors[field] = ["An Action Button cannot target itself."];
+                return;
+            }
+            if (!byFid.TryGetValue(f, out var target))
+            {
+                errors[field] = [$"Field {f} does not exist on this table."];
+                return;
+            }
+            if (target.IsSystem || PhysicalNaming.IsComputedTypeCode(target.TypeCode))
+            {
+                errors[field] = [$"'{target.Label ?? target.Name}' is a system/computed field and cannot be used here."];
+                return;
+            }
+            if (allowedTypeCodes is not null && !allowedTypeCodes.Contains(target.TypeCode))
+            {
+                errors[field] = [$"'{target.Label ?? target.Name}' is not a supported field type for this setting " +
+                    $"(expected {string.Join("/", allowedTypeCodes)})."];
+            }
+        }
+
+        var captureAllowed = parsed.Variant is ActionButtonVariants.Signature or ActionButtonVariants.File
+            ? new[] { "File" }
+            : null; // Prompt: the answer can reasonably land in many field types.
+        CheckTarget("Settings.CaptureFid", parsed.CaptureFid, captureAllowed);
+        CheckTarget("Settings.TimestampFid", parsed.TimestampFid, ["Date", "DateTime"]);
+        CheckTarget("Settings.BoolGateFid", parsed.BoolGateFid, ["Boolean"]);
+        CheckTarget("Settings.IpCaptureFid", parsed.IpCaptureFid, ["Text"]);
+        CheckTarget("Settings.LocationCapture.TargetFid", parsed.LocationCapture?.TargetFid, ["Text"]);
+        CheckTarget("Settings.PromptSourceFid", parsed.PromptSourceFid, ["SingleSelect", "MultiSelect"]);
+
+        if (parsed.AddData is { Length: > 0 })
+        {
+            for (var i = 0; i < parsed.AddData.Length; i++)
+                CheckTarget($"Settings.AddData[{i}].TargetFid", parsed.AddData[i].TargetFid, null);
+        }
+
+        if (errors.Count > 0)
+            throw new ValidationException(errors.AsReadOnly());
     }
 
     /// <summary>Encryption can only be toggled (either direction) while the table has zero records —

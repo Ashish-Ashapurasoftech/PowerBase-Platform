@@ -17,6 +17,10 @@ public static class CommonReportValidationHelpers
         "eq", "ne", "contains", "notContains", "startsWith", "notStartsWith",
         "gt", "gte", "lt", "lte", "in", "notIn", "isEmpty", "isNotEmpty", "date_eq",
         "wildcard", "notWildcard", "isCurrentUser", "includes", "notIncludes",
+        // Date-only range-containment operators ("is during" / "is not during") — resolved
+        // server-side into a literal {gte,lte}/{lt,gt} pair, same as pastDays/futureDays are
+        // resolved into a literal date; see RunReportQueryHandler.ResolveDateCondition.
+        "during", "notDuring",
     };
 
     /// <summary>Operators for which "compare to another field on this table" (ValueMode ==

@@ -89,6 +89,22 @@ public class CreateRelationshipCommandHandler
             refField = existing;
         }
 
+        // Resolve the per-relationship display key: find the parent field matching DisplayKeyFieldFid.
+        // Only uniqueness is required — any field type is eligible as a display key override (this is
+        // a lighter-weight, per-relationship display choice, not the table-wide Set Key feature, so it
+        // isn't restricted to Set Key's scalar-type allowlist).
+        long? displayKeyFieldId = null;
+        int? displayKeyFid = null;
+        if (command.DisplayKeyFieldFid is int dkFid && dkFid != 3 /* 3 = Record ID# = standard */) 
+        {
+            var dkField = parentFields.FirstOrDefault(f => f.Fid == dkFid)
+                ?? throw new ValidationException(new Dictionary<string, string[]> { ["displayKeyFieldFid"] = [$"Field {dkFid} not found on the parent table."] });
+            if (!dkField.IsUnique)
+                throw new ValidationException(new Dictionary<string, string[]> { ["displayKeyFieldFid"] = ["The display key field must be unique across all parent records."] });
+            displayKeyFieldId = dkField.Id;
+            displayKeyFid = dkFid;
+        }
+
         // 2. Relationship row.
         var (relId, relPublicId) = await _relRepo.CreateAsync(new Relationship
         {
@@ -99,13 +115,25 @@ public class CreateRelationshipCommandHandler
             ReferenceFid = refField.Fid!.Value,
             ProxyFieldId = null,
             ReferenceFieldIsExisting = referenceIsExistingField,
+            DisplayKeyFieldId = displayKeyFieldId,
         }, ct);
 
         await _fieldRepo.UpdateSettingsAsync(refField.Id,
             Serialize(new ReferenceSettings { RelationshipId = relId, ParentTableId = parent.Id }), ct);
 
         // 3. Lookup fields on the child (first one becomes the proxy).
-        var createdFields = new List<RelationshipFieldDto> { new(refField.PublicId, refField.Fid!.Value, refField.Name, "reference") };
+        var createdFields = new List<RelationshipFieldDto> { new(refField.PublicId, refField.Fid!.Value, refField.Name, "reference", "Reference") };
+        // Same precedence as KeyFieldResolver.ResolveDisplayKey (the just-resolved override, else the
+        // parent's global Set Key, else Record ID#) — matches what GetAsync returns on a later reload.
+        var parentKeyField = KeyFieldResolver.ResolveDisplayKey(
+            new Relationship { DisplayKeyFieldId = displayKeyFieldId }, parent, parentFields)
+            ?? parentFields.FirstOrDefault(f => f.IsSystem && f.Fid == 3)
+            ?? parentFields.FirstOrDefault(f => f.Fid == 3);
+        if (parentKeyField is not null)
+        {
+            var keyTypeCode = parentKeyField.Fid == 3 ? "Record ID#" : parentKeyField.TypeCode;
+            createdFields.Add(new(parentKeyField.PublicId, parentKeyField.Fid ?? 3, parentKeyField.Label ?? parentKeyField.Name, "key", keyTypeCode));
+        }
         // Only auto-append the reference to forms when it's newly created; an existing field is likely already placed.
         var childAddFids = referenceIsExistingField ? new List<int>() : new List<int> { refField.Fid!.Value };
         AppField? firstLookup = null;
@@ -196,6 +224,7 @@ public class CreateRelationshipCommandHandler
             ReferenceFid = refField.Fid!.Value,
             ReferenceFieldName = refField.Name,
             ProxyFid = firstLookup?.Fid,
+            DisplayKeyFid = displayKeyFid,
             Fields = createdFields,
         };
     }

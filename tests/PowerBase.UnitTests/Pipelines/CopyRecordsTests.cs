@@ -548,6 +548,7 @@ public class CopyRecordsTests
                 .AddSingleton(Substitute.For<IAppAccessService>()).AddSingleton(enforcer).AddSingleton(Substitute.For<IQueryContext>())
                 .AddSingleton(idempotency).AddSingleton(Substitute.For<ITenantUnitOfWork>()).AddSingleton(encryption)
                 .AddSingleton(Substitute.For<IUserRepository>()).AddSingleton(Substitute.For<IAuditRepository>())
+                .AddSingleton(Substitute.For<IRelationshipRepository>())
                 .AddSingleton(Substitute.For<IPipelineTriggerInterceptor>()).AddSingleton<FormulaEngine>().BuildServiceProvider();
         }
         private async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> Page()

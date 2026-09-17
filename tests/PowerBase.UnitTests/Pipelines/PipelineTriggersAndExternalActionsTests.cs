@@ -1504,7 +1504,7 @@ public class PipelineTriggersAndExternalActionsTests
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
-        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo);
+        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo);
 
         // Act
         await writeService.ApplyAsync(table, fields, recordPublicId, fieldValues, "Updated", "Record modified", CancellationToken.None);
@@ -1546,7 +1546,7 @@ public class PipelineTriggersAndExternalActionsTests
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
-        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo);
+        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo);
 
         // Act
         await writeService.ApplyAsync(table, fields, recordPublicId, fieldValues, "Updated", "Record modified", CancellationToken.None);
@@ -1593,7 +1593,7 @@ public class PipelineTriggersAndExternalActionsTests
             .Returns(2);
 
         var handler = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommandHandler(
-            tableRepo, fieldRepo, recordRepo, enforcer, auditRepo, triggerInterceptor, uow, queryContext, appRepo, Substitute.For<IMessagePublisher>());
+            tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), enforcer, auditRepo, triggerInterceptor, uow, queryContext, appRepo, Substitute.For<IMessagePublisher>());
 
         var command = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommand(
             table.PublicId, new List<Guid> { recId1, recId2 }, new Dictionary<long, object?> { [6] = "New" });

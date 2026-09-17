@@ -128,7 +128,10 @@ public sealed class InvokeButtonActionCommandHandler
     {
         if (settings.BoolGateFid is int boolFid)
         {
-            var raw = row.TryGetValue(PhysicalNaming.ColumnName(boolFid), out var bv) ? bv : null;
+            // Same system-field column-naming rule as ActionButtonValueResolver's 'field' case:
+            // ColumnName(fid) alone misses a system field's bespoke physical column.
+            var boolField = fields.FirstOrDefault(f => f.Fid == boolFid);
+            var raw = boolField is not null && row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(boolField), out var bv) ? bv : null;
             if (!IsTruthy(raw))
                 throw new ActionGateException("This action is not currently available.");
         }

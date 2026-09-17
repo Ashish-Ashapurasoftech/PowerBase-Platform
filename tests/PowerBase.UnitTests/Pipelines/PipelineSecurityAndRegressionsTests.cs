@@ -46,7 +46,8 @@ public class PipelineSecurityAndRegressionsTests
             Substitute.For<IPageRepository>(),
             appUserRepo,
             queryContext,
-            Substitute.For<IPipelineRepository>()
+            Substitute.For<IPipelineRepository>(),
+            Substitute.For<IRelationshipRepository>()
         );
 
         // Act
@@ -79,7 +80,8 @@ public class PipelineSecurityAndRegressionsTests
             Substitute.For<IPageRepository>(),
             appUserRepo,
             queryContext,
-            Substitute.For<IPipelineRepository>()
+            Substitute.For<IPipelineRepository>(),
+            Substitute.For<IRelationshipRepository>()
         );
 
         // Act
@@ -110,7 +112,8 @@ public class PipelineSecurityAndRegressionsTests
             Substitute.For<IPageRepository>(),
             appUserRepo,
             queryContext,
-            Substitute.For<IPipelineRepository>()
+            Substitute.For<IPipelineRepository>(),
+            Substitute.For<IRelationshipRepository>()
         );
 
         // Act
