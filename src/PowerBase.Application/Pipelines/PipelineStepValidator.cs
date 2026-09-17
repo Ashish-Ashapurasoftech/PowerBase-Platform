@@ -368,7 +368,10 @@ public class PipelineStepValidator
             {
                 var app = await appRepo.GetByPublicIdAsync(appGuid, ct);
                 appId = app.Id;
-                await appAccessService.RequirePermissionByAppPublicIdAsync(appGuid, PermissionCodes.PowerFlowsUpdate, ct);
+                // The pipeline's own App is already guarded by PowerFlowsUpdate on SaveSteps.
+                // A trigger's source App only needs the same read access used to list its
+                // tables and fields; it must not require edit rights in that source App.
+                await appAccessService.RequirePermissionByAppPublicIdAsync(appGuid, PermissionCodes.PowerFlowsRead, ct);
             }
             catch (Exception ex)
             {

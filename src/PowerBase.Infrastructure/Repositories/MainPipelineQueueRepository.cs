@@ -287,6 +287,25 @@ public class MainPipelineQueueRepository : ControlRepositoryBase, IMainPipelineQ
         return affected > 0;
     }
 
+    public async Task<bool> ScheduleWaitAsync(long id, string workerId, Guid claimToken, DateTime resumeDate, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineQueue
+            SET Status = 'Pending',
+                NextAttemptOn = @resumeDate,
+                AttemptCount = CASE WHEN AttemptCount > 0 THEN AttemptCount - 1 ELSE 0 END,
+                LockedBy = NULL,
+                LockedUntil = NULL,
+                ClaimToken = NULL,
+                LastModifiedOn = SYSUTCDATETIME()
+            WHERE Id = @id AND Status = 'Processing' AND LockedBy = @workerId AND ClaimToken = @claimToken;
+            """;
+
+        await using var conn = await OpenNewConnectionAsync(ct);
+        var affected = await conn.ExecuteAsync(new CommandDefinition(sql, new { id, workerId, claimToken, resumeDate }, cancellationToken: ct));
+        return affected > 0;
+    }
+
     public async Task<bool> ScheduleRetryAsync(long id, string workerId, Guid claimToken, int backoffSeconds, string error, CancellationToken ct = default)
     {
         const string sql = """
