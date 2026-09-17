@@ -213,4 +213,34 @@ public class UpdateFieldSystemFieldCoercionTests
             /* isFilterable */ Arg.Is(true), /* isReportable */ Arg.Is(false), /* isAuditable */ Arg.Is(true),
             /* isUnique */ Arg.Is(true), /* isEncrypted */ Arg.Is(false), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
+
+    [Fact]
+    public async Task UniqueIndexFailure_DoesNotSaveFieldMetadata()
+    {
+        var table = MakeTable();
+        var field = MakeExistingField(table, isSystem: false, typeCode: "Text");
+        field.Fid = 7;
+        _schemaEngine.SetUniqueAsync(table, field, true, Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new InvalidOperationException("index creation failed")));
+
+        var action = () => MakeSut().HandleAsync(MakeAttackCommand(table, field));
+
+        await action.Should().ThrowAsync<InvalidOperationException>();
+        await _fieldRepo.DidNotReceiveWithAnyArgs().UpdateAsync(default, default, default!, default,
+            default, default, default, default, default, default, default, default, default, default,
+            default, default);
+    }
+
+    [Fact]
+    public async Task AlreadyUniqueField_EnsuresMissingIndexIsRecreated()
+    {
+        var table = MakeTable();
+        var field = MakeExistingField(table, isSystem: false, typeCode: "Text");
+        field.Fid = 7;
+        field.IsUnique = true;
+
+        await MakeSut().HandleAsync(MakeAttackCommand(table, field));
+
+        await _schemaEngine.Received(1).SetUniqueAsync(table, field, true, Arg.Any<CancellationToken>());
+    }
 }
