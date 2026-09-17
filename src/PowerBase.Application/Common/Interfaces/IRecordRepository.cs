@@ -140,10 +140,9 @@ public interface IRecordRepository
     /// row additionally carries a "SeriesValue" key.</summary>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table,
-        AppField groupByField,
+        IReadOnlyList<(AppField Field, string Mode)> groupByFields,
         IReadOnlyList<SummaryAggregation> aggregations,
         IReadOnlyList<AppField> allFields,
-        string groupByMode = "EqualValues",
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
         AppField? seriesField = null,

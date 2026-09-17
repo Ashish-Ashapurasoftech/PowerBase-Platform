@@ -20,6 +20,9 @@ public class UpdateReportRequest
     // Table (Group panel) / Summary (Rows)
     public long? GroupByFieldId { get; set; }
     public string GroupByMode { get; set; } = "EqualValues";
+    /// <summary>Summary-only: ordered "Rows" group levels — supersedes GroupByFieldId/GroupByMode
+    /// when non-empty.</summary>
+    public List<RowGroupLevelRequest> RowGroupLevels { get; set; } = [];
     public bool HideTotals { get; set; }
     public bool? GroupDefaultCollapsed { get; set; }
     public bool GroupByDescending { get; set; }

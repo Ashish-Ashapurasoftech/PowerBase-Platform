@@ -920,29 +920,34 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
-        AppTable table, AppField groupByField,
+        AppTable table, IReadOnlyList<(AppField Field, string Mode)> groupByFields,
         IReadOnlyList<SummaryAggregation> aggregations,
         IReadOnlyList<AppField> allFields,
-        string groupByMode = "EqualValues",
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
         AppField? seriesField = null,
         string seriesMode = "EqualValues",
         CancellationToken ct = default)
     {
-        var groupCol = groupByField.IsSystem && !string.IsNullOrEmpty(groupByField.PhysicalColumnName)
-            ? groupByField.PhysicalColumnName!
-            : PhysicalNaming.ColumnName(groupByField.Fid!.Value);
-        var groupExpr = BuildGroupByExpr(groupCol, groupByMode, groupByField.TypeCode);
+        if (groupByFields.Count == 0) return [];
+
+        static string ColumnOf(AppField f) => f.IsSystem && !string.IsNullOrEmpty(f.PhysicalColumnName)
+            ? f.PhysicalColumnName!
+            : PhysicalNaming.ColumnName(f.Fid!.Value);
+
+        // Ordered "Rows" group levels (Summary's chained "Group by X, then by Y, ..." — Chart/
+        // legacy single-level Summary always pass a 1-element list here). Each level gets its own
+        // GroupValue{i} SELECT/GROUP BY/ORDER BY slot, all evaluated together with the optional
+        // crosstab/series dimension in one query.
+        var groupCols = groupByFields.Select(g => ColumnOf(g.Field)).ToList();
+        var groupExprs = groupByFields.Select((g, i) => BuildGroupByExpr(groupCols[i], g.Mode, g.Field.TypeCode)).ToList();
         var fieldMap = allFields.GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
 
         string? seriesExpr = null;
         string? seriesCol = null;
         if (seriesField is not null)
         {
-            seriesCol = seriesField.IsSystem && !string.IsNullOrEmpty(seriesField.PhysicalColumnName)
-                ? seriesField.PhysicalColumnName!
-                : PhysicalNaming.ColumnName(seriesField.Fid!.Value);
+            seriesCol = ColumnOf(seriesField);
             seriesExpr = BuildGroupByExpr(seriesCol, seriesMode, seriesField.TypeCode);
         }
 
@@ -991,16 +996,22 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 "DistinctCount" => $"COUNT(DISTINCT {col}) AS {alias}",
                 "StdDev" => $"STDEV(CAST({col} AS DECIMAL(18,4))) AS {alias}",
                 "Median" => BuildMedianClause(tableName, outerAlias, medianAlias, col, alias, ownerWhere, filterWhere,
-                    groupCol, groupByMode, groupByField.TypeCode, seriesCol, seriesMode, seriesField?.TypeCode),
+                    groupCols.Select((c, i) => (c, groupByFields[i].Mode, groupByFields[i].Field.TypeCode)).ToList(),
+                    seriesCol, seriesMode, seriesField?.TypeCode),
                 _ => null,
             };
             if (clause is not null) aggClauses.Add(clause);
         }
 
-        var selectList = seriesExpr is null
-            ? $"{groupExpr} AS GroupValue, {string.Join(", ", aggClauses)}"
-            : $"{groupExpr} AS GroupValue, {seriesExpr} AS SeriesValue, {string.Join(", ", aggClauses)}";
-        var groupByList = seriesExpr is null ? groupExpr : $"{groupExpr}, {seriesExpr}";
+        var groupSelectParts = groupExprs.Select((e, i) => $"{e} AS GroupValue{i}").ToList();
+        var selectParts = new List<string>(groupSelectParts);
+        if (seriesExpr is not null) selectParts.Add($"{seriesExpr} AS SeriesValue");
+        selectParts.AddRange(aggClauses);
+        var selectList = string.Join(", ", selectParts);
+
+        var groupByParts = new List<string>(groupExprs);
+        if (seriesExpr is not null) groupByParts.Add(seriesExpr);
+        var groupByList = string.Join(", ", groupByParts);
 
         var sql = $"""
             SELECT {selectList}
@@ -1047,19 +1058,25 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private static string BuildMedianClause(
         string tableName, string outerAlias, string medianAlias,
         string col, string alias, string ownerWhere, string filterWhere,
-        string groupCol, string groupByMode, string groupTypeCode,
+        IReadOnlyList<(string Col, string Mode, string TypeCode)> groupLevels,
         string? seriesCol, string? seriesMode, string? seriesTypeCode)
     {
-        var groupOuter = BuildGroupByExpr($"{outerAlias}.{groupCol}", groupByMode, groupTypeCode);
-        var groupInner = BuildGroupByExpr($"{medianAlias}.{groupCol}", groupByMode, groupTypeCode);
-        var correlation = $"(({groupInner} = {groupOuter}) OR ({groupInner} IS NULL AND {groupOuter} IS NULL))";
+        var correlationParts = new List<string>();
+        foreach (var (groupCol, groupByMode, groupTypeCode) in groupLevels)
+        {
+            var groupOuter = BuildGroupByExpr($"{outerAlias}.{groupCol}", groupByMode, groupTypeCode);
+            var groupInner = BuildGroupByExpr($"{medianAlias}.{groupCol}", groupByMode, groupTypeCode);
+            correlationParts.Add($"(({groupInner} = {groupOuter}) OR ({groupInner} IS NULL AND {groupOuter} IS NULL))");
+        }
 
         if (seriesCol is not null)
         {
             var seriesOuter = BuildGroupByExpr($"{outerAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
             var seriesInner = BuildGroupByExpr($"{medianAlias}.{seriesCol}", seriesMode ?? "EqualValues", seriesTypeCode ?? "Text");
-            correlation += $" AND (({seriesInner} = {seriesOuter}) OR ({seriesInner} IS NULL AND {seriesOuter} IS NULL))";
+            correlationParts.Add($"(({seriesInner} = {seriesOuter}) OR ({seriesInner} IS NULL AND {seriesOuter} IS NULL))");
         }
+
+        var correlation = string.Join(" AND ", correlationParts);
 
         return $"""
             (SELECT TOP (1) PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST({medianAlias}.{col} AS DECIMAL(18,4))) OVER ()

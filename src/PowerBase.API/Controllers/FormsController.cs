@@ -184,16 +184,15 @@ public class FormsController : ControllerBase
         return NoContent();
     }
 
-    /// <summary>Get the table's Quick Peek form, if one is configured. 404 if none is set.</summary>
+    /// <summary>Get the table's Quick Peek form. Data is null (still 200, not 404 — "no form
+    /// configured" is a normal, expected state here, not an error) when the table has none set.</summary>
     [HttpGet("tables/{tableId:guid}/forms/quick-peek")]
     [RequireAppMember(AppAccessResolver.ByTableId)]
-    [ProducesResponseType(typeof(ApiResponse<FormDetailResponse>), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<FormDetailResponse?>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetQuickPeekForm(Guid tableId, CancellationToken ct)
     {
         var form = await _getQuickPeekFormHandler.HandleAsync(new GetQuickPeekFormQuery(tableId), ct);
-        if (form == null) return NotFound();
-        return Ok(new ApiResponse<FormDetailResponse>(MapToDetail(form)));
+        return Ok(new ApiResponse<FormDetailResponse?>(form == null ? null : MapToDetail(form)));
     }
 
     /// <summary>Set (or clear, when FormId is null) which form is used for Quick Peek across

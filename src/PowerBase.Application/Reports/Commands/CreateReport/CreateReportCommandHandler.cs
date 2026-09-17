@@ -83,6 +83,11 @@ public class CreateReportCommandHandler
                 IsGroup = l.IsGroup,
                 GroupByMode = string.IsNullOrWhiteSpace(l.GroupByMode) ? "EqualValues" : l.GroupByMode,
             }).ToList(),
+            RowGroupLevels = (command.RowGroupLevels ?? []).Select(l => new RowGroupLevel
+            {
+                FieldId = l.FieldId,
+                GroupByMode = string.IsNullOrWhiteSpace(l.GroupByMode) ? "EqualValues" : l.GroupByMode,
+            }).ToList(),
             FilterTree = command.FilterTree,
             GroupByFieldId = command.GroupByFieldId,
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,
@@ -95,6 +100,7 @@ public class CreateReportCommandHandler
                 ShowEditIcon = command.Options.ShowEditIcon,
                 ShowViewIcon = command.Options.ShowViewIcon,
                 ShowQuickPeekIcon = command.Options.ShowQuickPeekIcon,
+                QuickPeekFormId = command.Options.QuickPeekFormId,
                 DisableBulkDelete = command.Options.DisableBulkDelete,
                 DisableBulkUpdate = command.Options.DisableBulkUpdate,
                 DisableGridEdit = command.Options.DisableGridEdit,

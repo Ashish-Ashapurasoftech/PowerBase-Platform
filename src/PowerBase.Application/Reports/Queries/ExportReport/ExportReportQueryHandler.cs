@@ -181,15 +181,13 @@ public class ExportReportQueryHandler
         string format,
         CancellationToken ct)
     {
-        if (!definition.GroupByFieldId.HasValue)
-            return BuildExport([], [], safeName, format);
-
         var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
         var fieldMap = allFields
             .Where(f => f.Fid.HasValue)
             .GroupBy(f => (long)f.Fid!.Value)
             .ToDictionary(g => g.Key, g => g.First());
-        if (!fieldMap.TryGetValue(definition.GroupByFieldId.Value, out var groupByField) || !visibleFieldIds.Contains(definition.GroupByFieldId.Value))
+        var rowGroupSpecs = RunReport.RunReportQueryHandler.ResolveRowGroupLevels(definition, fieldMap, visibleFieldIds);
+        if (rowGroupSpecs is null)
             return BuildExport([], [], safeName, format);
 
         var visibleAggregations = definition.Aggregations
@@ -205,7 +203,7 @@ public class ExportReportQueryHandler
         }
 
         var rows = await _recordRepo.SummarizeAsync(
-            table, groupByField, visibleAggregations, allFields, definition.GroupByMode,
+            table, rowGroupSpecs, visibleAggregations, allFields,
             filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy,
             seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
 
@@ -230,13 +228,18 @@ public class ExportReportQueryHandler
             }
         }
 
-        var groupKey = (groupByField.Fid ?? groupByField.Id).ToString();
+        // Same bare-fieldId-for-single-level convention as RunSummaryAsync — see its comment.
+        var rowGroupKeys = rowGroupSpecs.Count == 1
+            ? [(rowGroupSpecs[0].Field.Fid ?? rowGroupSpecs[0].Field.Id).ToString()]
+            : rowGroupSpecs.Select((g, i) => $"row{i}_{g.Field.Fid ?? g.Field.Id}").ToList();
         var seriesKey = seriesField is not null ? (seriesField.Fid ?? seriesField.Id).ToString() : null;
-        var columns = new List<ColumnInfo>
+        var columns = new List<ColumnInfo>();
+        for (var i = 0; i < rowGroupSpecs.Count; i++)
         {
-            new(groupKey, string.IsNullOrWhiteSpace(groupByField.Label) ? groupByField.Name : groupByField.Label),
-            new("0", "Count"),
-        };
+            var f = rowGroupSpecs[i].Field;
+            columns.Add(new ColumnInfo(rowGroupKeys[i], string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label));
+        }
+        columns.Add(new ColumnInfo("0", "Count"));
         if (seriesKey is not null)
         {
             columns.Add(new ColumnInfo(seriesKey, string.IsNullOrWhiteSpace(seriesField!.Label) ? seriesField.Name : seriesField.Label));
@@ -257,7 +260,8 @@ public class ExportReportQueryHandler
         var dataRows = rows.Select(row =>
         {
             var fields = new Dictionary<string, object?>();
-            fields[groupKey] = row.TryGetValue("GroupValue", out var gv) ? gv : null;
+            for (var i = 0; i < rowGroupSpecs.Count; i++)
+                fields[rowGroupKeys[i]] = row.TryGetValue($"GroupValue{i}", out var gv) ? gv : null;
             fields["0"] = row.TryGetValue("Count", out var cnt) ? cnt : null;
             if (seriesKey is not null)
                 fields[seriesKey] = row.TryGetValue("SeriesValue", out var sv) ? sv : null;

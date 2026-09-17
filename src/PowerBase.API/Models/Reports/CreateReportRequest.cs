@@ -23,6 +23,9 @@ public class CreateReportRequest
     // Table (Group panel) / Summary (Rows)
     public long? GroupByFieldId { get; set; }
     public string GroupByMode { get; set; } = "EqualValues";
+    /// <summary>Summary-only: ordered "Rows" group levels — supersedes GroupByFieldId/GroupByMode
+    /// when non-empty.</summary>
+    public List<RowGroupLevelRequest> RowGroupLevels { get; set; } = [];
     public bool HideTotals { get; set; }
     /// <summary>null = "Default report setting", true = Collapsed by default, false = Expanded by default.</summary>
     public bool? GroupDefaultCollapsed { get; set; }
@@ -48,12 +51,21 @@ public class SortGroupLevelRequest
     public string GroupByMode { get; set; } = "EqualValues";
 }
 
+public class RowGroupLevelRequest
+{
+    public long FieldId { get; set; }
+    public string GroupByMode { get; set; } = "EqualValues";
+}
+
 public class ReportOptionsRequest
 {
     public string ColumnHeaderText { get; set; } = "Default";
     public bool ShowEditIcon { get; set; } = true;
     public bool ShowViewIcon { get; set; } = true;
     public bool ShowQuickPeekIcon { get; set; } = true;
+    /// <summary>This report's own Quick Peek form, overriding the table's default (Form.
+    /// IsQuickPeekForm) for THIS report only. null means "use the table default".</summary>
+    public Guid? QuickPeekFormId { get; set; }
     public bool DisableBulkDelete { get; set; }
     public bool DisableBulkUpdate { get; set; }
     public bool DisableGridEdit { get; set; }
