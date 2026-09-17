@@ -3207,7 +3207,7 @@ public class PipelineEngine : IPipelineEngine
                 {
                     return root.EnumerateArray().Select(e => (object)e.Clone()).ToList();
                 }
-                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("records", out var recs) && recs.ValueKind == JsonValueKind.Array)
+                if (root.ValueKind == JsonValueKind.Object && TryGetLoopArray(root, out var recs))
                 {
                     return recs.EnumerateArray().Select(e => (object)e.Clone()).ToList();
                 }
@@ -3223,9 +3223,9 @@ public class PipelineEngine : IPipelineEngine
             }
             if (jsonEl.ValueKind == JsonValueKind.Object)
             {
-                if (jsonEl.TryGetProperty("records", out var recordsProp) && recordsProp.ValueKind == JsonValueKind.Array)
+                if (TryGetLoopArray(jsonEl, out var recordsProp))
                 {
-                    return recordsProp.EnumerateArray().Cast<object>();
+                    return recordsProp.EnumerateArray().Select(e => (object)e.Clone()).ToList();
                 }
             }
         }
@@ -3244,6 +3244,27 @@ public class PipelineEngine : IPipelineEngine
         }
 
         return null;
+    }
+
+    private static bool TryGetLoopArray(JsonElement value, out JsonElement array)
+    {
+        foreach (var propertyName in new[] { "records", "data", "items", "results" })
+        {
+            if (value.TryGetProperty(propertyName, out array) && array.ValueKind == JsonValueKind.Array)
+                return true;
+        }
+
+        // Custom APIs often wrap their list in one application-specific key.
+        // Accept that unambiguous shape without guessing when several arrays exist.
+        var arrays = value.EnumerateObject().Where(property => property.Value.ValueKind == JsonValueKind.Array).ToList();
+        if (arrays.Count == 1)
+        {
+            array = arrays[0].Value;
+            return true;
+        }
+
+        array = default;
+        return false;
     }
 
     private static bool TryParseDateTime(string input, out DateTime date)

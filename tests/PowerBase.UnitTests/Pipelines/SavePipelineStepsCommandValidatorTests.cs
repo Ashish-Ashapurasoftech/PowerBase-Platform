@@ -281,6 +281,25 @@ public class SavePipelineStepsCommandValidatorTests
     }
 
     [Fact]
+    public async Task Validate_LoopIteratingOverMakeRequest_IsValid()
+    {
+        var trigger = CreateTriggerStep("ref_1");
+        var request = CreateActionStep("ref_request");
+        request.Subtype = "make-request";
+        request.ConfigJson = $"{{\"requestMode\":\"quickbase\",\"connectionPublicId\":\"{Guid.NewGuid()}\",\"url\":\"/api/items\",\"method\":\"GET\"}}";
+        var loop = CreateLoopStep("ref_loop", "ref_request");
+
+        var command = new SavePipelineStepsCommand(
+            Guid.NewGuid(),
+            new List<SavePipelineStepDto> { trigger, request, loop },
+            Array.Empty<byte>());
+
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Validate_PrecedingVariableReference_IsValid()
     {
         // Arrange

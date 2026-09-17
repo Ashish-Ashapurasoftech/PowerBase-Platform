@@ -2509,6 +2509,21 @@ public class PipelineEngineTests
     }
 
     [Theory]
+    [InlineData("[1,2]", 2)]
+    [InlineData("{\"data\":[{\"id\":1},{\"id\":2}]}", 2)]
+    [InlineData("{\"items\":[1,2,3]}", 3)]
+    [InlineData("{\"customRows\":[1]}", 1)]
+    public void Loop_CanIterateMakeRequestArrayResponses(string responseJson, int expectedCount)
+    {
+        using var response = JsonDocument.Parse(responseJson);
+        var method = typeof(PipelineEngine).GetMethod("GetLoopCollection", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        var items = Assert.IsAssignableFrom<IEnumerable<object>>(method.Invoke(_engine, new object?[] { response.RootElement.Clone() }));
+
+        items.Should().HaveCount(expectedCount);
+    }
+
+    [Theory]
     [InlineData("number", "42.5")]
     [InlineData("numericText", "42.5")]
     public void EvaluateTokens_MakeRequestNumericOutput_CanBeWrittenToNumber(string property, string expected)

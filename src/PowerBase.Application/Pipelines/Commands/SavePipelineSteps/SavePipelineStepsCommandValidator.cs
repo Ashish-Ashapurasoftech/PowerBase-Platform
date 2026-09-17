@@ -181,6 +181,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                                              targetStep.Subtype == "bulk" ||
                                              targetStep.Subtype == "new-bulk-event" ||
                                              targetStep.Subtype == "search-records" ||
+                                             targetStep.Subtype == "make-request" ||
                                              targetStep.Subtype == "export-records-csv";
                         if (!isListProvider)
                         {
