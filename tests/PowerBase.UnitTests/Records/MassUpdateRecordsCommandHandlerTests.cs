@@ -12,6 +12,7 @@ public class MassUpdateRecordsCommandHandlerTests
     private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
     private readonly IAppFieldRepository _fieldRepo = Substitute.For<IAppFieldRepository>();
     private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
+    private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
     private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
 
@@ -20,7 +21,7 @@ public class MassUpdateRecordsCommandHandlerTests
     private static AppField MakeField(int fid, bool isRequired = false, bool isUnique = false) =>
         new() { Id = fid, Fid = fid, Name = $"C_field{fid}", Label = $"Field {fid}", TypeCode = "Text", IsRequired = isRequired, IsUnique = isUnique };
 
-    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _enforcer, _auditRepo);
+    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _enforcer, _auditRepo);
 
     public MassUpdateRecordsCommandHandlerTests()
     {

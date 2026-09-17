@@ -34,9 +34,13 @@ public interface IRecordRepository
     /// <summary>Count non-deleted child records whose reference column (f_{referenceFid}) points at the parent row.</summary>
     Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default);
 
-    /// <summary>Search parent records for a Reference picker, returning (row Id, display label) pairs.</summary>
+    /// <summary>Search parent records for a Reference picker, returning (row Id, display label) pairs.
+    /// <paramref name="primaryLabelField"/> is the parent's descriptive/picker field to project as
+    /// <see cref="ReferenceOption.Label"/> for the closed-input text; pass null to fall back to
+    /// <paramref name="labelFields"/>[0] (the standard-key case, where they're the same field).</summary>
     Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
-        AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take, CancellationToken ct = default);
+        AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
+        AppField? primaryLabelField = null, CancellationToken ct = default);
 
     /// <summary>Fetch a label value for each of the given parent row Ids (drives Lookup/Reference label resolution).</summary>
     Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(
@@ -123,14 +127,6 @@ public interface IRecordRepository
     /// <summary>Returns true if any non-deleted row has a NULL or empty-string value in the field's
     /// column (a candidate key field must be populated on every row).</summary>
     Task<bool> HasNullsAsync(AppTable table, AppField field, CancellationToken ct = default);
-
-    /// <summary>Set Key cascade rewire: for every non-deleted child row whose <paramref name="oldColumn"/>
-    /// raw value (native-typed — row Id, or a Set-Key key value of any scalar type) matches a key in
-    /// <paramref name="oldToNewValue"/>, write the mapped value into <paramref name="newColumn"/>.
-    /// Bounded by distinct parent count (chunked), not child row count.</summary>
-    Task RewriteReferenceColumnAsync(
-        AppTable childTable, string oldColumn, string newColumn,
-        IReadOnlyDictionary<object, object?> oldToNewValue, CancellationToken ct = default);
 
     /// <summary>Returns true if any non-deleted rows have a non-null, non-empty value in the field's column.</summary>
     Task<bool> HasAnyDataAsync(AppTable table, AppField field, CancellationToken ct = default);

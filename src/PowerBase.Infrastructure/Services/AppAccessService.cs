@@ -15,6 +15,7 @@ public class AppAccessService : IAppAccessService
     private readonly IQueryContext _queryContext;
     private readonly IPipelineRepository _pipelineRepo;
     private readonly IAppRoleRepository? _appRoleRepo;
+    private readonly IRelationshipRepository _relRepo;
 
     public AppAccessService(
         IAppRepository appRepo,
@@ -26,6 +27,7 @@ public class AppAccessService : IAppAccessService
         IAppUserRepository appUserRepo,
         IQueryContext queryContext,
         IPipelineRepository pipelineRepo,
+        IRelationshipRepository relRepo,
         IAppRoleRepository? appRoleRepo = null)
     {
         _appRepo = appRepo;
@@ -37,6 +39,7 @@ public class AppAccessService : IAppAccessService
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
         _pipelineRepo = pipelineRepo;
+        _relRepo = relRepo;
         _appRoleRepo = appRoleRepo;
     }
 
@@ -99,6 +102,13 @@ public class AppAccessService : IAppAccessService
             ?? throw new NotFoundException("AppRole", rolePublicId);
 
         await RequirePermissionByAppIdAsync(role.AppId, permissionCode, ct);
+    }
+
+    public async Task RequirePermissionByRelationshipPublicIdAsync(Guid relationshipPublicId, string permissionCode, CancellationToken ct = default)
+    {
+        var rel = await _relRepo.GetByPublicIdAsync(relationshipPublicId, ct)
+            ?? throw new NotFoundException("Relationship", relationshipPublicId);
+        await RequirePermissionByAppIdAsync(rel.AppId, permissionCode, ct);
     }
 
     public async Task RequirePermissionByAppIdAsync(long appId, string permissionCode, CancellationToken ct = default)

@@ -36,6 +36,7 @@ public sealed class RecordWriteService : IRecordWriteService
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IRelationshipRepository _relRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IUserRepository _userRepo;
     private readonly IAuditRepository _auditRepo;
@@ -46,6 +47,7 @@ public sealed class RecordWriteService : IRecordWriteService
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
+        IRelationshipRepository relRepo,
         IAppUserRepository appUserRepo,
         IUserRepository userRepo,
         IAuditRepository auditRepo,
@@ -55,6 +57,7 @@ public sealed class RecordWriteService : IRecordWriteService
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
+        _relRepo = relRepo;
         _appUserRepo = appUserRepo;
         _userRepo = userRepo;
         _auditRepo = auditRepo;
@@ -109,8 +112,9 @@ public sealed class RecordWriteService : IRecordWriteService
         bool suppressInterception = false,
         Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
     {
-        // Reference fields must point at an existing parent record.
-        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, ct);
+        // Reference fields must point at an existing parent record; a value submitted as a
+        // human key is resolved to the parent row Id here.
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
 
         // Fetch old values before update so we can diff them
         var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);

@@ -21,12 +21,16 @@ public sealed class RelationalProjector : IRelationalProjector
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IRelationshipRepository _relRepo;
 
-    public RelationalProjector(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo)
+    public RelationalProjector(
+        IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
+        IRelationshipRepository relRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
+        _relRepo = relRepo;
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>> ProjectAsync(
@@ -44,13 +48,14 @@ public sealed class RelationalProjector : IRelationalProjector
         var maps = new Dictionary<long, object?>[rows.Count];
         for (var i = 0; i < rows.Count; i++) maps[i] = new Dictionary<long, object?>();
 
-        await ProjectReferencesAndLookupsAsync(referenceFields, lookupFields, rows, maps, ct);
+        await ProjectReferencesAndLookupsAsync(table, referenceFields, lookupFields, rows, maps, ct);
         await ProjectSummariesAsync(table, summaryFields, rows, maps, ct);
 
         return maps;
     }
 
     private async Task ProjectReferencesAndLookupsAsync(
+        AppTable childTable,
         IReadOnlyList<AppField> referenceFields,
         IReadOnlyList<AppField> lookupFields,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
@@ -61,12 +66,23 @@ public sealed class RelationalProjector : IRelationalProjector
             .Select(f => (Field: f, Settings: FormulaTypeMap.ParseLookupSettings(f.Settings)))
             .Where(x => x.Settings is { SourceTableId: not null, ReferenceFid: not null, SourceFid: not null })
             .ToList();
-            
+
         var refs = referenceFields
             .Select(f => (Field: f, Settings: FormulaTypeMap.ParseReferenceSettings(f.Settings)))
             .Where(x => x.Settings is { ParentTableId: not null })
             .ToList();
-            
+
+        // The child table's relationships — used to pick each reference field's display key
+        // (per-relationship DisplayKeyFieldId override → parent table key → Record ID#).
+        Dictionary<long, Relationship> relsById = new();
+        Dictionary<int, Relationship> relsByRefFid = new();
+        if (refs.Count > 0)
+        {
+            var childRels = await _relRepo.ListByChildTableAsync(childTable.Id, ct);
+            relsById = childRels.ToDictionary(r => r.Id);
+            relsByRefFid = childRels.GroupBy(r => r.ReferenceFid).ToDictionary(g => g.Key, g => g.First());
+        }
+
         var parentTableIds = lookups.Select(l => l.Settings!.SourceTableId!.Value)
             .Concat(refs.Select(r => r.Settings!.ParentTableId!.Value))
             .Distinct()
@@ -80,7 +96,16 @@ public sealed class RelationalProjector : IRelationalProjector
             var parentTable = await _tableRepo.GetByIdAsync(parentTableId, ct);
             var parentFields = await _fieldRepo.ListByTableAsync(parentTableId, ct);
             var parentFieldsByFid = parentFields.Where(f => f.Fid.HasValue).ToDictionary(f => f.Fid!.Value);
-            var keyField = await KeyFieldResolver.ResolveAsync(parentTable, _fieldRepo, ct);
+
+            // Resolve each reference field's display key once (null ⇒ Record ID#, stored row Id shows as-is).
+            var displayKeyByRefFid = new Dictionary<int, AppField?>();
+            foreach (var (field, settings) in tableRefs)
+            {
+                var rel = settings!.RelationshipId is long relId && relsById.TryGetValue(relId, out var r)
+                    ? r
+                    : relsByRefFid.GetValueOrDefault(field.Fid!.Value);
+                displayKeyByRefFid[field.Fid!.Value] = KeyFieldResolver.ResolveDisplayKey(rel, parentTable, parentFields);
+            }
 
             // The Fids of the Reference columns on THIS (child) table that point to the parent table.
             var refFids = tableLookups.Select(l => l.Settings!.ReferenceFid!.Value)
@@ -121,21 +146,19 @@ public sealed class RelationalProjector : IRelationalProjector
                     maps[i][field.Fid!.Value] = value;
                 }
                 
-                // 2. References (Only if there is a Custom Key!)
-                if (keyField != null)
+                // 2. References — surface the display-key value (Id → readable) for each reference
+                //    field. When the display key is Record ID# (null) the stored row Id already shows,
+                //    so there is nothing to project.
+                foreach (var (field, _) in tableRefs)
                 {
-                    var customKeyCol = KeyFieldResolver.ColumnName(keyField);
-                    foreach (var (field, settings) in tableRefs)
+                    if (displayKeyByRefFid[field.Fid!.Value] is not AppField displayKey) continue;
+                    var displayKeyCol = KeyFieldResolver.ColumnName(displayKey);
+                    if (resolvedParentId.TryGetValue((i, field.Fid!.Value), out var pid) && pid is long parentId
+                        && parentRows.TryGetValue(parentId, out var prow)
+                        && prow.TryGetValue(displayKeyCol, out var displayKeyValue))
                     {
-                        if (resolvedParentId.TryGetValue((i, field.Fid!.Value), out var pid) && pid is long parentId
-                            && parentRows.TryGetValue(parentId, out var prow))
-                        {
-                            if (prow.TryGetValue(customKeyCol, out var customKeyValue))
-                            {
-                                // Store the custom key value string so RecordResult.FromRow can pick it up.
-                                maps[i][field.Fid!.Value] = KeyFieldResolver.FormatForSubmit(customKeyValue);
-                            }
-                        }
+                        // Store the display-key value string so RecordResult.FromRow can pick it up.
+                        maps[i][field.Fid!.Value] = KeyFieldResolver.FormatForSubmit(displayKeyValue);
                     }
                 }
             }
