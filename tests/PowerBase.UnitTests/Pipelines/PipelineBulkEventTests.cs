@@ -50,6 +50,7 @@ public class PipelineBulkEventTests
             _recordWriteService,
             _tableRepo,
             _fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             _emailService,
             _httpClientFactory,
             _fileStorageService,
