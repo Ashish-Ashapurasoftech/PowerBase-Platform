@@ -85,6 +85,7 @@ public class SetKeyCommandHandler
         // A key field must be guaranteed unique + always populated (Record ID# already is both).
         if (newKeyField is not null)
         {
+            await _schemaEngine.SetUniqueAsync(table, newKeyField, true, ct);
             await _fieldRepo.UpdateAsync(
                 newKeyField.PublicId, table.Id,
                 newKeyField.Label, newKeyField.Description,
@@ -92,7 +93,6 @@ public class SetKeyCommandHandler
                 newKeyField.IsSearchable, newKeyField.IsSortable,
                 newKeyField.IsFilterable, newKeyField.IsReportable, newKeyField.IsAuditable,
                 isUnique: true, isEncrypted: newKeyField.IsEncrypted, newKeyField.Settings, ct);
-            await _schemaEngine.SetUniqueAsync(table, newKeyField, true, ct);
         }
 
         await _tableRepo.SetKeyFieldAsync(table.Id, newKeyField?.Id, ct);
