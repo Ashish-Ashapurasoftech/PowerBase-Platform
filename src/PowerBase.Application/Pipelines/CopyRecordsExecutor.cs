@@ -174,6 +174,48 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var remaining = TimeSpan.FromHours(1) - (DateTime.UtcNow - snapshot.StartedUtc);
         if (remaining <= TimeSpan.Zero) throw new PipelineNonRetryableException("Copy Records exceeded its one-hour execution limit.");
         timeout.CancelAfter(remaining);
+
+        Dictionary<long, object?> MapValues(IReadOnlyDictionary<string, JsonElement> row)
+        {
+            var values = new Dictionary<long, object?>();
+            for (var i = 0; i < exported.Count; i++)
+            {
+                var field = exported[i];
+                row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var value);
+                if (value.ValueKind == JsonValueKind.Undefined)
+                    throw CopyRecordsDefinition.Error($"Source field '{field.Name}' has no exported value.");
+                object? raw = value;
+                if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
+                {
+                    row.TryGetValue(PhysicalNaming.EndColumnName(field.Fid!.Value), out var end);
+                    raw = JsonSerializer.Serialize(new { start = value, end = end.ValueKind == JsonValueKind.Undefined ? (JsonElement?)null : end });
+                }
+                values[imported[i].Fid!.Value] = CopyRecordsDefinition.ConvertValue(raw, field, imported[i]);
+            }
+            return values;
+        }
+
+        // Quickbase's "terminate on error" behavior is all-or-nothing for incompatible mapped
+        // values. Validate every saved source page before opening the first destination write
+        // transaction so a later bad row cannot leave earlier rows committed.
+        if (config.TerminateOnError == "Yes")
+        {
+            try
+            {
+                for (var pageIndex = 0; pageIndex < snapshot.Pages; pageIndex++)
+                {
+                    var encrypted = await Read($"/snapshot/{pageIndex}") ?? throw new InvalidOperationException("Copy Records snapshot page is missing.");
+                    var json = await encryption.DecryptDataAsync(encrypted, snapshot.WrappedKey, queryContext.TenantId, source.AppId, ct);
+                    var rows = JsonSerializer.Deserialize<List<Dictionary<string, JsonElement>>>(json)!;
+                    foreach (var row in rows) _ = MapValues(row);
+                }
+            }
+            catch (ValidationException ex)
+            {
+                throw new PipelineNonRetryableException($"Copy Records stopped before writing destination records. {ex.Message}");
+            }
+        }
+
         long inserted = 0, updated = 0, errors = 0;
         var messages = new List<string>();
         for (var pageIndex = 0; pageIndex < snapshot.Pages; pageIndex++)
@@ -193,21 +235,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                     await uow.BeginAsync(ct);
                     try
                     {
-                        var values = new Dictionary<long, object?>();
-                        for (int i = 0; i < exported.Count; i++)
-                        {
-                            var field = exported[i];
-                            row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var value);
-                            if (value.ValueKind == JsonValueKind.Undefined)
-                                throw CopyRecordsDefinition.Error($"Source field '{field.Name}' has no exported value.");
-                            object? raw = value;
-                            if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
-                            {
-                                row.TryGetValue(PhysicalNaming.EndColumnName(field.Fid!.Value), out var end);
-                                raw = JsonSerializer.Serialize(new { start = value, end = end.ValueKind == JsonValueKind.Undefined ? (JsonElement?)null : end });
-                            }
-                            values[imported[i].Fid!.Value] = CopyRecordsDefinition.ConvertValue(raw, field, imported[i]);
-                        }
+                        var values = MapValues(row);
                         values.TryGetValue(merge.Fid!.Value, out var key);
                         IReadOnlyDictionary<string, object?>? existing = null;
                         if (key != null && !string.IsNullOrEmpty(Convert.ToString(key, CultureInfo.InvariantCulture)))

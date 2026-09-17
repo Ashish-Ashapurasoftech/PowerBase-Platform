@@ -355,6 +355,21 @@ public class CopyRecordsTests
     }
 
     [Fact]
+    public async Task IncompatibleMappedValue_WithTerminateOnError_WritesNoRows()
+    {
+        using var harness = new Harness();
+        harness.SourceValues.Clear();
+        harness.SourceValues.AddRange(new[] { "first", "second" });
+        harness.DestinationField.TypeCode = "Number";
+
+        var error = await Assert.ThrowsAsync<PipelineNonRetryableException>(harness.Run);
+
+        Assert.Contains("before writing destination records", error.Message);
+        Assert.DoesNotContain(harness.Records.ReceivedCalls(), c => c.GetMethodInfo().Name == "CreateAsync");
+        Assert.Empty(harness.Writes.ReceivedCalls());
+    }
+
+    [Fact]
     public async Task InvalidQuery_DoesNotReadSourceOrWriteDestination()
     {
         using var harness = new Harness();
