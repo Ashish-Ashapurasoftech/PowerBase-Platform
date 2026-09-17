@@ -26,6 +26,8 @@ public sealed class InvokeButtonActionCommandHandler
     private readonly IRecordWriteService _writeService;
     private readonly IActionButtonValueResolver _valueResolver;
     private readonly IQueryContext _queryContext;
+    private readonly ITenantUnitOfWork _uow;
+    private readonly IMessagePublisher _messagePublisher;
 
     public InvokeButtonActionCommandHandler(
         IAppTableRepository tableRepo,
@@ -34,7 +36,9 @@ public sealed class InvokeButtonActionCommandHandler
         IRolePermissionEnforcer enforcer,
         IRecordWriteService writeService,
         IActionButtonValueResolver valueResolver,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        ITenantUnitOfWork uow,
+        IMessagePublisher messagePublisher)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -43,6 +47,8 @@ public sealed class InvokeButtonActionCommandHandler
         _writeService = writeService;
         _valueResolver = valueResolver;
         _queryContext = queryContext;
+        _uow = uow;
+        _messagePublisher = messagePublisher;
     }
 
     public async Task<InvokeButtonActionResult> HandleAsync(InvokeButtonActionCommand command, CancellationToken ct = default)
@@ -82,13 +88,32 @@ public sealed class InvokeButtonActionCommandHandler
         await _enforcer.EnsureButtonWriteAllowedAsync(table, fields, command.RecordPublicId, writes.Keys.ToHashSet(), ct);
 
         var label = buttonField.Label ?? buttonField.Name;
-        var effective = await _writeService.ApplyAsync(
-            table, fields, command.RecordPublicId, writes,
-            AuditActions.ButtonInvoked, $"Button '{label}' invoked on {table.Name}", ct);
+        IReadOnlyDictionary<long, object?> effective;
+        string? redirect;
+        PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;
 
-        var redirect = settings.Redirect is not null
-            ? (await _valueResolver.ResolveAsync(settings.Redirect, table, fields, row, FormulaType.Text, ct))?.ToString()
-            : null;
+        // The record mutation, audit and pipeline outbox must share one transaction.
+        await _uow.BeginAsync(ct);
+        try
+        {
+            effective = await _writeService.ApplyAsync(
+                table, fields, command.RecordPublicId, writes,
+                AuditActions.ButtonInvoked, $"Button '{label}' invoked on {table.Name}", ct,
+                _uow.Transaction, false, message => indexMessage = message);
+
+            redirect = settings.Redirect is not null
+                ? (await _valueResolver.ResolveAsync(settings.Redirect, table, fields, row, FormulaType.Text, ct))?.ToString()
+                : null;
+            await _uow.CommitAsync(ct);
+        }
+        catch
+        {
+            await _uow.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+
+        if (indexMessage != null)
+            _ = _messagePublisher.PublishAsync(indexMessage, default);
 
         return new InvokeButtonActionResult { UpdatedFields = effective, Redirect = string.IsNullOrWhiteSpace(redirect) ? null : redirect };
     }

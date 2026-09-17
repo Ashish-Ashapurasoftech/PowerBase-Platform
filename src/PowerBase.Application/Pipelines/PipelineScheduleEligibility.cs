@@ -25,18 +25,13 @@ public static class PipelineScheduleEligibility
 
         var root = rootSteps[0];
 
-        var scheduleableSubtypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-            "search-records", "look-up-record", "create-record", "send-email", "send-email-outlook",
-            "make-request", "prepare-bulk-upsert"
-        };
-
-        var firstSubtype = GetFirstExecutableSubtype(root, activeSteps);
-        if (string.IsNullOrEmpty(firstSubtype) || !scheduleableSubtypes.Contains(firstSubtype)) return false;
-
-        return true;
+        var firstExecutableStep = GetFirstExecutableStep(root, activeSteps);
+        return firstExecutableStep != null &&
+               (string.Equals(firstExecutableStep.Type, "action", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(firstExecutableStep.Type, "query", StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string? GetFirstExecutableSubtype(PipelineStep current, List<PipelineStep> activeSteps)
+    private static PipelineStep? GetFirstExecutableStep(PipelineStep current, List<PipelineStep> activeSteps)
     {
         if (current.Subtype == "handle-errors")
         {
@@ -47,9 +42,9 @@ public static class PipelineScheduleEligibility
                 .FirstOrDefault();
 
             if (firstChild == null) return null;
-            return GetFirstExecutableSubtype(firstChild, activeSteps);
+            return GetFirstExecutableStep(firstChild, activeSteps);
         }
 
-        return current.Subtype;
+        return current;
     }
 }

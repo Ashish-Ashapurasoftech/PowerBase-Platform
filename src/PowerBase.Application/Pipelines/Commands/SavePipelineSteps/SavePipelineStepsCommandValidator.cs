@@ -24,14 +24,15 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             return;
         }
 
-        // Rule 1: Must begin with a Trigger, Search/Query step, or Handle Errors step at root index 0
+        // Rule 1: valid roots include trigger/query flows, Make Request, error handling, and bulk upsert flows.
         var firstStep = steps[0];
-        bool isValidFirstStep = firstStep.Type == "trigger" || 
-                                (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
-                                (firstStep.Subtype == "handle-errors");
+        bool isValidFirstStep = firstStep.Type == "trigger" ||
+            (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
+            firstStep.Subtype == "handle-errors" ||
+            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request"));
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A pipeline must begin with either a Trigger step, a Search/Query step, or a Handle Errors step.");
+            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, or Prepare Bulk Record Upsert step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();
@@ -40,8 +41,9 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         // Traverse steps hierarchically to build lists and check structure
         var allStepsFlat = new List<(SavePipelineStepDto Step, string? ParentRefId, string? BranchType)>();
         var parentMap = new Dictionary<string, string>(); // childRefId -> parentRefId
+        var errorScope = new HashSet<string>();
 
-        void Traverse(List<SavePipelineStepDto> list, string? parentRefId, string? branchType)
+        void Traverse(List<SavePipelineStepDto> list, string? parentRefId, string? branchType, bool errorInScope = false)
         {
             if (list == null) return;
             foreach (var step in list)
@@ -49,6 +51,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                 allStepsFlat.Add((step, parentRefId, branchType));
                 if (!string.IsNullOrEmpty(step.RefId))
                 {
+                    if (errorInScope) errorScope.Add(step.RefId);
                     stepById[step.RefId] = step;
                     if (!string.IsNullOrEmpty(parentRefId))
                     {
@@ -62,10 +65,10 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
                 }
 
                 // Check nested collections
-                if (step.Children != null) Traverse(step.Children, step.RefId, "children");
-                if (step.ElseChildren != null) Traverse(step.ElseChildren, step.RefId, "elseChildren");
-                if (step.SuccessChildren != null) Traverse(step.SuccessChildren, step.RefId, "successChildren");
-                if (step.ErrorChildren != null) Traverse(step.ErrorChildren, step.RefId, "errorChildren");
+                if (step.Children != null) Traverse(step.Children, step.RefId, "children", errorInScope);
+                if (step.ElseChildren != null) Traverse(step.ElseChildren, step.RefId, "elseChildren", errorInScope);
+                if (step.SuccessChildren != null) Traverse(step.SuccessChildren, step.RefId, "successChildren", errorInScope);
+                if (step.ErrorChildren != null) Traverse(step.ErrorChildren, step.RefId, "errorChildren", errorInScope || step.Subtype == "handle-errors");
             }
         }
 
@@ -119,6 +122,20 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         var traversedRefIds = new HashSet<string>();
         foreach (var (step, parentRefId, branchType) in allStepsFlat)
         {
+            if (step.Subtype == "make-request" && step.IsValidated)
+            {
+                try
+                {
+                    var request = MakeRequestDefinition.Read(step.ConfigJson ?? "{}");
+                    request.Validate();
+                    if (!request.IsPowerBase && !request.HttpConnectionId.HasValue)
+                        context.AddFailure("Steps", $"Make Request '{step.RefId}': Connect the HTTP account before saving a validated step.");
+                }
+                catch (Exception ex) { context.AddFailure("Steps", $"Make Request '{step.RefId}': {ex.Message}"); }
+            }
+            if ((step.Subtype == "pipeline-called" && (step.Type != "trigger" || step != firstStep)) ||
+                (step.Subtype == "call-another-pipeline" && step.Type != "action"))
+                context.AddFailure("Steps", "Pipeline Called must be the first root trigger; Call Another Pipeline must be an action.");
             // Rule 3 (Nested triggers check): If trigger, it must be at the root (parentRefId == null)
             if (step.Type == "trigger" && parentRefId != null)
             {
@@ -299,7 +316,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
 
                      if (string.Equals(refId, "ERROR", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (branchType != "errorChildren")
+                        if (!errorScope.Contains(step.RefId))
                         {
                             context.AddFailure("Steps", $"Step '{step.RefId}' cannot reference ERROR object outside of an On error branch.");
                         }
@@ -550,4 +567,3 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         };
     }
 }
-

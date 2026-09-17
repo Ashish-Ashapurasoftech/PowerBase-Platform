@@ -33,5 +33,7 @@ public class ConnectionFieldDto
     public string? Settings { get; set; }
     public string? DefaultValue { get; set; }
     public bool IsRequired { get; set; }
+    public bool IsUnique { get; set; }
+    public bool IsPrimary { get; set; }
     public bool IsSystem { get; set; }
 }

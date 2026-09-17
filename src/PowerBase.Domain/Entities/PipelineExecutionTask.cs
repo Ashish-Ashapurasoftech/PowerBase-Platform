@@ -11,6 +11,7 @@ public class PipelineExecutionTask
     public string? VariablesJson { get; set; }
     public string? CorrelationId { get; set; }
     public int Depth { get; set; } = 1;
+    public string? PipelineChain { get; set; }
     public string? MessageId { get; set; }
     public string? WorkerId { get; set; }
 }

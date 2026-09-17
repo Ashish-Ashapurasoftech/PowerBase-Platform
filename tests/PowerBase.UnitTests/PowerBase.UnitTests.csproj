@@ -17,6 +17,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="Pipelines/Golden/Fixtures/**/*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
 

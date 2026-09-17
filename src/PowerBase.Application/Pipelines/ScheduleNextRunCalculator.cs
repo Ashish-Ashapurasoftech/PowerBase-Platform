@@ -42,29 +42,40 @@ public static class ScheduleNextRunCalculator
 
     public static TimeZoneInfo ResolveTimeZone(string timeZoneId)
     {
-        if (string.IsNullOrWhiteSpace(timeZoneId))
-        {
-            return TimeZoneInfo.Utc;
-        }
+        return TryResolveTimeZone(timeZoneId, out var timeZoneInfo) ? timeZoneInfo : TimeZoneInfo.Utc;
+    }
+
+    public static bool TryResolveTimeZone(string? timeZoneId, out TimeZoneInfo timeZoneInfo)
+    {
+        timeZoneInfo = TimeZoneInfo.Utc;
+        if (string.IsNullOrWhiteSpace(timeZoneId)) return false;
 
         try
         {
-            return TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
+            timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
+            return true;
         }
-        catch
+        catch (TimeZoneNotFoundException)
         {
-            if (IanaToWindowsMap.TryGetValue(timeZoneId, out var windowsId))
-            {
-                try
-                {
-                    return TimeZoneInfo.FindSystemTimeZoneById(windowsId);
-                }
-                catch
-                {
-                    return TimeZoneInfo.Utc;
-                }
-            }
-            return TimeZoneInfo.Utc;
+        }
+        catch (InvalidTimeZoneException)
+        {
+        }
+
+        if (!IanaToWindowsMap.TryGetValue(timeZoneId, out var windowsId)) return false;
+
+        try
+        {
+            timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(windowsId);
+            return true;
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return false;
+        }
+        catch (InvalidTimeZoneException)
+        {
+            return false;
         }
     }
 
@@ -83,7 +94,7 @@ public static class ScheduleNextRunCalculator
         var anchorUtc = schedule.CreatedOn == default ? fromUtc : schedule.CreatedOn;
         var anchorLocal = TimeZoneInfo.ConvertTimeFromUtc(anchorUtc, timeZoneInfo);
         var timeOfDay = schedule.TimeOfDay ?? new TimeSpan(9, 0, 0);
-        var interval = schedule.Interval ?? 1;
+        var interval = Math.Max(1, schedule.Interval ?? 1);
 
         if (string.Equals(schedule.ScheduleType, "hourly", StringComparison.OrdinalIgnoreCase))
         {
@@ -119,6 +130,8 @@ public static class ScheduleNextRunCalculator
             var days = (schedule.Weekdays ?? "")
                 .Split(',', StringSplitOptions.RemoveEmptyEntries)
                 .Select(int.Parse)
+                .Distinct()
+                .OrderBy(day => day)
                 .ToList();
             if (days.Count == 0)
             {
@@ -126,28 +139,22 @@ public static class ScheduleNextRunCalculator
             }
 
             var anchorWeekStart = anchorLocal.Date.AddDays(-(int)anchorLocal.DayOfWeek);
-            DateTime nextCandidate = DateTime.MaxValue;
+            var weeksFromAnchor = Math.Max(0, (int)((fromLocal.Date - anchorWeekStart).TotalDays / 7));
+            var firstEligibleWeek = (weeksFromAnchor / interval) * interval;
 
-            for (int w = 0; w < 52; w++)
+            for (var offset = firstEligibleWeek; ; offset += interval)
             {
-                if (w % interval != 0) continue;
-
-                var weekStart = anchorWeekStart.AddDays(w * 7);
+                if (offset > (DateTime.MaxValue.Date - anchorWeekStart).TotalDays / 7) return DateTime.MaxValue;
+                var weekStart = anchorWeekStart.AddDays(offset * 7L);
                 foreach (var day in days)
                 {
                     var candidate = weekStart.AddDays(day).Add(timeOfDay);
-                    if (candidate > fromLocal && candidate < nextCandidate)
+                    if (candidate > fromLocal)
                     {
-                        nextCandidate = candidate;
+                        return ConvertToUtcSafe(candidate, timeZoneInfo);
                     }
                 }
-
-                if (nextCandidate != DateTime.MaxValue)
-                {
-                    break;
-                }
             }
-            return ConvertToUtcSafe(nextCandidate, timeZoneInfo);
         }
 
         if (string.Equals(schedule.ScheduleType, "monthly", StringComparison.OrdinalIgnoreCase))
@@ -161,17 +168,28 @@ public static class ScheduleNextRunCalculator
                 dayTokens.Add("1");
             }
 
-            DateTime nextCandidate = DateTime.MaxValue;
+            var monthsFromAnchor = Math.Max(0,
+                (fromLocal.Year - anchorLocal.Year) * 12 + fromLocal.Month - anchorLocal.Month);
+            var firstEligibleMonth = (monthsFromAnchor / interval) * interval;
 
-            for (int m = 0; m < 24; m++)
+            for (var offset = firstEligibleMonth; ; offset += interval)
             {
-                if (m % interval != 0) continue;
-
-                var targetMonthLocal = anchorLocal.Date.AddMonths(m);
+                if (offset > (9999 - anchorLocal.Year) * 12 + 11) return DateTime.MaxValue;
+                var targetMonthLocal = new DateTime(anchorLocal.Year, anchorLocal.Month, 1).AddMonths(offset);
                 var daysInMonth = DateTime.DaysInMonth(targetMonthLocal.Year, targetMonthLocal.Month);
 
                 var candidatesInMonth = new List<DateTime>();
-                foreach (var token in dayTokens)
+                if (schedule.RelativeWeek.HasValue && schedule.RelativeDay.HasValue)
+                {
+                    var relativeCandidate = GetRelativeMonthlyCandidate(
+                        targetMonthLocal.Year,
+                        targetMonthLocal.Month,
+                        schedule.RelativeWeek.Value,
+                        schedule.RelativeDay.Value,
+                        timeOfDay);
+                    if (relativeCandidate.HasValue) candidatesInMonth.Add(relativeCandidate.Value);
+                }
+                else foreach (var token in dayTokens)
                 {
                     if (string.Equals(token, "last", StringComparison.OrdinalIgnoreCase))
                     {
@@ -194,11 +212,9 @@ public static class ScheduleNextRunCalculator
 
                 if (futureDays.Count > 0)
                 {
-                    nextCandidate = futureDays[0];
-                    break;
+                    return ConvertToUtcSafe(futureDays[0], timeZoneInfo);
                 }
             }
-            return ConvertToUtcSafe(nextCandidate, timeZoneInfo);
         }
 
         if (string.Equals(schedule.ScheduleType, "yearly", StringComparison.OrdinalIgnoreCase))
@@ -206,13 +222,13 @@ public static class ScheduleNextRunCalculator
             var month = schedule.MonthOfYear ?? 1;
             var dayToken = (schedule.MonthDay ?? "1").Trim();
 
-            DateTime nextCandidate = DateTime.MaxValue;
+            var yearsFromAnchor = Math.Max(0, fromLocal.Year - anchorLocal.Year);
+            var firstEligibleYear = (yearsFromAnchor / interval) * interval;
 
-            for (int y = 0; y < 10; y++)
+            for (var offset = firstEligibleYear; ; offset += interval)
             {
-                if (y % interval != 0) continue;
-
-                var targetYear = anchorLocal.Year + y;
+                if (offset > 9999 - anchorLocal.Year) return DateTime.MaxValue;
+                var targetYear = anchorLocal.Year + offset;
                 var daysInMonth = DateTime.DaysInMonth(targetYear, month);
 
                 int targetDay;
@@ -236,15 +252,35 @@ public static class ScheduleNextRunCalculator
                     var candidate = new DateTime(targetYear, month, targetDay).Add(timeOfDay);
                     if (candidate > fromLocal)
                     {
-                        nextCandidate = candidate;
-                        break;
+                        return ConvertToUtcSafe(candidate, timeZoneInfo);
                     }
                 }
             }
-            return ConvertToUtcSafe(nextCandidate, timeZoneInfo);
         }
 
         return fromUtc.AddHours(1);
+    }
+
+    private static DateTime? GetRelativeMonthlyCandidate(
+        int year,
+        int month,
+        int relativeWeek,
+        int relativeDay,
+        TimeSpan timeOfDay)
+    {
+        if (relativeWeek < 1 || relativeWeek > 5 || relativeDay < 0 || relativeDay > 6) return null;
+
+        if (relativeWeek == 5)
+        {
+            var lastDay = new DateTime(year, month, DateTime.DaysInMonth(year, month));
+            var difference = ((int)lastDay.DayOfWeek - relativeDay + 7) % 7;
+            return lastDay.AddDays(-difference).Add(timeOfDay);
+        }
+
+        var firstDay = new DateTime(year, month, 1);
+        var daysUntilTarget = (relativeDay - (int)firstDay.DayOfWeek + 7) % 7;
+        var candidate = firstDay.AddDays(daysUntilTarget + ((relativeWeek - 1) * 7));
+        return candidate.Month == month ? candidate.Add(timeOfDay) : null;
     }
 
     private static DateTime ConvertToUtcSafe(DateTime localTime, TimeZoneInfo tz)

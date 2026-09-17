@@ -108,7 +108,7 @@ public class BulkDeleteRecordsCommandHandler
                         PipelineRecordEventType.Deleted
                     ));
                 }
-                catch
+                catch (NotFoundException)
                 {
                     // Skip if not found
                 }
@@ -148,7 +148,7 @@ public class BulkDeleteRecordsCommandHandler
         }
         catch
         {
-            await _uow.RollbackAsync(ct);
+            await _uow.RollbackAsync(CancellationToken.None);
             throw;
         }
     }

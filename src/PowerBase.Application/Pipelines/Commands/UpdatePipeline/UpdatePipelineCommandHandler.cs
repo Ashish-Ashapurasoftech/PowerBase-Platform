@@ -117,6 +117,14 @@ public class UpdatePipelineCommandHandler
             {
                 await stepValidator.ValidateNewEventStepAsync(step.ConfigJson ?? string.Empty, ct);
             }
+            foreach (var step in steps.Where(s => !s.IsDeleted && (s.Subtype == "pipeline-called" || s.Subtype == "call-another-pipeline")))
+            {
+                try { CallablePipelineDefinition.ValidateConfig(step.ConfigJson, step.Subtype == "call-another-pipeline"); }
+                catch (PipelineNonRetryableException ex)
+                {
+                    throw new ValidationException(new Dictionary<string, string[]> { ["Steps"] = new[] { ex.Message } });
+                }
+            }
         }
 
         if (!string.Equals(pipeline.Name, command.Name, StringComparison.OrdinalIgnoreCase))

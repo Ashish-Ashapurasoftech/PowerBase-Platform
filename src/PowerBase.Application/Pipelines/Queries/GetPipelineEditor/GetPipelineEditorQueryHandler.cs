@@ -574,6 +574,8 @@ public class GetPipelineEditorQueryHandler
                 Settings = f.Settings,
                 DefaultValue = f.DefaultValue,
                 IsRequired = f.IsRequired,
+                IsUnique = f.IsUnique,
+                IsPrimary = CopyRecordsDefinition.IsPrimaryField(f),
                 IsSystem = f.IsSystem
             }).ToList()
         };

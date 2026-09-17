@@ -294,6 +294,44 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return result;
     }
 
+    public async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetBulkUpsertRowsByIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> ids, IDbTransaction transaction, CancellationToken ct = default)
+    {
+        var rows = await GetBulkUpsertRowsByColumnValuesAsync(table, fields, "Id", ids.Cast<object>().ToArray(), transaction, ct);
+        return rows.Values.Distinct().ToDictionary(row => Convert.ToInt64(row["Id"]), row => row);
+    }
+
+    public async Task<IReadOnlyDictionary<object, IReadOnlyDictionary<string, object?>>> GetBulkUpsertRowsByColumnValuesAsync(
+        AppTable table, IReadOnlyList<AppField> fields, string columnName, IReadOnlyCollection<object> values, IDbTransaction transaction, CancellationToken ct = default)
+    {
+        var result = new Dictionary<object, IReadOnlyDictionary<string, object?>>();
+        if (values.Count == 0) return result;
+        if (columnName != "Id" && !fields.Any(f => PhysicalNaming.GetPhysicalColumnName(f) == columnName))
+            throw new ArgumentException("The merge column must belong to the target table.", nameof(columnName));
+
+        var connection = transaction.Connection ?? throw new InvalidOperationException("Bulk upsert requires an active transaction.");
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
+        var fieldCols = BuildFieldColumnList(fields);
+        var escapedColumnName = columnName.Replace("]", string.Concat(']', ']'));
+        foreach (var chunk in values.Distinct().Chunk(500))
+        {
+            var sql = $"""
+                SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+                FROM {PhysicalNaming.FullTableName(table.Id)} WITH (UPDLOCK, HOLDLOCK)
+                WHERE IsDeleted = 0 AND [{escapedColumnName}] IN @chunk
+                """;
+            var rows = await connection.QueryAsync(new CommandDefinition(sql, new { chunk }, transaction, cancellationToken: ct));
+            foreach (var row in rows)
+            {
+                IReadOnlyDictionary<string, object?> dict = ToDictionary(row);
+                await enc.DecryptRowAsync((IDictionary<string, object?>)dict, fields, ct);
+                if (dict.TryGetValue(columnName, out var value) && value is not null && value != DBNull.Value)
+                    result[value] = dict;
+            }
+        }
+        return result;
+    }
+
     public async Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
         IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
@@ -727,7 +765,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     public async Task<int> MassUpdateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> recordIds,
-        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null, IDbTransaction? transaction = null)
     {
         var relevantFields = fields.Where(f => f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
         if (relevantFields.Count == 0 || recordIds.Count == 0) return 0;
@@ -735,16 +773,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         Services.FieldEncryptionContext enc;
         IReadOnlyDictionary<long, object?> encryptedValues;
 
-        await using (var connectionForEnc = await ConnectionFactory.CreateAsync(ct))
-        {
-            enc = await GetEncryptionContextAsync(connectionForEnc, table.AppId, null, ct);
-            if (!enc.IsActive && (enc.IsAppEncrypted || relevantFields.Any(f => f.IsEncrypted)))
-            {
-                await using var tenantConn = await ConnectionFactory.CreateAsync(ct);
-                await enc.EnsureDekAsync(tenantConn, null, ct);
-            }
-            encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
-        }
+        await using var ownedConnection = transaction == null ? await ConnectionFactory.CreateAsync(ct) : null;
+        var connection = transaction?.Connection ?? ownedConnection
+            ?? throw new InvalidOperationException("The mass update transaction has no active connection.");
+        enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
+        if (!enc.IsActive && (enc.IsAppEncrypted || relevantFields.Any(f => f.IsEncrypted)))
+            await enc.EnsureDekAsync(connection, transaction, ct);
+        encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
 
         var parameters = new DynamicParameters();
         parameters.Add("ids", recordIds);
@@ -769,24 +804,21 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
         }
 
-        // A single UPDATE statement is implicitly transactional in SQL Server — either every matched
-        // row is written or none is, satisfying the all-or-nothing requirement without an explicit
-        // BEGIN TRAN (and without needing per-record round trips, since every record gets the same values).
+        // Enlist the mutation in the same transaction as its pipeline outbox entries.
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET {string.Join(", ", setClauses)}, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
             WHERE Id IN @ids AND IsDeleted = 0
             """;
 
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
         var affected = await ExecuteTranslatingUniqueViolationsAsync(() =>
-            connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)));
+            connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct)));
 
         // GAP #5: Re-index in Azure AI Search after Mass Update
         if (affected > 0 && fields.Any(f => f.IsSearchable || f.IsFilterable))
         {
             var publicIdsSql = $"SELECT PublicId FROM {PhysicalNaming.FullTableName(table.Id)} WHERE Id IN @ids";
-            var publicIds = await connection.QueryAsync<Guid>(new CommandDefinition(publicIdsSql, new { ids = recordIds }, cancellationToken: ct));
+            var publicIds = await connection.QueryAsync<Guid>(new CommandDefinition(publicIdsSql, new { ids = recordIds }, transaction, cancellationToken: ct));
 
             var searchableValues = fields
                 .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))

@@ -42,6 +42,13 @@ public interface IRecordRepository
     Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> ids, CancellationToken ct = default);
 
+    /// <summary>Bulk-upsert lookups that run inside the commit transaction.</summary>
+    Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetBulkUpsertRowsByIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> ids, System.Data.IDbTransaction transaction, CancellationToken ct = default);
+
+    Task<IReadOnlyDictionary<object, IReadOnlyDictionary<string, object?>>> GetBulkUpsertRowsByColumnValuesAsync(
+        AppTable table, IReadOnlyList<AppField> fields, string columnName, IReadOnlyCollection<object> values, System.Data.IDbTransaction transaction, CancellationToken ct = default);
+
     /// <summary>Row Id → the raw value of an arbitrary column, for the given row Ids. Used to resolve a
     /// table's Set-Key key-field value per row (Lookup/Summary/reference-picker/delete-guard), without
     /// needing SQL-building changes in the existing Id-based methods above.</summary>
@@ -102,7 +109,7 @@ public interface IRecordRepository
     /// Used by mass update, after constraint validation has already passed for every record.</summary>
     Task<int> MassUpdateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<long> recordIds,
-        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+        IReadOnlyDictionary<long, object?> values, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null, System.Data.IDbTransaction? transaction = null);
 
     Task DeleteAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
 

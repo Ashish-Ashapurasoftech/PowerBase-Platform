@@ -1,3 +1,5 @@
+using System.Data;
+using PowerBase.Application.Common.Models;
 using System.Text.Json;
 using FluentAssertions;
 using NSubstitute;
@@ -20,6 +22,8 @@ public class InvokeButtonActionHandlerTests
     private readonly IRolePermissionEnforcer _enforcer = Substitute.For<IRolePermissionEnforcer>();
     private readonly IRecordWriteService _writeService = Substitute.For<IRecordWriteService>();
     private readonly IActionButtonValueResolver _valueResolver = Substitute.For<IActionButtonValueResolver>();
+    private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
+    private readonly IMessagePublisher _messagePublisher = Substitute.For<IMessagePublisher>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -47,7 +51,8 @@ public class InvokeButtonActionHandlerTests
         // Echo whatever was written so tests can assert on it.
         _writeService.ApplyAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(),
+            Arg.Any<IDbTransaction?>(), false, Arg.Any<Action<SearchIndexMessage>?>())
             .Returns(ci => Task.FromResult(ci.Arg<IReadOnlyDictionary<long, object?>>()));
 
         _queryContext.IpAddress.Returns("203.0.113.7");
@@ -65,7 +70,7 @@ public class InvokeButtonActionHandlerTests
     }
 
     private InvokeButtonActionCommandHandler CreateSut() => new(
-        _tableRepo, _fieldRepo, _recordRepo, _enforcer, _writeService, _valueResolver, _queryContext);
+        _tableRepo, _fieldRepo, _recordRepo, _enforcer, _writeService, _valueResolver, _queryContext, _uow, _messagePublisher);
 
     private AppField ButtonField(ActionButtonSettings settings) => new()
     {
@@ -96,6 +101,80 @@ public class InvokeButtonActionHandlerTests
 
     // ── Link Expiration ──────────────────────────────────────────────────────────
 
+    [Theory]
+    [InlineData("success")]
+    [InlineData("write")]
+    [InlineData("commit")]
+    [InlineData("cancel")]
+    public async Task ButtonWrite_UsesTransactionAndPublishesOnlyAfterCommit(string outcome)
+    {
+        SetupFields(ButtonField(new ActionButtonSettings
+        {
+            Variant = ActionButtonVariants.Data,
+            AddData = [new AddDataItem { TargetFid = TargetFid, Value = new ValueSource { Kind = ValueSourceKinds.Data, Data = "updated" } }]
+        }), PlainField(TargetFid));
+        SetupRow();
+        var transaction = Substitute.For<IDbTransaction>();
+        var events = new List<string>();
+        IDbTransaction? active = null;
+        _uow.Transaction.Returns(_ => active);
+        _uow.BeginAsync(Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            events.Add("begin"); active = transaction; return Task.CompletedTask;
+        });
+        _writeService.ApplyAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(),
+            Arg.Any<IDbTransaction?>(), false, Arg.Any<Action<SearchIndexMessage>?>())
+            .Returns(call =>
+            {
+                Assert.Same(transaction, active);
+                Assert.Same(transaction, call.ArgAt<IDbTransaction>(7));
+                events.Add("write");
+                call.ArgAt<Action<SearchIndexMessage>>(9)(new SearchIndexMessage { RecordPublicId = _recordId });
+                if (outcome == "write") throw new InvalidOperationException("Outbox failed");
+                if (outcome == "cancel") throw new OperationCanceledException();
+                return Task.FromResult(call.ArgAt<IReadOnlyDictionary<long, object?>>(3));
+            });
+        _uow.CommitAsync(Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            events.Add("commit");
+            if (outcome == "commit") throw new InvalidOperationException("Commit failed");
+            return Task.CompletedTask;
+        });
+        _uow.RollbackAsync(Arg.Any<CancellationToken>()).Returns(call =>
+        {
+            Assert.Equal(CancellationToken.None, call.Arg<CancellationToken>());
+            events.Add("rollback"); return Task.CompletedTask;
+        });
+        _messagePublisher.PublishAsync(Arg.Any<SearchIndexMessage>(), Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            events.Add("publish"); return Task.CompletedTask;
+        });
+        if (outcome == "success")
+        {
+            var result = await CreateSut().HandleAsync(MakeCommand());
+            Assert.Equal("updated", result.UpdatedFields[TargetFid]);
+            Assert.Equal(new[] { "begin", "write", "commit", "publish" }, events);
+        }
+        else
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() => CreateSut().HandleAsync(MakeCommand()));
+            Assert.Equal(outcome == "commit" ? new[] { "begin", "write", "commit", "rollback" } : new[] { "begin", "write", "rollback" }, events);
+        }
+    }
+
+    [Fact]
+    public async Task ButtonPermissionFailure_DoesNotBeginTransaction()
+    {
+        SetupFields(ButtonField(new ActionButtonSettings { TimestampFid = TargetFid }), PlainField(TargetFid));
+        SetupRow();
+        _enforcer.EnsureButtonWriteAllowedAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
+            Arg.Any<IReadOnlySet<long>>(), Arg.Any<CancellationToken>()).Returns(Task.FromException(new UnauthorizedActionException("Denied")));
+        await Assert.ThrowsAsync<UnauthorizedActionException>(() => CreateSut().HandleAsync(MakeCommand()));
+        await _uow.DidNotReceive().BeginAsync(Arg.Any<CancellationToken>());
+    }
+
     [Fact]
     public async Task LinkExpiration_PastWindow_ThrowsLinkExpiredException()
     {
@@ -121,7 +200,8 @@ public class InvokeButtonActionHandlerTests
 
         await _writeService.DidNotReceive().ApplyAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(),
+            Arg.Any<IDbTransaction?>(), false, Arg.Any<Action<SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -171,7 +251,8 @@ public class InvokeButtonActionHandlerTests
 
         await _writeService.DidNotReceive().ApplyAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(),
+            Arg.Any<IDbTransaction?>(), false, Arg.Any<Action<SearchIndexMessage>?>());
     }
 
     [Fact]

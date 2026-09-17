@@ -1064,8 +1064,9 @@ public class PipelineTriggersAndExternalActionsTests
         fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
 
         // Mock existing record to trigger update path
-        var existingRow = new Dictionary<string, object> { { "fid_101", "Inactive" }, { "publicId", Guid.NewGuid() } };
-        recordRepo.ListAsync(table, fields, 1, 1, Arg.Any<FilterGroup>(), null, null, Arg.Any<CancellationToken>()).Returns(new List<IReadOnlyDictionary<string, object>> { existingRow });
+        var existingRow = new Dictionary<string, object?> { { "f_101", "Active" }, { "publicId", Guid.NewGuid() }, { "id", 55L } };
+        recordRepo.GetBulkUpsertRowsByColumnValuesAsync(table, fields, "f_101", Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>> { ["Active"] = existingRow });
 
         var method = typeof(PipelineEngine).GetMethod("ExecuteStepAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         var task = (Task<string>)method!.Invoke(engine, new object[] { step, "{}", contextDict, new List<PipelineStep>(), new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "trigger_1", CancellationToken.None })!;
@@ -1073,7 +1074,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         // Verify writeService was called with suppressInterception = true
         await writeService.Received(1).ApplyAsync(
-            table, fields, Arg.Any<Guid>(), row, AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), dbTx, suppressInterception: true);
+            table, fields, Arg.Any<Guid>(), row, AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), dbTx, suppressInterception: true, existingRecord: existingRow);
 
         // Verify triggerInterceptor was called for bulk modified exactly once with UserId 1
         await triggerInterceptor.Received(1).InterceptBulkAsync(
@@ -1489,9 +1490,11 @@ public class PipelineTriggersAndExternalActionsTests
         var userRepo = Substitute.For<IUserRepository>();
         var auditRepo = Substitute.For<IAuditRepository>();
         var triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
+        var appRepo = Substitute.For<IAppRepository>();
         var engine = new PowerBase.Formula.FormulaEngine();
 
         var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid(), Name = "Test Table" };
+        appRepo.GetByIdAsync(table.AppId, Arg.Any<CancellationToken>()).Returns(new App { Id = table.AppId });
         var customField = new AppField { Id = 101, Fid = 6, Name = "Status", PhysicalColumnName = null, IsAuditable = false, TypeCode = "Text" };
         var fields = new List<AppField> { customField };
 
@@ -1501,7 +1504,7 @@ public class PipelineTriggersAndExternalActionsTests
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
-        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, appUserRepo, userRepo, auditRepo, triggerInterceptor, engine);
+        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo);
 
         // Act
         await writeService.ApplyAsync(table, fields, recordPublicId, fieldValues, "Updated", "Record modified", CancellationToken.None);
@@ -1529,9 +1532,11 @@ public class PipelineTriggersAndExternalActionsTests
         var userRepo = Substitute.For<IUserRepository>();
         var auditRepo = Substitute.For<IAuditRepository>();
         var triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
+        var appRepo = Substitute.For<IAppRepository>();
         var engine = new PowerBase.Formula.FormulaEngine();
 
         var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid(), Name = "Test Table" };
+        appRepo.GetByIdAsync(table.AppId, Arg.Any<CancellationToken>()).Returns(new App { Id = table.AppId });
         var customField = new AppField { Id = 101, Fid = 6, Name = "Status", PhysicalColumnName = null, IsAuditable = false, TypeCode = "Text" };
         var fields = new List<AppField> { customField };
 
@@ -1541,7 +1546,7 @@ public class PipelineTriggersAndExternalActionsTests
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
-        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, appUserRepo, userRepo, auditRepo, triggerInterceptor, engine);
+        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo);
 
         // Act
         await writeService.ApplyAsync(table, fields, recordPublicId, fieldValues, "Updated", "Record modified", CancellationToken.None);
@@ -1564,8 +1569,10 @@ public class PipelineTriggersAndExternalActionsTests
         var triggerInterceptor = Substitute.For<IPipelineTriggerInterceptor>();
         var uow = Substitute.For<ITenantUnitOfWork>();
         var queryContext = Substitute.For<IQueryContext>();
+        var appRepo = Substitute.For<IAppRepository>();
 
         var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid(), Name = "Test Table" };
+        appRepo.GetByIdAsync(table.AppId, Arg.Any<CancellationToken>()).Returns(new App { Id = table.AppId });
         var field = new AppField { Id = 101, Fid = 6, Name = "Status", PhysicalColumnName = null, IsAuditable = true, TypeCode = "Text" };
         var fields = new List<AppField> { field };
 
@@ -1582,11 +1589,11 @@ public class PipelineTriggersAndExternalActionsTests
         recordRepo.GetByPublicIdAsync(table, fields, Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?> { ["f_6"] = "Old" });
 
-        recordRepo.MassUpdateAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>())
+        recordRepo.MassUpdateAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>(), Arg.Any<System.Data.IDbTransaction>())
             .Returns(2);
 
         var handler = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommandHandler(
-            tableRepo, fieldRepo, recordRepo, enforcer, auditRepo, triggerInterceptor, uow, queryContext);
+            tableRepo, fieldRepo, recordRepo, enforcer, auditRepo, triggerInterceptor, uow, queryContext, appRepo, Substitute.For<IMessagePublisher>());
 
         var command = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommand(
             table.PublicId, new List<Guid> { recId1, recId2 }, new Dictionary<long, object?> { [6] = "New" });

@@ -149,8 +149,10 @@ public class PipelineEngineHandleErrorsTests
         await _pipelineRepo.DidNotReceive().CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 4), Arg.Any<CancellationToken>());
     }
 
-    [Fact]
-    public async Task HandleErrors_MonitoredFailure_ExecutesErrorBranch_PopulatesERRORObject()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HandleErrors_MonitoredFailure_ExecutesErrorBranch_PopulatesERRORObject(bool invalidNumber)
     {
         // Arrange
         var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "RecordAdded", TriggerPayloadJson = "{}" };
@@ -182,8 +184,10 @@ public class PipelineEngineHandleErrorsTests
                 RefId = "monitored_fail",
                 Label = "Monitored Failing Lookup",
                 Type = "query",
-                Subtype = "look-up-record",
-                ConfigJson = JsonSerializer.Serialize(new { TablePublicId = failTableGuid.ToString(), RecordIdValue = "999" })
+                Subtype = invalidNumber ? "create-record" : "look-up-record",
+                ConfigJson = invalidNumber
+                    ? JsonSerializer.Serialize(new { TableId = failTableGuid.ToString(), FieldMappings = new[] { new { Field = "fid_6", Value = "invalid number" } } })
+                    : JsonSerializer.Serialize(new { TablePublicId = failTableGuid.ToString(), RecordIdValue = "999" })
             },
             new()
             {
@@ -202,6 +206,9 @@ public class PipelineEngineHandleErrorsTests
         _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
         _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 10 });
         _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
+
+        if (invalidNumber)
+            _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField> { new() { Id = 6, Fid = 6, Name = "Amount", TypeCode = "Number" } });
 
         _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyCollection<long>>(c => c.Contains(999)), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>()); // Empty = NotFoundException

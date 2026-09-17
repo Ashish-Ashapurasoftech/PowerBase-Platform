@@ -18,6 +18,7 @@ public class MassUpdateRecordsCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly IQueryContext _queryContext;
     private readonly IAppRepository _appRepo;
+    private readonly IMessagePublisher _messagePublisher;
 
     public MassUpdateRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -28,7 +29,8 @@ public class MassUpdateRecordsCommandHandler
         IPipelineTriggerInterceptor triggerInterceptor,
         ITenantUnitOfWork uow,
         IQueryContext queryContext,
-        IAppRepository appRepo)
+        IAppRepository appRepo,
+        IMessagePublisher messagePublisher)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -39,6 +41,7 @@ public class MassUpdateRecordsCommandHandler
         _uow = uow;
         _queryContext = queryContext;
         _appRepo = appRepo;
+        _messagePublisher = messagePublisher;
     }
 
     public async Task<int> HandleAsync(MassUpdateRecordsCommand command, CancellationToken ct = default)
@@ -181,12 +184,14 @@ public class MassUpdateRecordsCommandHandler
                     PipelineRecordEventType.Modified
                 ));
             }
-            catch
+            catch (NotFoundException)
             {
                 // Skip if not found
             }
         }
 
+        var indexMessages = new List<SearchIndexMessage>();
+        int affected;
         await _uow.BeginAsync(ct);
         try
         {
@@ -196,19 +201,21 @@ public class MassUpdateRecordsCommandHandler
                     table, fields, recordChanges, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
             }
 
-            var affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), command.FieldValues, ct);
+            affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), command.FieldValues, ct, indexMessages.Add, _uow.Transaction);
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.Updated, AuditEntityTypes.Record, table.PublicId.ToString(),
                 $"{affected} record(s) mass-updated in {table.Name}", appId: table.AppId, ct: ct);
 
             await _uow.CommitAsync(ct);
-            return affected;
         }
         catch
         {
-            await _uow.RollbackAsync(ct);
+            await _uow.RollbackAsync(CancellationToken.None);
             throw;
         }
+        if (indexMessages.Count > 0)
+            _ = _messagePublisher.PublishBatchAsync(indexMessages, default);
+        return affected;
     }
 }
