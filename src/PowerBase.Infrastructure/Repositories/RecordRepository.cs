@@ -249,7 +249,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         // Id is returned as text: the row Id by default, or (translated by the caller) the parent
         // table's Set-Key key-field value — either way, exactly what the reference column stores.
-        var selectCols = new List<string> { "CAST(Id AS NVARCHAR(400)) AS Id" };
+        // PublicId rides along from the same row purely so a picker-driven fetch (the Reference
+        // dropdown's own "selection changed" moment) can hit GetById directly — it plays no part
+        // in what gets submitted/stored.
+        var selectCols = new List<string> { "CAST(Id AS NVARCHAR(400)) AS Id", "PublicId" };
         if (labelFields.Count > 0) selectCols.Add($"{LabelColumnExpr(labelFields[0])} AS Value1");
         if (labelFields.Count > 1) selectCols.Add($"{LabelColumnExpr(labelFields[1])} AS Value2");
         if (labelFields.Count > 2) selectCols.Add($"{LabelColumnExpr(labelFields[2])} AS Value3");
@@ -266,8 +269,33 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             ORDER BY {searchColExpr}
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var enc = await GetEncryptionContextAsync(connection, parentTable.AppId, null, ct);
         var rows = await connection.QueryAsync<ReferenceOption>(new CommandDefinition(sql, parameters, cancellationToken: ct));
-        return rows.AsList();
+        var list = rows.AsList();
+
+        // Decrypt label-field values in place when the parent app has field encryption active.
+        // Id is the parent's internal BIGINT row Id (a system column) — it is never encrypted.
+        if (enc.IsActive)
+        {
+            var f1 = labelFields.Count > 0 ? labelFields[0] : null;
+            var f2 = labelFields.Count > 1 ? labelFields[1] : null;
+            var f3 = labelFields.Count > 2 ? labelFields[2] : null;
+            var fLabel = primaryLabelField ?? f1;
+
+            foreach (var opt in list)
+            {
+                if (NeedsDecrypt(enc, f1) && opt.Value1 is not null)
+                    opt.Value1 = await enc.DecryptValueAsync(opt.Value1, ct);
+                if (NeedsDecrypt(enc, f2) && opt.Value2 is not null)
+                    opt.Value2 = await enc.DecryptValueAsync(opt.Value2, ct);
+                if (NeedsDecrypt(enc, f3) && opt.Value3 is not null)
+                    opt.Value3 = await enc.DecryptValueAsync(opt.Value3, ct);
+                if (NeedsDecrypt(enc, fLabel) && opt.Label is not null)
+                    opt.Label = await enc.DecryptValueAsync(opt.Label, ct);
+            }
+        }
+
+        return list;
     }
 
     public async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(
@@ -439,6 +467,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             : PhysicalNaming.ColumnName(labelField.Fid!.Value);
         return $"CAST({col} AS NVARCHAR(400))";
     }
+
+    /// <summary>True when <paramref name="field"/>'s physical column was encrypted at write time
+    /// and therefore must be decrypted before surfacing its value to the caller. Mirrors the
+    /// <c>FieldsToEncrypt</c> predicate inside <see cref="Services.FieldEncryptionContext"/>.</summary>
+    private static bool NeedsDecrypt(Services.FieldEncryptionContext enc, AppField? field)
+        => field is not null && field.Fid.HasValue && !field.IsSystem
+           && (enc.IsAppEncrypted || field.IsEncrypted);
 
     public async Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default)
