@@ -104,7 +104,7 @@ public class SetKeyCommandHandler
                 isRequired: true, newKeyField.DefaultValue,
                 newKeyField.IsSearchable, newKeyField.IsSortable,
                 newKeyField.IsFilterable, newKeyField.IsReportable, newKeyField.IsAuditable,
-                isUnique: true, isEncrypted: newKeyField.IsEncrypted, newKeyField.Settings, ct);
+                isUnique: true, isEncrypted: newKeyField.IsEncrypted, isAutoFill: newKeyField.IsAutoFill, newKeyField.Settings, ct);
             await _schemaEngine.SetUniqueAsync(table, newKeyField, true, ct);
         }
 

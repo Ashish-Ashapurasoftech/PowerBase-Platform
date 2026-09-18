@@ -177,6 +177,7 @@ public class BulkCreateFieldsCommandHandler
                 IsReportable = advancedDefaults.Reportable,
                 IsAuditable = item.IsAuditable,
                 IsEncrypted = item.IsEncrypted,
+                IsAutoFill = FieldAutoFillCapability.IsSupported(fieldType.Code),
             };
 
             var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);

@@ -47,7 +47,7 @@ public interface IAppFieldRepository
     /// generated once at creation and immutable thereafter (stable third-party API identifier).</summary>
     Task<int> UpdateAsync(Guid publicId, long tableId, string? label, string? description,
         bool isRequired, string? defaultValue, bool isSearchable, bool isSortable,
-        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, string? settings,
+        bool isFilterable, bool isReportable, bool isAuditable, bool isUnique, bool isEncrypted, bool isAutoFill, string? settings,
         CancellationToken ct = default, IDbTransaction? transaction = null);
     Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null);
     Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null);

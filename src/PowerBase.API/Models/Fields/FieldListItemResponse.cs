@@ -18,6 +18,7 @@ public class FieldListItemResponse
     public bool IsAuditable { get; init; }
     public bool IsUnique { get; init; }
     public bool IsSystem { get; init; }
+    public bool IsAutoFill { get; init; }
     public int? Fid { get; init; }
     public DateTime CreatedOn { get; init; }
     /// <summary>Whether this is the table's current key field (Set Key feature).</summary>
