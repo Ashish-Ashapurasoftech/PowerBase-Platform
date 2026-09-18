@@ -25,4 +25,5 @@ public record UpdateReportCommand(
     string ColumnsMode = "Custom",
     List<SortGroupLevelCommand>? TableSortGroup = null,
     ReportOptionsCommand? Options = null,
-    List<RowGroupLevelCommand>? RowGroupLevels = null);
+    List<RowGroupLevelCommand>? RowGroupLevels = null,
+    List<SummarySortFieldCommand>? SummarySortFields = null);

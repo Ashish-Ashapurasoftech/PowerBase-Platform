@@ -69,7 +69,55 @@ public sealed class SummaryReportConfigValidator : IReportConfigValidator
         CommonReportValidationHelpers.ForbidIfPopulated(input.TableSortGroup.Count > 0, "tableSortGroup", "Summary", errors);
         CommonReportValidationHelpers.ForbidIfPopulated(input.Options is not null, "options", "Summary", errors);
 
+        var effectiveRowLevelCount = input.RowGroupLevels.Count > 0 ? input.RowGroupLevels.Count : (input.GroupByFieldId.HasValue ? 1 : 0);
+        ValidateSummarySortFields(input.SummarySortFields, input.Chart, effectiveRowLevelCount, input.Aggregations, errors);
+
         return errors;
+    }
+
+    /// <summary>Forbidden outright once a crosstab column is configured — one pivoted row spans
+    /// several underlying cells once "Group columns" is on, so there's no single well-defined
+    /// value to sort a Count/Aggregation entry by (see ReportDefinition.SummarySortFields' doc
+    /// comment). Otherwise each entry must resolve to a real output column: RowLevel needs a
+    /// LevelIndex within the actual number of configured Rows levels, Aggregation needs a
+    /// field+function pair matching one of the configured Aggregations (not list position, which
+    /// can't disambiguate e.g. Sum vs Avg of the same field).</summary>
+    private static void ValidateSummarySortFields(
+        List<SummarySortFieldCommand> sortFields, ChartConfigCommand? chart, int rowLevelCount,
+        List<SummaryAggregationCommand> aggregations, IDictionary<string, string[]> errors)
+    {
+        if (sortFields.Count == 0) return;
+
+        if (chart?.SeriesFieldId is not null)
+        {
+            CommonReportValidationHelpers.AddError(errors, "summarySortFields",
+                "Sorting is not available on a Summary report with a crosstab column (\"Group columns\") configured.");
+            return;
+        }
+
+        foreach (var s in sortFields)
+        {
+            switch (s.Target)
+            {
+                case "RowLevel":
+                    if (s.LevelIndex is not { } levelIndex || levelIndex < 0 || levelIndex >= rowLevelCount)
+                        CommonReportValidationHelpers.AddError(errors, "summarySortFields", $"Invalid Rows level index: {s.LevelIndex}.");
+                    break;
+                case "Count":
+                    break;
+                case "Aggregation":
+                    var matches = aggregations.Any(a =>
+                        a.FieldId == s.AggregationFieldId && string.Equals(a.Function, s.AggregationFunction, StringComparison.OrdinalIgnoreCase));
+                    if (!matches)
+                        CommonReportValidationHelpers.AddError(errors, "summarySortFields",
+                            $"No configured aggregation matches field {s.AggregationFieldId} / function '{s.AggregationFunction}'.");
+                    break;
+                default:
+                    CommonReportValidationHelpers.AddError(errors, "summarySortFields",
+                        $"target must be one of: RowLevel, Count, Aggregation. Got '{s.Target}'.");
+                    break;
+            }
+        }
     }
 
     /// <summary>Same field ID is allowed to repeat across levels (e.g. "Category" as both the

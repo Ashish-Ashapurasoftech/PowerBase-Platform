@@ -23,6 +23,10 @@ public class UpdateReportRequest
     /// <summary>Summary-only: ordered "Rows" group levels — supersedes GroupByFieldId/GroupByMode
     /// when non-empty.</summary>
     public List<RowGroupLevelRequest> RowGroupLevels { get; set; } = [];
+    /// <summary>Summary-only, and only when no crosstab column is configured — the report's
+    /// default row order, referencing its own output columns (a Rows level, Count, or an
+    /// aggregation) rather than a raw table field.</summary>
+    public List<SummarySortFieldRequest> SummarySortFields { get; set; } = [];
     public bool HideTotals { get; set; }
     public bool? GroupDefaultCollapsed { get; set; }
     public bool GroupByDescending { get; set; }

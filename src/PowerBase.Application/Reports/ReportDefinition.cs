@@ -10,8 +10,11 @@ public class ReportDefinition
     /// read this; it exists so the wizard can round-trip which mode the user explicitly chose.</summary>
     public string ColumnsMode { get; set; } = "Custom";
 
-    // Legacy multi-sort for Summary/Chart (Table reports now use TableSortGroup below — supersedes
-    // SortFieldId/SortDesc when non-empty)
+    // Legacy field — SortFields/SortFieldId/SortDesc were never actually wired up for Summary/
+    // Chart reports (RunReportQueryHandler's RunSummaryAsync call never receives the computed
+    // sortFields at all — see its dispatch around "report.ReportType is Summary or Chart"), so
+    // whatever a report saved here has always been silently ignored. Kept only so old JSON
+    // deserializes without data loss; Summary's real (working) sort is SummarySortFields below.
     public List<SortSpec> SortFields { get; set; } = [];
 
     /// <summary>Table-only: one ordered list unifying sort + group (each level is either a plain
@@ -35,6 +38,16 @@ public class ReportDefinition
     /// with, Chart's SeriesFieldId (the crosstab "Columns" dimension) — RunSummaryAsync groups
     /// by every level here plus the crosstab field together in one query.</summary>
     public List<RowGroupLevel> RowGroupLevels { get; set; } = [];
+    /// <summary>Summary-only: the report's default row order, referencing its own OUTPUT columns
+    /// (a Rows level, Count, or an aggregation) rather than raw table fields — unlike the dead
+    /// SortFields above, RunSummaryAsync actually applies this to the SQL ORDER BY. Empty means
+    /// the pre-existing default (ascending by the Rows group levels, SummarizeAsync's own
+    /// baseline ORDER BY). Forbidden (and the builder UI hides the whole Sorting section)
+    /// whenever a crosstab column is configured — one pivoted row spans several underlying cells
+    /// once "Group columns" is on, so "sort by Sum of X" has no single well-defined value to sort
+    /// by; only sorting by the Rows levels themselves would be unambiguous there, and this was
+    /// scoped down to flat (non-crosstab) reports only rather than half-supporting that case.</summary>
+    public List<SummarySortField> SummarySortFields { get; set; } = [];
     public bool HideTotals { get; set; }
     /// <summary>null = "Default report setting" (renders the same as false/Expanded, but keeps
     /// that choice distinguishable from an explicit "Expanded by default" pick), true = Collapsed
@@ -144,6 +157,24 @@ public class RowGroupLevel
     public string GroupByMode { get; set; } = "EqualValues";
 }
 
+/// <summary>One entry in Summary's SummarySortFields — references a report OUTPUT column, not a
+/// raw table field, since a raw fieldId alone can't identify e.g. "the Avg of Resolution Hours"
+/// aggregation specifically (a field can appear in more than one aggregation, e.g. Sum AND Avg of
+/// the same field) or which Rows level a repeated field belongs to.</summary>
+public class SummarySortField
+{
+    /// <summary>"RowLevel", "Count", or "Aggregation".</summary>
+    public string Target { get; set; } = "RowLevel";
+    /// <summary>RowLevel only — index into RowGroupLevels (0 for the legacy single GroupByFieldId,
+    /// same convention used everywhere else this session for a single-level fallback).</summary>
+    public int? LevelIndex { get; set; }
+    /// <summary>Aggregation only — identifies which configured aggregation by field + function
+    /// (not by list position, which can shift once hidden fields are filtered out server-side).</summary>
+    public long? AggregationFieldId { get; set; }
+    public string? AggregationFunction { get; set; }
+    public bool Desc { get; set; }
+}
+
 // ── Sort ─────────────────────────────────────────────────────────────────────
 
 public class SortSpec
@@ -172,6 +203,16 @@ public class SummaryAggregation
     /// <summary>Normal (default) or PercentOfColumnTotal</summary>
     public string DisplayAs { get; set; } = "Normal";
 }
+
+/// <summary>SQL-facing sort instruction for IRecordRepository.SummarizeAsync — deliberately
+/// simpler/more mechanical than SummarySortField above (that one identifies an aggregation by
+/// field+function since a field can be aggregated more than once; by the time RunSummaryAsync
+/// resolves it down to this type, it has already found that aggregation's position in the exact
+/// aggregations list being passed to SummarizeAsync, so a plain 0-based Index is unambiguous
+/// here).</summary>
+public record SummarizeSortSpec(SummarizeSortTarget Target, int Index, bool Desc);
+
+public enum SummarizeSortTarget { GroupLevel, Count, Aggregation }
 
 // ── Custom Dynamic Filter Item ────────────────────────────────────────────────
 

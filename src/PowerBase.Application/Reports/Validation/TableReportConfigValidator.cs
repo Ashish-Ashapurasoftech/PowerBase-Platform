@@ -46,6 +46,7 @@ public sealed class TableReportConfigValidator : IReportConfigValidator
         CommonReportValidationHelpers.ForbidIfPopulated(input.Aggregations.Count > 0, "aggregations", "Table", errors);
         CommonReportValidationHelpers.ForbidIfPopulated(input.Chart is not null, "chart", "Table", errors);
         CommonReportValidationHelpers.ForbidIfPopulated(input.RowGroupLevels.Count > 0, "rowGroupLevels", "Table", errors);
+        CommonReportValidationHelpers.ForbidIfPopulated(input.SummarySortFields.Count > 0, "summarySortFields", "Table", errors);
 
         return errors;
     }
