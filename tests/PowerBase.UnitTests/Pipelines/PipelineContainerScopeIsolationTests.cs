@@ -42,6 +42,7 @@ public class PipelineContainerScopeIsolationTests
             _recordWriteService,
             _tableRepo,
             _fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             Substitute.For<IFileStorageService>(),
@@ -131,7 +132,7 @@ public class PipelineContainerScopeIsolationTests
         serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(searchService);
 
         var engine = new PipelineEngine(
-            _pipelineRepo, _recordRepo, _recordWriteService, _tableRepo, _fieldRepo,
+            _pipelineRepo, _recordRepo, _recordWriteService, _tableRepo, _fieldRepo, Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(), Substitute.For<IHttpClientFactory>(), Substitute.For<IFileStorageService>(),
             Options.Create(new PipelineExecutionOptions()), Substitute.For<ILogger<PipelineEngine>>(), Substitute.For<IPipelineTriggerInterceptor>(),
             Substitute.For<ITenantUnitOfWork>(), Substitute.For<IPipelineAuditFormatter>(), Substitute.For<IQueryContext>(),

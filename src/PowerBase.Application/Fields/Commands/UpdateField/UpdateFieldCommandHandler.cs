@@ -156,6 +156,12 @@ public class UpdateFieldCommandHandler
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, isUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, isEncrypted, ct);
 
+        // Build the physical constraint before persisting IsUnique. A failed index build must
+        // not leave metadata claiming that uniqueness is enforced. Also repair fields whose
+        // metadata was saved by an earlier failed attempt but whose index is missing.
+        if (isUnique || existing.IsUnique)
+            await _schemaEngine.SetUniqueAsync(table, existing, isUnique, ct);
+
         // Save old IsSearchable state before UpdateAsync modifies metadata
         bool wasSearchable = existing.IsSearchable;
 
@@ -190,13 +196,6 @@ public class UpdateFieldCommandHandler
         {
             await _uow.RollbackAsync(ct);
             throw;
-        }
-
-        // Unique index: create or drop after the metadata row is committed.
-        if (isUnique != existing.IsUnique)
-        {
-            existing.IsUnique = isUnique;
-            await _schemaEngine.SetUniqueAsync(table, existing, isUnique, ct);
         }
 
         // Backfill: when an optional field becomes required and a default is supplied, fill existing

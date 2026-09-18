@@ -142,10 +142,11 @@ public class CopyRecordsTests
         Assert.Equal(value, CopyRecordsDefinition.ConvertValue(value, Field(6, "Source"), Field(9, "Destination")));
 
     [Fact]
-    public void NumericToTextPreservesZeroAndRejectsTextToNumber()
+    public void NumericToTextPreservesZeroAndTextToNumberUsesCreateRecordParsing()
     {
         Assert.Equal("0", CopyRecordsDefinition.ConvertValue(0, Field(6, "Source", "Number"), Field(9, "Target")));
-        Assert.Throws<ValidationException>(() => CopyRecordsDefinition.ConvertValue("123", Field(6, "Source"), Field(9, "Target", "Number")));
+        Assert.Equal(123m, CopyRecordsDefinition.ConvertValue("123", Field(6, "Source"), Field(9, "Target", "Number")));
+        Assert.Throws<ValidationException>(() => CopyRecordsDefinition.ConvertValue("abc", Field(6, "Source"), Field(9, "Target", "Number")));
     }
 
     private static CopyRecordsDefinition Config() => new()
@@ -153,6 +154,78 @@ public class CopyRecordsTests
         SourceTable = Guid.NewGuid().ToString(), DestinationTable = Guid.NewGuid().ToString(),
         SourceFields = new() { "fid_6" }, DestinationFields = new() { "fid_9" }, MergeField = "fid_9"
     };
+
+    [Theory]
+    [InlineData("fid_9")]
+    [InlineData("Destination")]
+    public void DuplicateDestinationMapping_IsRejectedEvenWithDifferentReferences(string duplicate)
+    {
+        var config = Config();
+        config.SourceFields.Add("fid_7");
+        config.DestinationFields.Add(duplicate);
+        var error = Assert.Throws<ValidationException>(() => config.ValidateFields(
+            new[] { Field(6, "Name"), Field(7, "Number", "Number") },
+            new[] { Field(9, "Destination", unique: true) }));
+        Assert.Contains("mapped more than once", error.Message);
+    }
+
+    [Theory]
+    [InlineData("Yes")]
+    [InlineData("No")]
+    public async Task InvalidNumericExport_IsAnErrorWithoutInsertOrUpdate(string setting)
+    {
+        using var harness = new Harness();
+        harness.Config.TerminateOnError = setting;
+        harness.SourceFields[0].TypeCode = "Number";
+        harness.DestinationField.TypeCode = "Number";
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            if (setting == "Yes")
+            {
+                var message = (await Assert.ThrowsAsync<PipelineNonRetryableException>(harness.Run)).Message;
+                Assert.Contains("1 record could not be copied (0 inserted, 0 updated)", message);
+                Assert.Contains("First error: Destination field 'Destination key' needs a valid number from source field 'Source key'.", message);
+            }
+            else
+            {
+                var result = JsonDocument.Parse(await harness.Run()).RootElement;
+                Assert.Equal(1, result.GetProperty("ErrorCount").GetInt32());
+                Assert.Equal(0, result.GetProperty("InsertedCount").GetInt32());
+                Assert.Equal(0, result.GetProperty("UpdatedCount").GetInt32());
+            }
+        }
+        Assert.Empty(harness.Records.ReceivedCalls());
+        Assert.Empty(harness.Writes.ReceivedCalls());
+    }
+
+    [Fact]
+    public void NumericValuesAndActualNull_ArePreserved()
+    {
+        var source = Field(6, "Source", "Number");
+        var destination = Field(9, "Destination", "Number");
+        Assert.Equal(12.5m, CopyRecordsDefinition.ConvertValue(JsonSerializer.SerializeToElement(12.5m), source, destination));
+        Assert.Equal(0, CopyRecordsDefinition.ConvertValue(0, source, destination));
+        Assert.Null(CopyRecordsDefinition.ConvertValue(JsonSerializer.SerializeToElement<object?>(null), source, destination));
+    }
+
+    [Fact]
+    public void ConversionErrors_UseFieldLabelsInsteadOfInternalNames()
+    {
+        var source = Field(6, "c_name");
+        source.Label = "Name";
+        var destination = Field(9, "c_number", "Number");
+        destination.Label = "Number";
+        var error = Assert.Throws<ValidationException>(() => CopyRecordsDefinition.ConvertValue("abc", source, destination));
+        Assert.Contains("Destination field 'Number' needs a valid number from source field 'Name'", error.Message);
+        Assert.DoesNotContain("c_number", error.Message);
+        var config = Config();
+        config.SourceFields.Add("fid_7");
+        config.DestinationFields.Add("fid_9");
+        var duplicate = Assert.Throws<ValidationException>(() => config.ValidateFields(
+            new[] { source, Field(7, "other") }, new[] { destination }));
+        Assert.Contains("'Number'", duplicate.Message);
+        Assert.DoesNotContain("c_number", duplicate.Message);
+    }
 
     [Theory]
     [InlineData(0, false)]
@@ -475,6 +548,7 @@ public class CopyRecordsTests
                 .AddSingleton(Substitute.For<IAppAccessService>()).AddSingleton(enforcer).AddSingleton(Substitute.For<IQueryContext>())
                 .AddSingleton(idempotency).AddSingleton(Substitute.For<ITenantUnitOfWork>()).AddSingleton(encryption)
                 .AddSingleton(Substitute.For<IUserRepository>()).AddSingleton(Substitute.For<IAuditRepository>())
+                .AddSingleton(Substitute.For<IRelationshipRepository>())
                 .AddSingleton(Substitute.For<IPipelineTriggerInterceptor>()).AddSingleton<FormulaEngine>().BuildServiceProvider();
         }
         private async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> Page()

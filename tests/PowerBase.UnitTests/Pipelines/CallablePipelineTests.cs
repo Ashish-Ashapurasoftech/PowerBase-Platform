@@ -23,7 +23,7 @@ public class CallablePipelineTests
         var context = Substitute.For<IQueryContext>();
         context.TenantId.Returns(3L);
         return new PipelineEngine(repository, Substitute.For<IRecordRepository>(), Substitute.For<IRecordWriteService>(),
-            Substitute.For<IAppTableRepository>(), Substitute.For<IAppFieldRepository>(), Substitute.For<IEmailService>(),
+            Substitute.For<IAppTableRepository>(), Substitute.For<IAppFieldRepository>(), Substitute.For<IRelationshipRepository>(), Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(), Substitute.For<IFileStorageService>(), Options.Create(new PipelineExecutionOptions()),
             Substitute.For<ILogger<PipelineEngine>>(), Substitute.For<IPipelineTriggerInterceptor>(), Substitute.For<ITenantUnitOfWork>(),
             Substitute.For<IPipelineAuditFormatter>(), context, Substitute.For<IServiceScopeFactory>(), services,

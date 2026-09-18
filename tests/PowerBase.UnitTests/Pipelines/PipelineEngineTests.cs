@@ -16,6 +16,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.DependencyInjection;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
+using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.UnitTests.Pipelines;
 
@@ -34,6 +35,7 @@ public class PipelineEngineTests
     private readonly IPipelineApiRequestDispatcher _apiRequestDispatcher;
     private readonly ITenantRepository _tenantRepository;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IPipelineStepIdempotencyRepository _idempotencyRepo;
 
     public PipelineEngineTests()
     {
@@ -50,6 +52,7 @@ public class PipelineEngineTests
         _tenantRepository = Substitute.For<ITenantRepository>();
         _httpClientFactory = Substitute.For<IHttpClientFactory>();
         _httpClientFactory.CreateClient(Arg.Any<string>()).Returns(_ => new HttpClient());
+        _idempotencyRepo = Substitute.For<IPipelineStepIdempotencyRepository>();
         var serviceProvider = Substitute.For<IServiceProvider>();
         serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(_pipelineRecordSearchService);
         serviceProvider.GetService(typeof(IPipelineApiRequestDispatcher)).Returns(_apiRequestDispatcher);
@@ -60,6 +63,7 @@ public class PipelineEngineTests
             _recordWriteService,
             _tableRepo,
             _fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             _httpClientFactory,
             Substitute.For<IFileStorageService>(),
@@ -73,7 +77,7 @@ public class PipelineEngineTests
             serviceProvider,
             Substitute.For<IAdminRepository>(),
             _tenantRepository,
-            Substitute.For<IPipelineStepIdempotencyRepository>()
+            _idempotencyRepo
         );
     }
 
@@ -87,6 +91,62 @@ public class PipelineEngineTests
     {
         var method = typeof(PipelineEngine).GetMethod("ParseValueType", BindingFlags.NonPublic | BindingFlags.Instance);
         return method!.Invoke(_engine, new object?[] { valueStr, typeCode, "Test field" });
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PauseThenResume_ContinuesAtFollowingStep()
+    {
+        var messageId = Guid.NewGuid();
+        PipelineRun? storedRun = null;
+        var savedOutputs = new Dictionary<Guid, string>();
+        var task = new PipelineExecutionTask
+        {
+            PipelineId = 1, TenantId = 1, TriggerEvent = "manual", TriggerPayloadJson = "{}",
+            MessageId = messageId.ToString(), WorkerId = "pause-test-worker"
+        };
+        var preceding = new PipelineStep
+        {
+            Id = 3, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "preceding",
+            Type = "trigger", Subtype = "schedule"
+        };
+        var pause = new PipelineStep
+        {
+            Id = 1, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "pause",
+            Type = "action", Subtype = "pause", DisplayOrder = 1, ConfigJson = "{\"duration\":1,\"unit\":\"seconds\"}"
+        };
+        var following = new PipelineStep
+        {
+            Id = 2, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "following",
+            Type = "trigger", Subtype = "schedule", DisplayOrder = 2
+        };
+        _pipelineRepo.GetRunByMessageIdAsync(messageId, Arg.Any<CancellationToken>()).Returns(_ => storedRun);
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>())
+            .Returns(call => { storedRun = call.Arg<PipelineRun>(); return (Guid.NewGuid(), 1L); });
+        _pipelineRepo.ClaimWaitingRunAsync(messageId, "pause-test-worker", Arg.Any<CancellationToken>())
+            .Returns(_ => { storedRun!.LockedBy = "pause-test-worker"; storedRun.Status = "Running"; return true; });
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>())
+            .Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>())
+            .Returns(new List<PipelineStep> { preceding, pause, following });
+        _pipelineRepo.CreateRunAttemptAsync(Arg.Any<PipelineRunAttempt>(), Arg.Any<CancellationToken>()).Returns(1L);
+        _pipelineRepo.CreateStepRunAsync(Arg.Any<PipelineStepRun>(), Arg.Any<CancellationToken>()).Returns(1L);
+        _idempotencyRepo.GetByExecutionKeyAsync(messageId, Arg.Any<Guid>(), Arg.Any<byte[]>(), null, Arg.Any<CancellationToken>())
+            .Returns(call => savedOutputs.GetValueOrDefault(call.ArgAt<Guid>(1)));
+        _idempotencyRepo.When(x => x.InsertAsync(Arg.Any<PipelineStepIdempotencyLog>(), null, Arg.Any<CancellationToken>()))
+            .Do(call => { var entry = call.Arg<PipelineStepIdempotencyLog>(); savedOutputs[entry.StepPublicId] = entry.OutputJson; });
+
+        var wait = await Assert.ThrowsAsync<PipelineWaitException>(() => _engine.ExecuteAsync(task, CancellationToken.None));
+        wait.ResumeDate.Should().BeAfter(DateTime.UtcNow);
+        storedRun!.Status.Should().Be("Waiting");
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 3), Arg.Any<CancellationToken>());
+        await _pipelineRepo.DidNotReceive().CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 2), Arg.Any<CancellationToken>());
+
+        // Simulate the queue waking after the stored resume date without sleeping in the test.
+        savedOutputs[pause.PublicId] = JsonSerializer.Serialize(new { Status = "Waiting", ResumeDate = DateTime.UtcNow.AddSeconds(-1) });
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+        storedRun.Status.Should().Be("Success");
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 3), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 2), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -1627,6 +1687,7 @@ public class PipelineEngineTests
             writeService,
             tableRepo,
             fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             Substitute.For<IFileStorageService>(),
@@ -1692,6 +1753,7 @@ public class PipelineEngineTests
             writeService,
             tableRepo,
             fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             Substitute.For<IFileStorageService>(),
@@ -1811,6 +1873,7 @@ public class PipelineEngineTests
             Substitute.For<IRecordWriteService>(),
             Substitute.For<IAppTableRepository>(),
             Substitute.For<IAppFieldRepository>(),
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             Substitute.For<IFileStorageService>(),
@@ -1879,6 +1942,7 @@ public class PipelineEngineTests
             Substitute.For<IRecordWriteService>(),
             Substitute.For<IAppTableRepository>(),
             Substitute.For<IAppFieldRepository>(),
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             Substitute.For<IFileStorageService>(),
@@ -1965,6 +2029,7 @@ public class PipelineEngineTests
             writeService,
             tableRepo,
             fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             Substitute.For<IFileStorageService>(),
@@ -2490,6 +2555,134 @@ public class PipelineEngineTests
         // Test input WITH steps. prefix
         var val2 = (string)method!.Invoke(_engine, new object?[] { "{{steps.ref_search.fid_7}}", payload, "main/ref_search/ref_loop/loop_index_0", allSteps })!;
         val2.Should().Be("4");
+    }
+
+    [Fact]
+    public void EvaluateTokens_LegacyMakeRequestFieldPath_UsesActualResponseProperty()
+    {
+        var request = new PipelineStep { RefId = "ref_request", Type = "action", Subtype = "make-request" };
+        var payload = JsonSerializer.Serialize(new { steps = new { ref_request = new { address = new { city = "Surat" } } } });
+        var method = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var result = (string)method.Invoke(_engine, new object?[] {
+            "{{steps.ref_request.fid_address.city}}", payload, null, new List<PipelineStep> { request }
+        })!;
+        result.Should().Be("Surat");
+        var canonical = (string)method.Invoke(_engine, new object?[] {
+            "{{steps.ref_request.address.city}}", payload, null, new List<PipelineStep> { request }
+        })!;
+        canonical.Should().Be("Surat");
+    }
+
+    [Theory]
+    [InlineData("[1,2]", 2)]
+    [InlineData("{\"data\":[{\"id\":1},{\"id\":2}]}", 2)]
+    [InlineData("{\"items\":[1,2,3]}", 3)]
+    [InlineData("{\"customRows\":[1]}", 1)]
+    public void Loop_CanIterateMakeRequestArrayResponses(string responseJson, int expectedCount)
+    {
+        using var response = JsonDocument.Parse(responseJson);
+        var method = typeof(PipelineEngine).GetMethod("GetLoopCollection", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        var items = Assert.IsAssignableFrom<IEnumerable<object>>(method.Invoke(_engine, new object?[] { response.RootElement.Clone() }));
+
+        items.Should().HaveCount(expectedCount);
+    }
+
+    [Theory]
+    [InlineData("number", "42.5")]
+    [InlineData("numericText", "42.5")]
+    public void EvaluateTokens_MakeRequestNumericOutput_CanBeWrittenToNumber(string property, string expected)
+    {
+        var request = new PipelineStep { RefId = "ref_request", Type = "action", Subtype = "make-request" };
+        var payload = "{\"steps\":{\"ref_request\":{\"number\":42.5,\"numericText\":\"42.5\"}}}";
+        var evaluate = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var resolved = (string)evaluate.Invoke(_engine, new object?[] {
+            "{{steps.ref_request." + property + "}}", payload, null, new List<PipelineStep> { request }
+        })!;
+        resolved.Should().Be(expected);
+        InvokeParseValueType(resolved, "Number").Should().Be(42.5m);
+    }
+
+    [Theory]
+    [InlineData("create-record")]
+    [InlineData("update-record")]
+    public async Task RecordAction_UsesNumericMakeRequestValueAndOmitsBlankMapping(string subtype)
+    {
+        var table = new AppTable { Id = 10, PublicId = Guid.NewGuid() };
+        var fields = new List<AppField> {
+            new() { Id = 11, Fid = 6, Name = "c_number", Label = "Number", TypeCode = "Number" },
+            new() { Id = 12, Fid = 7, Name = "c_optional", Label = "Optional", TypeCode = "Text" }
+        };
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+        var recordId = Guid.NewGuid();
+        var step = new PipelineStep { Id = 1, PublicId = Guid.NewGuid(), Type = "action", Subtype = subtype,
+            ConfigJson = JsonSerializer.Serialize(new { tableId = table.PublicId, targetRecordId = recordId,
+                fieldMappings = new[] { new { field = "fid_6", value = "{{steps.ref_request.number}}" },
+                    new { field = "fid_7", value = "{{steps.ref_request.optional}}" } } }) };
+        var request = new PipelineStep { RefId = "ref_request", Type = "action", Subtype = "make-request" };
+        var payload = "{\"steps\":{\"ref_request\":{\"number\":42.5,\"optional\":\"\"}}}";
+        IReadOnlyDictionary<long, object?>? written = null;
+        _recordRepo.CreateAsync(table, fields, Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+            .Returns(call => { written = call.ArgAt<IReadOnlyDictionary<long, object?>>(2); return Task.FromResult(recordId); });
+        _recordWriteService.ApplyAsync(table, fields, recordId, Arg.Any<IReadOnlyDictionary<long, object?>>(),
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>(),
+                Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
+            .Returns(call => { written = call.ArgAt<IReadOnlyDictionary<long, object?>>(3);
+                return Task.FromResult<IReadOnlyDictionary<long, object?>>(new Dictionary<long, object?>()); });
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        await (Task<string>)method.Invoke(_engine, new object[] {
+            step, payload, new Dictionary<string, object>(), new List<PipelineStep> { request, step }, new Dictionary<string, object>(),
+            1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "root/ref_action",
+            _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, Substitute.For<IPipelineTriggerInterceptor>(),
+            Substitute.For<ITenantUnitOfWork>(), Substitute.For<IPipelineStepIdempotencyRepository>(),
+            Substitute.For<IFileStorageService>(), _pipelineRecordSearchService, CancellationToken.None
+        })!;
+        written.Should().NotBeNull();
+        written![6].Should().Be(42.5m);
+        written.Should().NotContainKey(7);
+    }
+
+    [Fact]
+    public void RecordAction_InvalidNumericMapping_IdentifiesSourceWithoutLeakingValue()
+    {
+        var field = new AppField { Fid = 6, Name = "c_number", Label = "Number", TypeCode = "Number" };
+        var method = typeof(PipelineEngine).GetMethod("ParseRecordMappingValue", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var error = Assert.Throws<TargetInvocationException>(() => method.Invoke(_engine,
+            new object?[] { "private-invalid-text", field, "{{steps.ref_request.number}}" }));
+        var format = Assert.IsType<PipelineMappingException>(error.InnerException);
+        format.Message.Should().Contain("Field 'Number'").And.Contain("steps.ref_request.number");
+        format.Message.Should().NotContain("c_number").And.NotContain("private-invalid-text");
+        PipelineEngine.IsCatchablePipelineStepError(format).Should().BeTrue();
+    }
+
+    [Fact]
+    public void RecordAction_PhoneFormattedValue_MustNotBeCoercedToNumber()
+    {
+        var field = new AppField { Fid = 6, Name = "c_number", Label = "Number", TypeCode = "Number" };
+        var method = typeof(PipelineEngine).GetMethod("ParseRecordMappingValue", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var error = Assert.Throws<TargetInvocationException>(() => method.Invoke(_engine,
+            new object?[] { "1-770-736", field, "{{steps.ref_request.phone}}" }));
+        var format = Assert.IsType<PipelineMappingException>(error.InnerException);
+        format.Message.Should().Contain("Field 'Number'")
+            .And.Contain("steps.ref_request.phone")
+            .And.Contain("phone-formatted text")
+            .And.Contain("Phone or Text field")
+            .And.NotContain("1-770-736")
+            .And.NotContain("c_number");
+    }
+
+    [Fact]
+    public void EvaluateTokens_LegacyMakeRequestPrefix_DoesNotChangeRecordFieldReferences()
+    {
+        var record = new PipelineStep { RefId = "ref_record", Type = "query", Subtype = "search-records" };
+        var payload = JsonSerializer.Serialize(new { steps = new { ref_record = new { address = new { city = "Surat" } } } });
+        var method = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        Action act = () => method.Invoke(_engine, new object?[] {
+            "{{steps.ref_record.fid_address.city}}", payload, null, new List<PipelineStep> { record }
+        });
+        act.Should().Throw<TargetInvocationException>()
+            .WithInnerException<PowerBase.Domain.Exceptions.PipelineStepException>();
     }
 
     [Fact]

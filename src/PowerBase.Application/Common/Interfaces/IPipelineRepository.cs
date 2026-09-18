@@ -59,6 +59,7 @@ public interface IPipelineRepository
     Task UpdateRunAttemptAsync(PipelineRunAttempt attempt, CancellationToken ct = default);
     Task<bool> ReclaimStaleRunAsync(Guid messageId, string workerId, CancellationToken ct = default);
     Task<bool> ClaimFailedRunRetryAsync(Guid messageId, string workerId, CancellationToken ct = default);
+    Task<bool> ClaimWaitingRunAsync(Guid messageId, string workerId, CancellationToken ct = default);
     Task ExtendRunLeaseAsync(Guid messageId, string workerId, CancellationToken ct = default);
     Task<long> CreateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default);
     Task UpdateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default);

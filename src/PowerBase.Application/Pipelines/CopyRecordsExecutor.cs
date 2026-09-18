@@ -54,6 +54,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var enforcer = services.GetRequiredService<IRolePermissionEnforcer>();
         var queryContext = services.GetRequiredService<IQueryContext>();
         var records = services.GetRequiredService<IRecordRepository>();
+        var relRepo = services.GetService<IRelationshipRepository>();
         var writes = services.GetRequiredService<IRecordWriteService>();
         var search = services.GetRequiredService<IPipelineRecordSearchService>();
         var receipts = services.GetRequiredService<IPipelineStepIdempotencyRepository>();
@@ -93,19 +94,29 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
 
         // Each receipt namespace belongs to one logical step execution, including loop path.
         var prefix = executionPath + "/copy";
-        var configurationHash = Convert.ToHexString(Hash(JsonSerializer.Serialize(new { config.SourceTable,
-            config.DestinationTable, config.SourceFields, config.DestinationFields, config.MergeField, Query = query })));
+        var configurationHash = Convert.ToHexString(Hash(JsonSerializer.Serialize(new
+        {
+            config.SourceTable,
+            config.DestinationTable,
+            config.SourceFields,
+            config.DestinationFields,
+            config.MergeField,
+            Query = query
+        })));
         Task<string?> Read(string suffix) => receipts.GetByExecutionKeyAsync(messageId, stepId, Hash(prefix + suffix), uow.Transaction, ct);
         Task Store(string suffix, string json) => receipts.InsertAsync(new PipelineStepIdempotencyLog
         {
-            MessageId = messageId, StepPublicId = stepId, ExecutionPath = prefix + suffix,
-            ExecutionPathHash = Hash(prefix + suffix), OutputJson = json
+            MessageId = messageId,
+            StepPublicId = stepId,
+            ExecutionPath = prefix + suffix,
+            ExecutionPathHash = Hash(prefix + suffix),
+            OutputJson = json
         }, uow.Transaction, ct);
         string Finish(string json)
         {
             var summary = JsonSerializer.Deserialize<Summary>(json)!;
             if (summary.ErrorCount > 0 && config.TerminateOnError == "Yes")
-                throw new PipelineNonRetryableException($"Copy Records completed with {summary.ErrorCount} user error(s); {summary.InsertedCount} inserted, {summary.UpdatedCount} updated. {summary.Errors.FirstOrDefault()}");
+                throw new PipelineNonRetryableException($"Copy Records: {summary.ErrorCount} {(summary.ErrorCount == 1 ? "record" : "records")} could not be copied ({summary.InsertedCount} inserted, {summary.UpdatedCount} updated). First error: {summary.Errors.FirstOrDefault()}");
             return json;
         }
         var complete = await Read("/complete");
@@ -199,7 +210,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                             var field = exported[i];
                             row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var value);
                             if (value.ValueKind == JsonValueKind.Undefined)
-                                throw CopyRecordsDefinition.Error($"Source field '{field.Name}' has no exported value.");
+                                throw CopyRecordsDefinition.Error($"Source field '{CopyRecordsDefinition.DisplayName(field)}' has no exported value.");
                             object? raw = value;
                             if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
                             {
@@ -212,8 +223,11 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                         IReadOnlyDictionary<string, object?>? existing = null;
                         if (key != null && !string.IsNullOrEmpty(Convert.ToString(key, CultureInfo.InvariantCulture)))
                         {
-                            var match = new FilterGroup { Nodes = new() { new() { Condition = new()
-                            { FieldId = merge.Fid.Value, Operator = "eq", Value = Convert.ToString(key, CultureInfo.InvariantCulture) } } } };
+                            var match = new FilterGroup
+                            {
+                                Nodes = new() { new() { Condition = new()
+                            { FieldId = merge.Fid.Value, Operator = "eq", Value = Convert.ToString(key, CultureInfo.InvariantCulture) } } }
+                            };
                             var found = await records.ListAsync(destination, destinationFields, page: 1, pageSize: 2, filterTree: match, ct: ct);
                             if (found.Count > 1) throw CopyRecordsDefinition.Error("The destination merge value matches more than one record.");
                             existing = found.FirstOrDefault();
@@ -244,7 +258,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                                 if (!values.ContainsKey(field.Fid!.Value) && !string.IsNullOrWhiteSpace(field.DefaultValue))
                                     values[field.Fid.Value] = await DefaultValue(field, queryContext, ct);
                             }
-                            var overrides = await ReferenceWriteValidator.ValidateAsync(destinationFields, values, tableRepo, fieldRepo, records, ct);
+                            var overrides = await ReferenceWriteValidator.ValidateAsync(destinationFields, values, tableRepo, fieldRepo, records, relRepo, ct);
                             foreach (var pair in overrides) values[pair.Key] = pair.Value;
                             await UserFieldValueResolver.ResolveAsync(services.GetRequiredService<IUserRepository>(), destinationFields, values, ct);
                             await RecordConstraintValidator.ValidateAsync(destination, destinationFields, values, records, true, null, ct);

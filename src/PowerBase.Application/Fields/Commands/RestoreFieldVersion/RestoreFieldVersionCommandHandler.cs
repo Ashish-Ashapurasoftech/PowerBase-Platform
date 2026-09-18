@@ -102,6 +102,9 @@ public class RestoreFieldVersionCommandHandler
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, target.IsUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, target.IsEncrypted, ct);
 
+        if (target.IsUnique || existing.IsUnique)
+            await _schemaEngine.SetUniqueAsync(table, existing, target.IsUnique, ct);
+
         bool wasSearchable = existing.IsSearchable;
 
         await _uow.BeginAsync(ct);
@@ -131,12 +134,6 @@ public class RestoreFieldVersionCommandHandler
         {
             await _uow.RollbackAsync(ct);
             throw;
-        }
-
-        if (target.IsUnique != existing.IsUnique)
-        {
-            existing.IsUnique = target.IsUnique;
-            await _schemaEngine.SetUniqueAsync(table, existing, target.IsUnique, ct);
         }
 
         if (target.IsRequired && !string.IsNullOrWhiteSpace(target.DefaultValue) && !existing.IsRequired)

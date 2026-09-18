@@ -223,7 +223,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     public async Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
-        AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take, CancellationToken ct = default)
+        AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
+        AppField? primaryLabelField = null, CancellationToken ct = default)
     {
         take = Math.Clamp(take, 1, 200);
 
@@ -254,6 +255,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (labelFields.Count > 2) selectCols.Add($"{LabelColumnExpr(labelFields[2])} AS Value3");
         
         if (labelFields.Count == 0) selectCols.Add($"{searchColExpr} AS Value1");
+
+        var labelExpr = primaryLabelField is not null ? LabelColumnExpr(primaryLabelField) : searchColExpr;
+        selectCols.Add($"{labelExpr} AS Label");
 
         var sql = $"""
             SELECT TOP (@take) {string.Join(", ", selectCols)}
@@ -1773,37 +1777,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
     }
 
-    public async Task RewriteReferenceColumnAsync(
-        AppTable childTable, string oldColumn, string newColumn,
-        IReadOnlyDictionary<object, object?> oldToNewValue, CancellationToken ct = default)
-    {
-        if (oldToNewValue.Count == 0) return;
-
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        // Chunked to stay well under SQL Server's ~2100-parameter limit (2 params per mapped row).
-        const int chunkSize = 500;
-        foreach (var chunk in oldToNewValue.Chunk(chunkSize))
-        {
-            var parameters = new DynamicParameters();
-            var valueRows = new List<string>(chunk.Length);
-            for (var i = 0; i < chunk.Length; i++)
-            {
-                parameters.Add($"oldId{i}", chunk[i].Key);
-                parameters.Add($"newVal{i}", chunk[i].Value ?? (object)DBNull.Value);
-                valueRows.Add($"(@oldId{i}, @newVal{i})");
-            }
-
-            var sql = $"""
-                UPDATE t SET t.{newColumn} = m.NewValue
-                FROM {PhysicalNaming.FullTableName(childTable.Id)} t
-                JOIN (VALUES {string.Join(", ", valueRows)}) AS m(OldParentId, NewValue) ON t.{oldColumn} = m.OldParentId
-                WHERE t.IsDeleted = 0
-                """;
-            await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
-        }
-    }
-
-        public async Task<bool> HasAnyRecordsAsync(AppTable table, CancellationToken ct = default)
+    public async Task<bool> HasAnyRecordsAsync(AppTable table, CancellationToken ct = default)
     {
         var sql = $"""
             SELECT CAST(CASE WHEN EXISTS (

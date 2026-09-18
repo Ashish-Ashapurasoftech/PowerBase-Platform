@@ -117,6 +117,7 @@ public class PipelineBulkUpsertConcurrencyIntegrationTests
             recordWriteService,
             tableRepo,
             fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<System.Net.Http.IHttpClientFactory>(),
             fileStorage,

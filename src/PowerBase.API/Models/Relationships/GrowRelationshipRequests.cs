@@ -19,3 +19,10 @@ public class AddSummaryFieldRequest
     /// <summary>Optional "matching criteria": only summarize child records matching this filter.</summary>
     public FilterGroup? MatchingCriteria { get; set; }
 }
+
+/// <summary>Change an existing relationship's display key override (scoped to this relationship only).</summary>
+public class UpdateDisplayKeyRequest
+{
+    /// <summary>Parent field Fid to use as the picker/grid/filter label; 3 or null reverts to Standard key.</summary>
+    public int? DisplayKeyFieldFid { get; set; }
+}

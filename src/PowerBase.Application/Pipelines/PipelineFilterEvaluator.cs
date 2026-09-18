@@ -541,7 +541,7 @@ public static class PipelineFilterEvaluator
 
         if (string.IsNullOrEmpty(rule.Operator))
         {
-            AddValidatorError(errors, path, $"On New Event filter field '{field.Name}' requires an operator.");
+            AddValidatorError(errors, path, $"On New Event filter field '{(!string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name)}' requires an operator.");
             return;
         }
 
@@ -553,7 +553,7 @@ public static class PipelineFilterEvaluator
             if (!allowedOps.Contains(normalizedOp))
             {
                 var allowedListStr = string.Join(", ", allowedOps);
-                AddValidatorError(errors, path, $"On New Event filter field '{field.Name}' does not support operator '{rule.Operator}'. Allowed operators for {typeCategory} type are: [{allowedListStr}].");
+                AddValidatorError(errors, path, $"On New Event filter field '{(!string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name)}' does not support operator '{rule.Operator}'. Allowed operators for {typeCategory} type are: [{allowedListStr}].");
             }
         }
     }

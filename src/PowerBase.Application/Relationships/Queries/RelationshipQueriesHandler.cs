@@ -75,6 +75,19 @@ public class RelationshipQueriesHandler
             if (refField is not null)
                 fields.Add(new(refField.PublicId, refField.Fid ?? 0, refField.Label ?? refField.Name, "reference", "Reference"));
 
+            // Key field on parent: this relationship's own display-key override takes precedence,
+            // then the parent table's global Set Key, then the default Record ID# — same precedence
+            // KeyFieldResolver.ResolveDisplayKey applies for the reference picker/grid/filter, so this
+            // settings screen (and the reference field's displayed type, derived from this) matches them.
+            var parentKeyField = KeyFieldResolver.ResolveDisplayKey(rel, parent, parentFields)
+                ?? parentFields.FirstOrDefault(f => f.IsSystem && f.Fid == 3)
+                ?? parentFields.FirstOrDefault(f => f.Fid == 3);
+            if (parentKeyField is not null)
+            {
+                var keyTypeCode = parentKeyField.Fid == 3 ? "Record ID#" : parentKeyField.TypeCode;
+                fields.Add(new(parentKeyField.PublicId, parentKeyField.Fid ?? 3, parentKeyField.Label ?? parentKeyField.Name, "key", keyTypeCode));
+            }
+
             // Lookups (child); the proxy lookup gets the distinct "proxy" role. TypeCode = looked-up source type.
             foreach (var f in childFields.Where(f => f.TypeCode == "Lookup"
                 && FormulaTypeMap.ParseLookupSettings(f.Settings)?.RelationshipId == rel.Id))
@@ -145,6 +158,11 @@ public class RelationshipQueriesHandler
                 ? childFields.FirstOrDefault(f => f.Id == rel.ProxyFieldId.Value)?.Fid
                 : null;
 
+            // Resolve DisplayKeyFieldId → its Fid for the frontend (Task 6).
+            var displayKeyFid = rel.DisplayKeyFieldId.HasValue
+                ? parentFields.FirstOrDefault(f => f.Id == rel.DisplayKeyFieldId.Value)?.Fid
+                : null;
+
             result.Add(new RelationshipDto
             {
                 PublicId = rel.PublicId,
@@ -155,6 +173,7 @@ public class RelationshipQueriesHandler
                 ReferenceFid = rel.ReferenceFid,
                 ReferenceFieldName = refField?.Name ?? string.Empty,
                 ProxyFid = proxyFid,
+                DisplayKeyFid = displayKeyFid,
                 Fields = fields,
             });
         }

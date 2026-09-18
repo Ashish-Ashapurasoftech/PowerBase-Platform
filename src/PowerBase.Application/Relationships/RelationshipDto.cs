@@ -11,6 +11,11 @@ public sealed class RelationshipDto
     public int ReferenceFid { get; init; }
     public string ReferenceFieldName { get; init; } = string.Empty;
     public int? ProxyFid { get; init; }
+    /// <summary>
+    /// Fid of the parent field used as the display key in the reference picker, or null for the
+    /// standard key (Record ID# / table global KeyFieldId). Mirrors <see cref="Relationship.DisplayKeyFieldId"/>.
+    /// </summary>
+    public int? DisplayKeyFid { get; init; }
     public IReadOnlyList<RelationshipFieldDto> Fields { get; init; } = [];
 }
 

@@ -252,22 +252,21 @@ public class FieldsController : ControllerBase
     }
 
     /// <summary>Set (or reset) a table's key field. fieldFid = 0 resets to the default Record ID#.
-    /// If the table already has parent-side relationships, retry with force=true to confirm the
-    /// cascade rewire of every related record's reference.</summary>
+    /// The key field is a display/identity choice only — it never rewrites existing relationship
+    /// data, since a reference always stores the parent's (immutable) internal row Id.</summary>
     [HttpPost("tables/{tableId:guid}/fields/{fieldFid:int}/set-key")]
     [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status409Conflict)]
     [ProducesResponseType(StatusCodes.Status422UnprocessableEntity)]
     public async Task<IActionResult> SetKey(
         [FromServices] PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler setKeyHandler,
-        Guid tableId, int fieldFid, [FromQuery] bool force, CancellationToken ct)
+        Guid tableId, int fieldFid, CancellationToken ct)
     {
         await setKeyHandler.HandleAsync(new PowerBase.Application.Fields.Commands.SetKey.SetKeyCommand(
-            tableId, fieldFid == 0 ? null : fieldFid, force), ct);
+            tableId, fieldFid == 0 ? null : fieldFid), ct);
         return NoContent();
     }
 

@@ -75,10 +75,11 @@ public class FieldSettingsGuard
         }
     }
 
-    /// <summary>Turning Unique on is rejected if duplicate values already exist in the table.</summary>
+    /// <summary>A Unique field cannot have duplicate values, including when repairing an
+    /// earlier save that persisted metadata without successfully creating the index.</summary>
     public async Task ValidateUniqueTransitionAsync(AppTable table, AppField existing, string label, bool isUnique, CancellationToken ct)
     {
-        if (!isUnique || existing.IsUnique) return;
+        if (!isUnique) return;
 
         if (await _recordRepo.HasDuplicatesAsync(table, existing, ct))
         {

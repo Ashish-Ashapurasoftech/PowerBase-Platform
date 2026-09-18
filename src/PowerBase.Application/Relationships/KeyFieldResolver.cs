@@ -20,6 +20,36 @@ public static class KeyFieldResolver
         return await fieldRepo.GetByIdInTableAsync(keyFieldId, table.Id, ct);
     }
 
+    /// <summary>
+    /// The parent field whose value the reference picker, grid, and filter surface for one
+    /// specific relationship: the relationship's own <see cref="Relationship.DisplayKeyFieldId"/>
+    /// override, else the parent table's global <see cref="AppTable.KeyFieldId"/>, else null
+    /// (the default Record ID#, i.e. the stored row Id itself — no translation needed).
+    /// The reference column always stores the parent row Id regardless of what this returns.
+    /// </summary>
+    public static AppField? ResolveDisplayKey(Relationship? rel, AppTable parent, IReadOnlyList<AppField> parentFields)
+    {
+        if (rel?.DisplayKeyFieldId is long dkId)
+        {
+            var dk = parentFields.FirstOrDefault(f => f.Id == dkId);
+            if (dk is not null) return dk;
+        }
+        if (parent.KeyFieldId is long kId)
+        {
+            var k = parentFields.FirstOrDefault(f => f.Id == kId);
+            if (k is not null) return k;
+        }
+        return null;
+    }
+
+    /// <summary>Async convenience for callers that don't already hold the parent's field list.</summary>
+    public static async Task<AppField?> ResolveDisplayKeyAsync(
+        Relationship? rel, AppTable parent, IAppFieldRepository fieldRepo, CancellationToken ct)
+    {
+        var parentFields = await fieldRepo.ListByTableAsync(parent.Id, ct);
+        return ResolveDisplayKey(rel, parent, parentFields);
+    }
+
     /// <summary>The physical column name backing the table's key ("Id" for the default Record ID# key).</summary>
     public static string ColumnName(AppField? keyField) =>
         keyField is null ? "Id" : (keyField.PhysicalColumnName ?? PhysicalNaming.ColumnName(keyField.Fid!.Value));

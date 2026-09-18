@@ -65,13 +65,22 @@ public sealed class CopyRecordsDefinition
     public static bool IsAttachment(AppField field) =>
         field.TypeCode.Contains("File", StringComparison.OrdinalIgnoreCase) || field.TypeCode.Contains("Attachment", StringComparison.OrdinalIgnoreCase);
 
+    public static string DisplayName(AppField field) =>
+        !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
+
     public void ValidateFields(IReadOnlyList<AppField> source, IReadOnlyList<AppField> destination)
     {
         ValidateShape();
         foreach (var fid in SourceFields)
             if (IsAttachment(Field(fid, source))) throw Error("Copy Records does not copy file attachments.");
+        var mappedFields = new HashSet<int>();
         foreach (var fid in DestinationFields)
-            if (!IsWritable(Field(fid, destination))) throw Error($"Destination field '{fid}' is read-only or an attachment.");
+        {
+            var field = Field(fid, destination);
+            if (!IsWritable(field)) throw Error($"Destination field '{DisplayName(field)}' is read-only or an attachment.");
+            if (!mappedFields.Add(field.Fid!.Value))
+                throw Error($"Destination field '{DisplayName(field)}' is mapped more than once. Select a different destination field for each source column.");
+        }
         var merge = Field(MergeField, destination);
         if (!(merge.IsUnique || IsPrimaryField(merge)) || !IsWritable(merge))
             throw Error("The merge field must be a unique or primary destination field.");
@@ -95,8 +104,17 @@ public sealed class CopyRecordsDefinition
         var from = Kind(PhysicalNaming.IsComputedTypeCode(source.TypeCode)
             ? FormulaTypeMap.FieldType(source.TypeCode, source.Settings)?.ToString() ?? source.TypeCode : source.TypeCode);
         var to = Kind(destination.TypeCode);
-        if (from != to && !(from == "number" && to == "text"))
-            throw Error($"Field types do not match: '{source.Name}' to '{destination.Name}'.");
+        if (from != to && !(from == "number" && to == "text") && !(from == "text" && to == "number"))
+            throw Error($"Field types do not match: '{DisplayName(source)}' to '{DisplayName(destination)}'.");
+        // Match Create Record's numeric parsing for text values, while preserving numeric exports.
+        // Failed parsing must be a user error, never a silent NULL write.
+        if (to == "number")
+        {
+            if (value is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal)
+                return value;
+            if (value is string text && decimal.TryParse(text, out var parsed)) return parsed;
+            throw Error($"Destination field '{DisplayName(destination)}' needs a valid number from source field '{DisplayName(source)}'.");
+        }
         if (to == "text") return Convert.ToString(value, CultureInfo.InvariantCulture);
         return value;
     }
