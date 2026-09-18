@@ -188,7 +188,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
     private const string UpdateRunSql = """
         UPDATE audit.PipelineRun
         SET Status = @status,
-            CompletedOn = SYSUTCDATETIME(),
+            CompletedOn = CASE WHEN @status = 'Waiting' THEN NULL ELSE SYSUTCDATETIME() END,
             ErrorMessage = @errorMessage,
             LockedBy = @lockedBy,
             LockedUntil = @lockedUntil,
@@ -948,6 +948,25 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             WHERE MessageId = @messageId
               AND Status = 'Failed'
               AND AttemptCount < 5;
+            """;
+        var id = await connection.ExecuteScalarAsync<long?>(
+            new CommandDefinition(sql, new { messageId, workerId }, cancellationToken: ct));
+        return id.HasValue;
+    }
+
+    public async Task<bool> ClaimWaitingRunAsync(Guid messageId, string workerId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        const string sql = """
+            UPDATE audit.PipelineRun
+            SET LockedBy = @workerId,
+                LockedUntil = DATEADD(second, 45, SYSUTCDATETIME()),
+                HeartbeatOn = SYSUTCDATETIME(),
+                Status = 'Running',
+                ErrorMessage = NULL
+            OUTPUT inserted.Id
+            WHERE MessageId = @messageId
+              AND Status = 'Waiting';
             """;
         var id = await connection.ExecuteScalarAsync<long?>(
             new CommandDefinition(sql, new { messageId, workerId }, cancellationToken: ct));

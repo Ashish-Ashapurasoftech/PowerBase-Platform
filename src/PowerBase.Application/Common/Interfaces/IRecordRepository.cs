@@ -141,6 +141,10 @@ public interface IRecordRepository
     /// <summary>Run a GROUP BY aggregation query for Summary (and Chart) reports. When <paramref name="seriesField"/>
     /// is supplied (Chart reports only), groups by both <paramref name="groupByField"/> and it, and each result
     /// row additionally carries a "SeriesValue" key.</summary>
+    /// <param name="sort">Overrides the default "ORDER BY every group level, ascending" — Summary-
+    /// only (RunSummaryAsync resolves ReportDefinition.SummarySortFields into this; Chart never
+    /// populates it, so its rows keep the pre-existing default order). Null/empty = unchanged
+    /// default behavior.</param>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
         AppTable table,
         IReadOnlyList<(AppField Field, string Mode)> groupByFields,
@@ -150,6 +154,7 @@ public interface IRecordRepository
         long? restrictToCreatedBy = null,
         AppField? seriesField = null,
         string seriesMode = "EqualValues",
+        IReadOnlyList<SummarizeSortSpec>? sort = null,
         CancellationToken ct = default);
 
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(

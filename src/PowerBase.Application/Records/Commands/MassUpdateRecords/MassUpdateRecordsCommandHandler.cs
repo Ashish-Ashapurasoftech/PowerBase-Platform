@@ -133,7 +133,7 @@ public class MassUpdateRecordsCommandHandler
                 if (isBlank || PhysicalNaming.IsRangeTypeCode(field.TypeCode)) continue;
 
                 inRequestDuplicateFids.Add(fid);
-                var label = field.Label ?? field.Name;
+                var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
                 foreach (var recordId in foundIds)
                     violations.Add(new RecordConstraintViolation(recordId, fid, "Unique",
                         $"'{label}' must be unique — setting the same value on {foundIds.Count} records at once would create duplicates."));

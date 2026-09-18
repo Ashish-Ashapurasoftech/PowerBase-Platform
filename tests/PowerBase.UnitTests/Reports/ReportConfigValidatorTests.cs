@@ -22,7 +22,8 @@ public class ReportConfigValidatorTests
         ChartConfigCommand? chart = null,
         List<SortGroupLevelCommand>? tableSortGroup = null,
         ReportOptionsCommand? options = null,
-        List<RowGroupLevelCommand>? rowGroupLevels = null) => new()
+        List<RowGroupLevelCommand>? rowGroupLevels = null,
+        List<SummarySortFieldCommand>? summarySortFields = null) => new()
     {
         Columns = columns ?? [],
         SortFields = [],
@@ -33,6 +34,7 @@ public class ReportConfigValidatorTests
         TableSortGroup = tableSortGroup ?? [],
         Options = options,
         RowGroupLevels = rowGroupLevels ?? [],
+        SummarySortFields = summarySortFields ?? [],
     };
 
     // ── Table ────────────────────────────────────────────────────────────────
@@ -236,6 +238,107 @@ public class ReportConfigValidatorTests
         var errors = sut.Validate(EmptyInput(groupByFieldId: 1, chart: chart, rowGroupLevels: [new RowGroupLevelCommand(1)]), fields);
 
         errors.Should().ContainKey("rowGroupLevels");
+    }
+
+    [Fact]
+    public void Summary_WithValidRowLevelSort_IsAccepted()
+    {
+        var sut = new SummaryReportConfigValidator();
+        var fields = new List<AppField> { MakeField(1) };
+        var sort = new List<SummarySortFieldCommand> { new("RowLevel", 0, null, null, true) };
+
+        var errors = sut.Validate(EmptyInput(groupByFieldId: 1, summarySortFields: sort), fields);
+
+        errors.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Summary_WithValidAggregationSort_IsAccepted()
+    {
+        var sut = new SummaryReportConfigValidator();
+        var fields = new List<AppField> { MakeField(1), MakeField(2, "Number") };
+        var aggregations = new List<SummaryAggregationCommand> { new(2, "Sum") };
+        var sort = new List<SummarySortFieldCommand> { new("Aggregation", null, 2, "Sum", false) };
+
+        var errors = sut.Validate(EmptyInput(groupByFieldId: 1, aggregations: aggregations, summarySortFields: sort), fields);
+
+        errors.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Summary_WithSortByCount_IsAccepted()
+    {
+        var sut = new SummaryReportConfigValidator();
+        var fields = new List<AppField> { MakeField(1) };
+        var sort = new List<SummarySortFieldCommand> { new("Count", null, null, null, false) };
+
+        var errors = sut.Validate(EmptyInput(groupByFieldId: 1, summarySortFields: sort), fields);
+
+        errors.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Summary_WithOutOfRangeRowLevelIndex_IsRejected()
+    {
+        var sut = new SummaryReportConfigValidator();
+        var fields = new List<AppField> { MakeField(1) };
+        var sort = new List<SummarySortFieldCommand> { new("RowLevel", 1, null, null, false) };
+
+        var errors = sut.Validate(EmptyInput(groupByFieldId: 1, summarySortFields: sort), fields);
+
+        errors.Should().ContainKey("summarySortFields");
+    }
+
+    [Fact]
+    public void Summary_WithSortByUnconfiguredAggregation_IsRejected()
+    {
+        var sut = new SummaryReportConfigValidator();
+        var fields = new List<AppField> { MakeField(1), MakeField(2, "Number") };
+        // Aggregation configured is Sum, but the sort asks for Avg of the same field — no match.
+        var aggregations = new List<SummaryAggregationCommand> { new(2, "Sum") };
+        var sort = new List<SummarySortFieldCommand> { new("Aggregation", null, 2, "Avg", false) };
+
+        var errors = sut.Validate(EmptyInput(groupByFieldId: 1, aggregations: aggregations, summarySortFields: sort), fields);
+
+        errors.Should().ContainKey("summarySortFields");
+    }
+
+    [Fact]
+    public void Summary_WithSortFieldsAndCrosstab_IsRejected()
+    {
+        var sut = new SummaryReportConfigValidator();
+        var fields = new List<AppField> { MakeField(1), MakeField(2) };
+        var chart = new ChartConfigCommand("Bar", 2, "EqualValues", null, null, null, null, false, "Labels", "Asc", null, null, false, false, null);
+        var sort = new List<SummarySortFieldCommand> { new("RowLevel", 0, null, null, false) };
+
+        var errors = sut.Validate(EmptyInput(groupByFieldId: 1, chart: chart, summarySortFields: sort), fields);
+
+        errors.Should().ContainKey("summarySortFields");
+    }
+
+    [Fact]
+    public void Table_WithPopulatedSummarySortFields_IsRejected()
+    {
+        var sut = new TableReportConfigValidator();
+        var fields = new List<AppField> { MakeField(1) };
+        var sort = new List<SummarySortFieldCommand> { new("Count", null, null, null, false) };
+
+        var errors = sut.Validate(EmptyInput(summarySortFields: sort), fields);
+
+        errors.Should().ContainKey("summarySortFields");
+    }
+
+    [Fact]
+    public void Chart_WithPopulatedSummarySortFields_IsRejected()
+    {
+        var sut = new ChartReportConfigValidator();
+        var fields = new List<AppField> { MakeField(1) };
+        var chart = new ChartConfigCommand("Bar", null, "EqualValues", null, null, null, null, false, "Labels", "Asc", null, null, false, false, null);
+        var sort = new List<SummarySortFieldCommand> { new("Count", null, null, null, false) };
+
+        var errors = sut.Validate(EmptyInput(groupByFieldId: 1, chart: chart, summarySortFields: sort), fields);
+
+        errors.Should().ContainKey("summarySortFields");
     }
 
     [Fact]

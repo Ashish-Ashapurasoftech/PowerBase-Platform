@@ -19,6 +19,7 @@ public class FieldResponse
     public bool IsUnique { get; init; }
     public bool IsSystem { get; init; }
     public bool IsEncrypted { get; init; }
+    public bool IsAutoFill { get; init; }
     public int? Fid { get; init; }
     public string? Settings { get; init; }
     public DateTime CreatedOn { get; init; }

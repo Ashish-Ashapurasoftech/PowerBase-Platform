@@ -998,6 +998,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         long? restrictToCreatedBy = null,
         AppField? seriesField = null,
         string seriesMode = "EqualValues",
+        IReadOnlyList<SummarizeSortSpec>? sort = null,
         CancellationToken ct = default)
     {
         if (groupByFields.Count == 0) return [];
@@ -1037,9 +1038,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var tableName = PhysicalNaming.FullTableName(table.Id);
 
         var aggClauses = new List<string> { "COUNT(*) AS [Count]" };
+        // Parallel to `aggregations`, not `aggClauses` (which is one longer, for the locked Count
+        // column, and can be shorter overall when an aggregation references an unknown field) —
+        // lets a SummarizeSortSpec.Aggregation.Index (assigned by RunSummaryAsync against this
+        // exact `aggregations` list) find its SQL alias for ORDER BY below; null marks a skipped
+        // (unknown-field) aggregation, which a sort request against it simply falls through on.
+        var aggAliasesInOrder = new List<string?>();
         foreach (var agg in aggregations)
         {
-            if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
+            if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) { aggAliasesInOrder.Add(null); continue; }
             // Mirror groupCol/seriesCol above — a system field (e.g. Record ID#) stores its
             // value under PhysicalColumnName, not the generic f_{fid} slot; aggregating it via
             // ColumnName() alone referenced a column that never existed (SQL error 207).
@@ -1072,6 +1079,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 _ => null,
             };
             if (clause is not null) aggClauses.Add(clause);
+            aggAliasesInOrder.Add(clause is not null ? alias : null);
         }
 
         var groupSelectParts = groupExprs.Select((e, i) => $"{e} AS GroupValue{i}").ToList();
@@ -1084,12 +1092,35 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (seriesExpr is not null) groupByParts.Add(seriesExpr);
         var groupByList = string.Join(", ", groupByParts);
 
+        // Default (unchanged pre-existing behavior): ascending by every group level. A caller-
+        // supplied `sort` (Summary reports only — see RunSummaryAsync) overrides this by ORDER-
+        // BY-ing SQL aliases already in the SELECT list instead; any entry whose index doesn't
+        // resolve (out of range, or an Aggregation index pointing at a skipped/unknown field)
+        // is simply dropped rather than failing the whole query.
+        var orderByClause = groupByList;
+        if (sort is { Count: > 0 })
+        {
+            var orderParts = new List<string>();
+            foreach (var s in sort)
+            {
+                string? expr = s.Target switch
+                {
+                    SummarizeSortTarget.GroupLevel when s.Index >= 0 && s.Index < groupExprs.Count => $"GroupValue{s.Index}",
+                    SummarizeSortTarget.Count => "[Count]",
+                    SummarizeSortTarget.Aggregation when s.Index >= 0 && s.Index < aggAliasesInOrder.Count => aggAliasesInOrder[s.Index],
+                    _ => null,
+                };
+                if (expr is not null) orderParts.Add($"{expr} {(s.Desc ? "DESC" : "ASC")}");
+            }
+            if (orderParts.Count > 0) orderByClause = string.Join(", ", orderParts);
+        }
+
         var sql = $"""
             SELECT {selectList}
             FROM {tableName} AS {outerAlias}
             WHERE {outerAlias}.IsDeleted = 0{ownerWhere}{filterWhere}
             GROUP BY {groupByList}
-            ORDER BY {groupByList}
+            ORDER BY {orderByClause}
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);

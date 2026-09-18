@@ -84,6 +84,26 @@ public class PipelineAuditFormatterTests
         Assert.DoesNotContain("completed", result.LogMessage);
     }
 
+    [Theory]
+    [InlineData("create-record", "Create Record")]
+    [InlineData("update-record", "Update Record")]
+    public void FailedRecordStepHistoryShowsMappingReasonInsteadOfSuccess(string subtype, string action)
+    {
+        const string reason = "Field 'number' requires a valid Number value, but its mapping from 'steps.ref_request.phone' returned text that cannot be converted.";
+        var result = _formatter.FormatStepRun(
+            new PipelineStep { Id = 101, Type = "action", Subtype = subtype, Label = action },
+            "{}", JsonSerializer.Serialize(new { ErrorMessage = reason, ExceptionType = "PipelineMappingException" }),
+            "Failed", "test", DateTime.UtcNow, DateTime.UtcNow);
+
+        using var parsed = JsonDocument.Parse(result.OutputContextJson);
+        var output = parsed.RootElement.GetProperty("Output");
+        output.GetProperty("Status").GetString().Should().Be("Failed");
+        output.GetProperty("Error").GetString().Should().Be(reason);
+        output.TryGetProperty("Record", out _).Should().BeFalse();
+        result.LogMessage.Should().Be($"{action} failed: {reason}");
+        result.LogMessage.Should().NotContain("Created record").And.NotContain("Updated record");
+    }
+
     [Fact]
     public async Task InitializeAsync_CachesNamesAndMetadata_WithoutCausingNPlusOneQueries()
     {

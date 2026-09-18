@@ -22,6 +22,7 @@ public interface IMainPipelineQueueRepository
     Task<PipelineQueue?> GetByMessageIdAsync(Guid messageId, CancellationToken ct = default);
     Task<int> PausePendingJobsAsync(long tenantId, long pipelineId, DateTime sentinelDate, CancellationToken ct = default);
     Task<int> ResumePendingJobsAsync(long tenantId, long pipelineId, DateTime sentinelDate, CancellationToken ct = default);
+    Task<bool> ScheduleWaitAsync(long id, string workerId, Guid claimToken, DateTime resumeDate, CancellationToken ct = default);
     Task<bool> DeferPendingJobAsync(long id, string workerId, Guid claimToken, int backoffSeconds, DateTime sentinelDate, CancellationToken ct = default);
     Task<int> CancelPendingJobsForPipelinesAsync(long tenantId, IEnumerable<long> pipelineIds, string reason, CancellationToken ct = default);
     Task<int> ResumePendingJobsForPipelinesAsync(long tenantId, IEnumerable<long> pipelineIds, DateTime sentinelDate, CancellationToken ct = default);

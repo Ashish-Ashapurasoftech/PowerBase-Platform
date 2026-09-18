@@ -202,10 +202,11 @@ public class ExportReportQueryHandler
             seriesField = resolvedSeriesField;
         }
 
+        var summarySort = RunReport.RunReportQueryHandler.ResolveSummarySort(definition, rowGroupSpecs, visibleAggregations);
         var rows = await _recordRepo.SummarizeAsync(
             table, rowGroupSpecs, visibleAggregations, allFields,
             filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy,
-            seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
+            seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", sort: summarySort, ct: ct);
 
         // Build alias→unique-key map and percent set (same logic as RunSummaryAsync — see its
         // comment: a user can aggregate the SAME field with several different functions, e.g.

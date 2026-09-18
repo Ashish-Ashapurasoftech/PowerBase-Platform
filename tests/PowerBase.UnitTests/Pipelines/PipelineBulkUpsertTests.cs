@@ -69,6 +69,7 @@ public class PipelineBulkUpsertTests
             _recordWriteService,
             _tableRepo,
             _fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             _fileStorageService,

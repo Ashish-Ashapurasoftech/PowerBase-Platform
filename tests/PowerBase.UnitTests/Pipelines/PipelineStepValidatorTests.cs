@@ -133,6 +133,30 @@ public class PipelineStepValidatorTests
     }
 
     [Fact]
+    public async Task Validate_SourceAppWithReadAccess_DoesNotRequirePowerFlowsUpdate()
+    {
+        var appGuid = Guid.NewGuid();
+        var tableGuid = Guid.NewGuid();
+        _appRepo.GetByPublicIdAsync(appGuid, Arg.Any<CancellationToken>()).Returns(new App { Id = 1 });
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 2, AppId = 1 });
+        _appAccessService.RequirePermissionByAppPublicIdAsync(appGuid, PermissionCodes.PowerFlowsUpdate, Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new UnauthorizedAccessException("No update permission")));
+
+        var config = new
+        {
+            ConnectionPublicId = PipelineStepValidator.SystemConnectionIds.First().ToString(),
+            AppPublicId = appGuid.ToString(),
+            TablePublicId = tableGuid.ToString(),
+            TriggerOnAdded = true
+        };
+
+        await _validator.ValidateNewEventStepAsync(JsonSerializer.Serialize(config), CancellationToken.None);
+
+        await _appAccessService.Received(1).RequirePermissionByAppPublicIdAsync(appGuid, PermissionCodes.PowerFlowsRead, Arg.Any<CancellationToken>());
+        await _appAccessService.DidNotReceive().RequirePermissionByAppPublicIdAsync(appGuid, PermissionCodes.PowerFlowsUpdate, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task Validate_UnknownConnection_ThrowsValidationException()
     {
         var connGuid = Guid.NewGuid();
@@ -175,7 +199,8 @@ public class PipelineStepValidatorTests
     {
         var systemConn = PipelineStepValidator.SystemConnectionIds.First();
         var appGuid = Guid.NewGuid();
-        _appAccessService.RequirePermissionByAppPublicIdAsync(appGuid, PermissionCodes.PowerFlowsUpdate, Arg.Any<CancellationToken>())
+        _appRepo.GetByPublicIdAsync(appGuid, Arg.Any<CancellationToken>()).Returns(new App { Id = 1 });
+        _appAccessService.RequirePermissionByAppPublicIdAsync(appGuid, PermissionCodes.PowerFlowsRead, Arg.Any<CancellationToken>())
             .Returns(Task.FromException(new UnauthorizedAccessException("No access")));
 
         var config = new
@@ -396,6 +421,7 @@ public class PipelineStepValidatorTests
             writeService,
             tableRepo,
             fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             Substitute.For<IFileStorageService>(),

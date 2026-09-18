@@ -24,13 +24,16 @@ public record CreateReportCommand(
     string ColumnsMode = "Custom",
     List<SortGroupLevelCommand>? TableSortGroup = null,
     ReportOptionsCommand? Options = null,
-    List<RowGroupLevelCommand>? RowGroupLevels = null);
+    List<RowGroupLevelCommand>? RowGroupLevels = null,
+    List<SummarySortFieldCommand>? SummarySortFields = null);
 
 public record SummaryAggregationCommand(long FieldId, string Function, string DisplayAs = "Normal");
 
 public record SortGroupLevelCommand(long FieldId, bool Desc, bool IsGroup, string GroupByMode = "EqualValues");
 
 public record RowGroupLevelCommand(long FieldId, string GroupByMode = "EqualValues");
+
+public record SummarySortFieldCommand(string Target, int? LevelIndex, long? AggregationFieldId, string? AggregationFunction, bool Desc);
 
 public record ReportOptionsCommand(
     string ColumnHeaderText = "Default",

@@ -42,6 +42,7 @@ public class PipelineStepParitySuiteTests
             _recordWriteService,
             _tableRepo,
             _fieldRepo,
+            Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
             Substitute.For<IHttpClientFactory>(),
             Substitute.For<IFileStorageService>(),

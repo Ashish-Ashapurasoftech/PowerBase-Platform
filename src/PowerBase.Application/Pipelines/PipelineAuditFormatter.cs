@@ -298,7 +298,18 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             var inputDict = DeserializeJsonToDict(rawInputJson);
             var outputDict = DeserializeJsonToDict(rawOutputJson);
 
-            if (subtype is "pipeline-called" or "call-another-pipeline")
+            if (status == "Failed" && subtype is ("create-record" or "update-record"))
+            {
+                // These actions do not produce a record when validation fails. The
+                // normal success formatter would otherwise claim one was created or updated.
+                var reason = PipelineEngine.SanitizeErrorMessage(outputDict.GetValueOrDefault("ErrorMessage")?.ToString());
+                friendlyOutput["Status"] = "Failed";
+                friendlyOutput["Error"] = reason;
+                if (outputDict.TryGetValue("ExceptionType", out var exceptionType))
+                    technicalDetails["ExceptionType"] = exceptionType;
+                logMessage = $"{(subtype == "create-record" ? "Create Record" : "Update Record")} failed: {reason}";
+            }
+            else if (subtype is "pipeline-called" or "call-another-pipeline")
             {
                 foreach (var entry in inputDict) friendlyInput[entry.Key] = entry.Value;
                 foreach (var entry in outputDict) friendlyOutput[entry.Key] = entry.Value;

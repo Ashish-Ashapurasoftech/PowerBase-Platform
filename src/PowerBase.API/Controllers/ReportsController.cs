@@ -119,7 +119,8 @@ public class ReportsController : ControllerBase
             request.ColumnsMode,
             request.TableSortGroup.Select(l => new SortGroupLevelCommand(l.FieldId, l.Desc, l.IsGroup, l.GroupByMode)).ToList(),
             MapOptions(request.Options),
-            request.RowGroupLevels.Select(l => new RowGroupLevelCommand(l.FieldId, l.GroupByMode)).ToList());
+            request.RowGroupLevels.Select(l => new RowGroupLevelCommand(l.FieldId, l.GroupByMode)).ToList(),
+            request.SummarySortFields.Select(s => new SummarySortFieldCommand(s.Target, s.LevelIndex, s.AggregationFieldId, s.AggregationFunction, s.Desc)).ToList());
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
@@ -232,7 +233,8 @@ public class ReportsController : ControllerBase
             request.ColumnsMode,
             request.TableSortGroup.Select(l => new SortGroupLevelCommand(l.FieldId, l.Desc, l.IsGroup, l.GroupByMode)).ToList(),
             MapOptions(request.Options),
-            request.RowGroupLevels.Select(l => new RowGroupLevelCommand(l.FieldId, l.GroupByMode)).ToList());
+            request.RowGroupLevels.Select(l => new RowGroupLevelCommand(l.FieldId, l.GroupByMode)).ToList(),
+            request.SummarySortFields.Select(s => new SummarySortFieldCommand(s.Target, s.LevelIndex, s.AggregationFieldId, s.AggregationFunction, s.Desc)).ToList());
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
     }
@@ -514,6 +516,14 @@ public class ReportsController : ControllerBase
             {
                 FieldId = l.FieldId,
                 GroupByMode = l.GroupByMode,
+            }).ToList(),
+            SummarySortFields = r.Definition.SummarySortFields.Select(s => new SummarySortFieldDto
+            {
+                Target = s.Target,
+                LevelIndex = s.LevelIndex,
+                AggregationFieldId = s.AggregationFieldId,
+                AggregationFunction = s.AggregationFunction,
+                Desc = s.Desc,
             }).ToList(),
             HideTotals = r.Definition.HideTotals,
             GroupDefaultCollapsed = r.Definition.GroupDefaultCollapsed,

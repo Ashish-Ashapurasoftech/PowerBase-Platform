@@ -34,6 +34,7 @@ public class ReportDefinitionDto
     public long? GroupByFieldId { get; init; }
     public string GroupByMode { get; init; } = "EqualValues";
     public List<RowGroupLevelDto> RowGroupLevels { get; init; } = [];
+    public List<SummarySortFieldDto> SummarySortFields { get; init; } = [];
     public bool HideTotals { get; init; }
     public bool? GroupDefaultCollapsed { get; init; }
     public bool GroupByDescending { get; init; }
@@ -61,6 +62,15 @@ public class SortGroupLevelDto
     public bool Desc { get; init; }
     public bool IsGroup { get; init; }
     public string GroupByMode { get; init; } = "EqualValues";
+}
+
+public class SummarySortFieldDto
+{
+    public string Target { get; init; } = "RowLevel";
+    public int? LevelIndex { get; init; }
+    public long? AggregationFieldId { get; init; }
+    public string? AggregationFunction { get; init; }
+    public bool Desc { get; init; }
 }
 
 public class RowGroupLevelDto

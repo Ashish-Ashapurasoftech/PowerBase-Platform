@@ -11,7 +11,9 @@ public class CreateReportRequest
     public string ColumnsMode { get; set; } = "Custom";
     public List<Guid>? VisibleToRoleIds { get; set; }
 
-    // New multi-sort (Summary/Chart)
+    /// <summary>Legacy — never actually applied to Summary/Chart reports (RunSummaryAsync never
+    /// receives it). Kept only so old JSON deserializes without data loss; Summary's real sort is
+    /// SummarySortFields below.</summary>
     public List<SortSpecRequest> SortFields { get; set; } = [];
 
     /// <summary>Table-only unified Sort + Group list.</summary>
@@ -26,6 +28,10 @@ public class CreateReportRequest
     /// <summary>Summary-only: ordered "Rows" group levels — supersedes GroupByFieldId/GroupByMode
     /// when non-empty.</summary>
     public List<RowGroupLevelRequest> RowGroupLevels { get; set; } = [];
+    /// <summary>Summary-only, and only when no crosstab column is configured — the report's
+    /// default row order, referencing its own output columns (a Rows level, Count, or an
+    /// aggregation) rather than a raw table field.</summary>
+    public List<SummarySortFieldRequest> SummarySortFields { get; set; } = [];
     public bool HideTotals { get; set; }
     /// <summary>null = "Default report setting", true = Collapsed by default, false = Expanded by default.</summary>
     public bool? GroupDefaultCollapsed { get; set; }
@@ -55,6 +61,16 @@ public class RowGroupLevelRequest
 {
     public long FieldId { get; set; }
     public string GroupByMode { get; set; } = "EqualValues";
+}
+
+public class SummarySortFieldRequest
+{
+    /// <summary>"RowLevel", "Count", or "Aggregation".</summary>
+    public string Target { get; set; } = "RowLevel";
+    public int? LevelIndex { get; set; }
+    public long? AggregationFieldId { get; set; }
+    public string? AggregationFunction { get; set; }
+    public bool Desc { get; set; }
 }
 
 public class ReportOptionsRequest

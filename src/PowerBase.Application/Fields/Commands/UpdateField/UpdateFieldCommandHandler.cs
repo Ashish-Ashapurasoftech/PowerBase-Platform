@@ -100,6 +100,7 @@ public class UpdateFieldCommandHandler
         var isFilterable = existing.IsSystem ? false : command.IsFilterable;
         var isAuditable = existing.IsSystem ? false : command.IsAuditable;
         var isEncrypted = existing.IsSystem ? false : command.IsEncrypted;
+        var isAutoFill = existing.IsSystem ? false : command.IsAutoFill;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
             : command.Settings;
@@ -108,7 +109,7 @@ public class UpdateFieldCommandHandler
             throw new DuplicateException("Field", "label", label);
 
         _guard.ValidateSettingsAndCapabilities(
-            existing.TypeCode, settings, settings ?? existing.Settings, label, isRequired, isUnique, defaultValue);
+            existing.TypeCode, settings, settings ?? existing.Settings, label, isRequired, isUnique, defaultValue, isAutoFill);
 
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
@@ -155,12 +156,18 @@ public class UpdateFieldCommandHandler
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, isUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, isEncrypted, ct);
 
+        // Build the physical constraint before persisting IsUnique. A failed index build must
+        // not leave metadata claiming that uniqueness is enforced. Also repair fields whose
+        // metadata was saved by an earlier failed attempt but whose index is missing.
+        if (isUnique || existing.IsUnique)
+            await _schemaEngine.SetUniqueAsync(table, existing, isUnique, ct);
+
         // Save old IsSearchable state before UpdateAsync modifies metadata
         bool wasSearchable = existing.IsSearchable;
 
         var after = new FieldSnapshot(
             label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
-            isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, settings);
+            isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, isAutoFill, settings);
 
         // The field row itself and its new version are one atomic unit: either both land or
         // neither does, so a version is never created for a field-settings change that didn't
@@ -174,7 +181,7 @@ public class UpdateFieldCommandHandler
                 isRequired, defaultValue,
                 command.IsSearchable, isSortable,
                 isFilterable, command.IsReportable, isAuditable,
-                isUnique, isEncrypted, settings, ct, _uow.Transaction);
+                isUnique, isEncrypted, isAutoFill, settings, ct, _uow.Transaction);
 
             if (affected == 0)
                 throw new NotFoundException("Field", command.FieldPublicId);
@@ -189,13 +196,6 @@ public class UpdateFieldCommandHandler
         {
             await _uow.RollbackAsync(ct);
             throw;
-        }
-
-        // Unique index: create or drop after the metadata row is committed.
-        if (isUnique != existing.IsUnique)
-        {
-            existing.IsUnique = isUnique;
-            await _schemaEngine.SetUniqueAsync(table, existing, isUnique, ct);
         }
 
         // Backfill: when an optional field becomes required and a default is supplied, fill existing

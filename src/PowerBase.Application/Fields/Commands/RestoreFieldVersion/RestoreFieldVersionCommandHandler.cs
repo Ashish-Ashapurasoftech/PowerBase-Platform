@@ -94,13 +94,16 @@ public class RestoreFieldVersionCommandHandler
 
         _guard.ValidateSettingsAndCapabilities(
             existing.TypeCode, target.Settings, target.Settings ?? existing.Settings,
-            label, target.IsRequired, target.IsUnique, target.DefaultValue);
+            label, target.IsRequired, target.IsUnique, target.DefaultValue, target.IsAutoFill);
 
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
         _guard.ValidateActionButtonTargets(existing.TypeCode, target.Settings, tableFields, existing.Id);
         await _guard.ValidateRequiredHasDefaultOrNoRestrictedRolesAsync(existing.Id, label, target.IsRequired, target.DefaultValue, ct);
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, target.IsUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, target.IsEncrypted, ct);
+
+        if (target.IsUnique || existing.IsUnique)
+            await _schemaEngine.SetUniqueAsync(table, existing, target.IsUnique, ct);
 
         bool wasSearchable = existing.IsSearchable;
 
@@ -113,7 +116,7 @@ public class RestoreFieldVersionCommandHandler
                 target.IsRequired, target.DefaultValue,
                 target.IsSearchable, target.IsSortable,
                 target.IsFilterable, target.IsReportable, target.IsAuditable,
-                target.IsUnique, target.IsEncrypted, target.Settings, ct, _uow.Transaction);
+                target.IsUnique, target.IsEncrypted, target.IsAutoFill, target.Settings, ct, _uow.Transaction);
 
             if (affected == 0)
                 throw new NotFoundException("Field", command.FieldPublicId);
@@ -131,12 +134,6 @@ public class RestoreFieldVersionCommandHandler
         {
             await _uow.RollbackAsync(ct);
             throw;
-        }
-
-        if (target.IsUnique != existing.IsUnique)
-        {
-            existing.IsUnique = target.IsUnique;
-            await _schemaEngine.SetUniqueAsync(table, existing, target.IsUnique, ct);
         }
 
         if (target.IsRequired && !string.IsNullOrWhiteSpace(target.DefaultValue) && !existing.IsRequired)
