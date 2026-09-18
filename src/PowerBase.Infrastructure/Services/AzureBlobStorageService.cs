@@ -9,7 +9,7 @@ namespace PowerBase.Infrastructure.Services;
 /// Azure Blob Storage implementation of <see cref="IFileStorageService"/>.
 /// Automatically creates and manages the blob container and stores uploaded files securely in Azure Cloud.
 /// </summary>
-public sealed class AzureBlobStorageService : IFileStorageService
+public sealed class AzureBlobStorageService : IFileStorageService, IFileStorageReadService
 {
     private readonly BlobContainerClient? _containerClient;
     private readonly bool _isEnabled;
@@ -62,11 +62,17 @@ public sealed class AzureBlobStorageService : IFileStorageService
 
         var blobClient = _containerClient.GetBlobClient(uniqueBlobName);
 
-        var options = new BlobUploadOptions();
-        if (!string.IsNullOrWhiteSpace(contentType))
+        // Blob names are intentionally unique for collision safety. Preserve the friendly name
+        // in response headers too, so a direct blob download never exposes the storage key.
+        var downloadName = Path.GetFileName(fileName);
+        var options = new BlobUploadOptions
         {
-            options.HttpHeaders = new BlobHttpHeaders { ContentType = contentType };
-        }
+            HttpHeaders = new BlobHttpHeaders
+            {
+                ContentType = string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
+                ContentDisposition = $"attachment; filename*=UTF-8''{Uri.EscapeDataString(downloadName)}"
+            }
+        };
 
         // Upload stream to Azure Blob Storage
         await blobClient.UploadAsync(content, options, ct);
@@ -80,6 +86,16 @@ public sealed class AzureBlobStorageService : IFileStorageService
             Size = size,
             ContentType = contentType
         };
+    }
+
+    public async Task<Stream> OpenReadAsync(string path, CancellationToken ct = default)
+    {
+        if (!_isEnabled || _containerClient == null)
+            throw new InvalidOperationException("Azure Blob Storage is not configured.");
+
+        var blobName = Path.GetFileName(Uri.TryCreate(path, UriKind.Absolute, out var uri) ? uri.LocalPath : path);
+        var download = await _containerClient.GetBlobClient(blobName).DownloadStreamingAsync(cancellationToken: ct);
+        return download.Value.Content;
     }
 
     public async Task DeleteAsync(string relativePath, CancellationToken ct = default)

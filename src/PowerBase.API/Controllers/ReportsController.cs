@@ -413,6 +413,7 @@ public class ReportsController : ControllerBase
             CreatedOn = r.CreatedOn,
             ModifiedOn = r.ModifiedOn,
             CreatedBy = r.CreatedBy,
+            CreatedByName = r.CreatedByName,
             Fields = r.Fields,
         }).ToList(),
         TotalCount = result.TotalCount,

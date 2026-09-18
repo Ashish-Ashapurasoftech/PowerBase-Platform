@@ -1251,7 +1251,7 @@ public class RunReportQueryHandler
         CancellationToken ct)
     {
         var hasUserFields = fields.Any(f =>
-            f.TypeCode is "User" or "MultiUser" ||
+            f.TypeCode is "User" or "MultiUser" or "File" ||
             (f.IsSystem && f.PhysicalColumnName is "CreatedBy" or "ModifiedBy"));
 
         if (!hasUserFields) return new Dictionary<long, string>();

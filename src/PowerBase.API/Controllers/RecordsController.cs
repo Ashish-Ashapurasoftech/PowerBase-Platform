@@ -125,6 +125,37 @@ public class RecordsController : ControllerBase
         return NoContent();
     }
 
+    [HttpGet("tables/{tableId:guid}/records/{id:guid}/files/{fid:long}/reservation")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    public async Task<IActionResult> GetFileReservation(Guid tableId, Guid id, long fid,
+        [FromServices] FileReservationService fileReservationService, CancellationToken ct)
+        => Ok(new ApiResponse<FileReservationResult>(await fileReservationService.GetAsync(tableId, id, fid, ct)));
+
+    [HttpPost("tables/{tableId:guid}/records/{id:guid}/files/{fid:long}/reservation")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    public async Task<IActionResult> ReserveFile(Guid tableId, Guid id, long fid, [FromBody] FileReservationRequest request,
+        [FromServices] FileReservationService fileReservationService, CancellationToken ct)
+        => Ok(new ApiResponse<FileReservationResult>(await fileReservationService.ReserveAsync(tableId, id, fid, request.Comment, ct)));
+
+    [HttpDelete("tables/{tableId:guid}/records/{id:guid}/files/{fid:long}/reservation")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    public async Task<IActionResult> ReleaseFileReservation(Guid tableId, Guid id, long fid,
+        [FromServices] FileReservationService fileReservationService, CancellationToken ct)
+        => Ok(new ApiResponse<FileReservationResult>(await fileReservationService.ReleaseAsync(tableId, id, fid, ct)));
+
+    [HttpDelete("tables/{tableId:guid}/records/{id:guid}/files/{fid:long}/revisions")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    public async Task<IActionResult> DeleteFileRevision(Guid tableId, Guid id, long fid, [FromQuery] string path,
+        [FromServices] FileReservationService fileReservationService, CancellationToken ct)
+        => Ok(new ApiResponse<string?>(await fileReservationService.DeleteRevisionAsync(tableId, id, fid, path, ct)));
+
+    [HttpPost("tables/{tableId:guid}/records/{id:guid}/files/{fid:long}/revisions/delete")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    public async Task<IActionResult> DeleteFileRevisions(Guid tableId, Guid id, long fid,
+        [FromBody] DeleteFileRevisionsRequest request,
+        [FromServices] FileReservationService fileReservationService, CancellationToken ct)
+        => Ok(new ApiResponse<string?>(await fileReservationService.DeleteRevisionsAsync(tableId, id, fid, request.Paths, ct)));
+
     /// <summary>Invoke an Action Button field on a record: resolves its configured gates and
     /// writes, applies them under the Rule-1 privileged-write exception (works without normal
     /// field-edit permission for exactly the button's configured targets), and returns the
@@ -201,6 +232,8 @@ public class RecordsController : ControllerBase
     }
 
     public record BulkDeleteRequest(List<Guid> Ids);
+    public record FileReservationRequest(string? Comment);
+    public record DeleteFileRevisionsRequest(List<string> Paths);
 
     private static IReadOnlyDictionary<long, object?> ParseFieldValues(Dictionary<string, JsonElement> fields)
     {
@@ -230,6 +263,7 @@ public class RecordsController : ControllerBase
         CreatedOn = r.CreatedOn,
         ModifiedOn = r.ModifiedOn,
         CreatedBy = r.CreatedBy,
+        CreatedByName = r.CreatedByName,
         Fields = r.Fields,
     };
 }
