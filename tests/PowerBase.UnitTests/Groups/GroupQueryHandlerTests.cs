@@ -71,11 +71,11 @@ public class GroupQueryHandlerTests
             new() { PublicId = Guid.NewGuid(), Name = "Group B" }
         };
 
-        _groupRepository.ListPagedAsync("SearchTerm", 1, 20, Arg.Any<CancellationToken>())
+        _groupRepository.ListPagedAsync("SearchTerm", 1, 20, "name", false, Arg.Any<CancellationToken>())
             .Returns((groups, 2));
 
         var handler = new ListGroupsQueryHandler(_groupRepository);
-        var query = new ListGroupsQuery { Search = "SearchTerm", Page = 1, PageSize = 20 };
+        var query = new ListGroupsQuery { Search = "SearchTerm", Page = 1, PageSize = 20, SortBy = "name", SortDesc = false };
 
         // Act
         var result = await handler.HandleAsync(query, CancellationToken.None);
@@ -85,6 +85,31 @@ public class GroupQueryHandlerTests
         Assert.Equal(2, result.Total);
         Assert.Contains(result.Items, g => g.Name == "Group A");
         Assert.Contains(result.Items, g => g.Name == "Group B");
+    }
+
+    [Fact]
+    public async Task ListGroups_WithCustomSorting_PassesValidatedSortParameters()
+    {
+        // Arrange
+        var groups = new List<GroupDto>
+        {
+            new() { PublicId = Guid.NewGuid(), Name = "Group B", MemberCount = 5 },
+            new() { PublicId = Guid.NewGuid(), Name = "Group A", MemberCount = 1 }
+        };
+
+        _groupRepository.ListPagedAsync(null, 1, 10, "memberCount", true, Arg.Any<CancellationToken>())
+            .Returns((groups, 2));
+
+        var handler = new ListGroupsQueryHandler(_groupRepository);
+        var query = new ListGroupsQuery { Page = 1, PageSize = 10, SortBy = "memberCount", SortDesc = true };
+
+        // Act
+        var result = await handler.HandleAsync(query, CancellationToken.None);
+
+        // Assert
+        Assert.NotNull(result.Items);
+        Assert.Equal(2, result.Total);
+        await _groupRepository.Received(1).ListPagedAsync(null, 1, 10, "memberCount", true, Arg.Any<CancellationToken>());
     }
 
     [Fact]
