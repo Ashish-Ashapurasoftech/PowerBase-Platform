@@ -88,7 +88,7 @@ public sealed class RelationshipFieldFactory
     {
         if (fids.Count == 0) return;
         var forms = await _formRepo.ListByTableAsync(tablePublicId, ct);
-        foreach (var form in forms.Where(f => f.AutoAddNewFields))
+        foreach (var form in forms.Where(f => f.AutoAddNewFields && !f.IsQuickPeekForm))
             foreach (var fid in fids)
                 await _formRepo.AppendFieldToLastSectionAsync(form.Id, fid, ct);
     }

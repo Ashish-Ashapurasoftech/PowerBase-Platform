@@ -184,7 +184,7 @@ public class FormsController : ControllerBase
         return NoContent();
     }
 
-    /// <summary>Get the table's Quick Peek form. Data is null (still 200, not 404 — "no form
+    /// <summary>Get the table's default Quick Peek form (first flagged form by display order). Data is null (still 200, not 404 — "no form
     /// configured" is a normal, expected state here, not an error) when the table has none set.</summary>
     [HttpGet("tables/{tableId:guid}/forms/quick-peek")]
     [RequireAppMember(AppAccessResolver.ByTableId)]
@@ -195,14 +195,14 @@ public class FormsController : ControllerBase
         return Ok(new ApiResponse<FormDetailResponse?>(form == null ? null : MapToDetail(form)));
     }
 
-    /// <summary>Set (or clear, when FormId is null) which form is used for Quick Peek across
-    /// every report on this table.</summary>
-    [HttpPut("tables/{tableId:guid}/forms/quick-peek")]
-    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByTableId)]
+    /// <summary>Flag or un-flag a single form as a Quick Peek form. Non-exclusive: a table may
+    /// have several Quick Peek forms.</summary>
+    [HttpPut("forms/{publicId:guid}/quick-peek")]
+    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByFormPublicId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
-    public async Task<IActionResult> SetQuickPeekForm(Guid tableId, [FromBody] SetQuickPeekFormRequest request, CancellationToken ct)
+    public async Task<IActionResult> SetQuickPeekForm(Guid publicId, [FromBody] SetQuickPeekFormRequest request, CancellationToken ct)
     {
-        await _setQuickPeekFormHandler.HandleAsync(new SetQuickPeekFormCommand(tableId, request.FormId), ct);
+        await _setQuickPeekFormHandler.HandleAsync(new SetQuickPeekFormCommand(publicId, request.Enabled), ct);
         return NoContent();
     }
 
@@ -244,7 +244,7 @@ public class FormsController : ControllerBase
         var rowVersion = Convert.FromBase64String(request.RowVersion);
         await _updateSettingsHandler.HandleAsync(new UpdateFormSettingsCommand(
             publicId, request.Name, request.AutoAddNewFields, request.ShowBuiltInFields,
-            request.SaveOptions, rowVersion), ct);
+            request.SaveOptions, rowVersion, request.IsQuickPeekForm), ct);
         return NoContent();
     }
 

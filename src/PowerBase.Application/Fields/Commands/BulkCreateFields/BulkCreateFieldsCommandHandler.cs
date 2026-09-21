@@ -206,7 +206,7 @@ public class BulkCreateFieldsCommandHandler
             }
 
             // Auto-append to forms where AutoAddNewFields = true
-            foreach (var form in formsForTable.Where(f => f.AutoAddNewFields))
+            foreach (var form in formsForTable.Where(f => f.AutoAddNewFields && !f.IsQuickPeekForm))
             {
                 await _formRepo.AppendFieldToLastSectionAsync(form.Id, field.Fid!.Value, ct);
             }

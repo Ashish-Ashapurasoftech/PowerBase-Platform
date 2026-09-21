@@ -228,8 +228,8 @@ public static class RecordConstraintValidator
     private static bool TryParseAppFormat(string text, string format, out DateTime result)
     {
         result = default;
-        var tokens = format.Split('-', '/');
-        var match = Regex.Match(text.Trim(), @"^(\d{1,4})[/-](\d{1,4})[/-](\d{1,4})$");
+        var tokens = format.Split('-', '/', '.');
+        var match = Regex.Match(text.Trim(), @"^(\d{1,4})[/.-](\d{1,4})[/.-](\d{1,4})$");
         if (!match.Success || tokens.Length != 3) return false;
 
         var parts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
