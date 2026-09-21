@@ -38,7 +38,7 @@ public class FieldSettingsGuard
     /// entirely still validates against the field's current shape.</summary>
     public void ValidateSettingsAndCapabilities(
         string typeCode, string? settings, string? capabilitySettings,
-        string label, bool isRequired, bool isUnique, string? defaultValue)
+        string label, bool isRequired, bool isUnique, string? defaultValue, bool isAutoFill)
     {
         var settingsErrors = _settingsRegistry.Validate(typeCode, settings);
         if (settingsErrors.Count > 0)
@@ -47,6 +47,10 @@ public class FieldSettingsGuard
         var capErrors = FieldGeneralSettingsCapability.Validate(typeCode, capabilitySettings, label, isRequired, isUnique, defaultValue);
         if (capErrors.Count > 0)
             throw new ValidationException(capErrors.AsReadOnly());
+
+        var autoFillErrors = FieldAutoFillCapability.Validate(typeCode, label, isAutoFill);
+        if (autoFillErrors.Count > 0)
+            throw new ValidationException(autoFillErrors.AsReadOnly());
     }
 
     /// <summary>A required field with no default value cannot be saved while some role has it set

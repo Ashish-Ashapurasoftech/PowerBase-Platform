@@ -314,6 +314,7 @@ public class TablesController : ControllerBase
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
         IsEncrypted = f.IsEncrypted,
+        IsAutoFill = f.IsAutoFill,
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,

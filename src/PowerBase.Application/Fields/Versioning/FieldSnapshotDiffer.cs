@@ -30,6 +30,7 @@ public static class FieldSnapshotDiffer
         Compare(nameof(FieldSnapshot.IsAuditable), before.IsAuditable, after.IsAuditable);
         Compare(nameof(FieldSnapshot.IsUnique), before.IsUnique, after.IsUnique);
         Compare(nameof(FieldSnapshot.IsEncrypted), before.IsEncrypted, after.IsEncrypted);
+        Compare(nameof(FieldSnapshot.IsAutoFill), before.IsAutoFill, after.IsAutoFill);
 
         changes.AddRange(DiffSettings(before.Settings, after.Settings));
 

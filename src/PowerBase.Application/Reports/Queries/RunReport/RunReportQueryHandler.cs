@@ -1030,10 +1030,11 @@ public class RunReportQueryHandler
             ? visibleAggregations
             : [.. visibleAggregations, gaugeGoalAggregation];
 
+        var summarySort = ResolveSummarySort(definition, rowGroupSpecs, aggregationsForQuery);
         var rows = await _recordRepo.SummarizeAsync(
             table, rowGroupSpecs, aggregationsForQuery, allFields,
             filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
-            seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", ct: ct);
+            seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", sort: summarySort, ct: ct);
 
         // SummarizeAsync groups by the raw stored value — for a User field that's the numeric
         // user ID, not a display name (unlike RunTableAsync's rows, which already go through
@@ -1223,6 +1224,47 @@ public class RunReportQueryHandler
             resolved.Add((field, mode));
         }
         return resolved;
+    }
+
+    /// <summary>Resolves Summary's SummarySortFields (each identifying a Rows level by index, the
+    /// locked Count column, or an aggregation by field+function) into the SQL-facing
+    /// SummarizeSortSpec list SummarizeAsync actually understands (Rows level → position in
+    /// rowGroupSpecs, aggregation → position in the exact aggregationsForQuery list being passed
+    /// to that same call). An entry whose target no longer resolves (e.g. an aggregation that got
+    /// removed, or a Rows level index now out of range) is silently dropped rather than failing
+    /// the whole report — same "best effort, don't 500 over stale config" spirit as
+    /// ResolveRowGroupLevels' sibling checks. Returns null when there's nothing to sort by,
+    /// leaving SummarizeAsync's pre-existing default order (ascending by every Rows level)
+    /// unchanged — this only ever runs for genuine Summary reports since Chart/Table are
+    /// validator-forbidden from populating SummarySortFields at all. Shared with
+    /// ExportReportQueryHandler (same convention as ResolveRowGroupLevels/ResolveUserNamesAsync
+    /// above).</summary>
+    internal static List<SummarizeSortSpec>? ResolveSummarySort(
+        ReportDefinition definition, List<(AppField Field, string Mode)> rowGroupSpecs, List<SummaryAggregation> aggregationsForQuery)
+    {
+        if (definition.SummarySortFields.Count == 0) return null;
+
+        var result = new List<SummarizeSortSpec>();
+        foreach (var s in definition.SummarySortFields)
+        {
+            switch (s.Target)
+            {
+                case "RowLevel":
+                    if (s.LevelIndex is { } levelIndex && levelIndex >= 0 && levelIndex < rowGroupSpecs.Count)
+                        result.Add(new SummarizeSortSpec(SummarizeSortTarget.GroupLevel, levelIndex, s.Desc));
+                    break;
+                case "Count":
+                    result.Add(new SummarizeSortSpec(SummarizeSortTarget.Count, 0, s.Desc));
+                    break;
+                case "Aggregation":
+                    var aggIndex = aggregationsForQuery.FindIndex(a =>
+                        a.FieldId == s.AggregationFieldId && string.Equals(a.Function, s.AggregationFunction, StringComparison.OrdinalIgnoreCase));
+                    if (aggIndex >= 0)
+                        result.Add(new SummarizeSortSpec(SummarizeSortTarget.Aggregation, aggIndex, s.Desc));
+                    break;
+            }
+        }
+        return result.Count > 0 ? result : null;
     }
 
     /// <summary>Swaps a raw grouped/series value for its resolved display name when one was

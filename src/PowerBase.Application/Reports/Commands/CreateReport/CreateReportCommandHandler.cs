@@ -88,6 +88,14 @@ public class CreateReportCommandHandler
                 FieldId = l.FieldId,
                 GroupByMode = string.IsNullOrWhiteSpace(l.GroupByMode) ? "EqualValues" : l.GroupByMode,
             }).ToList(),
+            SummarySortFields = (command.SummarySortFields ?? []).Select(s => new SummarySortField
+            {
+                Target = string.IsNullOrWhiteSpace(s.Target) ? "RowLevel" : s.Target,
+                LevelIndex = s.LevelIndex,
+                AggregationFieldId = s.AggregationFieldId,
+                AggregationFunction = s.AggregationFunction,
+                Desc = s.Desc,
+            }).ToList(),
             FilterTree = command.FilterTree,
             GroupByFieldId = command.GroupByFieldId,
             GroupByMode = string.IsNullOrWhiteSpace(command.GroupByMode) ? "EqualValues" : command.GroupByMode,

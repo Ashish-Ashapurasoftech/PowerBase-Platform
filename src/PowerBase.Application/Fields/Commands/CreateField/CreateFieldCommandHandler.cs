@@ -23,6 +23,7 @@ public class CreateFieldResult
     public string? Settings { get; init; }
     public DateTime CreatedOn { get; init; }
     public bool IsEncrypted { get; init; }
+    public bool IsAutoFill { get; init; }
 }
 
 public class CreateFieldCommandHandler
@@ -134,6 +135,9 @@ public class CreateFieldCommandHandler
             IsReportable = advancedDefaults.Reportable,
             IsAuditable = command.IsAuditable,
             IsEncrypted = command.IsEncrypted,
+            // Auto-fill defaults to ON for every type that supports it (see
+            // FieldAutoFillCapability) — off for the rest, since it isn't meaningful there.
+            IsAutoFill = FieldAutoFillCapability.IsSupported(fieldType.Code),
         };
 
         var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
@@ -182,6 +186,7 @@ public class CreateFieldCommandHandler
             Settings = field.Settings,
             CreatedOn = DateTime.UtcNow,
             IsEncrypted = field.IsEncrypted,
+            IsAutoFill = field.IsAutoFill,
         };
     }
 

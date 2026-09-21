@@ -180,7 +180,7 @@ public class FieldsController : ControllerBase
             request.IsRequired, request.DefaultValue,
             request.IsSearchable, request.IsSortable,
             request.IsFilterable, request.IsReportable, request.IsAuditable,
-            request.IsUnique, request.IsEncrypted, request.Settings, request.CommitMessage), ct);
+            request.IsUnique, request.IsEncrypted, request.IsAutoFill, request.Settings, request.CommitMessage), ct);
         return NoContent();
     }
 
@@ -300,6 +300,7 @@ public class FieldsController : ControllerBase
         Settings = r.Settings,
         CreatedOn = r.CreatedOn,
         IsEncrypted = r.IsEncrypted,
+        IsAutoFill = r.IsAutoFill,
     };
 
     private static FieldListItemResponse MapToListItemResponse(AppFieldListItemDto f) => new()
@@ -318,6 +319,7 @@ public class FieldsController : ControllerBase
         IsAuditable = f.IsAuditable,
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
+        IsAutoFill = f.IsAutoFill,
         Fid = f.Fid,
         CreatedOn = f.CreatedOn,
         IsKeyField = f.IsKeyField,
@@ -341,6 +343,7 @@ public class FieldsController : ControllerBase
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
         IsEncrypted = f.IsEncrypted,
+        IsAutoFill = f.IsAutoFill,
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,

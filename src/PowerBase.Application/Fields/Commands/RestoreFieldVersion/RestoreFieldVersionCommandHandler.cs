@@ -94,7 +94,7 @@ public class RestoreFieldVersionCommandHandler
 
         _guard.ValidateSettingsAndCapabilities(
             existing.TypeCode, target.Settings, target.Settings ?? existing.Settings,
-            label, target.IsRequired, target.IsUnique, target.DefaultValue);
+            label, target.IsRequired, target.IsUnique, target.DefaultValue, target.IsAutoFill);
 
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
         _guard.ValidateActionButtonTargets(existing.TypeCode, target.Settings, tableFields, existing.Id);
@@ -116,7 +116,7 @@ public class RestoreFieldVersionCommandHandler
                 target.IsRequired, target.DefaultValue,
                 target.IsSearchable, target.IsSortable,
                 target.IsFilterable, target.IsReportable, target.IsAuditable,
-                target.IsUnique, target.IsEncrypted, target.Settings, ct, _uow.Transaction);
+                target.IsUnique, target.IsEncrypted, target.IsAutoFill, target.Settings, ct, _uow.Transaction);
 
             if (affected == 0)
                 throw new NotFoundException("Field", command.FieldPublicId);

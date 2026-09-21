@@ -88,7 +88,7 @@ public class UpdateFieldSystemFieldCoercionTests
         _fieldRepo.UpdateAsync(
             field.PublicId, table.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<string?>(),
             Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
-            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>())
+            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>())
             .Returns(1);
         return field;
     }
@@ -106,6 +106,7 @@ public class UpdateFieldSystemFieldCoercionTests
         IsAuditable: true,
         IsUnique: true,
         IsEncrypted: false,
+        IsAutoFill: false,
         Settings: settings,
         CommitMessage: "Testing system field coercion");
 
@@ -121,7 +122,7 @@ public class UpdateFieldSystemFieldCoercionTests
         await _fieldRepo.Received(1).UpdateAsync(
             Arg.Is(field.PublicId), Arg.Is(table.Id), Arg.Is("Record ID#"), Arg.Is("original description"),
             Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
-            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
+            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
 
     [Fact]
@@ -138,7 +139,7 @@ public class UpdateFieldSystemFieldCoercionTests
             /* isRequired */ Arg.Is(false), /* defaultValue */ Arg.Is<string?>(s => s == null),
             Arg.Any<bool>(), /* isSortable */ Arg.Is(false),
             /* isFilterable */ Arg.Is(false), Arg.Any<bool>(), /* isAuditable */ Arg.Is(false),
-            /* isUnique */ Arg.Is(false), /* isEncrypted */ Arg.Is(false), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
+            /* isUnique */ Arg.Is(false), /* isEncrypted */ Arg.Is(false), /* isAutoFill */ Arg.Is(false), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
 
     [Fact]
@@ -153,7 +154,7 @@ public class UpdateFieldSystemFieldCoercionTests
         await _fieldRepo.Received(1).UpdateAsync(
             Arg.Is(field.PublicId), Arg.Is(table.Id), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<string?>(),
             /* isSearchable */ Arg.Is(true), Arg.Any<bool>(), Arg.Any<bool>(), /* isReportable */ Arg.Is(false), Arg.Any<bool>(),
-            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
+            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
 
     [Fact]
@@ -178,7 +179,7 @@ public class UpdateFieldSystemFieldCoercionTests
         await _fieldRepo.Received(1).UpdateAsync(
             Arg.Is(field.PublicId), Arg.Is(table.Id), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<bool>(), Arg.Any<string?>(),
             Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
-            Arg.Any<bool>(), Arg.Any<bool>(),
+            Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
             Arg.Is<string?>(s => AllowsOnlyDisplayTrio(s)),
             Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
@@ -211,7 +212,7 @@ public class UpdateFieldSystemFieldCoercionTests
             /* isRequired */ Arg.Is(true), /* defaultValue */ Arg.Is("some default"),
             Arg.Any<bool>(), /* isSortable */ Arg.Is(true),
             /* isFilterable */ Arg.Is(true), /* isReportable */ Arg.Is(false), /* isAuditable */ Arg.Is(true),
-            /* isUnique */ Arg.Is(true), /* isEncrypted */ Arg.Is(false), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
+            /* isUnique */ Arg.Is(true), /* isEncrypted */ Arg.Is(false), /* isAutoFill */ Arg.Is(false), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>());
     }
 
     [Fact]

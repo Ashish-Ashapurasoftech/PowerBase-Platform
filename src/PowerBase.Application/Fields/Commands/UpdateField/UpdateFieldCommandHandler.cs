@@ -100,6 +100,7 @@ public class UpdateFieldCommandHandler
         var isFilterable = existing.IsSystem ? false : command.IsFilterable;
         var isAuditable = existing.IsSystem ? false : command.IsAuditable;
         var isEncrypted = existing.IsSystem ? false : command.IsEncrypted;
+        var isAutoFill = existing.IsSystem ? false : command.IsAutoFill;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
             : command.Settings;
@@ -108,7 +109,7 @@ public class UpdateFieldCommandHandler
             throw new DuplicateException("Field", "label", label);
 
         _guard.ValidateSettingsAndCapabilities(
-            existing.TypeCode, settings, settings ?? existing.Settings, label, isRequired, isUnique, defaultValue);
+            existing.TypeCode, settings, settings ?? existing.Settings, label, isRequired, isUnique, defaultValue, isAutoFill);
 
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
@@ -166,7 +167,7 @@ public class UpdateFieldCommandHandler
 
         var after = new FieldSnapshot(
             label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
-            isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, settings);
+            isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, isAutoFill, settings);
 
         // The field row itself and its new version are one atomic unit: either both land or
         // neither does, so a version is never created for a field-settings change that didn't
@@ -180,7 +181,7 @@ public class UpdateFieldCommandHandler
                 isRequired, defaultValue,
                 command.IsSearchable, isSortable,
                 isFilterable, command.IsReportable, isAuditable,
-                isUnique, isEncrypted, settings, ct, _uow.Transaction);
+                isUnique, isEncrypted, isAutoFill, settings, ct, _uow.Transaction);
 
             if (affected == 0)
                 throw new NotFoundException("Field", command.FieldPublicId);

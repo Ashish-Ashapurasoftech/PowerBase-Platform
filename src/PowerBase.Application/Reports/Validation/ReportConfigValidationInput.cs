@@ -28,6 +28,7 @@ public sealed class ReportConfigValidationInput
     public List<SortGroupLevelCommand> TableSortGroup { get; init; } = [];
     public ReportOptionsCommand? Options { get; init; }
     public List<RowGroupLevelCommand> RowGroupLevels { get; init; } = [];
+    public List<SummarySortFieldCommand> SummarySortFields { get; init; } = [];
 
     public static ReportConfigValidationInput FromCreate(CreateReportCommand command) => new()
     {
@@ -48,6 +49,7 @@ public sealed class ReportConfigValidationInput
         TableSortGroup = command.TableSortGroup ?? [],
         Options = command.Options,
         RowGroupLevels = command.RowGroupLevels ?? [],
+        SummarySortFields = command.SummarySortFields ?? [],
     };
 
     public static ReportConfigValidationInput FromUpdate(UpdateReportCommand command) => new()
@@ -69,5 +71,6 @@ public sealed class ReportConfigValidationInput
         TableSortGroup = command.TableSortGroup ?? [],
         Options = command.Options,
         RowGroupLevels = command.RowGroupLevels ?? [],
+        SummarySortFields = command.SummarySortFields ?? [],
     };
 }
