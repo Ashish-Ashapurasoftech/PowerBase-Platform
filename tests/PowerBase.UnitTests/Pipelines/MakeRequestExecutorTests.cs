@@ -71,10 +71,19 @@ public class MakeRequestExecutorTests
             Assert.Equal(c.Body, request.Content!.ReadAsStringAsync().Result);
         }).ExecuteAsync(c, Resolve, default);
     }
-    [Theory] [InlineData(400)] [InlineData(401)] [InlineData(404)] public async Task ClientErrorsAreNotRetried(int status)
-    { await Assert.ThrowsAsync<PipelineNonRetryableException>(() => Executor(status: status).ExecuteAsync(Config(), Resolve, default)); }
+    [Theory] [InlineData(400)] [InlineData(401)] [InlineData(403)] [InlineData(404)] [InlineData(409)] [InlineData(422)] [InlineData(499)]
+    public async Task ClientErrorsAreCatchableButNotRetried(int status)
+    {
+        var error = await Assert.ThrowsAsync<PipelineRequestRejectedException>(() => Executor(status: status).ExecuteAsync(Config(), Resolve, default));
+        Assert.IsAssignableFrom<PipelineNonRetryableException>(error);
+        Assert.Equal(status, error.StatusCode);
+        Assert.True(PipelineEngine.IsCatchablePipelineStepError(error));
+    }
     [Theory] [InlineData(429)] [InlineData(500)] [InlineData(503)] public async Task TransientErrorsAreRetryable(int status)
-    { await Assert.ThrowsAsync<HttpRequestException>(() => Executor(status: status).ExecuteAsync(Config(), Resolve, default)); }
+    {
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => Executor(status: status).ExecuteAsync(Config(), Resolve, default));
+        Assert.False(PipelineEngine.IsCatchablePipelineStepError(error));
+    }
     [Theory] [InlineData("custom")] [InlineData("none")] public async Task ExemptStatusesContinue(string option)
     { var c = Config(); c.ErrorsOption = option; c.ExemptErrorStatuses = "404"; Assert.Equal(404, (await Executor(status:404).ExecuteAsync(c, Resolve, default)).StatusCode); }
     [Fact] public async Task FormatValidationDoesNotValidateSchema()

@@ -125,6 +125,14 @@ public class UpdatePipelineCommandHandler
                     throw new ValidationException(new Dictionary<string, string[]> { ["Steps"] = new[] { ex.Message } });
                 }
             }
+            foreach (var step in steps.Where(s => !s.IsDeleted && s.Subtype == "webhook"))
+            {
+                try { IncomingWebhookConfig.Read(step.ConfigJson).Validate(); }
+                catch (Exception ex)
+                {
+                    throw new ValidationException(new Dictionary<string, string[]> { ["Steps"] = new[] { $"Incoming Request: {ex.Message}" } });
+                }
+            }
         }
 
         if (!string.Equals(pipeline.Name, command.Name, StringComparison.OrdinalIgnoreCase))

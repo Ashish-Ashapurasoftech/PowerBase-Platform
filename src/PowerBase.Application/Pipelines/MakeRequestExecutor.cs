@@ -165,7 +165,7 @@ public sealed class MakeRequestExecutor
         var exempt = config.ErrorsOption == "none" || config.ErrorsOption == "custom" && (config.ExemptErrorStatuses ?? "").Split(',').Any(x => x.Trim() == status.ToString());
         if (status >= 400 && !exempt)
         {
-            if (status < 500 && status != 429) throw new PipelineNonRetryableException($"HTTP request failed with status {status}.");
+            if (status < 500 && status != 429) throw new PipelineRequestRejectedException(status);
             throw new HttpRequestException($"HTTP request failed with status {status}.", null, response.StatusCode);
         }
         var payloadType = config.ExpectedPayloadType ?? (config.RequestMode == "http" || config.IsPowerBase && response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true ? "JSON" : "TEXT");

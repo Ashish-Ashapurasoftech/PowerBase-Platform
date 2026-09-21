@@ -247,7 +247,11 @@ else
 }
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineRecordSearchService, PowerBase.Infrastructure.Services.PipelineRecordSearchService>();
 builder.Services.AddSingleton<IAzureSearchService, PowerBase.Infrastructure.Services.AzureSearchService>();
-builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService, PowerBase.Application.Records.RecordWriteService>();
+builder.Services.AddScoped<PowerBase.Application.Records.RecordWriteService>();
+builder.Services.AddScoped<PowerBase.Application.Records.FileRecordWriteService>();
+builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService>(sp => sp.GetRequiredService<PowerBase.Application.Records.FileRecordWriteService>());
+builder.Services.AddScoped<PowerBase.Application.Records.IFileRecordWriteService>(sp => sp.GetRequiredService<PowerBase.Application.Records.FileRecordWriteService>());
+builder.Services.AddScoped<PowerBase.Application.Records.FileReservationService>();
 builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineTriggerInterceptor, PowerBase.Infrastructure.Pipelines.PipelineTriggerInterceptor>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineAuditFormatter, PowerBase.Application.Pipelines.PipelineAuditFormatter>();

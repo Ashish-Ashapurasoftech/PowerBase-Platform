@@ -41,9 +41,39 @@ public class FilesController : ControllerBase
             Path = stored.Path,
             Size = stored.Size,
             Type = stored.ContentType ?? string.Empty,
+            UploadedOn = DateTime.UtcNow,
+            UploadedBy = HttpContext?.RequestServices.GetService<IQueryContext>()?.UserName ?? string.Empty,
         };
 
         return Ok(new ApiResponse<FileUploadResponse>(response));
+    }
+
+    /// <summary>
+    /// Streams an attachment with its user-facing name. Storage providers intentionally use a
+    /// unique physical/blob name, which must never leak into the browser download name.
+    /// </summary>
+    [HttpGet("download")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Download(
+        Guid appId,
+        [FromQuery] string path,
+        [FromQuery] string fileName,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new BadRequestException("FILE_DOWNLOAD_ERROR", "A file path is required.");
+
+        var safeFileName = Path.GetFileName(fileName);
+        if (string.IsNullOrWhiteSpace(safeFileName))
+            throw new BadRequestException("FILE_DOWNLOAD_ERROR", "A file name is required.");
+
+        if (_storage is not IFileStorageReadService readableStorage)
+            throw new InvalidOperationException("The configured file storage provider cannot download files.");
+
+        var stream = await readableStorage.OpenReadAsync(path, ct);
+        return File(stream, "application/octet-stream", safeFileName, enableRangeProcessing: true);
     }
 }
 
@@ -53,4 +83,6 @@ public class FileUploadResponse
     public string Path { get; set; } = string.Empty;
     public long Size { get; set; }
     public string Type { get; set; } = string.Empty;
+    public DateTime UploadedOn { get; set; }
+    public string UploadedBy { get; set; } = string.Empty;
 }

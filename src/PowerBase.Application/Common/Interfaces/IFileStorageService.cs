@@ -17,6 +17,16 @@ public interface IFileStorageService
     Task DeleteAsync(string relativePath, CancellationToken ct = default);
 }
 
+/// <summary>
+/// Optional read capability for storage providers. Kept separate from
+/// <see cref="IFileStorageService"/> so existing storage implementations and consumers retain
+/// their original contract.
+/// </summary>
+public interface IFileStorageReadService
+{
+    Task<Stream> OpenReadAsync(string path, CancellationToken ct = default);
+}
+
 public sealed class StoredFile
 {
     public string Name { get; init; } = string.Empty;
