@@ -10,6 +10,7 @@ public class RecordResult
     public DateTime? ModifiedOn { get; init; }
     /// <summary>Internal userId (long) of the user who created this record. Used by the UI for OwnRecords scope gating.</summary>
     public long CreatedBy { get; init; }
+    public string? CreatedByName { get; init; }
     public Dictionary<string, object?> Fields { get; init; } = new();
 
     // userPublicIds: when supplied, User/MultiUser fields resolve to this userPublicId Guid instead
@@ -117,6 +118,7 @@ public class RecordResult
             CreatedOn = (DateTime)row["CreatedOn"]!,
             ModifiedOn = row.TryGetValue("ModifiedOn", out var mo) && mo is DateTime moDate ? moDate : null,
             CreatedBy = createdBy,
+            CreatedByName = userNames != null && userNames.TryGetValue(createdBy, out var creatorName) ? creatorName : null,
             Fields = fieldData,
         };
     }

@@ -5,7 +5,7 @@ namespace PowerBase.Infrastructure.Services;
 
 /// <summary>Local-disk implementation of <see cref="IFileStorageService"/>, serving files
 /// back via the app's static file middleware at <c>/files</c> (see Program.cs).</summary>
-public sealed class LocalFileStorageService : IFileStorageService
+public sealed class LocalFileStorageService : IFileStorageService, IFileStorageReadService
 {
     private readonly string _localPath;
 
@@ -96,6 +96,16 @@ public sealed class LocalFileStorageService : IFileStorageService
             Size = new FileInfo(physicalPath).Length,
             ContentType = contentType,
         };
+    }
+
+    public Task<Stream> OpenReadAsync(string path, CancellationToken ct = default)
+    {
+        var fileName = Path.GetFileName(path);
+        var physicalPath = Path.Combine(_localPath, fileName);
+        if (!File.Exists(physicalPath))
+            throw new FileNotFoundException("The source file for Upload a File was not found.", physicalPath);
+        return Task.FromResult<Stream>(new FileStream(
+            physicalPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous));
     }
 
     public Task DeleteAsync(string relativePath, CancellationToken ct = default)

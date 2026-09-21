@@ -1034,15 +1034,35 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyInput["File Source URL"] = fileUrl;
                 friendlyInput["File Name"] = fileName;
 
-                var uploadedFileName = outputDict.TryGetValue("Name", out var unObj) ? unObj?.ToString() : fileName;
-                var size = outputDict.TryGetValue("Size", out var szObj) ? szObj?.ToString() : "0";
-                var cType = outputDict.TryGetValue("ContentType", out var ctObj) ? ctObj?.ToString() : "application/octet-stream";
+                if (string.Equals(status, "Success", StringComparison.OrdinalIgnoreCase))
+                {
+                    var uploadedFileName = outputDict.TryGetValue("Name", out var unObj) ? unObj?.ToString() : fileName;
+                    var size = outputDict.TryGetValue("Size", out var szObj) ? szObj?.ToString() : "0";
+                    var cType = outputDict.TryGetValue("ContentType", out var ctObj) ? ctObj?.ToString() : "application/octet-stream";
 
-                friendlyOutput["Uploaded File Name"] = uploadedFileName;
-                friendlyOutput["File Size"] = long.TryParse(size, out var sz) ? sz : 0;
-                friendlyOutput["Content Type"] = cType;
+                    friendlyOutput["Uploaded File Name"] = uploadedFileName;
+                    friendlyOutput["File Size"] = long.TryParse(size, out var sz) ? sz : 0;
+                    friendlyOutput["Content Type"] = cType;
 
-                logMessage = $"Uploaded file \"{uploadedFileName}\" successfully ({size} bytes).";
+                    logMessage = $"Uploaded file \"{uploadedFileName}\" successfully ({size} bytes).";
+                }
+                else
+                {
+                    var errorMessage = outputDict.TryGetValue("ErrorMessage", out var errorObj)
+                        ? errorObj?.ToString()
+                        : null;
+                    errorMessage = string.IsNullOrWhiteSpace(errorMessage)
+                        ? "The file could not be uploaded."
+                        : errorMessage;
+
+                    friendlyOutput["Error Message"] = errorMessage;
+                    if (outputDict.TryGetValue("ExceptionType", out var exceptionType))
+                        friendlyOutput["Exception Type"] = exceptionType?.ToString();
+                    if (outputDict.TryGetValue("InnerError", out var innerError))
+                        friendlyOutput["Inner Error"] = innerError?.ToString();
+
+                    logMessage = $"Upload file failed: {errorMessage}";
+                }
             }
             else
             {

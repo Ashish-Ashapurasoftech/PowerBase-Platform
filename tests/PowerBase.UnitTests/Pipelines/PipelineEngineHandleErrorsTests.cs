@@ -30,6 +30,7 @@ public class PipelineEngineHandleErrorsTests
     private readonly ILogger<PipelineEngine> _logger;
     private readonly IPipelineAuditFormatter _auditFormatter;
     private readonly IPipelineRecordSearchService _pipelineRecordSearchService;
+    private readonly IHttpClientFactory _httpClientFactory;
 
     public PipelineEngineHandleErrorsTests()
     {
@@ -42,6 +43,7 @@ public class PipelineEngineHandleErrorsTests
         _logger = Substitute.For<ILogger<PipelineEngine>>();
         _auditFormatter = Substitute.For<IPipelineAuditFormatter>();
         _pipelineRecordSearchService = Substitute.For<IPipelineRecordSearchService>();
+        _httpClientFactory = Substitute.For<IHttpClientFactory>();
         var serviceProvider = Substitute.For<IServiceProvider>();
         serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(_pipelineRecordSearchService);
 
@@ -53,7 +55,7 @@ public class PipelineEngineHandleErrorsTests
             _fieldRepo,
             Substitute.For<IRelationshipRepository>(),
             Substitute.For<IEmailService>(),
-            Substitute.For<IHttpClientFactory>(),
+            _httpClientFactory,
             Substitute.For<IFileStorageService>(),
             Options.Create(_execOptions),
             _logger,
@@ -67,6 +69,53 @@ public class PipelineEngineHandleErrorsTests
             Substitute.For<ITenantRepository>(),
             Substitute.For<IPipelineStepIdempotencyRepository>()
         );
+    }
+
+    [Theory]
+    [InlineData(400, "automatic", "handle", true)]
+    [InlineData(401, "automatic", "handle", true)]
+    [InlineData(403, "automatic", "handle", true)]
+    [InlineData(404, "automatic", "handle", true)]
+    [InlineData(409, "automatic", "handle", true)]
+    [InlineData(422, "automatic", "handle", true)]
+    [InlineData(499, "automatic", "handle", true)]
+    [InlineData(400, "custom", "handle", true)]
+    [InlineData(404, "custom", "handle", false)]
+    [InlineData(400, "none", "handle", false)]
+    [InlineData(200, "automatic", "handle", false)]
+    [InlineData(400, "automatic", "ignore", true)]
+    public async Task HandleErrors_MakeRequest_RoutesResponseAndContinues(int status, string policy, string mode, bool rejected)
+    {
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true });
+        _httpClientFactory.CreateClient("PipelineMakeRequest").Returns(_ => new HttpClient(new ResponseHandler(status)));
+        PipelineStep Request(long id, string? branch = null) => new()
+        {
+            Id = id, PublicId = Guid.NewGuid(), RefId = "request_" + id, Type = "action", Subtype = "make-request",
+            ParentStepId = branch == null ? null : 1, ParentBranch = branch, DisplayOrder = (int)id,
+            ConfigJson = JsonSerializer.Serialize(new { RequestMode = "http", BaseUrl = "https://example.com", ExpectedPayloadType = "JSON", ErrorsOption = id == 2 ? policy : "none", ExemptErrorStatuses = "404" })
+        };
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 999, Type = "trigger", Subtype = "new-event" },
+            new() { Id = 1, PublicId = Guid.NewGuid(), RefId = "handler", Type = "control", Subtype = "handle-errors", DisplayOrder = 1, ConfigJson = JsonSerializer.Serialize(new { FallbackAction = mode }) },
+            Request(2, "children"), Request(3, "children"), Request(4, "successchildren"), Request(5, "errorchildren"), Request(6)
+        };
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+
+        await _engine.ExecuteAsync(new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "RecordAdded", TriggerPayloadJson = "{}" }, CancellationToken.None);
+
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(r => r.StepId == 2), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(rejected ? 0 : 1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(r => r.StepId == 3), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(!rejected && mode == "handle" ? 1 : 0).CreateStepRunAsync(Arg.Is<PipelineStepRun>(r => r.StepId == 4), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(rejected && mode == "handle" ? 1 : 0).CreateStepRunAsync(Arg.Is<PipelineStepRun>(r => r.StepId == 5), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(r => r.StepId == 6), Arg.Any<CancellationToken>());
+    }
+
+    private sealed class ResponseHandler(int status) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage((System.Net.HttpStatusCode)status) { Content = new StringContent("{}") });
     }
 
     [Fact]

@@ -67,9 +67,33 @@ public class UpdateRecordCommandHandler
         await _uow.BeginAsync(ct);
         try
         {
-            await _writeService.ApplyAsync(
-                table, fields, command.RecordPublicId, command.FieldValues,
-                AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false, msg => indexMessage = msg);
+            var writesFileField = fields.Any(field => field.Fid.HasValue &&
+                command.FieldValues.ContainsKey(field.Fid.Value) &&
+                string.Equals(field.TypeCode, "File", StringComparison.OrdinalIgnoreCase));
+            if (writesFileField)
+            {
+                if (_writeService is IFileRecordWriteService fileWriteService)
+                {
+                    await fileWriteService.ApplyFileWriteAsync(
+                        table, fields, command.RecordPublicId, command.FieldValues,
+                        AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false,
+                        msg => indexMessage = msg);
+                }
+                else
+                {
+                    await _writeService.ApplyAsync(
+                        table, fields, command.RecordPublicId, command.FieldValues,
+                        AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false,
+                        msg => indexMessage = msg);
+                }
+            }
+            else
+            {
+                await _writeService.ApplyAsync(
+                    table, fields, command.RecordPublicId, command.FieldValues,
+                    AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false,
+                    msg => indexMessage = msg);
+            }
             await _uow.CommitAsync(ct);
         }
         catch
