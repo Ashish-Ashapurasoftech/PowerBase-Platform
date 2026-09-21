@@ -160,7 +160,9 @@ public class ReportsController : ControllerBase
         var wanted = formIds.ToHashSet();
         var reports = await _listByTableHandler.HandleAsync(new ListReportsByTableQuery(tableId), ct);
         IReadOnlyList<QuickPeekFormUsageResponse> usage = reports
-            .Where(r => r.Definition.Options?.QuickPeekFormId is Guid id && wanted.Contains(id))
+            // A report with its Quick Peek icon turned off never opens a Quick Peek form, so its
+            // (still-stored) pinned form isn't affected by the form being removed.
+            .Where(r => r.Definition.Options is { ShowQuickPeekIcon: true, QuickPeekFormId: Guid id } && wanted.Contains(id))
             .Select(r => new QuickPeekFormUsageResponse
             {
                 ReportId = r.Id,

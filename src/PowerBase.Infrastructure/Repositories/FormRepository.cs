@@ -101,6 +101,19 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         WHERE PublicId = @formPublicId AND IsDeleted = 0
         """;
 
+    /// <summary>Removes a form's pin from every report on its table (Definition.Options.
+    /// QuickPeekFormId), so those reports go back to "use the table default" for good — called
+    /// when the form is un-flagged as a Quick Peek form or deleted. Deliberately not filtered by
+    /// report visibility: another user's personal report pinning this form must be cleared too.</summary>
+    private const string ClearReportQuickPeekPinsSql = """
+        UPDATE r
+        SET Definition = JSON_MODIFY(r.Definition, '$.Options.QuickPeekFormId', NULL)
+        FROM meta.Report r
+        WHERE r.AppTableId = (SELECT TOP 1 AppTableId FROM meta.Form WHERE PublicId = @formPublicId)
+          AND r.IsDeleted = 0
+          AND UPPER(JSON_VALUE(r.Definition, '$.Options.QuickPeekFormId')) = UPPER(CAST(@formPublicId AS NVARCHAR(36)))
+        """;
+
     private const string GetQuickPeekFormSql = $"""
         SELECT {SelectColumns}
         FROM meta.Form
@@ -361,14 +374,18 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                 modifiedBy = QueryContext.UserId, rowVersion,
             }, cancellationToken: ct));
         if (rows == 0) throw new ConcurrencyException("Form");
+        if (isQuickPeekForm == false)
+            await conn.ExecuteAsync(new CommandDefinition(ClearReportQuickPeekPinsSql, new { formPublicId = publicId }, cancellationToken: ct));
         return rows;
     }
 
     public async Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
-        return await conn.ExecuteAsync(
+        var deleted = await conn.ExecuteAsync(
             new CommandDefinition(SoftDeleteSql, new { publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(ClearReportQuickPeekPinsSql, new { formPublicId = publicId }, cancellationToken: ct));
+        return deleted;
     }
 
     public async Task<IReadOnlyList<FormPage>> GetPagesAsync(long formId, CancellationToken ct = default)
@@ -717,6 +734,8 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(SetQuickPeekFormSql,
             new { formPublicId, enabled, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+        if (!enabled)
+            await connection.ExecuteAsync(new CommandDefinition(ClearReportQuickPeekPinsSql, new { formPublicId }, cancellationToken: ct));
     }
 
     public async Task<Form?> GetQuickPeekFormAsync(Guid tablePublicId, CancellationToken ct = default)
