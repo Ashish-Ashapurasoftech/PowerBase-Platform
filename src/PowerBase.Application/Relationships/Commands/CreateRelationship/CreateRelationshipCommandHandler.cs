@@ -122,7 +122,7 @@ public class CreateRelationshipCommandHandler
             Serialize(new ReferenceSettings { RelationshipId = relId, ParentTableId = parent.Id }), ct);
 
         // 3. Lookup fields on the child (first one becomes the proxy).
-        var createdFields = new List<RelationshipFieldDto> { new(refField.PublicId, refField.Fid!.Value, refField.Name, "reference", "Reference") };
+        var createdFields = new List<RelationshipFieldDto> { new(refField.PublicId, refField.Fid!.Value, refField.Label ?? refField.Name, "reference", "Reference") };
         // Same precedence as KeyFieldResolver.ResolveDisplayKey (the just-resolved override, else the
         // parent's global Set Key, else Record ID#) — matches what GetAsync returns on a later reload.
         var parentKeyField = KeyFieldResolver.ResolveDisplayKey(
@@ -153,7 +153,7 @@ public class CreateRelationshipCommandHandler
                     SourceSubField = spec.SourceSubField,
                 }, ct);
             firstLookup ??= lookup;
-            createdFields.Add(new(lookup.PublicId, lookup.Fid!.Value, lookup.Name, "lookup"));
+            createdFields.Add(new(lookup.PublicId, lookup.Fid!.Value, lookup.Label ?? lookup.Name, "lookup", src.TypeCode));
             childAddFids.Add(lookup.Fid!.Value);
         }
 
@@ -189,22 +189,19 @@ public class CreateRelationshipCommandHandler
         // 5. Auto-create a Report Link on the parent: "See {child.Name}" — navigates to filtered child records.
         var appPublicId = await _appRepo.GetPublicIdByIdAsync(parent.AppId, ct);
         var reportLinkLabel = $"{child.Name} records";
-        if (!await _fieldRepo.LabelExistsInTableAsync(parent.Id, reportLinkLabel, ct: ct))
-        {
-            var reportLink = await _fieldFactory.CreateAsync(parent, FieldTypeCodeNames.ReportLink, reportLinkLabel, false,
-                new ReportLinkSettings
-                {
-                    RelationshipId = relId,
-                    TargetAppPublicId = appPublicId.ToString(),
-                    TargetTablePublicId = child.PublicId.ToString(),
-                    TargetFid = refField.Fid!.Value,
-                    SourceFid = null, // null = use Record ID# (Fid 3)
-                    LinkText = $"See related {child.Name}",
-                    OpenInNewWindow = false,
-                }, ct);
-            createdFields.Add(new(reportLink.PublicId, reportLink.Fid!.Value, reportLink.Name, "reportlink", reportLink.TypeCode));
-            parentAddFids.Add(reportLink.Fid!.Value);
-        }
+        var reportLink = await _fieldFactory.CreateAsync(parent, FieldTypeCodeNames.ReportLink, reportLinkLabel, false,
+            new ReportLinkSettings
+            {
+                RelationshipId = relId,
+                TargetAppPublicId = appPublicId.ToString(),
+                TargetTablePublicId = child.PublicId.ToString(),
+                TargetFid = refField.Fid!.Value,
+                SourceFid = null, // null = use Record ID# (Fid 3)
+                LinkText = $"See related {child.Name}",
+                OpenInNewWindow = false,
+            }, ct);
+        createdFields.Add(new(reportLink.PublicId, reportLink.Fid!.Value, reportLink.Label ?? reportLink.Name, "reportlink", reportLink.TypeCode));
+        parentAddFids.Add(reportLink.Fid!.Value);
 
         // 6. Auto-append new fields to forms that opt in.
         await _fieldFactory.AppendToAutoAddFormsAsync(child.PublicId, childAddFids, ct);
