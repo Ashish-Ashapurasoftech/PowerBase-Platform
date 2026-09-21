@@ -4752,6 +4752,8 @@ public class PipelineEngine : IPipelineEngine
     {
         if (ex == null) return false;
 
+        if (ex is PipelineRequestRejectedException) return true;
+
         if (IsControlFlowOrInfrastructureException(ex))
         {
             return false;
