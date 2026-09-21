@@ -163,10 +163,12 @@ public class PipelineTriggersAndExternalActionsTests
 
         var tenantPublicId = Guid.NewGuid();
         var stepPublicId = Guid.NewGuid();
+        controller.Request.Method = "POST";
 
         adminRepo.GetTenantIdByPublicIdAsync(tenantPublicId, Arg.Any<CancellationToken>()).Returns(1L);
         pipelineRepo.GetStepByPublicIdAsync(stepPublicId, Arg.Any<CancellationToken>())
-            .Returns(new PipelineStep { Subtype = "webhook", ConfigJson = "{\"authType\": \"bearer\", \"authSecret\": \"secret\"}" });
+            .Returns(new PipelineStep { Type = "trigger", Subtype = "webhook", ConfigJson = "{\"authType\": \"bearer\", \"authSecret\": \"secret\"}" });
+        pipelineRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(new Pipeline { IsActive = true });
 
         // Act
         var result = await controller.ExecuteWebhook(tenantPublicId, stepPublicId, CancellationToken.None);
@@ -185,6 +187,7 @@ public class PipelineTriggersAndExternalActionsTests
         var queryCtx = Substitute.For<IQueryContext>();
 
         var httpCtx = new DefaultHttpContext();
+        httpCtx.Request.Method = "POST";
         httpCtx.Request.Headers["Authorization"] = "Bearer wrong-secret";
 
         var controller = new WebhookController(adminRepo, pipelineRepo, queue, queryCtx, Substitute.For<ILogger<WebhookController>>())
@@ -197,7 +200,8 @@ public class PipelineTriggersAndExternalActionsTests
 
         adminRepo.GetTenantIdByPublicIdAsync(tenantPublicId, Arg.Any<CancellationToken>()).Returns(1L);
         pipelineRepo.GetStepByPublicIdAsync(stepPublicId, Arg.Any<CancellationToken>())
-            .Returns(new PipelineStep { Subtype = "webhook", ConfigJson = "{\"authType\": \"bearer\", \"authSecret\": \"secret\"}" });
+            .Returns(new PipelineStep { Type = "trigger", Subtype = "webhook", ConfigJson = "{\"authType\": \"bearer\", \"authSecret\": \"secret\"}" });
+        pipelineRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(new Pipeline { IsActive = true });
 
         // Act
         var result = await controller.ExecuteWebhook(tenantPublicId, stepPublicId, CancellationToken.None);
@@ -218,6 +222,7 @@ public class PipelineTriggersAndExternalActionsTests
         var queryCtx = Substitute.For<IQueryContext>();
 
         var httpCtx = new DefaultHttpContext();
+        httpCtx.Request.Method = "POST";
         httpCtx.Request.Headers["Authorization"] = "Bearer secret";
         var bodyBytes = Encoding.UTF8.GetBytes("{\"age\": \"not-an-integer\"}");
         httpCtx.Request.Body = new MemoryStream(bodyBytes);
@@ -234,7 +239,8 @@ public class PipelineTriggersAndExternalActionsTests
 
         adminRepo.GetTenantIdByPublicIdAsync(tenantPublicId, Arg.Any<CancellationToken>()).Returns(1L);
         pipelineRepo.GetStepByPublicIdAsync(stepPublicId, Arg.Any<CancellationToken>())
-            .Returns(new PipelineStep { Subtype = "webhook", ConfigJson = $"{{\"authType\": \"bearer\", \"authSecret\": \"secret\", \"jsonSchema\": {JsonSerializer.Serialize(schemaJson)}}}" });
+            .Returns(new PipelineStep { Type = "trigger", Subtype = "webhook", ConfigJson = $"{{\"authType\": \"bearer\", \"authSecret\": \"secret\", \"jsonSchema\": {JsonSerializer.Serialize(schemaJson)}}}" });
+        pipelineRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(new Pipeline { IsActive = true });
 
         // Act
         var result = await controller.ExecuteWebhook(tenantPublicId, stepPublicId, CancellationToken.None);
@@ -253,6 +259,7 @@ public class PipelineTriggersAndExternalActionsTests
         var queryCtx = Substitute.For<IQueryContext>();
 
         var httpCtx = new DefaultHttpContext();
+        httpCtx.Request.Method = "POST";
         httpCtx.Request.Headers["Authorization"] = "Bearer secret";
         var bodyBytes = Encoding.UTF8.GetBytes("{\"age\": 30}");
         httpCtx.Request.Body = new MemoryStream(bodyBytes);
@@ -269,13 +276,14 @@ public class PipelineTriggersAndExternalActionsTests
 
         adminRepo.GetTenantIdByPublicIdAsync(tenantPublicId, Arg.Any<CancellationToken>()).Returns(1L);
         pipelineRepo.GetStepByPublicIdAsync(stepPublicId, Arg.Any<CancellationToken>())
-            .Returns(new PipelineStep { Subtype = "webhook", ConfigJson = $"{{\"authType\": \"bearer\", \"authSecret\": \"secret\", \"jsonSchema\": {JsonSerializer.Serialize(schemaJson)}}}" });
+            .Returns(new PipelineStep { Type = "trigger", Subtype = "webhook", ConfigJson = $"{{\"authType\": \"bearer\", \"authSecret\": \"secret\", \"jsonSchema\": {JsonSerializer.Serialize(schemaJson)}}}" });
+        pipelineRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(new Pipeline { IsActive = true });
 
         // Act
         var result = await controller.ExecuteWebhook(tenantPublicId, stepPublicId, CancellationToken.None);
 
         // Assert
-        result.Should().BeOfType<AcceptedResult>();
+        result.Should().BeOfType<OkObjectResult>();
         queue.Received(1).QueueTask(Arg.Is<PipelineExecutionTask>(t => t.TenantId == 1 && t.TriggerEvent == "webhook"));
     }
 

@@ -62,9 +62,11 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     private const string UpdateSettingsSql = """
         UPDATE meta.Form
         SET Name             = @name,
-            AutoAddNewFields = @autoAddNewFields,
+            -- A Quick Peek form is a compact preview; auto-appending every new field would clutter it.
+            AutoAddNewFields = CASE WHEN ISNULL(@isQuickPeekForm, IsQuickPeekForm) = 1 THEN 0 ELSE @autoAddNewFields END,
             ShowBuiltInFields = @showBuiltInFields,
             SaveOptions      = @saveOptions,
+            IsQuickPeekForm  = ISNULL(@isQuickPeekForm, IsQuickPeekForm),
             ModifiedOn       = SYSUTCDATETIME(),
             ModifiedBy       = @modifiedBy
         WHERE PublicId  = @publicId
@@ -91,17 +93,25 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         WHERE PublicId = @formPublicId AND IsDeleted = 0
         """;
 
-    private const string UnsetQuickPeekFormSql = """
-        UPDATE meta.Form
-        SET IsQuickPeekForm = 0, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
-        WHERE AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
-          AND IsDeleted = 0
-        """;
-
     private const string SetQuickPeekFormSql = """
         UPDATE meta.Form
-        SET IsQuickPeekForm = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+        SET IsQuickPeekForm = @enabled,
+            AutoAddNewFields = CASE WHEN @enabled = 1 THEN 0 ELSE AutoAddNewFields END,
+            ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @formPublicId AND IsDeleted = 0
+        """;
+
+    /// <summary>Removes a form's pin from every report on its table (Definition.Options.
+    /// QuickPeekFormId), so those reports go back to "use the table default" for good — called
+    /// when the form is un-flagged as a Quick Peek form or deleted. Deliberately not filtered by
+    /// report visibility: another user's personal report pinning this form must be cleared too.</summary>
+    private const string ClearReportQuickPeekPinsSql = """
+        UPDATE r
+        SET Definition = JSON_MODIFY(r.Definition, '$.Options.QuickPeekFormId', NULL)
+        FROM meta.Report r
+        WHERE r.AppTableId = (SELECT TOP 1 AppTableId FROM meta.Form WHERE PublicId = @formPublicId)
+          AND r.IsDeleted = 0
+          AND UPPER(JSON_VALUE(r.Definition, '$.Options.QuickPeekFormId')) = UPPER(CAST(@formPublicId AS NVARCHAR(36)))
         """;
 
     private const string GetQuickPeekFormSql = $"""
@@ -110,6 +120,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         WHERE AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
           AND IsQuickPeekForm = 1
           AND IsDeleted = 0
+        ORDER BY DisplayOrder, Id
         """;
 
     private const string GetRoleFormOverridesSql = """
@@ -353,24 +364,28 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     }
 
     public async Task<int> UpdateSettingsAsync(Guid publicId, string name, bool autoAddNewFields,
-        bool showBuiltInFields, string saveOptions, byte[] rowVersion, CancellationToken ct = default)
+        bool showBuiltInFields, string saveOptions, byte[] rowVersion, bool? isQuickPeekForm = null, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         var rows = await conn.ExecuteAsync(
             new CommandDefinition(UpdateSettingsSql, new
             {
-                publicId, name, autoAddNewFields, showBuiltInFields, saveOptions,
+                publicId, name, autoAddNewFields, showBuiltInFields, saveOptions, isQuickPeekForm,
                 modifiedBy = QueryContext.UserId, rowVersion,
             }, cancellationToken: ct));
         if (rows == 0) throw new ConcurrencyException("Form");
+        if (isQuickPeekForm == false)
+            await conn.ExecuteAsync(new CommandDefinition(ClearReportQuickPeekPinsSql, new { formPublicId = publicId }, cancellationToken: ct));
         return rows;
     }
 
     public async Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
-        return await conn.ExecuteAsync(
+        var deleted = await conn.ExecuteAsync(
             new CommandDefinition(SoftDeleteSql, new { publicId, deletedBy = QueryContext.UserId }, cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(ClearReportQuickPeekPinsSql, new { formPublicId = publicId }, cancellationToken: ct));
+        return deleted;
     }
 
     public async Task<IReadOnlyList<FormPage>> GetPagesAsync(long formId, CancellationToken ct = default)
@@ -714,27 +729,19 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         catch { await transaction.RollbackAsync(ct); throw; }
     }
 
-    public async Task SetQuickPeekFormAsync(Guid tablePublicId, Guid? formPublicId, CancellationToken ct = default)
+    public async Task SetQuickPeekFormAsync(Guid formPublicId, bool enabled, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        await connection.OpenAsync(ct);
-        await using var transaction = await connection.BeginTransactionAsync(ct);
-        try
-        {
-            await connection.ExecuteAsync(new CommandDefinition(UnsetQuickPeekFormSql, new { tablePublicId, modifiedBy = QueryContext.UserId }, transaction: transaction, cancellationToken: ct));
-            if (formPublicId.HasValue)
-            {
-                await connection.ExecuteAsync(new CommandDefinition(SetQuickPeekFormSql, new { formPublicId = formPublicId.Value, modifiedBy = QueryContext.UserId }, transaction: transaction, cancellationToken: ct));
-            }
-            await transaction.CommitAsync(ct);
-        }
-        catch { await transaction.RollbackAsync(ct); throw; }
+        await connection.ExecuteAsync(new CommandDefinition(SetQuickPeekFormSql,
+            new { formPublicId, enabled, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+        if (!enabled)
+            await connection.ExecuteAsync(new CommandDefinition(ClearReportQuickPeekPinsSql, new { formPublicId }, cancellationToken: ct));
     }
 
     public async Task<Form?> GetQuickPeekFormAsync(Guid tablePublicId, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
-        return await conn.QuerySingleOrDefaultAsync<Form?>(
+        return await conn.QueryFirstOrDefaultAsync<Form?>(
             new CommandDefinition(GetQuickPeekFormSql, new { tablePublicId }, cancellationToken: ct));
     }
 

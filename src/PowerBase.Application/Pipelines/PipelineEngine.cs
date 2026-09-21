@@ -364,7 +364,7 @@ public class PipelineEngine : IPipelineEngine
             if (!isSkipped && eventName == "pipeline-called" && task.TriggeredBy != pipelineMeta!.CreatedBy)
                 throw new PipelineNonRetryableException("Callable execution must use the called pipeline owner's identity.");
             var normalizedEventName = eventName.Replace("-", "").Replace("_", "");
-            if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent" or "webhook")
+            if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent")
             {
                 normalizedEventName = "new-event";
             }
@@ -424,7 +424,7 @@ public class PipelineEngine : IPipelineEngine
                 else if (normalizedEventName == "new-event")
                 {
                     if (rootStep == null || rootStep.Type != "trigger" || 
-                        (rootStep.Subtype != "new-event" && rootStep.Subtype != "record-added" && rootStep.Subtype != "record-updated" && rootStep.Subtype != "record-deleted" && rootStep.Subtype != "webhook"))
+                        (rootStep.Subtype != "new-event" && rootStep.Subtype != "record-added" && rootStep.Subtype != "record-updated" && rootStep.Subtype != "record-deleted"))
                     {
                         throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("New event trigger event requires an active root-level event trigger step.");
                     }
@@ -519,6 +519,10 @@ public class PipelineEngine : IPipelineEngine
                                 var refId = refIdObj.ToString();
                                 if (!string.IsNullOrEmpty(refId))
                                 {
+                                    // Incoming requests expose their complete payload through the
+                                    // trigger reference (normally "a"), just like other triggers.
+                                    // Record triggers replace this with their selected field values below.
+                                    stepsDict[refId] = triggerData;
                                     if (triggerData.TryGetValue("SelectedFieldValues", out var selectedValuesObj) && selectedValuesObj is JsonElement selectedElement)
                                     {
                                         var selectedDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(selectedElement.GetRawText());
@@ -1750,7 +1754,13 @@ public class PipelineEngine : IPipelineEngine
                 values[3] = recordId;
                 await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, values, "record-added", ct);
 
-                var outputJson = JsonSerializer.Serialize(new { CreatedRecordPublicId = recordPublicId.ToString() });
+                var output = new Dictionary<string, object?>
+                {
+                    ["CreatedRecordPublicId"] = recordPublicId.ToString()
+                };
+                foreach (var value in values)
+                    output[$"fid_{value.Key}"] = value.Value;
+                var outputJson = JsonSerializer.Serialize(output);
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
                 {
@@ -3125,194 +3135,157 @@ public class PipelineEngine : IPipelineEngine
             if (string.IsNullOrWhiteSpace(fileUrl))
                 throw new InvalidOperationException("Upload file step configuration is missing FileUrl.");
 
-            var resolvedUrl = EvaluateTokens(fileUrl, payloadJson, executionPath, allSteps);
-            var resolvedFileName = EvaluateTokens(config.FileName, payloadJson, executionPath, allSteps);
+            var sourceToken = UploadFileStepContract.NormalizeFileSourceToken(fileUrl);
+            var resolvedSource = UploadFileStepContract.ResolveDownloadSource(
+                EvaluateTokens(sourceToken, payloadJson, executionPath, allSteps));
+            var resolvedFileName = UploadFileStepContract.NormalizeFileName(
+                EvaluateTokens(config.FileName, payloadJson, executionPath, allSteps));
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                FileUrl = resolvedUrl,
+                FileUrl = resolvedSource,
                 FileName = resolvedFileName,
                 FileRecordStepId = config.FileRecordStepId,
                 TargetFileField = config.TargetFileField
             });
 
-            if (string.IsNullOrWhiteSpace(resolvedFileName))
+            if (string.IsNullOrWhiteSpace(config.FileRecordStepId))
+                throw new InvalidOperationException("Upload a File requires a target record step.");
+            var targetStep = allSteps.FirstOrDefault(candidate =>
+                candidate.Id.ToString() == config.FileRecordStepId || candidate.RefId == config.FileRecordStepId)
+                ?? throw new InvalidOperationException("The selected Upload a File record step is unavailable.");
+            var metadataStep = targetStep;
+            if (targetStep.Type == "loop")
             {
-                try
-                {
-                    resolvedFileName = System.IO.Path.GetFileName(new Uri(resolvedUrl).LocalPath);
-                }
-                catch
-                {
-                    resolvedFileName = "downloaded_file.bin";
-                }
+                var loopSourceId = UploadFileStepContract.ReadConfigValue(targetStep.ConfigJson, "loopOverStepId");
+                metadataStep = allSteps.FirstOrDefault(candidate =>
+                    candidate.Id.ToString() == loopSourceId || candidate.RefId == loopSourceId)
+                    ?? throw new InvalidOperationException("The selected Upload a File loop source is unavailable.");
             }
+            var targetTableId = UploadFileStepContract.ReadConfigValue(
+                metadataStep.ConfigJson, "tablePublicId", "tableId", "tableLabel");
+            if (!Guid.TryParse(targetTableId, out var tablePublicId))
+                throw new InvalidOperationException("The selected Upload a File record step has no valid table.");
 
-            var client = _httpClientFactory.CreateClient();
-            using var response = await client.GetAsync(resolvedUrl, HttpCompletionOption.ResponseHeadersRead, ct);
-            response.EnsureSuccessStatusCode();
+            var table = await tableRepo.GetByPublicIdAsync(tablePublicId, ct);
+            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            var selectedFields = !string.IsNullOrWhiteSpace(config.TargetFileField)
+                ? new[] { config.TargetFileField }
+                : config.SelectedFileFields?.Where(mapping => !string.IsNullOrWhiteSpace(mapping.Field))
+                    .Select(mapping => mapping.Field!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? [];
+            if (selectedFields.Length == 0)
+                throw new InvalidOperationException("Upload a File requires a file attachment field.");
+            var targetFields = selectedFields
+                .Select(selected => ResolvePipelineField(selected, fields))
+                .ToArray();
+            if (targetFields.Any(field => field?.Fid == null ||
+                    !string.Equals(field.TypeCode, "File", StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("A selected field is not a file attachment field.");
 
-            using var contentStream = await response.Content.ReadAsStreamAsync(ct);
-            var contentType = response.Content.Headers.ContentType?.MediaType;
+            object? recordOutput = null;
+            if (targetStep.Type == "trigger") contextDict.TryGetValue("trigger", out recordOutput);
+            else stepsDict.TryGetValue(targetStep.RefId, out recordOutput);
+            var recordPublicId = UploadFileStepContract.ResolveRecordPublicId(recordOutput);
+            if (recordPublicId == Guid.Empty)
+                throw new InvalidOperationException("The selected Upload a File record could not be resolved.");
 
+            var cached = await idempotencyRepo.GetByExecutionKeyAsync(
+                messageGuid, step.PublicId, executionPathHash, null, ct);
+            if (!string.IsNullOrEmpty(cached)) return cached;
+
+            MemoryStream contentStream;
+            string? contentType;
+            string? responseFileName;
+            Uri sourceUri;
+            var isStoredFileSource = resolvedSource.StartsWith("/files/", StringComparison.OrdinalIgnoreCase);
+            if (isStoredFileSource)
+            {
+                if (fileStorageService is not IFileStorageReadService readableStorage)
+                    throw new InvalidOperationException("The configured file storage provider cannot read a File Transfer Handle.");
+                await using var sourceStream = await readableStorage.OpenReadAsync(resolvedSource, ct);
+                contentStream = await UploadFileStepContract.ReadWithLimitAsync(sourceStream, ct);
+                contentType = null;
+                responseFileName = Path.GetFileName(resolvedSource);
+                sourceUri = new Uri("https://storage.local" + resolvedSource);
+            }
+            else
+            {
+                sourceUri = new Uri(resolvedSource);
+                var client = _httpClientFactory.CreateClient();
+                using var response = await client.GetAsync(sourceUri, HttpCompletionOption.ResponseHeadersRead, ct);
+                response.EnsureSuccessStatusCode();
+                contentStream = await UploadFileStepContract.ReadWithLimitAsync(response.Content, ct);
+                contentType = response.Content.Headers.ContentType?.MediaType;
+                responseFileName = response.Content.Headers.ContentDisposition?.FileNameStar ??
+                    response.Content.Headers.ContentDisposition?.FileName;
+            }
+            using var contentStreamLease = contentStream;
+            if (!isStoredFileSource)
+            {
+                resolvedFileName = UploadFileStepContract.PreferSourceFileName(
+                    resolvedFileName, sourceUri, responseFileName);
+            }
+            resolvedFileName = UploadFileStepContract.EnsureFileExtension(
+                resolvedFileName,
+                sourceUri,
+                responseFileName,
+                contentType,
+                contentStream);
             var uniqueKey = $"{messageGuid}_{step.PublicId}_{Convert.ToHexString(executionPathHash)}";
             var storedFile = await fileStorageService.SaveAsync(contentStream, resolvedFileName, contentType, ct, uniqueKey);
-
-            if (!string.IsNullOrEmpty(config.FileRecordStepId))
-            {
-                var targetStep = allSteps.FirstOrDefault(s => s.Id.ToString() == config.FileRecordStepId || s.RefId == config.FileRecordStepId);
-                if (targetStep != null)
-                {
-                    string? targetTableId = null;
-                    if (!string.IsNullOrEmpty(targetStep.ConfigJson))
-                    {
-                        using var doc = JsonDocument.Parse(targetStep.ConfigJson);
-                        if (doc.RootElement.TryGetProperty("tableId", out var prop))
-                        {
-                            targetTableId = prop.GetString();
-                        }
-                        else if (doc.RootElement.TryGetProperty("tableLabel", out var propLabel))
-                        {
-                            targetTableId = propLabel.GetString();
-                        }
-                    }
-
-                    if (!string.IsNullOrEmpty(targetTableId))
-                    {
-                        var tableGuid = Guid.Parse(targetTableId);
-                        var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
-                        var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
-
-                        Guid recordPublicId = Guid.Empty;
-                        if (targetStep.Type == "trigger")
-                        {
-                            if (contextDict.TryGetValue("trigger", out var triggerObj) && triggerObj is Dictionary<string, object> triggerDict)
-                            {
-                                if (triggerDict.TryGetValue("RecordPublicId", out var rVal) && Guid.TryParse(rVal?.ToString(), out var g))
-                                    recordPublicId = g;
-                                else if (triggerDict.TryGetValue("RecordId", out var rVal2) && Guid.TryParse(rVal2?.ToString(), out var g2))
-                                    recordPublicId = g2;
-                            }
-                        }
-                        else
-                        {
-                            if (stepsDict.TryGetValue(targetStep.RefId, out var stepOutputObj))
-                            {
-                                var jsonStr = JsonSerializer.Serialize(stepOutputObj);
-                                using var outputDoc = JsonDocument.Parse(jsonStr);
-                                var root = outputDoc.RootElement;
-                                if (root.TryGetProperty("CreatedRecordPublicId", out var p1) && Guid.TryParse(p1.GetString(), out var g1))
-                                    recordPublicId = g1;
-                                else if (root.TryGetProperty("UpdatedRecordPublicId", out var p2) && Guid.TryParse(p2.GetString(), out var g2))
-                                    recordPublicId = g2;
-                                else if (root.TryGetProperty("RecordPublicId", out var p3) && Guid.TryParse(p3.GetString(), out var g3))
-                                    recordPublicId = g3;
-                                else if (root.TryGetProperty("RecordId", out var p4) && Guid.TryParse(p4.GetString(), out var g4))
-                                    recordPublicId = g4;
-                                else if (root.TryGetProperty("id", out var p5) && Guid.TryParse(p5.GetString(), out var g5))
-                                    recordPublicId = g5;
-                            }
-                        }
-
-                        if (recordPublicId != Guid.Empty)
-                        {
-                            var updateValues = new Dictionary<long, object?>();
-                            var fileJson = JsonSerializer.Serialize(new
-                            {
-                                Name = storedFile.Name,
-                                Path = storedFile.Path,
-                                Size = storedFile.Size,
-                                ContentType = storedFile.ContentType
-                            });
-
-                            if (config.SelectedFileFields != null && config.SelectedFileFields.Count > 0)
-                            {
-                                foreach (var mapping in config.SelectedFileFields)
-                                {
-                                    if (string.IsNullOrEmpty(mapping.Field)) continue;
-                                    var field = fields.FirstOrDefault(f =>
-                                        f.Name.Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) ||
-                                        $"fid_{f.Id}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase) ||
-                                        $"fid_{f.Fid}".Equals(mapping.Field, StringComparison.OrdinalIgnoreCase));
-
-                                    if (field != null && field.Fid.HasValue)
-                                    {
-                                        updateValues[field.Fid.Value] = fileJson;
-                                    }
-                                }
-                            }
-                            else if (!string.IsNullOrEmpty(config.TargetFileField))
-                            {
-                                var field = fields.FirstOrDefault(f =>
-                                    f.Name.Equals(config.TargetFileField, StringComparison.OrdinalIgnoreCase) ||
-                                    $"fid_{f.Id}".Equals(config.TargetFileField, StringComparison.OrdinalIgnoreCase) ||
-                                    $"fid_{f.Fid}".Equals(config.TargetFileField, StringComparison.OrdinalIgnoreCase));
-
-                                if (field != null && field.Fid.HasValue)
-                                {
-                                    updateValues[field.Fid.Value] = fileJson;
-                                }
-                            }
-
-                            if (updateValues.Count > 0)
-                            {
-                                await uow.BeginAsync(ct);
-                                try
-                                {
-                                    var cachedOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, uow.Transaction, ct);
-                                    if (!string.IsNullOrEmpty(cachedOutput))
-                                    {
-                                        await uow.CommitAsync(ct);
-                                        return cachedOutput;
-                                    }
-
-                                    await recordWriteService.ApplyAsync(
-                                        table, fields, recordPublicId, updateValues, AuditActions.Updated, "File uploaded via Pipeline action step", ct, uow.Transaction);
-
-                                    var outputJson = JsonSerializer.Serialize(new
-                                    {
-                                        Name = storedFile.Name,
-                                        Path = storedFile.Path,
-                                        Size = storedFile.Size,
-                                        ContentType = storedFile.ContentType
-                                    });
-
-                                    await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
-                                    {
-                                        MessageId = messageGuid,
-                                        StepPublicId = step.PublicId,
-                                        ExecutionPathHash = executionPathHash,
-                                        ExecutionPath = executionPath,
-                                        OutputJson = outputJson
-                                    }, uow.Transaction, ct);
-
-                                    await uow.CommitAsync(ct);
-                                    return outputJson;
-                                }
-                                catch (Exception ex) when (IsUniqueConstraintViolation(ex))
-                                {
-                                    await uow.RollbackAsync(CancellationToken.None);
-                                    var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
-                                    if (winningOutput != null) return winningOutput;
-                                    throw;
-                                }
-                                catch
-                                {
-                                    await uow.RollbackAsync(CancellationToken.None);
-                                    throw;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            return JsonSerializer.Serialize(new
+            var fileJson = UploadFileStepContract.SerializeAttachmentValue(storedFile);
+            var outputJson = JsonSerializer.Serialize(new
             {
                 Name = storedFile.Name,
                 Path = storedFile.Path,
                 Size = storedFile.Size,
-                ContentType = storedFile.ContentType
+                ContentType = storedFile.ContentType,
+                RecordPublicId = recordPublicId,
+                Field = $"fid_{targetFields[0]!.Fid!.Value}",
+                Fields = targetFields.Select(field => $"fid_{field!.Fid!.Value}").ToArray()
             });
+
+            await uow.BeginAsync(ct);
+            try
+            {
+                var fileValues = targetFields.ToDictionary(
+                    field => (long)field!.Fid!.Value, _ => (object?)fileJson);
+                if (recordWriteService is IFileRecordWriteService fileRecordWriteService)
+                {
+                    await fileRecordWriteService.ApplyFileWriteAsync(table, fields, recordPublicId,
+                        fileValues, AuditActions.Updated, "File uploaded via Pipeline action step",
+                        ct, uow.Transaction);
+                }
+                else
+                {
+                    await recordWriteService.ApplyAsync(table, fields, recordPublicId,
+                        fileValues, AuditActions.Updated, "File uploaded via Pipeline action step",
+                        ct, uow.Transaction);
+                }
+                await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
+                {
+                    MessageId = messageGuid,
+                    StepPublicId = step.PublicId,
+                    ExecutionPathHash = executionPathHash,
+                    ExecutionPath = executionPath,
+                    OutputJson = outputJson
+                }, uow.Transaction, ct);
+                await uow.CommitAsync(ct);
+                return outputJson;
+            }
+            catch (Exception ex) when (IsUniqueConstraintViolation(ex))
+            {
+                await uow.RollbackAsync(ct);
+                var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(
+                    messageGuid, step.PublicId, executionPathHash, null, ct);
+                if (winningOutput != null) return winningOutput;
+                throw;
+            }
+            catch
+            {
+                await uow.RollbackAsync(ct);
+                await fileStorageService.DeleteAsync(storedFile.Path, ct);
+                throw;
+            }
         }
         else if (step.Type == "trigger" && (subtype == "new-event" || subtype == "new-bulk-event" || subtype == "record-added" || subtype == "record-updated" || subtype == "record-deleted" || subtype == "schedule" || subtype == "webhook"))
         {
@@ -3325,7 +3298,7 @@ public class PipelineEngine : IPipelineEngine
                 "record-updated" => "On Record Updated",
                 "record-deleted" => "On Record Deleted",
                 "schedule" => "On Schedule",
-                "webhook" => "On Webhook",
+                "webhook" => "Incoming Request",
                 _ => "On New Event"
             };
 
@@ -3978,6 +3951,18 @@ public class PipelineEngine : IPipelineEngine
                 }
                 contextDict["trigger"] = triggerData;
                 stepsDict["trigger"] = triggerData;
+            }
+
+            // Webhook payloads carry the trigger reference at the root.  Keep it available as
+            // {{steps.a.*}} (as well as {{steps.trigger.*}}) when evaluating later steps.
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("TriggerStepRefId", out var triggerRefElement)
+                && triggerRefElement.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(triggerRefElement.GetString())
+                && !stepsDict.ContainsKey(triggerRefElement.GetString()!)
+                && stepsDict.TryGetValue("trigger", out var triggerValue))
+            {
+                stepsDict[triggerRefElement.GetString()!] = triggerValue;
             }
 
             // Normalize legacy un-prefixed step tokens (e.g. {{ref_9356.fid_6}} -> {{steps.ref_9356.fid_6}})
@@ -4766,6 +4751,8 @@ public class PipelineEngine : IPipelineEngine
     public static bool IsCatchablePipelineStepError(Exception ex)
     {
         if (ex == null) return false;
+
+        if (ex is PipelineRequestRejectedException) return true;
 
         if (IsControlFlowOrInfrastructureException(ex))
         {

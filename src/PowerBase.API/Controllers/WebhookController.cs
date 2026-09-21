@@ -8,6 +8,10 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using NJsonSchema;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Cryptography;
+using PowerBase.Application.Pipelines;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
 
@@ -37,8 +41,9 @@ public class WebhookController : ControllerBase
         _logger = logger;
     }
 
-    [HttpPost("{tenantPublicId}/{stepPublicId}")]
-    [ProducesResponseType(StatusCodes.Status202Accepted)]
+    [AcceptVerbs("GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", Route = "{tenantPublicId:guid}/{stepPublicId:guid}")]
+    [RequestSizeLimit(1048576)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
@@ -66,17 +71,32 @@ public class WebhookController : ControllerBase
         }
 
         // 4. Ensure step is active/not deleted and is a webhook trigger
-        if (step.IsDeleted || step.Subtype != "webhook")
+        if (step.IsDeleted || step.Subtype != "webhook" || step.Type != "trigger" || step.ParentStepId != null)
         {
             return BadRequest(new { error = new { code = "INVALID_STEP_TYPE", message = "Selected step is not a valid webhook trigger." } });
         }
 
         // 5. Read webhook configuration from ConfigJson
-        var config = string.IsNullOrEmpty(step.ConfigJson)
-            ? new WebhookStepConfig()
-            : JsonSerializer.Deserialize<WebhookStepConfig>(step.ConfigJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new WebhookStepConfig();
+        IncomingWebhookConfig config;
+        try { config = IncomingWebhookConfig.Read(step.ConfigJson); config.Validate(); }
+        catch (Exception ex) when (ex is JsonException or ArgumentException or CryptographicException)
+        {
+            return BadRequest(new { error = new { code = "INVALID_CONFIG", message = "The Incoming Request configuration is invalid." } });
+        }
 
-        // 6. Validate Authorization header
+        // 6. Match the six methods displayed by Incoming Request. ANY BELOW accepts all six.
+        if (!IncomingWebhookConfig.Methods.Contains(Request.Method, StringComparer.OrdinalIgnoreCase))
+            return StatusCode(StatusCodes.Status405MethodNotAllowed);
+        var expectedMethod = string.IsNullOrWhiteSpace(config.MethodType) ? "ANY BELOW" : config.MethodType;
+        if (!string.Equals(expectedMethod, "ANY BELOW", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(expectedMethod, Request.Method, StringComparison.OrdinalIgnoreCase))
+        {
+            return NoContent(); // deliberately ignored: this request does not start the pipeline
+        }
+
+        // 7. Validate the selected authentication schema. Bearer remains accepted for existing
+        // saved triggers; new incoming-request triggers use no-auth or JWT.
+        JsonElement? jwtPayload = null;
         if (config.AuthType == "bearer")
         {
             var authHeader = Request.Headers["Authorization"].FirstOrDefault();
@@ -89,14 +109,62 @@ public class WebhookController : ControllerBase
                 ? authHeader.Substring(7).Trim()
                 : authHeader.Trim();
 
-            if (token != config.AuthSecret)
+            if (!CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(token), System.Text.Encoding.UTF8.GetBytes(config.AuthSecret!)))
             {
                 return StatusCode(StatusCodes.Status403Forbidden, new { error = new { code = "INVALID_TOKEN", message = "Invalid authorization token." } });
             }
         }
+        else if (string.Equals(config.AuthType, "jwt", StringComparison.OrdinalIgnoreCase))
+        {
+            var authHeader = Request.Headers["Authorization"].FirstOrDefault();
+            var token = authHeader?.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) == true
+                ? authHeader[7..].Trim() : authHeader?.Trim();
+            if (string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(config.PublicKey))
+                return Unauthorized(new { error = new { code = "MISSING_TOKEN", message = "A JWT bearer token is required." } });
+            try
+            {
+                using var rsa = RSA.Create();
+                using var ec = ECDsa.Create();
+                SecurityKey key;
+                if (config.JwtAlgorithm.StartsWith("RS")) { rsa.ImportFromPem(config.PublicKey); key = new RsaSecurityKey(rsa); }
+                else { ec.ImportFromPem(config.PublicKey); key = new ECDsaSecurityKey(ec); }
+                var parameters = new TokenValidationParameters
+                {
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = key,
+                    ValidateIssuer = false,
+                    ValidateAudience = false,
+                    ValidateLifetime = true,
+                    RequireExpirationTime = false,
+                    ClockSkew = TimeSpan.Zero,
+                    ValidAlgorithms = new[] { config.JwtAlgorithm }
+                };
+                new JwtSecurityTokenHandler().ValidateToken(token, parameters, out var validated);
+                jwtPayload = JsonSerializer.SerializeToElement(((JwtSecurityToken)validated).Payload);
+            }
+            catch (Exception ex) when (ex is SecurityTokenException || ex is ArgumentException || ex is CryptographicException)
+            {
+                return Unauthorized(new { error = new { code = "INVALID_TOKEN", message = "JWT verification failed." } });
+            }
+        }
+
+        var pipeline = await _pipelineRepo.GetByIdAsync(step.PipelineId, ct);
+        if (pipeline == null || pipeline.IsDeleted) return NotFound();
+        if (!pipeline.IsActive) return NoContent();
 
         // 9. Validate request body against JSON Schema
-        using var reader = new StreamReader(Request.Body);
+        if (Request.ContentLength > 1048576) return StatusCode(StatusCodes.Status413PayloadTooLarge);
+        // Bound streamed/chunked requests too, instead of allocating an unbounded string.
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        int read;
+        while ((read = await Request.Body.ReadAsync(chunk, ct)) > 0)
+        {
+            if (buffer.Length + read > 1048576) return StatusCode(StatusCodes.Status413PayloadTooLarge);
+            await buffer.WriteAsync(chunk.AsMemory(0, read), ct);
+        }
+        buffer.Position = 0;
+        using var reader = new StreamReader(buffer);
         var bodyStr = await reader.ReadToEndAsync(ct);
 
         if (!string.IsNullOrEmpty(config.JsonSchema))
@@ -133,7 +201,7 @@ public class WebhookController : ControllerBase
         }
 
         // 14. If depth > 10, reject immediately
-        if (depth > 10)
+        if (depth < 1 || depth > 10)
         {
             return BadRequest(new { error = new { code = "RECURSION_LIMIT_EXCEEDED", message = "Loop recursion limit exceeded." } });
         }
@@ -143,19 +211,40 @@ public class WebhookController : ControllerBase
                               ?? Request.Headers["X-GitHub-Delivery"].FirstOrDefault() 
                               ?? string.Empty;
 
-        var hashInput = tenantPublicId.ToString() + "_" + stepPublicId.ToString() + "_" + (bodyStr ?? string.Empty) + "_" + providerEventId;
+        // Only provider event IDs identify retries. Identical independent requests must run again.
+        var hashInput = tenantPublicId.ToString() + "_" + stepPublicId.ToString() + "_" + providerEventId;
         var hashBytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(hashInput));
         var guidBytes = new byte[16];
         Array.Copy(hashBytes, guidBytes, 16);
-        var messageId = new Guid(guidBytes);
+        var messageId = string.IsNullOrWhiteSpace(providerEventId) ? Guid.NewGuid() : new Guid(guidBytes);
+
+        JsonElement? json = null;
+        try { using var parsed = JsonDocument.Parse(bodyStr); json = parsed.RootElement.Clone(); }
+        catch (JsonException) { /* Webhooks accept text, XML and empty bodies as well as JSON. */ }
+        var payload = JsonSerializer.SerializeToElement(new
+        {
+            TriggerStepId = step.Id, TriggerStepRefId = step.RefId,
+            body = bodyStr, json, method = Request.Method,
+            content_type = Request.ContentType ?? "",
+            headers = Request.Headers.SelectMany(h => h.Value.Select(v => new { name = h.Key, value = v ?? "" })).ToArray(),
+            url_params = Request.Query.ToDictionary(q => q.Key, q => q.Value.Count == 1 ? (object?)q.Value[0] : q.Value.ToArray()),
+            origin_ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "",
+            jwt_payload = jwtPayload
+        });
+        try { if (!config.Matches(payload, step.RefId)) return NoContent(); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Invalid Incoming Request condition for step {StepId}", step.Id);
+            return BadRequest(new { error = new { code = "INVALID_CONDITION", message = "The trigger condition could not be evaluated." } });
+        }
 
         var task = new PipelineExecutionTask
         {
             TenantId = tenantId.Value,
             PipelineId = step.PipelineId,
             TriggerEvent = "webhook",
-            TriggerPayloadJson = string.IsNullOrEmpty(bodyStr) ? "{}" : bodyStr,
-            TriggeredBy = 0, // Public anonymous trigger
+            TriggerPayloadJson = payload.GetRawText(),
+            TriggeredBy = pipeline.CreatedBy,
             VariablesJson = null,
             CorrelationId = correlationId,
             Depth = depth,
@@ -182,13 +271,7 @@ public class WebhookController : ControllerBase
         }
 
         // 17. Return accepted response
-        return Accepted(new { message = "Pipeline execution enqueued successfully.", correlationId, messageId = messageId.ToString() });
+        return Ok(new { message = "Pipeline execution enqueued successfully.", correlationId, messageId = messageId.ToString() });
     }
 
-    private class WebhookStepConfig
-    {
-        public string? AuthType { get; set; }
-        public string? AuthSecret { get; set; }
-        public string? JsonSchema { get; set; }
-    }
 }

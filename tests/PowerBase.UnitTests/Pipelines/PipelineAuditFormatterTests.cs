@@ -286,6 +286,38 @@ public class PipelineAuditFormatterTests
     }
 
     [Fact]
+    public void FormatStepRun_UploadFileFailure_ReportsTheErrorInsteadOfAZeroByteSuccess()
+    {
+        var step = new PipelineStep
+        {
+            Id = 201,
+            Type = "file",
+            Subtype = "upload-file",
+            Label = "Upload a File",
+            RefId = "file_1"
+        };
+        var rawInput = JsonSerializer.Serialize(new
+        {
+            FileUrl = "https://example.com/document.pdf",
+            FileName = "document.pdf"
+        });
+        var rawOutput = JsonSerializer.Serialize(new
+        {
+            ErrorMessage = "The source file could not be downloaded.",
+            ExceptionType = "HttpRequestException"
+        });
+
+        var result = _formatter.FormatStepRun(
+            step, rawInput, rawOutput, "Failed", "corr_123", DateTime.UtcNow, DateTime.UtcNow);
+
+        result.LogMessage.Should().Be("Upload file failed: The source file could not be downloaded.");
+        result.LogMessage.Should().NotContain("successfully");
+        result.OutputContextJson.Should().Contain("The source file could not be downloaded.");
+        result.OutputContextJson.Should().NotContain("Uploaded File Name");
+        result.OutputContextJson.Should().NotContain("File Size");
+    }
+
+    [Fact]
     public void FormatStepRun_ConditionStep_FormatsCriteriaAndBranch()
     {
         // Arrange

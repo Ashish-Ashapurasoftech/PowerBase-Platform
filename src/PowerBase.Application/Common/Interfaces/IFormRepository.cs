@@ -11,7 +11,7 @@ public interface IFormRepository
     Task<IReadOnlyList<Form>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> CreateAsync(Form form, CancellationToken ct = default);
     Task<int> UpdateSettingsAsync(Guid publicId, string name, bool autoAddNewFields, bool showBuiltInFields,
-        string saveOptions, byte[] rowVersion, CancellationToken ct = default);
+        string saveOptions, byte[] rowVersion, bool? isQuickPeekForm = null, CancellationToken ct = default);
     Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<FormSection>> GetLayoutAsync(long formId, CancellationToken ct = default);
     Task<IReadOnlyList<FormPage>> GetPagesAsync(long formId, CancellationToken ct = default);
@@ -35,10 +35,11 @@ public interface IFormRepository
     Task AppendFieldToLastSectionAsync(long formId, int fieldFid, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default);
     Task SetDefaultAsync(Guid tablePublicId, Guid formPublicId, CancellationToken ct = default);
-    /// <summary>Sets the table's Quick Peek form (unsetting any prior one first, mirroring
-    /// SetDefaultAsync's exclusivity). <paramref name="formPublicId"/> null just clears it.</summary>
-    Task SetQuickPeekFormAsync(Guid tablePublicId, Guid? formPublicId, CancellationToken ct = default);
-    /// <summary>The form flagged as this table's Quick Peek form, or null if none is set.</summary>
+    /// <summary>Flags/un-flags one form as a Quick Peek form. Non-exclusive: other forms on the
+    /// table keep their own flag.</summary>
+    Task SetQuickPeekFormAsync(Guid formPublicId, bool enabled, CancellationToken ct = default);
+    /// <summary>The table's default Quick Peek form: the first flagged form by display order,
+    /// or null if none is flagged.</summary>
     Task<Form?> GetQuickPeekFormAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<IReadOnlyList<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)>> GetRoleFormOverridesAsync(Guid tablePublicId, CancellationToken ct = default);
     Task UpdateRoleFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)> overrides, CancellationToken ct = default);

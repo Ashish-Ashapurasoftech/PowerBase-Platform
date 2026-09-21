@@ -123,6 +123,11 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         var traversedRefIds = new HashSet<string>();
         foreach (var (step, parentRefId, branchType) in allStepsFlat)
         {
+            if (step.Subtype == "webhook" && step.IsValidated)
+            {
+                try { IncomingWebhookConfig.Read(step.ConfigJson).Validate(); }
+                catch (Exception ex) { context.AddFailure("Steps", $"Incoming Request '{step.RefId}': {ex.Message}"); }
+            }
             if (step.Subtype == "make-request" && step.IsValidated)
             {
                 try
