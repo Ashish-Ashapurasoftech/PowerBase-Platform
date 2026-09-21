@@ -364,7 +364,7 @@ public class PipelineEngine : IPipelineEngine
             if (!isSkipped && eventName == "pipeline-called" && task.TriggeredBy != pipelineMeta!.CreatedBy)
                 throw new PipelineNonRetryableException("Callable execution must use the called pipeline owner's identity.");
             var normalizedEventName = eventName.Replace("-", "").Replace("_", "");
-            if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent" or "webhook")
+            if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent")
             {
                 normalizedEventName = "new-event";
             }
@@ -424,7 +424,7 @@ public class PipelineEngine : IPipelineEngine
                 else if (normalizedEventName == "new-event")
                 {
                     if (rootStep == null || rootStep.Type != "trigger" || 
-                        (rootStep.Subtype != "new-event" && rootStep.Subtype != "record-added" && rootStep.Subtype != "record-updated" && rootStep.Subtype != "record-deleted" && rootStep.Subtype != "webhook"))
+                        (rootStep.Subtype != "new-event" && rootStep.Subtype != "record-added" && rootStep.Subtype != "record-updated" && rootStep.Subtype != "record-deleted"))
                     {
                         throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("New event trigger event requires an active root-level event trigger step.");
                     }
@@ -519,6 +519,10 @@ public class PipelineEngine : IPipelineEngine
                                 var refId = refIdObj.ToString();
                                 if (!string.IsNullOrEmpty(refId))
                                 {
+                                    // Incoming requests expose their complete payload through the
+                                    // trigger reference (normally "a"), just like other triggers.
+                                    // Record triggers replace this with their selected field values below.
+                                    stepsDict[refId] = triggerData;
                                     if (triggerData.TryGetValue("SelectedFieldValues", out var selectedValuesObj) && selectedValuesObj is JsonElement selectedElement)
                                     {
                                         var selectedDict = JsonSerializer.Deserialize<Dictionary<string, object?>>(selectedElement.GetRawText());
@@ -3294,7 +3298,7 @@ public class PipelineEngine : IPipelineEngine
                 "record-updated" => "On Record Updated",
                 "record-deleted" => "On Record Deleted",
                 "schedule" => "On Schedule",
-                "webhook" => "On Webhook",
+                "webhook" => "Incoming Request",
                 _ => "On New Event"
             };
 
@@ -3947,6 +3951,18 @@ public class PipelineEngine : IPipelineEngine
                 }
                 contextDict["trigger"] = triggerData;
                 stepsDict["trigger"] = triggerData;
+            }
+
+            // Webhook payloads carry the trigger reference at the root.  Keep it available as
+            // {{steps.a.*}} (as well as {{steps.trigger.*}}) when evaluating later steps.
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("TriggerStepRefId", out var triggerRefElement)
+                && triggerRefElement.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(triggerRefElement.GetString())
+                && !stepsDict.ContainsKey(triggerRefElement.GetString()!)
+                && stepsDict.TryGetValue("trigger", out var triggerValue))
+            {
+                stepsDict[triggerRefElement.GetString()!] = triggerValue;
             }
 
             // Normalize legacy un-prefixed step tokens (e.g. {{ref_9356.fid_6}} -> {{steps.ref_9356.fid_6}})
