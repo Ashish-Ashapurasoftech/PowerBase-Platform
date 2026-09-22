@@ -1343,7 +1343,14 @@ public class PipelineEngine : IPipelineEngine
         catch (UnauthorizedAccessException ex) { throw new PipelineNonRetryableException(ex.Message); }
         if (!context.TryGetValue("request_metadata", out var metadata) || metadata is not Dictionary<string, object> requests)
             context["request_metadata"] = requests = new Dictionary<string, object>();
-        requests[step.RefId] = new { status_code = result.StatusCode, status_message = result.StatusMessage, response_headers = result.ResponseHeaders };
+        requests[step.RefId] = new { 
+            status_code = result.StatusCode, 
+            status_message = result.StatusMessage, 
+            response_headers = result.ResponseHeaders,
+            request_url = result.RequestUrl,
+            request_headers = result.RequestHeaders,
+            body = new { text = result.OutputJson }
+        };
         return result.OutputJson;
     }
 
