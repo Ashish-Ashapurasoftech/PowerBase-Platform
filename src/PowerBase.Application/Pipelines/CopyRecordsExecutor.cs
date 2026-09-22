@@ -267,6 +267,15 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                             var identityField = destinationFields.SingleOrDefault(f => f.IsSystem && f.PhysicalColumnName == "Id" && f.Fid.HasValue);
                             if (identityField != null)
                                 values[identityField.Fid!.Value] = await records.GetActiveRecordIdByPublicIdAsync(destination, publicId, uow.Transaction, ct);
+                            // Date Created / Record Owner were stripped from values above (system
+                            // identities are match-only, never writable), so a pipeline trigger
+                            // firing off this copy-created record could never resolve
+                            // {{steps.<trigger>.fid_N}} for them. Same fix as
+                            // CreateRecordCommandHandler's analogous backfill.
+                            var copyCreatedOnField = destinationFields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
+                            if (copyCreatedOnField != null) values[copyCreatedOnField.Fid!.Value] = DateTime.UtcNow;
+                            var copyCreatedByField = destinationFields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
+                            if (copyCreatedByField != null) values[copyCreatedByField.Fid!.Value] = queryContext.UserId;
                             await services.GetRequiredService<IAuditRepository>().LogActivityAsync(AuditActions.Created, AuditEntityTypes.Record,
                                 publicId.ToString(), "Record created via Pipeline Copy Records", appId: destination.AppId, ct: ct);
                             await tableRepo.IncrementRecordCountAsync(destination.Id, ct);

@@ -153,6 +153,19 @@ public class MassUpdateRecordsCommandHandler
         if (violations.Count > 0)
             throw new RecordConstraintViolationException(violations);
 
+        // Date Modified / Last Modified By are system-managed — mass-update explicitly forbids
+        // setting them (see the systemIds check above), so effectiveValues never carries them,
+        // and the afterValues snapshot below would otherwise fall back to the pre-update
+        // (often-still-null) oldVal for these two, exactly like the single-record update path.
+        // This must be a *separate* dictionary from effectiveValues: that one is also handed to
+        // MassUpdateAsync below, whose generic per-fid column mapping targets the wrong physical
+        // column (f_2 instead of ModifiedOn) for a system field.
+        var triggerValues = new Dictionary<long, object?>(effectiveValues);
+        var modifiedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedOn" && f.Fid.HasValue);
+        if (modifiedOnField != null) triggerValues[modifiedOnField.Fid!.Value] = DateTime.UtcNow;
+        var modifiedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedBy" && f.Fid.HasValue);
+        if (modifiedByField != null) triggerValues[modifiedByField.Fid!.Value] = _queryContext.UserId;
+
         // Pre-fetch snapshots for pipeline trigger interceptor before executing mass update
         var recordChanges = new List<PipelineRecordChange>();
         foreach (var recordPublicId in foundIds)
@@ -173,7 +186,7 @@ public class MassUpdateRecordsCommandHandler
                         beforeValues[f.Id] = oldVal;
                         beforeValues[f.Fid.Value] = oldVal;
 
-                        if (effectiveValues.TryGetValue(f.Fid.Value, out var newVal))
+                        if (triggerValues.TryGetValue(f.Fid.Value, out var newVal))
                         {
                             afterValues[f.Id] = newVal;
                             afterValues[f.Fid.Value] = newVal;

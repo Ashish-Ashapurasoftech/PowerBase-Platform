@@ -1759,14 +1759,27 @@ public class PipelineEngine : IPipelineEngine
                 _logger.LogInformation("Create Record step {StepId} succeeded. Created record: {RecordPublicId}.", step.Id, recordPublicId);
                 var recordId = await recordRepo.GetActiveRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
                 values[3] = recordId;
+
+                // Date Created / Record Owner are system-managed — never present in values,
+                // since nothing submits them — so a pipeline trigger firing off this Create
+                // Record step (for a *different* pipeline listening on this table) could never
+                // resolve {{steps.<trigger>.fid_N}} for them. Same fix as
+                // CreateRecordCommandHandler's analogous backfill for the non-pipeline create path.
+                var createdOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
+                if (createdOnField != null) values[createdOnField.Fid!.Value] = DateTime.UtcNow;
+                var createdByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
+                if (createdByField != null) values[createdByField.Fid!.Value] = _queryContext.UserId;
+
                 await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, values, "record-added", ct);
 
-                var output = new Dictionary<string, object?>
+                IReadOnlyDictionary<string, object?>? persistedRecord = null;
+                if (uow.Transaction is not null)
                 {
-                    ["CreatedRecordPublicId"] = recordPublicId.ToString()
-                };
-                foreach (var value in values)
-                    output[$"fid_{value.Key}"] = value.Value;
+                    var persistedRows = await recordRepo.GetBulkUpsertRowsByIdsAsync(
+                        table, fields, [recordId], uow.Transaction, ct);
+                    persistedRows?.TryGetValue(recordId, out persistedRecord);
+                }
+                var output = BuildCreatedRecordOutput(recordPublicId, recordId, fields, values, persistedRecord);
                 var outputJson = JsonSerializer.Serialize(output);
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
@@ -2271,9 +2284,10 @@ public class PipelineEngine : IPipelineEngine
                 return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count, FailedIterationCount = failedCount });
             }
         }
-        else if (subtype == "send-email" || subtype == "send-email-outlook")
+        else if (subtype == "send-email" || subtype == "send-email-outlook" || subtype == "send an email")
         {
             var config = JsonSerializer.Deserialize<SendEmailStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            config?.Normalize();
             if (config == null || string.IsNullOrWhiteSpace(config.ToAddresses))
                 throw new InvalidOperationException("Send email step configuration is invalid or missing ToAddresses.");
 
@@ -2298,6 +2312,8 @@ public class PipelineEngine : IPipelineEngine
                 }
             }
 
+            var urlAttachments = config.ResolveUrlAttachments(value => EvaluateTokens(value, payloadJson, executionPath, allSteps));
+
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 To = resolvedTo,
                 Subject = resolvedSubject,
@@ -2305,10 +2321,17 @@ public class PipelineEngine : IPipelineEngine
                 Bcc = resolvedBcc,
                 From = resolvedFrom,
                 Body = resolvedBody,
-                Attachments = resolvedAttachments
+                Attachments = resolvedAttachments,
+                UrlAttachmentCount = urlAttachments.Count
             });
 
-            await _emailService.SendEmailAsync(resolvedTo, resolvedSubject, resolvedBody, resolvedCc, resolvedBcc, resolvedAttachments, resolvedFrom, ct);
+            await _emailService.SendPipelineEmailAsync(new PipelineEmailMessage(
+                resolvedTo, resolvedSubject, resolvedBody, resolvedCc, resolvedBcc, resolvedFrom,
+                EvaluateTokens(config.SharedMailbox, payloadJson, executionPath, allSteps),
+                EvaluateTokens(config.ContentType ?? "HTML", payloadJson, executionPath, allSteps),
+                EvaluateTokens(config.Importance ?? "Normal", payloadJson, executionPath, allSteps),
+                EvaluateTokens(config.SaveToSentItems ?? "Yes", payloadJson, executionPath, allSteps),
+                resolvedAttachments, urlAttachments, RequireContent: subtype == "send-email-outlook"), ct);
 
             return JsonSerializer.Serialize(new { SentTo = resolvedTo, Subject = resolvedSubject });
         }
@@ -2954,6 +2977,16 @@ public class PipelineEngine : IPipelineEngine
                                 }
                             }
 
+                            // Date Modified / Last Modified By are system-managed and were just
+                            // stripped from row above (non-writable), so the loop's fallback branch
+                            // left them at their stale pre-update oldVal — even though ApplyAsync's
+                            // own UPDATE just set them for real. Same fix as RecordWriteService's
+                            // analogous backfill for the non-bulk update path.
+                            var bulkModifiedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedOn" && f.Fid.HasValue);
+                            if (bulkModifiedOnField != null) { afterValues[bulkModifiedOnField.Id] = DateTime.UtcNow; afterValues[bulkModifiedOnField.Fid!.Value] = DateTime.UtcNow; }
+                            var bulkModifiedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedBy" && f.Fid.HasValue);
+                            if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Id] = _queryContext.UserId; afterValues[bulkModifiedByField.Fid!.Value] = _queryContext.UserId; }
+
                             // UPDATE in DB on uow.Transaction via recordWriteService (with sanitized row)
                             await recordWriteService.ApplyAsync(
                                 table,
@@ -3038,6 +3071,11 @@ public class PipelineEngine : IPipelineEngine
                     var publicIds = addedRecords.Select(r => r.PublicId).ToList();
                     var publicIdToIdMap = await recordRepo.GetActiveRecordIdsByPublicIdsAsync(table, publicIds, uow.Transaction, ct);
                     var recordIdField = fields.FirstOrDefault(f => f.Fid == 3);
+                    // Date Created / Record Owner are system-managed and were stripped from row
+                    // earlier (non-writable), so cv (built purely from row) never carries them —
+                    // same fix as CreateRecordCommandHandler's analogous backfill.
+                    var bulkCreatedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
+                    var bulkCreatedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
 
                     foreach (var (pubId, r, cv) in addedRecords)
                     {
@@ -3051,6 +3089,8 @@ public class PipelineEngine : IPipelineEngine
                             cv[3] = id;
                             createdRecordIds.Add(id);
                         }
+                        if (bulkCreatedOnField != null) { cv[bulkCreatedOnField.Id] = DateTime.UtcNow; cv[bulkCreatedOnField.Fid!.Value] = DateTime.UtcNow; }
+                        if (bulkCreatedByField != null) { cv[bulkCreatedByField.Id] = _queryContext.UserId; cv[bulkCreatedByField.Fid!.Value] = _queryContext.UserId; }
 
                         addedChanges.Add(new PipelineRecordChange(
                             pubId,
@@ -3341,6 +3381,46 @@ public class PipelineEngine : IPipelineEngine
             _logger.LogError("Step type '{Type}' / subtype '{Subtype}' is not supported by the execution engine.", step.Type, step.Subtype);
             throw new NotSupportedException($"Step type '{step.Type}' / subtype '{step.Subtype}' is not supported by the execution engine.");
         }
+    }
+
+    public static Dictionary<string, object?> BuildCreatedRecordOutput(
+        Guid recordPublicId,
+        long recordId,
+        IReadOnlyList<AppField> fields,
+        IReadOnlyDictionary<long, object?> submittedValues,
+        IReadOnlyDictionary<string, object?>? persistedRecord)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["CreatedRecordPublicId"] = recordPublicId.ToString(),
+            ["RecordPublicId"] = recordPublicId.ToString(),
+            ["PublicId"] = recordPublicId.ToString(),
+            ["Id"] = recordId,
+            ["fid_3"] = recordId
+        };
+
+        if (persistedRecord is not null)
+        {
+            foreach (var alias in new[] { "CreatedOn", "CreatedBy", "ModifiedOn", "ModifiedBy" })
+                if (persistedRecord.TryGetValue(alias, out var value)) output[alias] = value;
+        }
+
+        foreach (var field in fields.Where(field => field.Fid.HasValue))
+        {
+            var fid = field.Fid!.Value;
+            var key = $"fid_{fid}";
+            var column = PhysicalNaming.GetPhysicalColumnName(field);
+            if (persistedRecord is not null && persistedRecord.TryGetValue(column, out var persistedValue))
+                output[key] = persistedValue;
+            else if (persistedRecord is not null && persistedRecord.TryGetValue(field.Name, out var namedValue))
+                output[key] = namedValue;
+            else if (submittedValues.TryGetValue(fid, out var submittedValue))
+                output[key] = submittedValue;
+            else
+                output.TryAdd(key, null);
+        }
+
+        return output;
     }
 
     private Dictionary<string, BulkUpsertSession> GetOrCreateBulkUpsertSessions(Dictionary<string, object> contextDict)
@@ -4714,17 +4794,6 @@ public class PipelineEngine : IPipelineEngine
     private class LoopStepConfig
     {
         public string? LoopOverStepId { get; set; }
-    }
-
-    private class SendEmailStepConfig
-    {
-        public string? ToAddresses { get; set; }
-        public string? Subject { get; set; }
-        public string? Body { get; set; }
-        public string? CcAddresses { get; set; }
-        public string? BccAddresses { get; set; }
-        public string? FromAddress { get; set; }
-        public List<string>? Attachments { get; set; }
     }
 
     private class HandleErrorsStepConfig

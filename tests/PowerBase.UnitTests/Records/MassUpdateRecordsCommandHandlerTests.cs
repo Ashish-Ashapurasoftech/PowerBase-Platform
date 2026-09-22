@@ -107,6 +107,42 @@ public class MassUpdateRecordsCommandHandlerTests
     }
 
     [Fact]
+    public async Task HandleAsync_FiresTriggerInterceptor_WithModifiedOnAndModifiedByPopulated()
+    {
+        // Date Modified / Last Modified By are system-managed, and mass-update explicitly
+        // forbids setting them directly — so the afterValues snapshot handed to
+        // InterceptBulkAsync must not silently fall back to the pre-update (often-still-null)
+        // value for these two, same as the single-record update path.
+        var table = MakeTable();
+        var nameField = MakeField(6);
+        var modifiedOnField = new AppField { Id = 3, Fid = 2, Name = "S_dateModified", Label = "Date Modified", IsSystem = true, PhysicalColumnName = "ModifiedOn" };
+        var modifiedByField = new AppField { Id = 5, Fid = 5, Name = "S_lastModifiedBy", Label = "Last Modified By", IsSystem = true, PhysicalColumnName = "ModifiedBy" };
+        var fields = new List<AppField> { modifiedOnField, modifiedByField, nameField };
+        var recordId = Guid.NewGuid();
+        var idMap = new Dictionary<Guid, long> { [recordId] = 100L };
+        var oldRecord = new Dictionary<string, object?> { ["Id"] = 100L, ["ModifiedOn"] = null, ["ModifiedBy"] = null, ["f_6"] = "Old" };
+
+        _queryContext.UserId.Returns(40017L);
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(fields);
+        _recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns((IReadOnlyDictionary<Guid, long>)idMap);
+        _recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<CancellationToken>()).Returns(oldRecord);
+        _recordRepo.MassUpdateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>(), Arg.Any<Action<SearchIndexMessage>>(), Arg.Any<IDbTransaction>())
+            .Returns(1);
+
+        var sut = CreateSut();
+        await sut.HandleAsync(new MassUpdateRecordsCommand(table.PublicId, new[] { recordId }, new Dictionary<long, object?> { [6L] = "New" }));
+
+        await _triggerInterceptor.Received(1).InterceptBulkAsync(table, Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Is<IReadOnlyList<PipelineRecordChange>>(changes =>
+                changes.Count == 1 &&
+                changes[0].AfterValues[2L] is DateTime &&
+                Equals(changes[0].AfterValues[5L], 40017L)),
+            Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task HandleAsync_RequiredFieldSetBlank_ThrowsWithoutWriting()
     {
         var table = MakeTable();
