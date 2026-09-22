@@ -4551,6 +4551,25 @@ public class PipelineEngine : IPipelineEngine
                     }
                 }
             }
+            // A mapping like `{{ steps.trigger.headers.name }}` references a property of each item
+            // in an array (e.g. the webhook trigger's Headers, one {name, value} pair per request
+            // header) rather than of a single object. Outside a loop there's no single item to pick,
+            // so collect that property from every element and join them — e.g. two headers named
+            // Content-Type and Authorization become "Content-Type, Authorization" — instead of
+            // leaving the whole mapping unresolved.
+            else if (target is JsonElement arr && arr.ValueKind == JsonValueKind.Array)
+            {
+                var collected = new List<string>();
+                foreach (var item in arr.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object) continue;
+                    if (TryGetValue(context, span, item, member, out var itemValue) && itemValue != null)
+                        collected.Add(itemValue.ToString() ?? "");
+                }
+                if (collected.Count == 0) return false;
+                value = string.Join(", ", collected);
+                return true;
+            }
             return false;
         }
 

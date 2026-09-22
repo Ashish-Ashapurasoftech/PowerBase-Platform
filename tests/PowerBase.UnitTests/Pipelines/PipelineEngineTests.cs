@@ -577,6 +577,33 @@ public class PipelineEngineTests
             .Should().Be("First: Rec_1, Second: Rec_2");
     }
 
+    [Fact]
+    public void EvaluateTokens_PropertyOfArrayOfObjects_JoinsEachItemsValue()
+    {
+        // Mapping a Create Record field straight to the webhook trigger's "Headers > Name" picker
+        // entry produces a token like {{steps.trigger.headers.name}} with no index — since Headers
+        // is an array (one {name, value} pair per request header), that must join every item's
+        // name rather than leave the whole mapping unresolved.
+        var payload = JsonSerializer.Serialize(new
+        {
+            steps = new
+            {
+                trigger = new
+                {
+                    headers = new[]
+                    {
+                        new { name = "Content-Type", value = "application/json" },
+                        new { name = "Authorization", value = "Bearer abc" }
+                    }
+                }
+            }
+        });
+
+        InvokeEvaluateTokens("{{steps.trigger.headers.name}}", payload).Should().Be("Content-Type, Authorization");
+        InvokeEvaluateTokens("{{steps.trigger.headers.value}}", payload).Should().Be("application/json, Bearer abc");
+        InvokeEvaluateTokens("{{steps.trigger.headers[1].name}}", payload).Should().Be("Authorization");
+    }
+
     private bool InvokeEvaluateConditionOperator(string leftVal, string op, string rightVal)
     {
         var method = typeof(PipelineEngine).GetMethod("EvaluateConditionOperator", BindingFlags.NonPublic | BindingFlags.Instance);

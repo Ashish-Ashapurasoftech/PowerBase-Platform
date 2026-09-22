@@ -1165,6 +1165,24 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         return affected > 0;
     }
 
+    public async Task<bool> UpdateStepConfigJsonAsync(long stepId, string configJson, byte[] rowVersion, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        const string sql = """
+            UPDATE meta.PipelineStep
+            SET ConfigJson = @configJson, ModifiedOn = SYSUTCDATETIME()
+            WHERE Id = @stepId AND RowVersion = @rowVersion
+            """;
+        var parameters = new DynamicParameters();
+        parameters.Add("stepId", stepId, DbType.Int64);
+        parameters.Add("configJson", configJson, DbType.String);
+        parameters.Add("rowVersion", rowVersion, DbType.Binary, size: 8);
+
+        var affected = await connection.ExecuteAsync(
+            new CommandDefinition(sql, parameters, cancellationToken: ct));
+        return affected > 0;
+    }
+
     public async Task<IReadOnlyList<PipelineStep>> GetActiveScheduleStepsAsync(CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);

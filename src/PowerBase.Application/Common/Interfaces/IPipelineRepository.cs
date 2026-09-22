@@ -84,6 +84,7 @@ public interface IPipelineRepository
     Task InvalidateStepsReferencingFieldAsync(int fid, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<PipelineStep?> GetStepByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<bool> UpdateStepLastTriggeredOnAsync(long stepId, DateTime? oldTime, DateTime newTime, byte[] rowVersion, CancellationToken ct = default);
+    Task<bool> UpdateStepConfigJsonAsync(long stepId, string configJson, byte[] rowVersion, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineStep>> GetActiveScheduleStepsAsync(CancellationToken ct = default);
 
     Task<PipelineSchedule?> GetScheduleByPipelineIdAsync(long pipelineId, CancellationToken ct = default);

@@ -52,6 +52,23 @@ public class IncomingWebhookTests
         Assert.Equal(19, Queued().TriggeredBy);
     }
     [Fact]
+    public async Task RecordsNewQueryStringKeysForThePipelineBuilderToOfferLater()
+    {
+        http.Request.QueryString = new QueryString("?Test1=a&Test2=b");
+        Assert.IsType<OkObjectResult>(await Send());
+        await repo.Received(1).UpdateStepConfigJsonAsync(42,
+            Arg.Is<string>(json => json.Contains("\"Test1\"") && json.Contains("\"Test2\"") && json.Contains("sampleUrlParamKeys")),
+            Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+    }
+    [Fact]
+    public async Task DoesNotRewriteConfigWhenNoNewQueryStringKeysAppear()
+    {
+        step.ConfigJson = JsonSerializer.Serialize(new { sampleUrlParamKeys = new[] { "Test1" } });
+        http.Request.QueryString = new QueryString("?Test1=a");
+        Assert.IsType<OkObjectResult>(await Send());
+        await repo.DidNotReceive().UpdateStepConfigJsonAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+    }
+    [Fact]
     public async Task RejectsPatchOutsideQuickbaseMethodList()
     {
         http.Request.Method = "PATCH";
