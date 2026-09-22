@@ -278,6 +278,8 @@ public class ChartConfig
     // ── Gauge ──
     /// <summary>The field the gauge measures. The wizard also uses this as GroupByFieldId under the hood (Gauge has no category axis).</summary>
     public long? GaugeFieldId { get; set; }
+    /// <summary>How GaugeFieldId is summarized: Sum, Avg, Max, or Min. Null/blank defaults to Sum.</summary>
+    public string? GaugeFunction { get; set; }
     /// <summary>Upper bound (%) of the "Low" color band.</summary>
     public decimal GaugeLowMaxPercent { get; set; } = 30;
     /// <summary>Upper bound (%) of the "Medium" color band; above this is "High".</summary>

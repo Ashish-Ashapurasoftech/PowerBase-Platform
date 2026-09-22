@@ -693,7 +693,8 @@ public class ReportsController : ControllerBase
             req.DataLabelDisplayAs,
             req.GaugeGoalType,
             req.GaugeGoalFieldId,
-            req.GaugeGoalFunction);
+            req.GaugeGoalFunction,
+            req.GaugeFunction);
     }
 
     private static ChartConfigDto? MapChartConfigDto(ChartConfig? chart)
@@ -722,6 +723,7 @@ public class ReportsController : ControllerBase
             YMax2 = chart.YMax2,
             LogScale2 = chart.LogScale2,
             GaugeFieldId = chart.GaugeFieldId,
+            GaugeFunction = chart.GaugeFunction,
             GaugeLowMaxPercent = chart.GaugeLowMaxPercent,
             GaugeMediumMaxPercent = chart.GaugeMediumMaxPercent,
             DataLabelDisplayAs = chart.DataLabelDisplayAs,
