@@ -48,13 +48,25 @@ jobs:
       - name: Build Migrator
         run: dotnet build src/PowerBase.Migrator/PowerBase.Migrator.csproj --configuration Release --no-restore
 
+      # Initialize Workflow Summary
+      - name: Init Summary
+        run: |
+          echo "## 🚀 Database Migrations Report" >> $GITHUB_STEP_SUMMARY
+          echo "Triggered by **${{ github.actor }}** via **${{ github.event_name }}**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
       # 1. Control Database Migrations (database/migrations/control against Powerbase)
       - name: Run Control Migrations
         if: ${{ (github.event_name == 'push' || github.event.inputs.target == 'all' || github.event.inputs.target == 'control') && github.event.inputs.tenant_id == '' }}
         env:
           ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
-          dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate control
+          echo "### 🛡️ Control Database Migrations" >> $GITHUB_STEP_SUMMARY
+          output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate control)
+          echo "$output"
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          echo "$output" | grep -E '(\[run\]|\[skip\]|Applied:|Mode|Server)' >> $GITHUB_STEP_SUMMARY || echo "$output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       # 2. All Tenant Databases Migrations (database/migrations/tenant against all provisioned Powerbase_N)
       - name: Run All Tenant Migrations
@@ -62,7 +74,12 @@ jobs:
         env:
           ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
-          dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate tenants
+          echo "### 🏢 All Tenant Migrations" >> $GITHUB_STEP_SUMMARY
+          output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate tenants)
+          echo "$output"
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          echo "$output" | grep -E '(\[run\]|Tenant [0-9]|Applied:|Tenants processed)' >> $GITHUB_STEP_SUMMARY || echo "$output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       # 3. Single Tenant Migration (if tenant_id is explicitly provided)
       - name: Run Single Tenant Migration
@@ -70,7 +87,12 @@ jobs:
         env:
           ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
-          dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate tenant --id ${{ github.event.inputs.tenant_id }}
+          echo "### 🏢 Single Tenant Migration (Tenant ${{ github.event.inputs.tenant_id }})" >> $GITHUB_STEP_SUMMARY
+          output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- migrate tenant --id ${{ github.event.inputs.tenant_id }})
+          echo "$output"
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          echo "$output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       # 4. Legacy Root Migrations (database/migrations against Powerbase)
       - name: Run Root Migrations
@@ -78,7 +100,12 @@ jobs:
         env:
           ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
-          dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release
+          echo "### ⚙️ Root Migrations" >> $GITHUB_STEP_SUMMARY
+          output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release)
+          echo "$output"
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          echo "$output" | grep -E '(\[run\]|Applied:)' >> $GITHUB_STEP_SUMMARY || echo "$output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       # 5. Field Names Backfill (all tenants or single tenant)
       - name: Run Field Names Backfill
@@ -86,8 +113,13 @@ jobs:
         env:
           ConnectionStrings__DefaultConnection: ${{ secrets.AZURE_SQL_CONNECTION_STRING }}
         run: |
+          echo "### 🏷️ Field Names Backfill" >> $GITHUB_STEP_SUMMARY
           if [ -n "${{ github.event.inputs.tenant_id }}" ]; then
-            dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- backfill-field-names --id ${{ github.event.inputs.tenant_id }}
+            output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- backfill-field-names --id ${{ github.event.inputs.tenant_id }})
           else
-            dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- backfill-field-names
+            output=$(dotnet run --project src/PowerBase.Migrator/PowerBase.Migrator.csproj --no-build --configuration Release -- backfill-field-names)
           fi
+          echo "$output"
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          echo "$output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
