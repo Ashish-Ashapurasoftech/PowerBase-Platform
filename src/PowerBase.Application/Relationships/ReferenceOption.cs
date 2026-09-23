@@ -14,7 +14,7 @@ public class ReferenceOption
     /// <see cref="Id"/>), but the row-fetch key a picker-driven consumer needs: it lets the
     /// picker's own "the user just selected this exact row" moment resolve straight to
     /// GET /tables/{tableId}/records/{id:guid} instead of translating <see cref="Id"/> (an
-    /// internal value, and Override-Key-dependent for what it even represents) back into a GUID
+    /// internal value, and Alternate-Key-dependent for what it even represents) back into a GUID
     /// some other way.</summary>
     public Guid PublicId { get; set; }
     public string? Value1 { get; set; }

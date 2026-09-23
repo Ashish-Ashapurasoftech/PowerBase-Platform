@@ -49,12 +49,16 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
     }
 
     private const string ListPagedSql = @"
-        SELECT g.Id, g.PublicId, g.Name, g.Description, g.CreatedOn,
-               (SELECT COUNT(1) FROM meta.GroupMember gm WHERE gm.GroupId = g.Id AND gm.IsDeleted = 0) AS MemberCount
-        FROM meta.[Group] g
-        WHERE g.IsDeleted = 0
-          AND (@search IS NULL OR g.Name LIKE '%' + @search + '%' OR g.Description LIKE '%' + @search + '%')
-        ORDER BY g.Name
+        WITH GroupData AS (
+            SELECT g.Id, g.PublicId, g.Name, g.Description, g.CreatedOn,
+                   (SELECT COUNT(1) FROM meta.GroupMember gm WHERE gm.GroupId = g.Id AND gm.IsDeleted = 0) AS MemberCount
+            FROM meta.[Group] g
+            WHERE g.IsDeleted = 0
+              AND (@search IS NULL OR g.Name LIKE '%' + @search + '%' OR g.Description LIKE '%' + @search + '%')
+        )
+        SELECT Id, PublicId, Name, Description, CreatedOn, MemberCount
+        FROM GroupData
+        ORDER BY {0}
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
 
         SELECT COUNT(1) FROM meta.[Group] g
@@ -62,12 +66,25 @@ public class GroupRepository : TenantRepositoryBase, IGroupRepository
           AND (@search IS NULL OR g.Name LIKE '%' + @search + '%' OR g.Description LIKE '%' + @search + '%');";
 
     public async Task<(IEnumerable<GroupDto> Items, int TotalCount)> ListPagedAsync(
-        string? search, int page, int pageSize, CancellationToken ct = default)
+        string? search, int page, int pageSize, string sortBy = "name", bool sortDesc = false, CancellationToken ct = default)
     {
         await using var conn = await OpenConnectionAsync(ct);
         var offset = (page - 1) * pageSize;
+
+        var column = sortBy?.ToLowerInvariant() switch
+        {
+            "description" => "Description",
+            "membercount" => "MemberCount",
+            "createdon"   => "CreatedOn",
+            _             => "Name"
+        };
+        var direction = sortDesc ? "DESC" : "ASC";
+        var orderBy = $"{column} {direction}, Id ASC";
+
+        var sql = string.Format(ListPagedSql, orderBy);
+
         await using var multi = await conn.QueryMultipleAsync(new CommandDefinition(
-            ListPagedSql, new { search = string.IsNullOrWhiteSpace(search) ? null : search, offset, pageSize },
+            sql, new { search = string.IsNullOrWhiteSpace(search) ? null : search, offset, pageSize },
             cancellationToken: ct));
 
         var items = (await multi.ReadAsync<GroupDto>()).ToList();

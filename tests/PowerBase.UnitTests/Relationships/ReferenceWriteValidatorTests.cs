@@ -116,4 +116,17 @@ public class ReferenceWriteValidatorTests
 
         overrides.Should().BeEmpty();
     }
+
+    [Fact]
+    public async Task Self_referencing_record_can_reference_itself()
+    {
+        _recordRepo.ExistsAsync(Arg.Any<AppTable>(), 42L, Arg.Any<CancellationToken>()).Returns(true);
+
+        var overrides = await ReferenceWriteValidator.ValidateAsync(
+            [RefField()],
+            new Dictionary<long, object?> { [RefFid] = "42" },
+            _tableRepo, _fieldRepo, _recordRepo, _relRepo, CancellationToken.None);
+
+        overrides.Should().BeEmpty();
+    }
 }
