@@ -21,6 +21,7 @@ using Microsoft.Extensions.Options;
 using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Reports;
+using PowerBase.Application.Reports.Queries.RunReport.OData;
 using Scriban;
 using Scriban.Runtime;
 
@@ -67,6 +68,7 @@ public class PipelineEngine : IPipelineEngine
     private readonly ITenantRepository _tenantRepo;
     private readonly IPipelineStepIdempotencyRepository _idempotencyRepo;
     private readonly IPipelineRecordSearchService _pipelineRecordSearchService;
+    private readonly IAzureSearchService? _azureSearchService;
 
     public PipelineEngine(
         IPipelineRepository pipelineRepo,
@@ -111,6 +113,7 @@ public class PipelineEngine : IPipelineEngine
         _tenantRepo = tenantRepo;
         _idempotencyRepo = idempotencyRepo;
         _pipelineRecordSearchService = (IPipelineRecordSearchService)serviceProvider.GetService(typeof(IPipelineRecordSearchService))!;
+        _azureSearchService = (IAzureSearchService?)serviceProvider.GetService(typeof(IAzureSearchService));
     }
     public async Task ExecuteAsync(PipelineExecutionTask task, CancellationToken ct)
     {
@@ -1660,34 +1663,114 @@ public class PipelineEngine : IPipelineEngine
                 MaxResults = limit
             });
 
-            // Encrypted fields store ciphertext in their physical column, so a SQL LIKE/=
-            // condition against them can never match. Split those conditions out of the SQL
-            // tree and evaluate them in memory against decrypted candidate rows instead —
-            // mirrors RunReportQueryHandler's handling of formula (compute-on-read) fields.
-            var encryptedFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
-                .Select(f => (long)f.Fid!.Value).ToHashSet();
-            List<IReadOnlyDictionary<string, object?>> resultsList;
-            if (encryptedFilterFids.Count > 0 && FormulaFilterSorter.TreeContainsFormulaField(filterTree, encryptedFilterFids))
+            // SQL Server accepts at most ~2100 parameters per query, so any Id-list lookup this
+            // step does (AI Search match resolution, chunked candidate fetches) must be batched
+            // in chunks this size — never trimmed to it. A trimmed cap would silently drop
+            // records past the cutoff; chunking fetches every one of them, just in more queries.
+            const int sqlIdChunkSize = 2000;
+            const int pageSize = 5000;
+
+            // Fetches every row matching `tree` — never a fixed cap. Prefers recordSearchService
+            // (it may target a different tenant's connection for cross-tenant pipeline steps) and
+            // asks it for every match in one unbounded query (maxResults: null skips its OFFSET/
+            // FETCH clause entirely — this is its native "no limit" mode, not a page-size choice).
+            // Falls back to recordRepo (always the current tenant) only when it's unavailable —
+            // IRecordRepository.ListAsync always needs a bounded pageSize, so that path paginates.
+            async Task<List<IReadOnlyDictionary<string, object?>>> FetchAllAsync(FilterGroup? tree)
             {
-                var (physicalFilterTree, encryptedFilterTree) = FormulaFilterSorter.SplitFilterTree(filterTree, encryptedFilterFids);
-                const int candidateCap = 50_000;
-                var candidates = recordSearchService != null
-                    ? await recordSearchService.SearchAsync(table, fields, maxResults: candidateCap, filterTree: physicalFilterTree, ct: ct)
-                    : await recordRepo.ListAsync(table, fields, page: 1, pageSize: candidateCap, filterTree: physicalFilterTree, ct: ct);
-                var pairs = (candidates ?? Array.Empty<IReadOnlyDictionary<string, object?>>())
-                    .Select(r => (Row: r, Computed: (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
-                    .ToList();
-                if (encryptedFilterTree != null)
-                    pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, encryptedFilterTree, fields);
-                IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p => p.Row);
-                resultsList = (limit.HasValue ? filtered.Take(limit.Value) : filtered).ToList();
+                if (recordSearchService != null)
+                {
+                    var rows = await recordSearchService.SearchAsync(table, fields, maxResults: null, filterTree: tree, ct: ct);
+                    return rows?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+                }
+                var all = new List<IReadOnlyDictionary<string, object?>>();
+                for (var page = 1; ; page++)
+                {
+                    var pageRows = await recordRepo.ListAsync(table, fields, page, pageSize, filterTree: tree, ct: ct);
+                    if (pageRows.Count == 0) break;
+                    all.AddRange(pageRows);
+                    if (pageRows.Count < pageSize) break;
+                }
+                return all;
+            }
+
+            // Performance: when Azure AI Search grid-search is enabled (same
+            // UseAzureAiForGridSearch flag Reports uses), route filtering through the search
+            // index instead of a SQL scan. The index stores decrypted plaintext for encrypted
+            // fields (RecordRepository.GetSearchableFieldsAsync decrypts before indexing), so
+            // this also naturally handles encrypted-field conditions without the in-memory
+            // split below — mirrors RunReportQueryHandler's OData/AI Search routing. Falls back
+            // to the SQL path (which has its own encrypted-field handling) on any failure.
+            List<IReadOnlyDictionary<string, object?>>? aiSearchRows = null;
+            if (_azureSearchService != null && _azureSearchService.IsGridSearchEnabled && filterTree != null
+                && fields.Any(f => f.IsSearchable || f.IsFilterable) && await _azureSearchService.IsHealthyAsync(ct))
+            {
+                var odata = ODataFilterBuilder.Build(filterTree, fields);
+                if (!string.IsNullOrWhiteSpace(odata))
+                {
+                    try
+                    {
+                        var aiMatches = await _azureSearchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
+                        var matchedIds = new List<long>();
+                        foreach (var publicIdChunk in aiMatches.Chunk(sqlIdChunkSize))
+                            matchedIds.AddRange(await recordRepo.GetIdsByPublicIdsAsync(table, publicIdChunk, ct));
+
+                        var rows = new List<IReadOnlyDictionary<string, object?>>();
+                        foreach (var idChunk in matchedIds.Chunk(sqlIdChunkSize))
+                        {
+                            var chunkFilter = new FilterGroup { Logic = "and", Nodes = new List<FilterNode> { new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "in", Value = JsonSerializer.Serialize(idChunk) } } } };
+                            rows.AddRange(await FetchAllAsync(chunkFilter));
+                            if (limit.HasValue && rows.Count >= limit.Value) break; // a user-configured cap, not a silent one
+                        }
+                        aiSearchRows = rows;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "[Pipeline SearchRecords] Azure AI Search unavailable for table {TableId}. Falling back to SQL.", table.Id);
+                    }
+                }
+            }
+
+            List<IReadOnlyDictionary<string, object?>> resultsList;
+            if (aiSearchRows != null)
+            {
+                resultsList = (limit.HasValue ? aiSearchRows.Take(limit.Value) : aiSearchRows).ToList();
             }
             else
             {
-                var records = recordSearchService != null
-                    ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
-                    : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit ?? 100000, filterTree: filterTree, ct: ct);
-                resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+                // Encrypted fields store ciphertext in their physical column, so a SQL LIKE/=
+                // condition against them can never match. Split those conditions out of the SQL
+                // tree and evaluate them in memory against decrypted candidate rows instead —
+                // mirrors RunReportQueryHandler's handling of formula (compute-on-read) fields.
+                var encryptedFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
+                    .Select(f => (long)f.Fid!.Value).ToHashSet();
+                if (encryptedFilterFids.Count > 0 && FormulaFilterSorter.TreeContainsFormulaField(filterTree, encryptedFilterFids))
+                {
+                    var (physicalFilterTree, encryptedFilterTree) = FormulaFilterSorter.SplitFilterTree(filterTree, encryptedFilterFids);
+                    // Fetch EVERY physical-filter-matching candidate via pagination — no fixed
+                    // cap — so nothing is silently dropped before the encrypted conditions are
+                    // evaluated in memory below, no matter how many rows match physically.
+                    var candidates = await FetchAllAsync(physicalFilterTree);
+                    var pairs = candidates
+                        .Select(r => (Row: r, Computed: (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
+                        .ToList();
+                    if (encryptedFilterTree != null)
+                        pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, encryptedFilterTree, fields);
+                    IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p => p.Row);
+                    resultsList = (limit.HasValue ? filtered.Take(limit.Value) : filtered).ToList();
+                }
+                else if (limit.HasValue)
+                {
+                    var records = recordSearchService != null
+                        ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
+                        : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit.Value, filterTree: filterTree, ct: ct);
+                    resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+                }
+                else
+                {
+                    // No user-configured MaxResults — fetch every matching row via pagination.
+                    resultsList = await FetchAllAsync(filterTree);
+                }
             }
             _logger.LogInformation("Search Records step {StepId} matched {Count} records.", step.Id, resultsList.Count);
 

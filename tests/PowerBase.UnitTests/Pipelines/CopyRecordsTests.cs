@@ -475,6 +475,111 @@ public class CopyRecordsTests
             Arg.Is<FilterGroup?>(f => f != null), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
     }
 
+    // ── Azure AI Search performance routing for Copy Records' source filter ─────────────────
+    // Mirrors the same UseAzureAiForGridSearch-gated routing added to the pipeline Search
+    // Records step and to RunReportQueryHandler: when enabled and the index is healthy, resolve
+    // the `query` filter through Azure AI Search and read the source snapshot by Id instead of
+    // scanning the source table with the original condition.
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_HealthyIndex_ResolvesQueryThroughAzureSearchToIdFilter()
+    {
+        using var harness = new Harness();
+        harness.SourceFields[0].IsSearchable = true;
+        harness.AzureSearch.IsGridSearchEnabled.Returns(true);
+        harness.AzureSearch.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        var matchedPublicId = Guid.NewGuid();
+        harness.AzureSearch.SearchRecordsByFilterAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new List<Guid> { matchedPublicId });
+        harness.Records.GetIdsByPublicIdsAsync(harness.Source, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new List<long> { 7 });
+
+        FilterGroup? capturedFilter = null;
+        harness.Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(ci => { capturedFilter = ci.ArgAt<FilterGroup?>(2); return harness.EmptyPage(); });
+
+        await harness.Run("{6.CT.'none'}");
+
+        await harness.AzureSearch.Received(1).SearchRecordsByFilterAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<CancellationToken>());
+        Assert.NotNull(capturedFilter);
+        Assert.Equal(3, capturedFilter!.Nodes[0].Condition!.FieldId);
+        Assert.Equal("in", capturedFilter.Nodes[0].Condition!.Operator);
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_AiSearchThrows_FallsBackToOriginalSqlFilter()
+    {
+        using var harness = new Harness();
+        harness.SourceFields[0].IsSearchable = true;
+        harness.AzureSearch.IsGridSearchEnabled.Returns(true);
+        harness.AzureSearch.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        harness.AzureSearch.SearchRecordsByFilterAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns<Task<IReadOnlyList<Guid>>>(_ => throw new InvalidOperationException("Azure Search unavailable"));
+
+        FilterGroup? capturedFilter = null;
+        harness.Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(ci => { capturedFilter = ci.ArgAt<FilterGroup?>(2); return harness.EmptyPage(); });
+
+        var result = JsonDocument.Parse(await harness.Run("{6.CT.'none'}")).RootElement;
+
+        Assert.Equal(0, result.GetProperty("ErrorCount").GetInt32());
+        Assert.NotNull(capturedFilter);
+        // Fell back to the original "contains" condition on field 6, not an Id filter.
+        Assert.Equal(6, capturedFilter!.Nodes[0].Group!.Nodes[0].Group!.Nodes[0].Condition!.FieldId);
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchDisabled_NeverCallsAzureSearch()
+    {
+        using var harness = new Harness();
+        harness.AzureSearch.IsGridSearchEnabled.Returns(false);
+
+        await harness.Run("{6.CT.'none'}");
+
+        await harness.AzureSearch.DidNotReceive().SearchRecordsByFilterAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_MoreMatchesThanOneSqlChunk_CopiesAllOfThemWithoutTruncating()
+    {
+        // Regression: an earlier version capped AI Search matches at a fixed 2000 and silently
+        // dropped the rest from the copy. Matches must now all be fetched via chunked queries.
+        using var harness = new Harness();
+        harness.SourceFields[0].IsSearchable = true;
+        harness.AzureSearch.IsGridSearchEnabled.Returns(true);
+        harness.AzureSearch.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        const int totalMatches = 20000; // user-reported scenario: far more than one 2000-id SQL chunk
+        var publicIds = Enumerable.Range(0, totalMatches).Select(_ => Guid.NewGuid()).ToList();
+        harness.AzureSearch.SearchRecordsByFilterAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(publicIds);
+        harness.Records.GetIdsByPublicIdsAsync(harness.Source, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => ci.ArgAt<IReadOnlyCollection<Guid>>(1).Select((_, i) => (long)i).ToList());
+
+        var snapshotCallCount = 0;
+        harness.Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                snapshotCallCount++;
+                var chunkIds = JsonSerializer.Deserialize<long[]>(ci.ArgAt<FilterGroup?>(2)!.Nodes[0].Condition!.Value!)!;
+                return ChunkPage(chunkIds.Length);
+            });
+
+        var result = JsonDocument.Parse(await harness.Run("{6.CT.'none'}")).RootElement;
+
+        Assert.True(snapshotCallCount >= 10, $"Expected at least 10 chunked snapshot reads for {totalMatches} matches, got {snapshotCallCount}.");
+        Assert.Equal(totalMatches, result.GetProperty("InsertedCount").GetInt32());
+
+        static async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ChunkPage(int count)
+        {
+            await Task.CompletedTask;
+            yield return Enumerable.Range(0, count).Select(i => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+            {
+                ["f_6"] = $"row-{Guid.NewGuid()}",
+                ["PublicId"] = Guid.NewGuid()
+            }).ToList();
+        }
+    }
+
     [Theory]
     [InlineData("Yes", true)]
     [InlineData("No", false)]
@@ -575,16 +680,18 @@ public class CopyRecordsTests
         public IRecordRepository Records { get; } = Substitute.For<IRecordRepository>();
         public IRecordWriteService Writes { get; } = Substitute.For<IRecordWriteService>();
         public IPipelineRecordSearchService Search { get; } = Substitute.For<IPipelineRecordSearchService>();
+        public IAzureSearchService AzureSearch { get; } = Substitute.For<IAzureSearchService>();
         public List<string> SourceValues { get; } = new() { "none" };
         public List<AppField> SourceFields { get; } = new() { Field(6, "Source key") };
         public List<AppField> DestinationFields { get; } = new();
+        public AppTable Source { get; }
         private readonly ServiceProvider provider;
         private readonly Guid step = Guid.NewGuid(), message = Guid.NewGuid();
         public Harness()
         {
             var tables = Substitute.For<IAppTableRepository>();
             var fields = Substitute.For<IAppFieldRepository>();
-            var source = new AppTable { Id = 1, AppId = 1, PublicId = Guid.Parse(Config.SourceTable) };
+            var source = Source = new AppTable { Id = 1, AppId = 1, PublicId = Guid.Parse(Config.SourceTable) };
             var destination = new AppTable { Id = 2, AppId = 1, PublicId = Guid.Parse(Config.DestinationTable) };
             tables.GetByPublicIdAsync(source.PublicId, Arg.Any<CancellationToken>()).Returns(source);
             tables.GetByPublicIdAsync(destination.PublicId, Arg.Any<CancellationToken>()).Returns(destination);
@@ -620,7 +727,7 @@ public class CopyRecordsTests
                 .AddSingleton(idempotency).AddSingleton(Substitute.For<ITenantUnitOfWork>()).AddSingleton(encryption)
                 .AddSingleton(Substitute.For<IUserRepository>()).AddSingleton(Substitute.For<IAuditRepository>())
                 .AddSingleton(Substitute.For<IRelationshipRepository>())
-                .AddSingleton(relationalProjector).AddSingleton(formulaProjector)
+                .AddSingleton(relationalProjector).AddSingleton(formulaProjector).AddSingleton(AzureSearch)
                 .AddSingleton(Substitute.For<IPipelineTriggerInterceptor>()).AddSingleton<FormulaEngine>().BuildServiceProvider();
         }
         private async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> Page()
@@ -632,6 +739,11 @@ public class CopyRecordsTests
                     row["PublicId"] = Guid.NewGuid();
                     return (IReadOnlyDictionary<string, object?>)row;
                 }).ToList();
+        }
+        public async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> EmptyPage()
+        {
+            await Task.CompletedTask;
+            yield break;
         }
         public Task<string> Run() => Run("");
         public Task<string> Run(string query) => new CopyRecordsExecutor(provider).ExecuteAsync(Config, query, step, message, "root", default);

@@ -89,21 +89,40 @@ public class PipelineEncryptedFilterTests
     {
         FilterGroup? captured = null;
         var candidateList = candidateRows.ToList();
+
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> Narrow(FilterGroup? tree)
+        {
+            // Simulate what the real (SQL-backed) fetch would do: apply the physical filter
+            // tree server-side before returning candidates. FormulaFilterSorter's per-condition
+            // matcher reads straight from the row dict for any non-computed field, so it doubles
+            // here as a stand-in SQL evaluator for the mock.
+            return tree == null
+                ? candidateList
+                : FormulaFilterSorter.ApplyFormulaFilters(
+                    candidateList.Select(r => (Row: r, Computed: (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>())),
+                    tree, Fields()).Select(p => p.Row).ToList();
+        }
+
         _searchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 captured = ci.ArgAt<FilterGroup?>(3);
-                // Simulate what the real (SQL-backed) SearchAsync would do: apply the physical
-                // filter tree server-side before returning candidates. FormulaFilterSorter's
-                // per-condition matcher reads straight from the row dict for any non-computed
-                // field, so it doubles here as a stand-in SQL evaluator for the mock.
-                IReadOnlyList<IReadOnlyDictionary<string, object?>> narrowed = captured == null
-                    ? candidateList
-                    : FormulaFilterSorter.ApplyFormulaFilters(
-                        candidateList.Select(r => (Row: r, Computed: (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>())),
-                        captured, Fields()).Select(p => p.Row).ToList();
-                return Task.FromResult(narrowed);
+                return Task.FromResult(Narrow(captured));
             });
+        // The encrypted-field path (and the "no MaxResults configured" path) now paginate via
+        // IRecordRepository.ListAsync instead of IPipelineRecordSearchService.SearchAsync, since
+        // the latter has no page parameter. Page 1 returns the (filtered) candidates; page 2+
+        // returns empty so the production pagination loop terminates after one page.
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, Arg.Any<int>(),
+            Arg.Any<FilterGroup>(), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                captured = ci.ArgAt<FilterGroup?>(4);
+                return Task.FromResult(Narrow(captured));
+            });
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<int>(p => p > 1), Arg.Any<int>(),
+            Arg.Any<FilterGroup>(), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>>());
         _fieldRepo.ListByTableAsync(_table.Id, Arg.Any<CancellationToken>()).Returns(Fields());
 
         var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;

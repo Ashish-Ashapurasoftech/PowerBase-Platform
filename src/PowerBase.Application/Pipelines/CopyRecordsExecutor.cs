@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Records;
 using PowerBase.Application.Relationships;
@@ -89,6 +90,50 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         if (sourceAccess.ViewFilter != null) effectiveFilter.Nodes.Add(new() { Group = sourceAccess.ViewFilter });
         if (sourceAccess.RestrictToCreatedBy.HasValue)
             effectiveFilter.Nodes.Add(new() { Condition = new() { FieldId = 4, Operator = "eq", Value = sourceAccess.RestrictToCreatedBy.Value.ToString(CultureInfo.InvariantCulture) } });
+
+        // SQL Server accepts at most ~2100 parameters per query, so any Id-list lookup below
+        // (AI Search match resolution, the source-row fetch itself) must be batched in chunks
+        // this size — never trimmed to it. A trimmed cap would silently drop rows past the
+        // cutoff from the copy; chunking fetches every one of them, just across more queries.
+        const int sqlIdChunkSize = 2000;
+
+        // Performance: when Azure AI Search grid-search is enabled (same UseAzureAiForGridSearch
+        // flag Reports and pipeline Search Records use), resolve the source-side filter through
+        // the search index instead of scanning the source table. Read-only and pre-transaction —
+        // this only narrows which rows the snapshot read below selects, it never guards a write.
+        // The index stores decrypted plaintext for encrypted fields, so this also naturally
+        // handles encrypted-field conditions in `query` without the in-memory split further down.
+        // Falls back to the SQL path (which has its own encrypted-field handling) on any failure.
+        // Result: a list of Id-only filters, one per SQL parameter chunk (usually just one).
+        List<FilterGroup?>? aiSearchIdFilterChunks = null;
+        var azureSearch = services.GetService<IAzureSearchService>();
+        if (azureSearch != null && azureSearch.IsGridSearchEnabled && effectiveFilter.Nodes.Count > 0
+            && sourceFields.Any(f => f.IsSearchable || f.IsFilterable) && await azureSearch.IsHealthyAsync(ct))
+        {
+            var odata = PowerBase.Application.Reports.Queries.RunReport.OData.ODataFilterBuilder.Build(effectiveFilter, sourceFields);
+            if (!string.IsNullOrWhiteSpace(odata))
+            {
+                try
+                {
+                    var aiMatches = await azureSearch.SearchRecordsByFilterAsync(queryContext.TenantId, source.Id, odata, ct);
+                    var matchedIds = new List<long>();
+                    foreach (var publicIdChunk in aiMatches.Chunk(sqlIdChunkSize))
+                        matchedIds.AddRange(await records.GetIdsByPublicIdsAsync(source, publicIdChunk, ct));
+
+                    aiSearchIdFilterChunks = matchedIds.Count == 0
+                        ? new List<FilterGroup?> { new FilterGroup { Logic = "and", Nodes = [new() { Condition = new() { FieldId = 3, Operator = "eq", Value = "-1" } }] } }
+                        : matchedIds.Chunk(sqlIdChunkSize)
+                            .Select(idChunk => (FilterGroup?)new FilterGroup { Logic = "and", Nodes = [new() { Condition = new() { FieldId = 3, Operator = "in", Value = JsonSerializer.Serialize(idChunk) } }] })
+                            .ToList();
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    services.GetService<ILogger<CopyRecordsExecutor>>()?
+                        .LogWarning(ex, "[CopyRecords] Azure AI Search unavailable for table {TableId}. Falling back to SQL.", source.Id);
+                }
+            }
+        }
+
         var computedFids = sourceFields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode)).Select(f => (long)f.Fid!.Value).ToHashSet();
         // Encrypted fields DO have a physical column (unlike formula fields) — they still need
         // to be selected and decrypted normally. Only their filter *conditions* must be pulled
@@ -98,7 +143,23 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             .Select(f => (long)f.Fid!.Value).ToHashSet();
         var inMemoryFilterFids = new HashSet<long>(computedFids);
         inMemoryFilterFids.UnionWith(encryptedFilterFids);
-        var (physicalFilter, computedFilter) = FormulaFilterSorter.SplitFilterTree(effectiveFilter, inMemoryFilterFids);
+        // AI Search already fully resolved the filter (including any encrypted-field
+        // conditions, against its plaintext index) — the resulting Id filter chunks need no
+        // further in-memory pass. Otherwise, split as before: physical conditions to SQL,
+        // computed/encrypted conditions evaluated in memory against decrypted candidate rows.
+        List<FilterGroup?> physicalFilterChunks;
+        FilterGroup? computedFilter;
+        if (aiSearchIdFilterChunks != null)
+        {
+            physicalFilterChunks = aiSearchIdFilterChunks;
+            computedFilter = null;
+        }
+        else
+        {
+            FilterGroup? physicalFilter;
+            (physicalFilter, computedFilter) = FormulaFilterSorter.SplitFilterTree(effectiveFilter, inMemoryFilterFids);
+            physicalFilterChunks = new List<FilterGroup?> { physicalFilter };
+        }
 
         // Each receipt namespace belongs to one logical step execution, including loop path.
         var prefix = executionPath + "/copy";
@@ -157,7 +218,12 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                 IncludeFilter(effectiveFilter);
                 var needsComputed = exported.Any(f => computedFids.Contains(f.Fid!.Value)) || computedFilter != null;
                 var snapshotFields = sourceFields.Where(f => f.Fid.HasValue && !computedFids.Contains(f.Fid.Value) && (needsComputed || needed.Contains(f.Fid.Value))).ToList();
-                await foreach (var page in search.ReadCopySnapshotAsync(source, snapshotFields, physicalFilter, ct))
+                // Normally one chunk (one query); multiple only when AI Search matched more rows
+                // than a single SQL "IN" clause can parameterize — every chunk still feeds the
+                // same page/receipt sequence below, so no row is dropped and none copied twice.
+                foreach (var filterChunk in physicalFilterChunks)
+                {
+                await foreach (var page in search.ReadCopySnapshotAsync(source, snapshotFields, filterChunk, ct))
                 {
                     IReadOnlyList<IReadOnlyDictionary<string, object?>> projected = page;
                     if (needsComputed)
@@ -180,6 +246,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                     var json = JsonSerializer.Serialize(projected.Select(row => row.Where(p => exportColumns.Contains(p.Key)).ToDictionary(p => p.Key, p => p.Value)));
                     var encrypted = await encryption.EncryptDataAsync(json, wrappedKey, queryContext.TenantId, source.AppId, ct);
                     await Store($"/snapshot/{pages++}", encrypted);
+                }
                 }
                 snapshot = new Snapshot(pages, wrappedKey, started, configurationHash);
                 await Store("/snapshot", JsonSerializer.Serialize(snapshot));
