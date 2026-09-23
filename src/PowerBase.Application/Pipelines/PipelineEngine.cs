@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using System.Transactions;
 using Microsoft.Extensions.Options;
 using PowerBase.Application.Common.Configurations;
+using PowerBase.Application.Formulas;
 using PowerBase.Application.Reports;
 using Scriban;
 using Scriban.Runtime;
@@ -26,6 +27,10 @@ using Scriban.Runtime;
 namespace PowerBase.Application.Pipelines;
 public class PipelineEngine : IPipelineEngine
 {
+    /// <summary>Shared empty Computed dict for FormulaFilterSorter pairs built from rows that
+    /// have no compute-on-read (formula) fields — only encrypted-field in-memory filtering.</summary>
+    private static readonly Dictionary<long, object?> EmptyComputedValues = new();
+
     internal static Dictionary<string, object?> BuildBulkEventRecord(PipelineBulkEventRecord record)
     {
         var valuesJson = string.Equals(record.EventType, "Deleted", StringComparison.OrdinalIgnoreCase)
@@ -1655,10 +1660,35 @@ public class PipelineEngine : IPipelineEngine
                 MaxResults = limit
             });
 
-            var records = recordSearchService != null
-                ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
-                : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit ?? 100000, filterTree: filterTree, ct: ct);
-            var resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+            // Encrypted fields store ciphertext in their physical column, so a SQL LIKE/=
+            // condition against them can never match. Split those conditions out of the SQL
+            // tree and evaluate them in memory against decrypted candidate rows instead —
+            // mirrors RunReportQueryHandler's handling of formula (compute-on-read) fields.
+            var encryptedFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
+                .Select(f => (long)f.Fid!.Value).ToHashSet();
+            List<IReadOnlyDictionary<string, object?>> resultsList;
+            if (encryptedFilterFids.Count > 0 && FormulaFilterSorter.TreeContainsFormulaField(filterTree, encryptedFilterFids))
+            {
+                var (physicalFilterTree, encryptedFilterTree) = FormulaFilterSorter.SplitFilterTree(filterTree, encryptedFilterFids);
+                const int candidateCap = 50_000;
+                var candidates = recordSearchService != null
+                    ? await recordSearchService.SearchAsync(table, fields, maxResults: candidateCap, filterTree: physicalFilterTree, ct: ct)
+                    : await recordRepo.ListAsync(table, fields, page: 1, pageSize: candidateCap, filterTree: physicalFilterTree, ct: ct);
+                var pairs = (candidates ?? Array.Empty<IReadOnlyDictionary<string, object?>>())
+                    .Select(r => (Row: r, Computed: (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
+                    .ToList();
+                if (encryptedFilterTree != null)
+                    pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, encryptedFilterTree, fields);
+                IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p => p.Row);
+                resultsList = (limit.HasValue ? filtered.Take(limit.Value) : filtered).ToList();
+            }
+            else
+            {
+                var records = recordSearchService != null
+                    ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
+                    : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit ?? 100000, filterTree: filterTree, ct: ct);
+                resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+            }
             _logger.LogInformation("Search Records step {StepId} matched {Count} records.", step.Id, resultsList.Count);
 
             var normalizedResults = new List<Dictionary<string, object?>>();

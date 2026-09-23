@@ -90,7 +90,15 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         if (sourceAccess.RestrictToCreatedBy.HasValue)
             effectiveFilter.Nodes.Add(new() { Condition = new() { FieldId = 4, Operator = "eq", Value = sourceAccess.RestrictToCreatedBy.Value.ToString(CultureInfo.InvariantCulture) } });
         var computedFids = sourceFields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode)).Select(f => (long)f.Fid!.Value).ToHashSet();
-        var (physicalFilter, computedFilter) = FormulaFilterSorter.SplitFilterTree(effectiveFilter, computedFids);
+        // Encrypted fields DO have a physical column (unlike formula fields) — they still need
+        // to be selected and decrypted normally. Only their filter *conditions* must be pulled
+        // out of the SQL tree (ciphertext can't satisfy a LIKE/=), so this set is used solely for
+        // the tree split below, never for the snapshotFields exclusion further down.
+        var encryptedFilterFids = sourceFields.Where(f => f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && f.IsEncrypted)
+            .Select(f => (long)f.Fid!.Value).ToHashSet();
+        var inMemoryFilterFids = new HashSet<long>(computedFids);
+        inMemoryFilterFids.UnionWith(encryptedFilterFids);
+        var (physicalFilter, computedFilter) = FormulaFilterSorter.SplitFilterTree(effectiveFilter, inMemoryFilterFids);
 
         // Each receipt namespace belongs to one logical step execution, including loop path.
         var prefix = executionPath + "/copy";
@@ -187,6 +195,14 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         timeout.CancelAfter(remaining);
         long inserted = 0, updated = 0, errors = 0;
         var messages = new List<string>();
+        // The merge field stores ciphertext when encrypted, so an "=" SQL lookup per row can
+        // never match. Build a decrypted key -> record index once up front instead (same
+        // client-side approach RecordRepository.GetDistinctFieldValuesAsync uses for encrypted
+        // fields), and keep it updated as rows are inserted so later rows in this same run still
+        // see them, matching what a live per-row SQL lookup would have seen.
+        var mergeIndex = merge.IsEncrypted
+            ? await BuildEncryptedMergeIndexAsync(records, destination, destinationFields, merge, ct)
+            : null;
         for (var pageIndex = 0; pageIndex < snapshot.Pages; pageIndex++)
         {
             var encrypted = await Read($"/snapshot/{pageIndex}") ?? throw new InvalidOperationException("Copy Records snapshot page is missing.");
@@ -221,16 +237,28 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                         }
                         values.TryGetValue(merge.Fid!.Value, out var key);
                         IReadOnlyDictionary<string, object?>? existing = null;
-                        if (key != null && !string.IsNullOrEmpty(Convert.ToString(key, CultureInfo.InvariantCulture)))
+                        var keyStr = key != null ? Convert.ToString(key, CultureInfo.InvariantCulture) : null;
+                        if (!string.IsNullOrEmpty(keyStr))
                         {
-                            var match = new FilterGroup
+                            if (merge.IsEncrypted)
                             {
-                                Nodes = new() { new() { Condition = new()
-                            { FieldId = merge.Fid.Value, Operator = "eq", Value = Convert.ToString(key, CultureInfo.InvariantCulture) } } }
-                            };
-                            var found = await records.ListAsync(destination, destinationFields, page: 1, pageSize: 2, filterTree: match, ct: ct);
-                            if (found.Count > 1) throw CopyRecordsDefinition.Error("The destination merge value matches more than one record.");
-                            existing = found.FirstOrDefault();
+                                if (mergeIndex!.TryGetValue(keyStr, out var matches))
+                                {
+                                    if (matches.Count > 1) throw CopyRecordsDefinition.Error("The destination merge value matches more than one record.");
+                                    existing = matches[0];
+                                }
+                            }
+                            else
+                            {
+                                var match = new FilterGroup
+                                {
+                                    Nodes = new() { new() { Condition = new()
+                                { FieldId = merge.Fid.Value, Operator = "eq", Value = keyStr } } }
+                                };
+                                var found = await records.ListAsync(destination, destinationFields, page: 1, pageSize: 2, filterTree: match, ct: ct);
+                                if (found.Count > 1) throw CopyRecordsDefinition.Error("The destination merge value matches more than one record.");
+                                existing = found.FirstOrDefault();
+                            }
                         }
                         foreach (var systemField in destinationFields.Where(f => f.IsSystem && f.Fid.HasValue))
                             values.Remove(systemField.Fid!.Value); // System identities are match-only, never writable.
@@ -280,6 +308,12 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                                 publicId.ToString(), "Record created via Pipeline Copy Records", appId: destination.AppId, ct: ct);
                             await tableRepo.IncrementRecordCountAsync(destination.Id, ct);
                             await services.GetRequiredService<IPipelineTriggerInterceptor>().InterceptAsync(destination, destinationFields, publicId, values, "record-added", ct);
+                            if (merge.IsEncrypted && keyStr != null)
+                            {
+                                if (!mergeIndex!.TryGetValue(keyStr, out var list))
+                                    mergeIndex[keyStr] = list = new List<IReadOnlyDictionary<string, object?>>();
+                                list.Add(new Dictionary<string, object?> { ["PublicId"] = publicId });
+                            }
                             receipt = new(true, false);
                         }
                         await Store(rowKey, JsonSerializer.Serialize(receipt));
@@ -305,5 +339,33 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         try { await Store("/complete", output); await uow.CommitAsync(ct); }
         catch { await uow.RollbackAsync(CancellationToken.None); throw; }
         return Finish(output);
+    }
+
+    /// <summary>Scans the destination table (paginated, decrypted) once and indexes it by the
+    /// encrypted merge field's plaintext value, case-insensitively, so per-row merge matching
+    /// during Copy Records doesn't run an "=" SQL comparison against ciphertext (which can never
+    /// match) and doesn't re-scan the whole table per row.</summary>
+    private static async Task<Dictionary<string, List<IReadOnlyDictionary<string, object?>>>> BuildEncryptedMergeIndexAsync(
+        IRecordRepository records, AppTable destination, IReadOnlyList<AppField> destinationFields, AppField merge, CancellationToken ct)
+    {
+        var col = PhysicalNaming.GetPhysicalColumnName(merge);
+        var index = new Dictionary<string, List<IReadOnlyDictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
+        const int pageSize = 5000;
+        for (var page = 1; ; page++)
+        {
+            var rows = await records.ListAsync(destination, destinationFields, page, pageSize, filterTree: null, ct: ct);
+            if (rows.Count == 0) break;
+            foreach (var row in rows)
+            {
+                if (!row.TryGetValue(col, out var val) || val == null) continue;
+                var key = Convert.ToString(val, CultureInfo.InvariantCulture);
+                if (string.IsNullOrEmpty(key)) continue;
+                if (!index.TryGetValue(key, out var list))
+                    index[key] = list = new List<IReadOnlyDictionary<string, object?>>();
+                list.Add(row);
+            }
+            if (rows.Count < pageSize) break;
+        }
+        return index;
     }
 }

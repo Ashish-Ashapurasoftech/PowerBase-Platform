@@ -414,6 +414,67 @@ public class CopyRecordsTests
             Arg.Is<IReadOnlyDictionary<long, object?>>(v => v.ContainsKey(9) && !v.ContainsKey(6)), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
     }
 
+    // ── Encrypted-field filtering / merge-key matching regression coverage ──────────────────
+    // The source field's physical column stores ciphertext when encrypted, so a "query" filter
+    // condition or a merge-key "=" lookup against it can never match in SQL. These mirror the
+    // encrypted-field fix applied to CopyRecordsExecutor: filter conditions on encrypted fields
+    // are evaluated in memory against decrypted candidate rows, and the merge-key lookup uses a
+    // decrypted client-side index instead of a SQL "=" comparison.
+
+    [Fact]
+    public async Task Copy_EncryptedQueryFilter_MatchesDecryptedSourceValueInMemoryAndNeverReachesSql()
+    {
+        using var harness = new Harness();
+        harness.SourceFields[0].IsEncrypted = true;
+        harness.SourceValues.Clear();
+        harness.SourceValues.AddRange(new[] { "Ronak Dhamsaniya", "Someone Else" });
+
+        var result = JsonDocument.Parse(await harness.Run("{6.CT.'ronak'}")).RootElement;
+
+        Assert.Equal(1, result.GetProperty("InsertedCount").GetInt32());
+        await harness.Records.Received(1).CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Is<IReadOnlyDictionary<long, object?>>(v => (string)v[9]! == "Ronak Dhamsaniya"),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>());
+        // The encrypted condition must never reach the snapshot reader as a physical filter.
+        harness.Search.Received(1).ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Is<FilterGroup?>(f => f == null), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Copy_EncryptedQueryFilter_CaseInsensitiveNoMatch_InsertsNothing()
+    {
+        using var harness = new Harness();
+        harness.SourceFields[0].IsEncrypted = true;
+        harness.SourceValues.Clear();
+        harness.SourceValues.AddRange(new[] { "Someone Else", "Another Person" });
+
+        var result = JsonDocument.Parse(await harness.Run("{6.CT.'RONAK'}")).RootElement;
+
+        Assert.Equal(0, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Empty(harness.Records.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "CreateAsync"));
+    }
+
+    [Fact]
+    public async Task Copy_EncryptedMergeField_MatchesExistingRecordByDecryptedValue_UpdatesInsteadOfDuplicating()
+    {
+        using var harness = new Harness();
+        harness.DestinationField.IsEncrypted = true; // merge field ("fid_9") is encrypted
+        var id = Guid.NewGuid();
+        harness.Records.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, Arg.Any<int>(),
+            Arg.Is<FilterGroup?>(f => f == null), null, null, Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>> { new Dictionary<string, object?> { ["PublicId"] = id, ["f_9"] = "none" } });
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
+        Assert.Equal(0, result.GetProperty("InsertedCount").GetInt32());
+        await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), id,
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+        // The merge lookup must never run a SQL "=" condition against the encrypted column.
+        await harness.Records.DidNotReceive().ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(),
+            Arg.Is<FilterGroup?>(f => f != null), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
+    }
+
     [Theory]
     [InlineData("Yes", true)]
     [InlineData("No", false)]
@@ -544,11 +605,22 @@ public class CopyRecordsTests
             encryption.DecryptDataAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(c => c.ArgAt<string>(0));
             Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>()).Returns(_ => Page());
             Records.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup>(), null, null, Arg.Any<CancellationToken>()).Returns(Array.Empty<IReadOnlyDictionary<string, object?>>());
+            var relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
+            relationalProjector.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+                .Returns(c => c.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
+                    .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+            var formulaProjector = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
+            formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable>())
+                .Returns(c => c.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
+                    .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
             provider = new ServiceCollection().AddSingleton(tables).AddSingleton(fields).AddSingleton(Records).AddSingleton(Writes).AddSingleton(Search)
                 .AddSingleton(Substitute.For<IAppAccessService>()).AddSingleton(enforcer).AddSingleton(Substitute.For<IQueryContext>())
                 .AddSingleton(idempotency).AddSingleton(Substitute.For<ITenantUnitOfWork>()).AddSingleton(encryption)
                 .AddSingleton(Substitute.For<IUserRepository>()).AddSingleton(Substitute.For<IAuditRepository>())
                 .AddSingleton(Substitute.For<IRelationshipRepository>())
+                .AddSingleton(relationalProjector).AddSingleton(formulaProjector)
                 .AddSingleton(Substitute.For<IPipelineTriggerInterceptor>()).AddSingleton<FormulaEngine>().BuildServiceProvider();
         }
         private async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> Page()
