@@ -14,12 +14,18 @@ public class SaveFormRuleCommandValidator : AbstractValidator<SaveFormRuleComman
     private static readonly HashSet<string> ValidOperators = new()
     {
         "eq", "ne", "contains", "notContains", "startsWith", "endsWith",
-        "isEmpty", "isNotEmpty", "gt", "gte", "lt", "lte"
+        "isEmpty", "isNotEmpty", "gt", "gte", "lt", "lte",
+        // "includes"/"notIncludes" (User/MultiUser fields, and now role conditions) were already
+        // used by the frontend's rule builder but missing here, which would have rejected any
+        // rule using them — added alongside "changed"/"notChanged" (field-change-detection).
+        "includes", "notIncludes", "changed", "notChanged",
     };
 
     private static readonly HashSet<string> ValidConditionLogic = new() { "all", "any" };
 
     private static readonly HashSet<string> ValidTargetTypes = new() { "Field", "Section", "Block" };
+
+    private static readonly HashSet<string> ValidConditionKinds = new() { "field", "role" };
 
     public SaveFormRuleCommandValidator()
     {
@@ -36,7 +42,25 @@ public class SaveFormRuleCommandValidator : AbstractValidator<SaveFormRuleComman
 
         RuleForEach(x => x.Conditions).ChildRules(c =>
         {
-            c.RuleFor(x => x.AppFieldId).GreaterThan(0);
+            c.RuleFor(x => x.ConditionKind)
+                .Must(k => ValidConditionKinds.Contains(k))
+                .WithMessage($"ConditionKind must be one of: {string.Join(", ", ValidConditionKinds)}");
+            // 'field' conditions compare one field's value, so they need a real AppFieldId; 'role'
+            // conditions compare the evaluating user's role instead, so AppFieldId is meaningless
+            // there and must stay null (the field-picker vs. role-picker UI is mutually exclusive
+            // per condition, mirroring the two condition kinds themselves).
+            c.RuleFor(x => x.AppFieldId)
+                .NotNull().GreaterThan(0)
+                .When(x => x.ConditionKind == "field")
+                .WithMessage("AppFieldId is required for a field condition.");
+            c.RuleFor(x => x.AppFieldId)
+                .Null()
+                .When(x => x.ConditionKind == "role")
+                .WithMessage("AppFieldId must not be set for a role condition.");
+            c.RuleFor(x => x.Value)
+                .NotEmpty()
+                .When(x => x.ConditionKind == "role")
+                .WithMessage("Value (the role(s) to match) is required for a role condition.");
             c.RuleFor(x => x.Operator)
                 .Must(o => ValidOperators.Contains(o))
                 .WithMessage($"Operator must be one of: {string.Join(", ", ValidOperators)}");

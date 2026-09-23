@@ -5,6 +5,7 @@ using PowerBase.Domain.Constants;
 using PowerBase.Domain.Enums;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.ValueObjects;
+using PowerBase.Formula;
 
 namespace PowerBase.Application.Records.Commands.MassUpdateRecords;
 
@@ -21,6 +22,9 @@ public class MassUpdateRecordsCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAppRepository _appRepo;
     private readonly IMessagePublisher _messagePublisher;
+    private readonly FormulaEngine _engine;
+    private readonly IFormRuleRepository _formRuleRepo;
+    private readonly IFormRepository _formRepo;
 
     public MassUpdateRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -33,7 +37,10 @@ public class MassUpdateRecordsCommandHandler
         ITenantUnitOfWork uow,
         IQueryContext queryContext,
         IAppRepository appRepo,
-        IMessagePublisher messagePublisher)
+        IMessagePublisher messagePublisher,
+        FormulaEngine engine,
+        IFormRuleRepository formRuleRepo,
+        IFormRepository formRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -46,6 +53,9 @@ public class MassUpdateRecordsCommandHandler
         _queryContext = queryContext;
         _appRepo = appRepo;
         _messagePublisher = messagePublisher;
+        _engine = engine;
+        _formRuleRepo = formRuleRepo;
+        _formRepo = formRepo;
     }
 
     public async Task<int> HandleAsync(MassUpdateRecordsCommand command, CancellationToken ct = default)
@@ -140,26 +150,20 @@ public class MassUpdateRecordsCommandHandler
             }
         }
 
-        // Required + per-record DB Unique check, reusing the same validator every other write path uses.
-        // Unique violations already reported above (in-request duplicates) are dropped here to avoid
-        // reporting the same field/record twice under two different reasons.
-        foreach (var recordId in foundIds)
-        {
-            var recordViolations = await RecordConstraintValidator.CollectViolationsAsync(
-                table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: idMap[recordId], ct, recordId, appDateFormat: dateFormat);
-            violations.AddRange(recordViolations.Where(v => !(v.ConstraintType == "Unique" && inRequestDuplicateFids.Contains(v.FieldId))));
-        }
-
-        if (violations.Count > 0)
-            throw new RecordConstraintViolationException(violations);
-
-        // Pre-fetch snapshots for pipeline trigger interceptor before executing mass update
+        // Required + per-record DB Unique check (RecordConstraintValidator) and Form Rule
+        // Require/Prevent Save violations (FormRuleServerValidator), merged into the same
+        // per-record loop as the pipeline-trigger snapshot fetch below — oldRecord (needed for
+        // both the snapshot and 'changed'/'notChanged' form-rule conditions) is fetched once per
+        // record rather than twice. Unique violations already reported above (in-request
+        // duplicates) are dropped here to avoid reporting the same field/record twice under two
+        // different reasons.
         var recordChanges = new List<PipelineRecordChange>();
         foreach (var recordPublicId in foundIds)
         {
             var beforeValues = new Dictionary<long, object?>();
             var afterValues = new Dictionary<long, object?>();
             var changedFieldIds = new List<long>();
+            var oldValuesByFid = new Dictionary<long, object?>();
 
             try
             {
@@ -172,6 +176,7 @@ public class MassUpdateRecordsCommandHandler
                         var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
                         beforeValues[f.Id] = oldVal;
                         beforeValues[f.Fid.Value] = oldVal;
+                        oldValuesByFid[f.Fid.Value] = oldVal;
 
                         if (effectiveValues.TryGetValue(f.Fid.Value, out var newVal))
                         {
@@ -194,12 +199,24 @@ public class MassUpdateRecordsCommandHandler
                     changedFieldIds,
                     PipelineRecordEventType.Modified
                 ));
+
+                var recordViolations = await RecordConstraintValidator.CollectViolationsAsync(
+                    table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: idMap[recordPublicId], ct, recordPublicId, appDateFormat: dateFormat);
+                violations.AddRange(recordViolations.Where(v => !(v.ConstraintType == "Unique" && inRequestDuplicateFids.Contains(v.FieldId))));
+
+                var formRuleViolations = await FormRuleServerValidator.CollectViolationsAsync(
+                    table, fields, effectiveValues, oldValuesByFid, _queryContext.TenantRole,
+                    _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _engine, ct, recordPublicId);
+                violations.AddRange(formRuleViolations);
             }
             catch (NotFoundException)
             {
                 // Skip if not found
             }
         }
+
+        if (violations.Count > 0)
+            throw new RecordConstraintViolationException(violations);
 
         var indexMessages = new List<SearchIndexMessage>();
         int affected;

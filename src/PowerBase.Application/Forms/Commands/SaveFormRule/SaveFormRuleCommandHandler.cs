@@ -59,6 +59,7 @@ public class SaveFormRuleCommandHandler
 
         var conditions = command.Conditions.Select(c => new FormRuleCondition
         {
+            ConditionKind = c.ConditionKind,
             AppFieldId   = c.AppFieldId,
             Operator     = c.Operator,
             Value        = c.Value,

@@ -17,7 +17,8 @@ public class SaveFormRuleRequest
 
 public class FormRuleConditionRequest
 {
-    public long AppFieldId { get; init; }
+    public string ConditionKind { get; init; } = "field";
+    public long? AppFieldId { get; init; }
     public string Operator { get; init; } = string.Empty;
     public string? Value { get; init; }
     public string? ValueType { get; init; }

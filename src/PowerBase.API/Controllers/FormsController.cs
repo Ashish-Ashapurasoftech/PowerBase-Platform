@@ -393,7 +393,7 @@ public class FormsController : ControllerBase
     {
         var rowVersion = Convert.FromBase64String(request.RowVersion);
         var conditions = request.Conditions.Select(c =>
-            new FormRuleConditionSpec(c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder)).ToList();
+            new FormRuleConditionSpec(c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder, c.ConditionKind)).ToList();
         var actions = request.Actions.Select(a =>
             new FormRuleActionSpec(a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder)).ToList();
 
@@ -593,6 +593,7 @@ public class FormsController : ControllerBase
         CreatedOn        = r.CreatedOn,
         Conditions       = r.Conditions.Select(c => new FormRuleConditionResponse
         {
+            ConditionKind = c.ConditionKind,
             AppFieldId   = c.AppFieldId,
             Operator     = c.Operator,
             Value        = c.Value,

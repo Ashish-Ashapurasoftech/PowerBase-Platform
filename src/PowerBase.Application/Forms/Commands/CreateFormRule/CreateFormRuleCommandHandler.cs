@@ -72,6 +72,7 @@ public class CreateFormRuleCommandHandler
         Conditions       = r.Conditions.Select(c => new FormRuleConditionDetail
         {
             Id           = c.Id,
+            ConditionKind = c.ConditionKind,
             AppFieldId   = c.AppFieldId,
             Operator     = c.Operator,
             Value        = c.Value,

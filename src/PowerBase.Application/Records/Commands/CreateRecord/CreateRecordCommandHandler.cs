@@ -25,6 +25,8 @@ public class CreateRecordCommandHandler
     private readonly IMessagePublisher _messagePublisher;
     private readonly FormulaEngine _engine;
     private readonly IAppRepository _appRepo;
+    private readonly IFormRuleRepository _formRuleRepo;
+    private readonly IFormRepository _formRepo;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -40,7 +42,9 @@ public class CreateRecordCommandHandler
         IUserRepository userRepo,
         IMessagePublisher messagePublisher,
         FormulaEngine engine,
-        IAppRepository appRepo)
+        IAppRepository appRepo,
+        IFormRuleRepository formRuleRepo,
+        IFormRepository formRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -56,6 +60,8 @@ public class CreateRecordCommandHandler
         _messagePublisher = messagePublisher;
         _engine = engine;
         _appRepo = appRepo;
+        _formRuleRepo = formRuleRepo;
+        _formRepo = formRepo;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -126,6 +132,14 @@ public class CreateRecordCommandHandler
         // Delete or other tables' writes). Runs after the built-in constraints above so a plain
         // Required/Unique violation is reported first.
         await CustomDataRuleValidator.ValidateAsync(table, fields, effectiveValues, _tableRepo, _fieldRepo, _recordRepo, _engine, ct);
+
+        // Form Rules — server-side mirror of the Add/Edit Record form's client-side rule
+        // evaluation, so a client that bypasses the UI and calls this API directly still can't
+        // violate a Require/Prevent Save form rule. No "before" values exist yet on create, so
+        // 'changed'/'notChanged' conditions never match here.
+        await FormRuleServerValidator.ValidateAsync(
+            table, fields, effectiveValues, oldValuesByFid: null, _queryContext.TenantRole,
+            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _engine, ct);
 
         Guid publicId;
         PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;
