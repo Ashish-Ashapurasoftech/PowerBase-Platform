@@ -227,6 +227,29 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         WHERE PipelineId = @pipelineId
         """;
 
+    private const string ListRunsByAppSql = """
+        SELECT r.Id, r.PublicId, r.PipelineId, r.Status, r.TriggerType, r.StartedOn, r.CompletedOn, r.TriggeredBy, r.ErrorMessage, r.MessageId, r.AttemptCount, r.HeartbeatOn, r.LockedBy, r.LockedUntil, r.LastError,
+               p.Name AS PipelineName, p.PublicId AS PipelinePublicId
+        FROM audit.PipelineRun r
+        INNER JOIN meta.Pipeline p ON p.Id = r.PipelineId
+        WHERE p.AppId = @appId AND p.IsDeleted = 0
+          AND (@pipelineId IS NULL OR r.PipelineId = @pipelineId)
+          AND (@fromDate IS NULL OR r.StartedOn >= @fromDate)
+          AND (@toDate IS NULL OR r.StartedOn <= @toDate)
+        ORDER BY r.StartedOn DESC, r.Id DESC
+        OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+        """;
+
+    private const string CountRunsByAppSql = """
+        SELECT COUNT(1)
+        FROM audit.PipelineRun r
+        INNER JOIN meta.Pipeline p ON p.Id = r.PipelineId
+        WHERE p.AppId = @appId AND p.IsDeleted = 0
+          AND (@pipelineId IS NULL OR r.PipelineId = @pipelineId)
+          AND (@fromDate IS NULL OR r.StartedOn >= @fromDate)
+          AND (@toDate IS NULL OR r.StartedOn <= @toDate)
+        """;
+
     private const string GetActivePipelineReferencesForFieldSql = """
         SELECT p.Name AS PipelineName, s.Label AS StepLabel
         FROM meta.PipelineStep s
@@ -343,6 +366,21 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                     isActive
                 },
                 cancellationToken: ct));
+    }
+
+    private const string ListNamesByAppIdSql = """
+        SELECT PublicId, Name
+        FROM meta.Pipeline
+        WHERE AppId = @appId AND IsDeleted = 0
+        ORDER BY Name
+        """;
+
+    public async Task<IReadOnlyList<(Guid PublicId, string Name)>> ListNamesByAppIdAsync(long appId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var results = await connection.QueryAsync<(Guid PublicId, string Name)>(
+            new CommandDefinition(ListNamesByAppIdSql, new { appId }, cancellationToken: ct));
+        return results.AsList();
     }
 
     public async Task<IReadOnlyList<Pipeline>> FindCallablePipelinesAsync(long ownerId, string callDefinition, CancellationToken ct = default)
@@ -1067,6 +1105,28 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(
             new CommandDefinition(CountRunsSql, new { pipelineId }, cancellationToken: ct));
+    }
+
+    private class PipelineRunWithPipelineRow : PipelineRun
+    {
+        public string PipelineName { get; set; } = string.Empty;
+        public Guid PipelinePublicId { get; set; }
+    }
+
+    public async Task<IReadOnlyList<(PipelineRun Run, string PipelineName, Guid PipelinePublicId)>> GetRunsByAppIdAsync(
+        long appId, long? pipelineId, DateTime? fromDate, DateTime? toDate, int page, int pageSize, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<PipelineRunWithPipelineRow>(
+            new CommandDefinition(ListRunsByAppSql, new { appId, pipelineId, fromDate, toDate, offset = (page - 1) * pageSize, pageSize }, cancellationToken: ct));
+        return rows.Select(r => ((PipelineRun)r, r.PipelineName, r.PipelinePublicId)).ToList();
+    }
+
+    public async Task<int> CountRunsByAppIdAsync(long appId, long? pipelineId, DateTime? fromDate, DateTime? toDate, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(CountRunsByAppSql, new { appId, pipelineId, fromDate, toDate }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineReferencesForFieldAsync(int fid, CancellationToken ct = default)
