@@ -162,7 +162,7 @@ public class PipelineStepValidator
 
         if (!Guid.TryParse(connectionPublicId, out var connectionGuid))
         {
-            throw new ValidationException(new Dictionary<string, string[]> { { "ConnectionPublicId", new[] { "Connection must be a valid Guid." } } });
+            throw new ValidationException(new Dictionary<string, string[]> { { "ConnectionPublicId", new[] { "Connection is required." } } });
         }
 
         if (SystemConnectionIds.Contains(connectionGuid))
@@ -267,7 +267,7 @@ public class PipelineStepValidator
         ConnectionScope? accountScope = null;         // set only for saved PowerFlows accounts
         if (string.IsNullOrEmpty(config.ConnectionPublicId) || !Guid.TryParse(config.ConnectionPublicId, out var connectionGuid))
         {
-            AddError(errors, "ConnectionPublicId", "Connection is required and must be a valid Guid.");
+            AddError(errors, "ConnectionPublicId", "Connection is required.");
         }
         else if (!SystemConnectionIds.Contains(connectionGuid))
         {
@@ -360,7 +360,7 @@ public class PipelineStepValidator
         long appId = 0;
         if (string.IsNullOrEmpty(config.AppPublicId) || !Guid.TryParse(config.AppPublicId, out var appGuid))
         {
-            AddError(errors, "AppPublicId", "App is required and must be a valid Guid.");
+            AddError(errors, "AppPublicId", "App is required.");
         }
         else
         {
@@ -383,7 +383,7 @@ public class PipelineStepValidator
         long tableId = 0;
         if (string.IsNullOrEmpty(config.TablePublicId) || !Guid.TryParse(config.TablePublicId, out var tableGuid))
         {
-            AddError(errors, "TablePublicId", "Table is required and must be a valid Guid.");
+            AddError(errors, "TablePublicId", "Table is required.");
         }
         else
         {

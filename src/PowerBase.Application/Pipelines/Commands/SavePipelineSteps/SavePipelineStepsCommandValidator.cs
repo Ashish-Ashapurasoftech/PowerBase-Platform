@@ -30,10 +30,11 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         bool isValidFirstStep = firstStep.Type == "trigger" ||
             (firstStep.Type == "query" && (firstStep.Subtype == "search-records" || firstStep.Subtype == "look-up-record")) ||
             firstStep.Subtype == "handle-errors" ||
-            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause"));
+            (firstStep.Type == "action" && (firstStep.Subtype == "prepare-bulk-upsert" || firstStep.Subtype == "copy-records" || firstStep.Subtype == "make-request" || firstStep.Subtype == "pause")) ||
+            (firstStep.Type == "email" && (firstStep.Subtype == "send-email" || firstStep.Subtype == "send-email-outlook"));
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, Prepare Bulk Record Upsert, or Pause step.");
+            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, Prepare Bulk Record Upsert, Pause, or Send Email step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();
