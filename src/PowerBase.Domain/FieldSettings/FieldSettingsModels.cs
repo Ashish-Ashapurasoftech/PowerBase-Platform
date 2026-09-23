@@ -272,6 +272,12 @@ public sealed class FileSettings
     public string? LinkText { get; set; }
     /// <summary>Show .jpg/.png/.gif files as images in forms.</summary>
     public bool? ShowImagePreview { get; set; }
+    /// <summary>Store every revision, up to Quickbase's 100-version limit.</summary>
+    public bool? KeepAllRevisions { get; set; }
+    /// <summary>Number of total versions to retain when KeepAllRevisions is false. Defaults to 3.</summary>
+    public int? RevisionLimit { get; set; }
+    /// <summary>Expose revision history and allow users with Modify access to restore an older version.</summary>
+    public bool? AllowOlderVersionsAsCurrent { get; set; }
     public bool? DisplayBold { get; set; }
     public bool? NoWrap { get; set; }
     public int? ColumnWidth { get; set; }
