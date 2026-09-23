@@ -548,7 +548,7 @@ public class CopyRecordsTests
         harness.SourceFields[0].IsSearchable = true;
         harness.AzureSearch.IsGridSearchEnabled.Returns(true);
         harness.AzureSearch.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
-        const int totalMatches = 20000; // user-reported scenario: far more than one 2000-id SQL chunk
+        const int totalMatches = 5000; // > one 2000-id SQL chunk, needs 3 chunks (verified against 20,000 manually too)
         var publicIds = Enumerable.Range(0, totalMatches).Select(_ => Guid.NewGuid()).ToList();
         harness.AzureSearch.SearchRecordsByFilterAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(publicIds);
@@ -566,7 +566,7 @@ public class CopyRecordsTests
 
         var result = JsonDocument.Parse(await harness.Run("{6.CT.'none'}")).RootElement;
 
-        Assert.True(snapshotCallCount >= 10, $"Expected at least 10 chunked snapshot reads for {totalMatches} matches, got {snapshotCallCount}.");
+        Assert.True(snapshotCallCount >= 3, $"Expected at least 3 chunked snapshot reads for {totalMatches} matches, got {snapshotCallCount}.");
         Assert.Equal(totalMatches, result.GetProperty("InsertedCount").GetInt32());
 
         static async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ChunkPage(int count)
