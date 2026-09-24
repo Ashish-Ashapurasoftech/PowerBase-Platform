@@ -28,5 +28,11 @@ public record PipelineStepRunDto(
     DateTime? CompletedOn,
     string? InputContext,
     string? OutputContext,
-    string? LogMessage
+    string? LogMessage,
+    long? PipelineRunAttemptId,
+    string? ExecutionPath,
+    int SequenceNumber,
+    string TransactionOutcome,
+    string? ErrorType,
+    long? DurationMs
 );

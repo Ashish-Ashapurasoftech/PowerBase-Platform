@@ -361,7 +361,7 @@ public class PipelineGapsVerificationTests
         appRepo.GetIdByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(5L);
         pipelineRepo.GetByPublicIdAsync(publicId, Arg.Any<CancellationToken>()).Returns(pipeline);
 
-        var handler = new DeletePipelinesCommandHandler(appRepo, pipelineRepo, auditRepo, queueRepo, queryContext);
+        var handler = new DeletePipelinesCommandHandler(pipelineRepo, auditRepo, queueRepo, queryContext, Substitute.For<IAppAccessService>());
 
         // Act
         await handler.HandleAsync(new DeletePipelinesCommand(Guid.NewGuid(), new List<Guid> { publicId }), CancellationToken.None);
@@ -404,7 +404,7 @@ public class PipelineGapsVerificationTests
         appRepo.GetIdByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(5L);
         pipelineRepo.GetByPublicIdAsync(publicId, Arg.Any<CancellationToken>()).Returns(pipeline);
 
-        var handler = new DeletePipelinesCommandHandler(appRepo, pipelineRepo, auditRepo, queueRepo, queryContext);
+        var handler = new DeletePipelinesCommandHandler(pipelineRepo, auditRepo, queueRepo, queryContext, Substitute.For<IAppAccessService>());
 
         // Act
         await handler.HandleAsync(new DeletePipelinesCommand(Guid.NewGuid(), new List<Guid> { publicId }), CancellationToken.None);

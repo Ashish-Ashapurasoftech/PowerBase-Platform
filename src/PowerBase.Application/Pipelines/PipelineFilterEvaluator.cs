@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using PowerBase.Domain.Entities;
 
@@ -10,9 +12,39 @@ public class TriggerFilterRule
 {
     public string? Field { get; set; }
     public string? Operator { get; set; }
+    // Angular number inputs emit JSON numbers while text/date/select controls emit strings.
+    // Accept every scalar representation so one numeric rule cannot make the entire Search
+    // Records configuration fail deserialization.
+    [JsonConverter(typeof(FilterScalarStringJsonConverter))]
     public string? Value { get; set; }
     public string? Type { get; set; } // "rule" or "nested"
     public List<TriggerFilterGroup>? Groups { get; set; }
+}
+
+public sealed class FilterScalarStringJsonConverter : JsonConverter<string?>
+{
+    public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+        reader.TokenType switch
+        {
+            JsonTokenType.String => reader.GetString(),
+            JsonTokenType.Number => ReadNumber(ref reader),
+            JsonTokenType.True => "true",
+            JsonTokenType.False => "false",
+            JsonTokenType.Null => null,
+            _ => throw new JsonException($"Filter values must be scalar; received '{reader.TokenType}'.")
+        };
+
+    public override void Write(Utf8JsonWriter writer, string? value, JsonSerializerOptions options)
+    {
+        if (value is null) writer.WriteNullValue();
+        else writer.WriteStringValue(value);
+    }
+
+    private static string ReadNumber(ref Utf8JsonReader reader)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        return document.RootElement.GetRawText();
+    }
 }
 
 public class TriggerFilterGroup
@@ -36,7 +68,7 @@ public static class PipelineFilterEvaluator
         var code = typeCode?.ToUpperInvariant();
         if (code == "NUMBER" || code == "CURRENCY" || code == "PERCENT" || code == "RATING" || code == "NUMERIC" || code == "INTEGER" || code == "FLOAT" || code == "NUMERICRANGE" || code == "RECORDID" || code == "DURATION")
             return "NUMBER";
-        if (code == "DATE" || code == "DATETIME" || code == "TIMESTAMP" || code == "TIME" || code == "DATERANGE")
+        if (code == "DATE" || code == "DATE_TIME" || code == "DATETIME" || code == "TIMESTAMP" || code == "TIME" || code == "TIME_OF_DAY" || code == "DATERANGE")
             return "DATE";
         if (code == "BOOLEAN" || code == "CHECKBOX")
             return "BOOLEAN";

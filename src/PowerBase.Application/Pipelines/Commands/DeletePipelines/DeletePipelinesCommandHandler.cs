@@ -12,24 +12,24 @@ namespace PowerBase.Application.Pipelines.Commands.DeletePipelines;
 
 public class DeletePipelinesCommandHandler
 {
-    private readonly IAppRepository _appRepo;
     private readonly IPipelineRepository _pipelineRepo;
     private readonly IAuditRepository _auditRepo;
     private readonly IMainPipelineQueueRepository _queueRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IAppAccessService _appAccessService;
 
     public DeletePipelinesCommandHandler(
-        IAppRepository appRepo,
         IPipelineRepository pipelineRepo,
         IAuditRepository auditRepo,
         IMainPipelineQueueRepository queueRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAppAccessService appAccessService)
     {
-        _appRepo = appRepo;
         _pipelineRepo = pipelineRepo;
         _auditRepo = auditRepo;
         _queueRepo = queueRepo;
         _queryContext = queryContext;
+        _appAccessService = appAccessService;
     }
 
     public async Task HandleAsync(DeletePipelinesCommand command, CancellationToken ct = default)
@@ -52,16 +52,15 @@ public class DeletePipelinesCommandHandler
 
         var distinctIds = command.PipelinePublicIds.Distinct().ToList();
 
-        var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
-
         var pipelines = new List<Pipeline>();
         foreach (var publicId in distinctIds)
         {
             var pipeline = await _pipelineRepo.GetByPublicIdAsync(publicId, ct);
-            if (pipeline.AppId != appId)
-            {
-                throw new UnauthorizedActionException("One or more PowerFlows do not belong to this application.");
-            }
+
+            // A PowerFlow may be managed from an app other than the one that owns it, so
+            // permission is checked against the pipeline's own app rather than the request's appId.
+            await _appAccessService.RequirePermissionByPipelinePublicIdAsync(publicId, PermissionCodes.PowerFlowsDelete, ct);
+
             pipelines.Add(pipeline);
         }
 
@@ -101,7 +100,7 @@ public class DeletePipelinesCommandHandler
                 AuditEntityTypes.Pipeline,
                 pipeline.PublicId.ToString(),
                 $"Pipeline workflow deleted: {pipeline.Name}",
-                appId: appId,
+                appId: pipeline.AppId,
                 ct: ct);
         }
     }

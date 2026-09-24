@@ -1392,6 +1392,58 @@ public class PipelineEngineTests
         configType!.GetProperty("MaxResults")!.GetValue(config6).Should().Be(3);
     }
 
+    [Theory]
+    [InlineData("0", "0")]
+    [InlineData("15", "15")]
+    [InlineData("-12.50", "-12.50")]
+    [InlineData("true", "true")]
+    [InlineData("false", "false")]
+    public void TriggerFilterRule_ScalarJsonValues_DeserializeWithoutLosingTheirValue(string jsonValue, string expected)
+    {
+        var json = $"{{\"field\":\"fid_10\",\"operator\":\"is\",\"value\":{jsonValue}}}";
+
+        var rule = JsonSerializer.Deserialize<TriggerFilterRule>(json, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+
+        rule.Should().NotBeNull();
+        rule!.Value.Should().Be(expected);
+    }
+
+    [Fact]
+    public void TriggerFilterRule_StringDateValue_DeserializesUnchanged()
+    {
+        const string date = "2026-09-24T00:00:00.000Z";
+        var rule = JsonSerializer.Deserialize<TriggerFilterRule>(
+            $"{{\"field\":\"fid_11\",\"operator\":\"is\",\"value\":\"{date}\"}}",
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        rule!.Value.Should().Be(date);
+    }
+
+    [Theory]
+    [InlineData("DateTime", "is", "date_eq")]
+    [InlineData("Date", "is-not", "date_ne")]
+    [InlineData("Text", "ends-with", "endsWith")]
+    public void SearchRecords_FilterOperators_MapWithFieldTypeSemantics(string typeCode, string uiOperator, string expectedDbOperator)
+    {
+        var fields = new List<AppField>
+        {
+            new() { Id = 10, Fid = 20, Name = "Value", TypeCode = typeCode }
+        };
+        var group = new TriggerFilterGroup
+        {
+            LogicalOp = "AND",
+            Rules = [new TriggerFilterRule { Field = "fid_20", Operator = uiOperator, Value = "2026-09-24" }]
+        };
+        var method = typeof(PipelineEngine).GetMethod("MapTriggerFilterGroupToDbFilterGroup", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        var result = (FilterGroup)method!.Invoke(_engine, [group, fields, "{}", "path", new List<PipelineStep>(), null])!;
+
+        result.Nodes.Should().ContainSingle().Which.Condition!.Operator.Should().Be(expectedDbOperator);
+    }
+
     [Fact]
     public async Task ExecuteAsync_MismatchTriggerEvent_ThrowsPipelineNonRetryableException()
     {
@@ -2214,7 +2266,7 @@ public class PipelineEngineTests
         var method = typeof(PipelineEngine).GetMethod("MapTriggerFilterGroupToDbFilterGroup", BindingFlags.NonPublic | BindingFlags.Instance);
         
         // Act
-        var result = (FilterGroup)method!.Invoke(_engine, new object[] { triggerFilterGroup, fields, "{}", "path", new List<PipelineStep>() })!;
+        var result = (FilterGroup)method!.Invoke(_engine, new object?[] { triggerFilterGroup, fields, "{}", "path", new List<PipelineStep>(), null })!;
 
         // Assert
         result.Should().NotBeNull();
