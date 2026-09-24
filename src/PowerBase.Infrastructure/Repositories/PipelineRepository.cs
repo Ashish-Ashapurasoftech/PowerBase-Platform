@@ -9,6 +9,8 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
 {
+    private bool? _hasEnhancedStepHistoryColumns;
+    private bool? _hasStepSnapshotColumns;
     public async Task<IReadOnlyList<AppField>> GetTableFieldsAsync(long tableId, CancellationToken ct = default)
     {
         const string sql = """
@@ -198,12 +200,44 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         """;
 
     private const string InsertStepRunSql = """
+        INSERT INTO audit.PipelineStepRun (PipelineRunId, StepId, Status, StartedOn, InputContext, OutputContext, LogMessage,
+                                           PipelineRunAttemptId, ExecutionPath, SequenceNumber, TransactionOutcome, ErrorType,
+                                           StepPublicIdSnapshot, StepRefIdSnapshot, StepLabelSnapshot, StepTypeSnapshot, StepSubtypeSnapshot)
+        OUTPUT INSERTED.Id
+        VALUES (@pipelineRunId, @stepId, @status, SYSUTCDATETIME(), @inputContext, @outputContext, @logMessage,
+                @pipelineRunAttemptId, @executionPath, @sequenceNumber, @transactionOutcome, @errorType,
+                @stepPublicIdSnapshot, @stepRefIdSnapshot, @stepLabelSnapshot, @stepTypeSnapshot, @stepSubtypeSnapshot)
+        """;
+
+    private const string UpdateStepRunSql = """
+        UPDATE audit.PipelineStepRun
+        SET Status = @status,
+            CompletedOn = SYSUTCDATETIME(),
+            InputContext = @inputContext,
+            OutputContext = @outputContext,
+            LogMessage = @logMessage,
+            ExecutionPath = COALESCE(@executionPath, ExecutionPath),
+            SequenceNumber = CASE WHEN @sequenceNumber > 0 THEN @sequenceNumber ELSE SequenceNumber END,
+            TransactionOutcome = COALESCE(@transactionOutcome, TransactionOutcome),
+            ErrorType = @errorType
+        WHERE Id = @id
+        """;
+
+    private const string InsertStepRunEnhancedSql = """
+        INSERT INTO audit.PipelineStepRun (PipelineRunId, StepId, Status, StartedOn, InputContext, OutputContext, LogMessage,
+                                           PipelineRunAttemptId, ExecutionPath, SequenceNumber, TransactionOutcome, ErrorType)
+        OUTPUT INSERTED.Id
+        VALUES (@pipelineRunId, @stepId, @status, SYSUTCDATETIME(), @inputContext, @outputContext, @logMessage,
+                @pipelineRunAttemptId, @executionPath, @sequenceNumber, @transactionOutcome, @errorType)
+        """;
+
+    private const string InsertStepRunLegacySql = """
         INSERT INTO audit.PipelineStepRun (PipelineRunId, StepId, Status, StartedOn, InputContext, OutputContext, LogMessage)
         OUTPUT INSERTED.Id
         VALUES (@pipelineRunId, @stepId, @status, SYSUTCDATETIME(), @inputContext, @outputContext, @logMessage)
         """;
 
-    private const string UpdateStepRunSql = """
+    private const string UpdateStepRunLegacySql = """
         UPDATE audit.PipelineStepRun
         SET Status = @status,
             CompletedOn = SYSUTCDATETIME(),
@@ -1029,29 +1063,51 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
     public async Task<long> CreateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await DetectStepHistorySchemaAsync(connection, ct);
+        var insertSql = _hasStepSnapshotColumns == true
+            ? InsertStepRunSql
+            : _hasEnhancedStepHistoryColumns == true
+                ? InsertStepRunEnhancedSql
+                : InsertStepRunLegacySql;
         return await connection.ExecuteScalarAsync<long>(
-            new CommandDefinition(InsertStepRunSql, new
+            new CommandDefinition(insertSql, new
             {
                 pipelineRunId = stepRun.PipelineRunId,
                 stepId = stepRun.StepId,
                 status = stepRun.Status,
                 inputContext = stepRun.InputContext,
                 outputContext = stepRun.OutputContext,
-                logMessage = stepRun.LogMessage
+                logMessage = stepRun.LogMessage,
+                pipelineRunAttemptId = stepRun.PipelineRunAttemptId,
+                executionPath = stepRun.ExecutionPath,
+                sequenceNumber = stepRun.SequenceNumber,
+                transactionOutcome = stepRun.TransactionOutcome,
+                errorType = stepRun.ErrorType,
+                stepPublicIdSnapshot = stepRun.StepPublicIdSnapshot,
+                stepRefIdSnapshot = stepRun.StepRefIdSnapshot,
+                stepLabelSnapshot = stepRun.StepLabelSnapshot,
+                stepTypeSnapshot = stepRun.StepTypeSnapshot,
+                stepSubtypeSnapshot = stepRun.StepSubtypeSnapshot
             }, cancellationToken: ct));
     }
 
     public async Task UpdateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await DetectStepHistorySchemaAsync(connection, ct);
+        var updateSql = _hasEnhancedStepHistoryColumns == true ? UpdateStepRunSql : UpdateStepRunLegacySql;
         await connection.ExecuteAsync(
-            new CommandDefinition(UpdateStepRunSql, new
+            new CommandDefinition(updateSql, new
             {
                 id = stepRun.Id,
                 status = stepRun.Status,
                 inputContext = stepRun.InputContext,
                 outputContext = stepRun.OutputContext,
-                logMessage = stepRun.LogMessage
+                logMessage = stepRun.LogMessage,
+                executionPath = stepRun.ExecutionPath,
+                sequenceNumber = stepRun.SequenceNumber,
+                transactionOutcome = stepRun.TransactionOutcome,
+                errorType = stepRun.ErrorType
             }, cancellationToken: ct));
     }
 
@@ -1063,8 +1119,16 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
     public async Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, int page, int pageSize, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        const string sql = """
-            SELECT Id, PipelineRunId, StepId, Status, StartedOn, CompletedOn, InputContext, OutputContext, LogMessage
+        await DetectStepHistorySchemaAsync(connection, ct);
+        var enhancedColumns = _hasEnhancedStepHistoryColumns == true
+            ? "PipelineRunAttemptId, ExecutionPath, SequenceNumber, TransactionOutcome, ErrorType"
+            : "CAST(NULL AS BIGINT) AS PipelineRunAttemptId, CAST(NULL AS NVARCHAR(1000)) AS ExecutionPath, 0 AS SequenceNumber, 'Legacy' AS TransactionOutcome, CAST(NULL AS NVARCHAR(300)) AS ErrorType";
+        var snapshotColumns = _hasStepSnapshotColumns == true
+            ? "StepPublicIdSnapshot, StepRefIdSnapshot, StepLabelSnapshot, StepTypeSnapshot, StepSubtypeSnapshot"
+            : "CAST(NULL AS UNIQUEIDENTIFIER) AS StepPublicIdSnapshot, CAST(NULL AS NVARCHAR(100)) AS StepRefIdSnapshot, CAST(NULL AS NVARCHAR(500)) AS StepLabelSnapshot, CAST(NULL AS NVARCHAR(100)) AS StepTypeSnapshot, CAST(NULL AS NVARCHAR(100)) AS StepSubtypeSnapshot";
+        var sql = $"""
+            SELECT Id, PipelineRunId, StepId, Status, StartedOn, CompletedOn, InputContext, OutputContext, LogMessage,
+                   {enhancedColumns}, {snapshotColumns}
             FROM audit.PipelineStepRun
             WHERE PipelineRunId = @runId
             ORDER BY StartedOn ASC, Id ASC
@@ -1074,6 +1138,24 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         var results = await connection.QueryAsync<PipelineStepRun>(
             new CommandDefinition(sql, new { runId, offset, pageSize }, cancellationToken: ct));
         return results.AsList();
+    }
+
+    private async Task DetectStepHistorySchemaAsync(IDbConnection connection, CancellationToken ct)
+    {
+        if (_hasEnhancedStepHistoryColumns.HasValue && _hasStepSnapshotColumns.HasValue) return;
+
+        const string sql = """
+            SELECT
+                CAST(CASE WHEN COL_LENGTH('audit.PipelineStepRun', 'ExecutionPath') IS NOT NULL
+                                AND COL_LENGTH('audit.PipelineStepRun', 'TransactionOutcome') IS NOT NULL
+                          THEN 1 ELSE 0 END AS bit) AS HasEnhanced,
+                CAST(CASE WHEN COL_LENGTH('audit.PipelineStepRun', 'StepPublicIdSnapshot') IS NOT NULL
+                          THEN 1 ELSE 0 END AS bit) AS HasSnapshots
+            """;
+        var schema = await connection.QuerySingleAsync<(bool HasEnhanced, bool HasSnapshots)>(
+            new CommandDefinition(sql, cancellationToken: ct));
+        _hasEnhancedStepHistoryColumns = schema.HasEnhanced;
+        _hasStepSnapshotColumns = schema.HasSnapshots;
     }
 
     public async Task<int> CountStepRunsByRunIdAsync(long runId, CancellationToken ct = default)

@@ -507,6 +507,8 @@ public class PipelineEngine : IPipelineEngine
                 contextDict["_CreatedBy"] = pipelineMeta.CreatedBy;
                 contextDict["_MessageId"] = messageGuid ?? Guid.Empty;
                 contextDict["_ResumeAfterPause"] = resumingPause;
+                contextDict["_RunAttemptId"] = attemptId;
+                contextDict["_StepSequence"] = 0;
                 var stepsDict = new Dictionary<string, object>();
                 contextDict["steps"] = stepsDict;
 
@@ -629,7 +631,7 @@ public class PipelineEngine : IPipelineEngine
             finally
             {
                 var executionTimeMs = sw.ElapsedMilliseconds;
-                _logger.LogInformation("Pipeline transaction finished. Business execution completed in {ExecutionTimeMs} ms. Success={Success}", executionTimeMs, txSuccess);
+                _logger.LogInformation("Pipeline business execution finished in {ExecutionTimeMs} ms. Success={Success}", executionTimeMs, txSuccess);
 
                 sw.Restart();
                 foreach (var snap in snapshots)
@@ -647,28 +649,6 @@ public class PipelineEngine : IPipelineEngine
                             snap.StartedOn,
                             snap.CompletedOn
                         );
-
-                        if (!txSuccess)
-                        {
-                            snap.RolledBack = true;
-                            logMsg = $"[Rolled Back] {logMsg}";
-
-                            try
-                            {
-                                var outDict = JsonSerializer.Deserialize<Dictionary<string, object>>(formattedOutput);
-                                if (outDict != null)
-                                {
-                                    if (outDict.TryGetValue("TechnicalDetails", out var tdObj) && tdObj is JsonElement tdEl)
-                                    {
-                                        var tdDict = JsonSerializer.Deserialize<Dictionary<string, object>>(tdEl.GetRawText()) ?? new Dictionary<string, object>();
-                                        tdDict["TransactionOutcome"] = "Rolled Back";
-                                        outDict["TechnicalDetails"] = tdDict;
-                                        formattedOutput = JsonSerializer.Serialize(outDict);
-                                    }
-                                }
-                            }
-                            catch {}
-                        }
 
                         snap.StepRun.InputContext = formattedInput;
                         snap.StepRun.OutputContext = formattedOutput;
@@ -936,7 +916,16 @@ public class PipelineEngine : IPipelineEngine
                 StepId = step.Id,
                 Status = "Running",
                 StartedOn = DateTime.UtcNow,
-                InputContext = SerializeAndSanitizeAudit(contextDict)
+                InputContext = SerializeAndSanitizeAudit(contextDict),
+                PipelineRunAttemptId = contextDict.TryGetValue("_RunAttemptId", out var attemptObj) && attemptObj is long runAttemptId ? runAttemptId : null,
+                ExecutionPath = currentPath,
+                SequenceNumber = NextStepSequence(contextDict),
+                TransactionOutcome = "Pending",
+                StepPublicIdSnapshot = step.PublicId,
+                StepRefIdSnapshot = step.RefId,
+                StepLabelSnapshot = !string.IsNullOrWhiteSpace(step.Label) ? step.Label : step.RefId,
+                StepTypeSnapshot = step.Type,
+                StepSubtypeSnapshot = step.Subtype
             };
 
             long stepRunId = 0;
@@ -954,17 +943,29 @@ public class PipelineEngine : IPipelineEngine
                 var contextJson = JsonSerializer.Serialize(contextDict);
                 var output = await ExecuteStepAsync(step, contextJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, currentPath, ct);
 
-                if (replayable && messageId != Guid.Empty && output != null &&
-                    await _idempotencyRepo.GetByExecutionKeyAsync(messageId, step.PublicId, pathHash, null, ct) == null)
+                // The action itself may already have committed its own transaction. Audit/idempotency
+                // bookkeeping after that boundary must never turn a successful write into a false
+                // failed step (or invite a duplicate retry). Persist best-effort replay metadata and
+                // retain the real business outcome if the metadata store is temporarily unavailable.
+                try
                 {
-                    await _idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
+                    if (replayable && messageId != Guid.Empty && output != null &&
+                        await _idempotencyRepo.GetByExecutionKeyAsync(messageId, step.PublicId, pathHash, null, ct) == null)
                     {
-                        MessageId = messageId,
-                        StepPublicId = step.PublicId,
-                        ExecutionPathHash = pathHash,
-                        ExecutionPath = currentPath,
-                        OutputJson = output
-                    }, null, ct);
+                        await _idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
+                        {
+                            MessageId = messageId,
+                            StepPublicId = step.PublicId,
+                            ExecutionPathHash = pathHash,
+                            ExecutionPath = currentPath,
+                            OutputJson = output
+                        }, null, ct);
+                    }
+                }
+                catch (Exception bookkeepingEx)
+                {
+                    _logger.LogWarning(bookkeepingEx,
+                        "Step {StepId} completed but replay bookkeeping failed. Preserving successful execution outcome.", step.Id);
                 }
 
                 if (step.Type == "trigger")
@@ -981,6 +982,7 @@ public class PipelineEngine : IPipelineEngine
                 }
 
                 stepRun.CompletedOn = DateTime.UtcNow;
+                stepRun.TransactionOutcome = IsDurableMutationStep(step) ? "Committed" : "NotApplicable";
 
                 snapshots.Add(new RawStepAuditSnapshot
                 {
@@ -1003,7 +1005,12 @@ public class PipelineEngine : IPipelineEngine
                         Status = stepRun.Status,
                         StartedOn = stepRun.StartedOn,
                         CompletedOn = stepRun.CompletedOn,
-                        LogMessage = $"Step executed. Status: {stepRun.Status}."
+                        InputContext = stepRun.InputContext,
+                        OutputContext = SerializeAndSanitizeAuditString(output),
+                        LogMessage = $"Step executed. Status: {stepRun.Status}.",
+                        ExecutionPath = stepRun.ExecutionPath,
+                        SequenceNumber = stepRun.SequenceNumber,
+                        TransactionOutcome = stepRun.TransactionOutcome
                     }, ct);
                     suppressScope.Complete();
                 }
@@ -1028,6 +1035,7 @@ public class PipelineEngine : IPipelineEngine
             {
                 stepRun.Status = "Waiting";
                 stepRun.CompletedOn = DateTime.UtcNow;
+                stepRun.TransactionOutcome = "NotApplicable";
 
                 var output = JsonSerializer.Serialize(new { Status = "Waiting", ResumeDate = waitEx.ResumeDate });
                 snapshots.Add(new RawStepAuditSnapshot
@@ -1051,7 +1059,12 @@ public class PipelineEngine : IPipelineEngine
                         Status = stepRun.Status,
                         StartedOn = stepRun.StartedOn,
                         CompletedOn = stepRun.CompletedOn,
-                        LogMessage = $"Step paused until {waitEx.ResumeDate:O}"
+                        InputContext = stepRun.InputContext,
+                        OutputContext = SerializeAndSanitizeAuditString(output),
+                        LogMessage = $"Step paused until {waitEx.ResumeDate:O}",
+                        ExecutionPath = stepRun.ExecutionPath,
+                        SequenceNumber = stepRun.SequenceNumber,
+                        TransactionOutcome = stepRun.TransactionOutcome
                     }, ct);
                     suppressScope.Complete();
                 }
@@ -1061,8 +1074,10 @@ public class PipelineEngine : IPipelineEngine
             {
                 stepRun.Status = "Stopped";
                 stepRun.CompletedOn = DateTime.UtcNow;
+                stepRun.TransactionOutcome = "NotApplicable";
 
-                var stopOutput = JsonSerializer.Serialize(new { Status = "Stopped", Reason = stopEx.Message });
+                var sanitizedStopReason = SanitizeErrorMessage(stopEx.Message);
+                var stopOutput = JsonSerializer.Serialize(new { Status = "Stopped", Reason = sanitizedStopReason });
 
                 snapshots.Add(new RawStepAuditSnapshot
                 {
@@ -1085,7 +1100,12 @@ public class PipelineEngine : IPipelineEngine
                         Status = "Stopped",
                         StartedOn = stepRun.StartedOn,
                         CompletedOn = stepRun.CompletedOn,
-                        LogMessage = $"Step stopped: {stopEx.Message}"
+                        InputContext = stepRun.InputContext,
+                        OutputContext = SerializeAndSanitizeAuditString(stopOutput),
+                        LogMessage = $"Step stopped: {sanitizedStopReason}",
+                        ExecutionPath = stepRun.ExecutionPath,
+                        SequenceNumber = stepRun.SequenceNumber,
+                        TransactionOutcome = stepRun.TransactionOutcome
                     }, ct);
                     suppressScope.Complete();
                 }
@@ -1097,15 +1117,18 @@ public class PipelineEngine : IPipelineEngine
                     step.Id, step.Subtype, SanitizeErrorMessage(stepEx.Message));
                 stepRun.Status = "Failed";
                 stepRun.CompletedOn = DateTime.UtcNow;
+                stepRun.TransactionOutcome = "NotCommitted";
+                stepRun.ErrorType = stepEx.GetType().Name;
 
+                var sanitizedError = SanitizeErrorMessage(stepEx.Message);
                 var errorInfo = new Dictionary<string, object?>();
-                errorInfo["ErrorMessage"] = stepEx.Message;
+                errorInfo["ErrorMessage"] = sanitizedError;
                 errorInfo["ExceptionType"] = stepEx.GetType().Name;
                 errorInfo["StepId"] = step.Id;
                 errorInfo["RefId"] = step.RefId;
                 if (stepEx.InnerException != null)
                 {
-                    errorInfo["InnerError"] = stepEx.InnerException.Message;
+                    errorInfo["InnerError"] = SanitizeErrorMessage(stepEx.InnerException.Message);
                 }
                 var errorOutput = JsonSerializer.Serialize(errorInfo);
 
@@ -1130,7 +1153,13 @@ public class PipelineEngine : IPipelineEngine
                         Status = "Failed",
                         StartedOn = stepRun.StartedOn,
                         CompletedOn = stepRun.CompletedOn,
-                        LogMessage = $"Step failed: {stepEx.Message}"
+                        InputContext = stepRun.InputContext,
+                        OutputContext = SerializeAndSanitizeAuditString(errorOutput),
+                        LogMessage = $"Step failed: {sanitizedError}",
+                        ExecutionPath = stepRun.ExecutionPath,
+                        SequenceNumber = stepRun.SequenceNumber,
+                        TransactionOutcome = stepRun.TransactionOutcome,
+                        ErrorType = stepRun.ErrorType
                     }, ct);
                     suppressScope.Complete();
                 }
@@ -1138,6 +1167,19 @@ public class PipelineEngine : IPipelineEngine
             }
         }
     }
+
+    private static int NextStepSequence(Dictionary<string, object> contextDict)
+    {
+        var next = contextDict.TryGetValue("_StepSequence", out var value) && value is int current
+            ? current + 1
+            : 1;
+        contextDict["_StepSequence"] = next;
+        return next;
+    }
+
+    private static bool IsDurableMutationStep(PipelineStep step) =>
+        step.Type == "action" && step.Subtype is "create-record" or "update-record" or "delete-record"
+            or "commit-upsert" or "copy-records" or "upload-file" or "send-email" or "make-request";
 
     private async Task<string> ExecuteStepAsync(
         PipelineStep step,
@@ -5833,7 +5875,6 @@ public class PipelineEngine : IPipelineEngine
         public string Status { get; set; } = null!;
         public DateTime StartedOn { get; set; }
         public DateTime CompletedOn { get; set; }
-        public bool RolledBack { get; set; }
     }
 }
 

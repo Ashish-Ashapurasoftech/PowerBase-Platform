@@ -37,17 +37,23 @@ public class GetPipelineRunStepsQueryHandler
             var stepExists = stepsMap.TryGetValue(sr.StepId, out var step);
             return new PipelineStepRunDto(
                 sr.Id,
-                stepExists ? step!.PublicId : Guid.Empty,
-                stepExists ? step!.RefId : string.Empty,
-                stepExists ? (!string.IsNullOrWhiteSpace(step!.Label) ? step!.Label : step!.RefId) : string.Empty,
-                stepExists ? step!.Type : string.Empty,
-                stepExists ? (step!.Subtype ?? string.Empty) : string.Empty,
+                sr.StepPublicIdSnapshot.HasValue && sr.StepPublicIdSnapshot.Value != Guid.Empty ? sr.StepPublicIdSnapshot.Value : stepExists ? step!.PublicId : Guid.Empty,
+                !string.IsNullOrWhiteSpace(sr.StepRefIdSnapshot) ? sr.StepRefIdSnapshot : stepExists ? step!.RefId : string.Empty,
+                !string.IsNullOrWhiteSpace(sr.StepLabelSnapshot) ? sr.StepLabelSnapshot : stepExists ? (!string.IsNullOrWhiteSpace(step!.Label) ? step!.Label : step!.RefId) : string.Empty,
+                !string.IsNullOrWhiteSpace(sr.StepTypeSnapshot) ? sr.StepTypeSnapshot : stepExists ? step!.Type : string.Empty,
+                !string.IsNullOrWhiteSpace(sr.StepSubtypeSnapshot) ? sr.StepSubtypeSnapshot : stepExists ? (step!.Subtype ?? string.Empty) : string.Empty,
                 sr.Status,
                 sr.StartedOn,
                 sr.CompletedOn,
                 sr.InputContext,
                 sr.OutputContext,
-                sr.LogMessage
+                sr.LogMessage,
+                sr.PipelineRunAttemptId,
+                sr.ExecutionPath,
+                sr.SequenceNumber,
+                sr.TransactionOutcome,
+                sr.ErrorType,
+                sr.CompletedOn.HasValue ? Math.Max(0L, (long)(sr.CompletedOn.Value - sr.StartedOn).TotalMilliseconds) : null
             );
         }).ToList();
 
