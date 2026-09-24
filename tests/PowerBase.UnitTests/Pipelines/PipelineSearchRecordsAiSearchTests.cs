@@ -85,12 +85,12 @@ public class PipelineSearchRecordsAiSearchTests
         }
     };
 
-    private async Task<string> RunAsync(IServiceProvider serviceProvider)
+    private async Task<string> RunAsync(IServiceProvider serviceProvider, object? config = null)
     {
         _fieldRepo.ListByTableAsync(_table.Id, Arg.Any<CancellationToken>()).Returns(Fields());
         var engine = BuildEngine(serviceProvider);
         var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        var step = SearchStep(Config());
+        var step = SearchStep(config ?? Config());
         return await (Task<string>)method.Invoke(engine, new object[]
         {
             step, "{}", new Dictionary<string, object>(), new List<PipelineStep> { step }, new Dictionary<string, object>(),
@@ -231,5 +231,93 @@ public class PipelineSearchRecordsAiSearchTests
         await RunAsync(Provider());
 
         await _azureSearchService.DidNotReceive().SearchRecordsByFilterAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task LegacyEditorGroupSavedAsOr_ExecutesVisibleRulesAsAnd()
+    {
+        _azureSearchService.IsGridSearchEnabled.Returns(false);
+        FilterGroup? capturedFilter = null;
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>>(), f => capturedFilter = f);
+        var legacyConfig = new
+        {
+            TableId = _table.PublicId.ToString(),
+            FilterGroups = new List<object>
+            {
+                new
+                {
+                    LogicalOp = "OR",
+                    Rules = new List<object>
+                    {
+                        new { Field = "fid_7", Operator = "is", Value = "a" },
+                        new { Field = "fid_7", Operator = "is", Value = "b" }
+                    }
+                }
+            }
+        };
+
+        await RunAsync(Provider(), legacyConfig);
+
+        Assert.NotNull(capturedFilter);
+        Assert.Equal("and", capturedFilter!.Logic);
+        Assert.Equal(2, capturedFilter.Nodes.Count);
+    }
+
+    [Fact]
+    public async Task NestedEditorGroups_ExecuteAsAndRulesInsideOrAlternatives()
+    {
+        _azureSearchService.IsGridSearchEnabled.Returns(false);
+        FilterGroup? capturedFilter = null;
+        StubSearchServiceAsync(new List<IReadOnlyDictionary<string, object?>>(), f => capturedFilter = f);
+        var config = new
+        {
+            TableId = _table.PublicId.ToString(),
+            FilterGroups = new List<object>
+            {
+                new
+                {
+                    LogicalOp = "OR", // legacy editor value; visible root rules are AND
+                    Rules = new List<object>
+                    {
+                        new { Type = "rule", Field = "fid_7", Operator = "is", Value = "root" },
+                        new
+                        {
+                            Type = "nested",
+                            Groups = new List<object>
+                            {
+                                new
+                                {
+                                    Rules = new List<object>
+                                    {
+                                        new { Type = "rule", Field = "fid_7", Operator = "is", Value = "left-1" },
+                                        new { Type = "rule", Field = "fid_7", Operator = "is", Value = "left-2" }
+                                    }
+                                },
+                                new
+                                {
+                                    Rules = new List<object>
+                                    {
+                                        new { Type = "rule", Field = "fid_7", Operator = "is", Value = "right" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        await RunAsync(Provider(), config);
+
+        Assert.NotNull(capturedFilter);
+        Assert.Equal("and", capturedFilter!.Logic);
+        Assert.Equal(2, capturedFilter.Nodes.Count);
+        var nestedOr = capturedFilter.Nodes[1].Group;
+        Assert.NotNull(nestedOr);
+        Assert.Equal("or", nestedOr!.Logic);
+        Assert.Equal(2, nestedOr.Nodes.Count);
+        Assert.All(nestedOr.Nodes, node => Assert.Equal("and", node.Group!.Logic));
+        Assert.Equal(2, nestedOr.Nodes[0].Group!.Nodes.Count);
+        Assert.Single(nestedOr.Nodes[1].Group!.Nodes);
     }
 }

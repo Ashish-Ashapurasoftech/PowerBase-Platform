@@ -1614,7 +1614,10 @@ public class PipelineEngine : IPipelineEngine
                 var outerGroup = new FilterGroup { Logic = "or", Nodes = new List<FilterNode>() };
                 foreach (var g in config.FilterGroups)
                 {
-                    var mapped = MapTriggerFilterGroupToDbFilterGroup(g, fields, payloadJson, executionPath, allSteps);
+                    // Each editor box contains AND-connected rules; the boxes themselves
+                    // are OR-connected by outerGroup. Legacy UI versions persisted OR on
+                    // the box itself, so enforce the UI contract here for saved pipelines.
+                    var mapped = MapTriggerFilterGroupToDbFilterGroup(g, fields, payloadJson, executionPath, allSteps, "and");
                     if (mapped != null)
                     {
                         outerGroup.Nodes.Add(new FilterNode { Group = mapped });
@@ -5259,13 +5262,14 @@ public class PipelineEngine : IPipelineEngine
         IReadOnlyList<AppField> fields,
         string payloadJson,
         string? executionPath = null,
-        List<PipelineStep>? allSteps = null)
+        List<PipelineStep>? allSteps = null,
+        string? logicOverride = null)
     {
         if (group?.Rules == null || !group.Rules.Any()) return null;
 
         var dbGroup = new FilterGroup
         {
-            Logic = group.LogicalOp?.ToLowerInvariant() == "or" ? "or" : "and",
+            Logic = logicOverride ?? (group.LogicalOp?.ToLowerInvariant() == "or" ? "or" : "and"),
             Nodes = new List<FilterNode>()
         };
 
@@ -5277,13 +5281,29 @@ public class PipelineEngine : IPipelineEngine
             {
                 if (rule.Groups != null)
                 {
+                    // The editor renders the rules in each nested box as AND and
+                    // renders separate nested boxes as OR alternatives.
+                    var nestedAlternatives = new FilterGroup
+                    {
+                        Logic = "or",
+                        Nodes = new List<FilterNode>()
+                    };
                     foreach (var subGroup in rule.Groups)
                     {
-                        var mappedSub = MapTriggerFilterGroupToDbFilterGroup(subGroup, fields, payloadJson, executionPath, allSteps);
+                        var mappedSub = MapTriggerFilterGroupToDbFilterGroup(subGroup, fields, payloadJson, executionPath, allSteps, "and");
                         if (mappedSub != null)
                         {
-                            dbGroup.Nodes.Add(new FilterNode { Group = mappedSub });
+                            nestedAlternatives.Nodes.Add(new FilterNode { Group = mappedSub });
                         }
+                    }
+                    if (nestedAlternatives.Nodes.Any())
+                    {
+                        dbGroup.Nodes.Add(new FilterNode
+                        {
+                            Group = nestedAlternatives.Nodes.Count == 1
+                                ? nestedAlternatives.Nodes[0].Group
+                                : nestedAlternatives
+                        });
                     }
                 }
             }
