@@ -17,15 +17,22 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Transactions;
+using System.Globalization;
 using Microsoft.Extensions.Options;
 using PowerBase.Application.Common.Configurations;
+using PowerBase.Application.Formulas;
 using PowerBase.Application.Reports;
+using PowerBase.Application.Reports.Queries.RunReport.OData;
 using Scriban;
 using Scriban.Runtime;
 
 namespace PowerBase.Application.Pipelines;
 public class PipelineEngine : IPipelineEngine
 {
+    /// <summary>Shared empty Computed dict for FormulaFilterSorter pairs built from rows that
+    /// have no compute-on-read (formula) fields — only encrypted-field in-memory filtering.</summary>
+    private static readonly Dictionary<long, object?> EmptyComputedValues = new();
+
     internal static Dictionary<string, object?> BuildBulkEventRecord(PipelineBulkEventRecord record)
     {
         var valuesJson = string.Equals(record.EventType, "Deleted", StringComparison.OrdinalIgnoreCase)
@@ -62,6 +69,7 @@ public class PipelineEngine : IPipelineEngine
     private readonly ITenantRepository _tenantRepo;
     private readonly IPipelineStepIdempotencyRepository _idempotencyRepo;
     private readonly IPipelineRecordSearchService _pipelineRecordSearchService;
+    private readonly IAzureSearchService? _azureSearchService;
 
     public PipelineEngine(
         IPipelineRepository pipelineRepo,
@@ -106,6 +114,7 @@ public class PipelineEngine : IPipelineEngine
         _tenantRepo = tenantRepo;
         _idempotencyRepo = idempotencyRepo;
         _pipelineRecordSearchService = (IPipelineRecordSearchService)serviceProvider.GetService(typeof(IPipelineRecordSearchService))!;
+        _azureSearchService = (IAzureSearchService?)serviceProvider.GetService(typeof(IAzureSearchService));
     }
     public async Task ExecuteAsync(PipelineExecutionTask task, CancellationToken ct)
     {
@@ -1343,7 +1352,14 @@ public class PipelineEngine : IPipelineEngine
         catch (UnauthorizedAccessException ex) { throw new PipelineNonRetryableException(ex.Message); }
         if (!context.TryGetValue("request_metadata", out var metadata) || metadata is not Dictionary<string, object> requests)
             context["request_metadata"] = requests = new Dictionary<string, object>();
-        requests[step.RefId] = new { status_code = result.StatusCode, status_message = result.StatusMessage, response_headers = result.ResponseHeaders };
+        requests[step.RefId] = new { 
+            status_code = result.StatusCode, 
+            status_message = result.StatusMessage, 
+            response_headers = result.ResponseHeaders,
+            request_url = result.RequestUrl,
+            request_headers = result.RequestHeaders,
+            body = new { text = result.OutputJson }
+        };
         return result.OutputJson;
     }
 
@@ -1648,10 +1664,115 @@ public class PipelineEngine : IPipelineEngine
                 MaxResults = limit
             });
 
-            var records = recordSearchService != null
-                ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
-                : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit ?? 100000, filterTree: filterTree, ct: ct);
-            var resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+            // SQL Server accepts at most ~2100 parameters per query, so any Id-list lookup this
+            // step does (AI Search match resolution, chunked candidate fetches) must be batched
+            // in chunks this size — never trimmed to it. A trimmed cap would silently drop
+            // records past the cutoff; chunking fetches every one of them, just in more queries.
+            const int sqlIdChunkSize = 2000;
+            const int pageSize = 5000;
+
+            // Fetches every row matching `tree` — never a fixed cap. Prefers recordSearchService
+            // (it may target a different tenant's connection for cross-tenant pipeline steps) and
+            // asks it for every match in one unbounded query (maxResults: null skips its OFFSET/
+            // FETCH clause entirely — this is its native "no limit" mode, not a page-size choice).
+            // Falls back to recordRepo (always the current tenant) only when it's unavailable —
+            // IRecordRepository.ListAsync always needs a bounded pageSize, so that path paginates.
+            async Task<List<IReadOnlyDictionary<string, object?>>> FetchAllAsync(FilterGroup? tree)
+            {
+                if (recordSearchService != null)
+                {
+                    var rows = await recordSearchService.SearchAsync(table, fields, maxResults: null, filterTree: tree, ct: ct);
+                    return rows?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+                }
+                var all = new List<IReadOnlyDictionary<string, object?>>();
+                for (var page = 1; ; page++)
+                {
+                    var pageRows = await recordRepo.ListAsync(table, fields, page, pageSize, filterTree: tree, ct: ct);
+                    if (pageRows.Count == 0) break;
+                    all.AddRange(pageRows);
+                    if (pageRows.Count < pageSize) break;
+                }
+                return all;
+            }
+
+            // Performance: when Azure AI Search grid-search is enabled (same
+            // UseAzureAiForGridSearch flag Reports uses), route filtering through the search
+            // index instead of a SQL scan. The index stores decrypted plaintext for encrypted
+            // fields (RecordRepository.GetSearchableFieldsAsync decrypts before indexing), so
+            // this also naturally handles encrypted-field conditions without the in-memory
+            // split below — mirrors RunReportQueryHandler's OData/AI Search routing. Falls back
+            // to the SQL path (which has its own encrypted-field handling) on any failure.
+            List<IReadOnlyDictionary<string, object?>>? aiSearchRows = null;
+            if (_azureSearchService != null && _azureSearchService.IsGridSearchEnabled && filterTree != null
+                && fields.Any(f => f.IsSearchable || f.IsFilterable) && await _azureSearchService.IsHealthyAsync(ct))
+            {
+                var odata = ODataFilterBuilder.Build(filterTree, fields);
+                if (!string.IsNullOrWhiteSpace(odata))
+                {
+                    try
+                    {
+                        var aiMatches = await _azureSearchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
+                        var matchedIds = new List<long>();
+                        foreach (var publicIdChunk in aiMatches.Chunk(sqlIdChunkSize))
+                            matchedIds.AddRange(await recordRepo.GetIdsByPublicIdsAsync(table, publicIdChunk, ct));
+
+                        var rows = new List<IReadOnlyDictionary<string, object?>>();
+                        foreach (var idChunk in matchedIds.Chunk(sqlIdChunkSize))
+                        {
+                            var chunkFilter = new FilterGroup { Logic = "and", Nodes = new List<FilterNode> { new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "in", Value = JsonSerializer.Serialize(idChunk) } } } };
+                            rows.AddRange(await FetchAllAsync(chunkFilter));
+                            if (limit.HasValue && rows.Count >= limit.Value) break; // a user-configured cap, not a silent one
+                        }
+                        aiSearchRows = rows;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "[Pipeline SearchRecords] Azure AI Search unavailable for table {TableId}. Falling back to SQL.", table.Id);
+                    }
+                }
+            }
+
+            List<IReadOnlyDictionary<string, object?>> resultsList;
+            if (aiSearchRows != null)
+            {
+                resultsList = (limit.HasValue ? aiSearchRows.Take(limit.Value) : aiSearchRows).ToList();
+            }
+            else
+            {
+                // Encrypted fields store ciphertext in their physical column, so a SQL LIKE/=
+                // condition against them can never match. Split those conditions out of the SQL
+                // tree and evaluate them in memory against decrypted candidate rows instead —
+                // mirrors RunReportQueryHandler's handling of formula (compute-on-read) fields.
+                var encryptedFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
+                    .Select(f => (long)f.Fid!.Value).ToHashSet();
+                if (encryptedFilterFids.Count > 0 && FormulaFilterSorter.TreeContainsFormulaField(filterTree, encryptedFilterFids))
+                {
+                    var (physicalFilterTree, encryptedFilterTree) = FormulaFilterSorter.SplitFilterTree(filterTree, encryptedFilterFids);
+                    // Fetch EVERY physical-filter-matching candidate via pagination — no fixed
+                    // cap — so nothing is silently dropped before the encrypted conditions are
+                    // evaluated in memory below, no matter how many rows match physically.
+                    var candidates = await FetchAllAsync(physicalFilterTree);
+                    var pairs = candidates
+                        .Select(r => (Row: r, Computed: (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
+                        .ToList();
+                    if (encryptedFilterTree != null)
+                        pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, encryptedFilterTree, fields);
+                    IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p => p.Row);
+                    resultsList = (limit.HasValue ? filtered.Take(limit.Value) : filtered).ToList();
+                }
+                else if (limit.HasValue)
+                {
+                    var records = recordSearchService != null
+                        ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
+                        : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit.Value, filterTree: filterTree, ct: ct);
+                    resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+                }
+                else
+                {
+                    // No user-configured MaxResults — fetch every matching row via pagination.
+                    resultsList = await FetchAllAsync(filterTree);
+                }
+            }
             _logger.LogInformation("Search Records step {StepId} matched {Count} records.", step.Id, resultsList.Count);
 
             var normalizedResults = new List<Dictionary<string, object?>>();
@@ -1718,7 +1839,7 @@ public class PipelineEngine : IPipelineEngine
                         // Quickbase single-record steps omit blank mappings instead of
                         // writing NULL (which would clear an existing value on update).
                         if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
-                        var parsedVal = ParseRecordMappingValue(resolvedValStr, field, mapping.Value);
+                        var parsedVal = ParseRecordMappingValueWithFormat(resolvedValStr, field, mapping.Value, mapping.FormatString);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -1752,14 +1873,27 @@ public class PipelineEngine : IPipelineEngine
                 _logger.LogInformation("Create Record step {StepId} succeeded. Created record: {RecordPublicId}.", step.Id, recordPublicId);
                 var recordId = await recordRepo.GetActiveRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
                 values[3] = recordId;
+
+                // Date Created / Record Owner are system-managed — never present in values,
+                // since nothing submits them — so a pipeline trigger firing off this Create
+                // Record step (for a *different* pipeline listening on this table) could never
+                // resolve {{steps.<trigger>.fid_N}} for them. Same fix as
+                // CreateRecordCommandHandler's analogous backfill for the non-pipeline create path.
+                var createdOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
+                if (createdOnField != null) values[createdOnField.Fid!.Value] = DateTime.UtcNow;
+                var createdByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
+                if (createdByField != null) values[createdByField.Fid!.Value] = _queryContext.UserId;
+
                 await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, values, "record-added", ct);
 
-                var output = new Dictionary<string, object?>
+                IReadOnlyDictionary<string, object?>? persistedRecord = null;
+                if (uow.Transaction is not null)
                 {
-                    ["CreatedRecordPublicId"] = recordPublicId.ToString()
-                };
-                foreach (var value in values)
-                    output[$"fid_{value.Key}"] = value.Value;
+                    var persistedRows = await recordRepo.GetBulkUpsertRowsByIdsAsync(
+                        table, fields, [recordId], uow.Transaction, ct);
+                    persistedRows?.TryGetValue(recordId, out persistedRecord);
+                }
+                var output = BuildCreatedRecordOutput(recordPublicId, recordId, fields, values, persistedRecord);
                 var outputJson = JsonSerializer.Serialize(output);
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
@@ -1817,7 +1951,7 @@ public class PipelineEngine : IPipelineEngine
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
                         if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
-                        var parsedVal = ParseRecordMappingValue(resolvedValStr, field, mapping.Value);
+                        var parsedVal = ParseRecordMappingValueWithFormat(resolvedValStr, field, mapping.Value, mapping.FormatString);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -2264,9 +2398,10 @@ public class PipelineEngine : IPipelineEngine
                 return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = count, FailedIterationCount = failedCount });
             }
         }
-        else if (subtype == "send-email" || subtype == "send-email-outlook")
+        else if (subtype == "send-email" || subtype == "send-email-outlook" || subtype == "send an email")
         {
             var config = JsonSerializer.Deserialize<SendEmailStepConfig>(step.ConfigJson ?? "{}", new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            config?.Normalize();
             if (config == null || string.IsNullOrWhiteSpace(config.ToAddresses))
                 throw new InvalidOperationException("Send email step configuration is invalid or missing ToAddresses.");
 
@@ -2291,6 +2426,8 @@ public class PipelineEngine : IPipelineEngine
                 }
             }
 
+            var urlAttachments = config.ResolveUrlAttachments(value => EvaluateTokens(value, payloadJson, executionPath, allSteps));
+
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 To = resolvedTo,
                 Subject = resolvedSubject,
@@ -2298,10 +2435,17 @@ public class PipelineEngine : IPipelineEngine
                 Bcc = resolvedBcc,
                 From = resolvedFrom,
                 Body = resolvedBody,
-                Attachments = resolvedAttachments
+                Attachments = resolvedAttachments,
+                UrlAttachmentCount = urlAttachments.Count
             });
 
-            await _emailService.SendEmailAsync(resolvedTo, resolvedSubject, resolvedBody, resolvedCc, resolvedBcc, resolvedAttachments, resolvedFrom, ct);
+            await _emailService.SendPipelineEmailAsync(new PipelineEmailMessage(
+                resolvedTo, resolvedSubject, resolvedBody, resolvedCc, resolvedBcc, resolvedFrom,
+                EvaluateTokens(config.SharedMailbox, payloadJson, executionPath, allSteps),
+                EvaluateTokens(config.ContentType ?? "HTML", payloadJson, executionPath, allSteps),
+                EvaluateTokens(config.Importance ?? "Normal", payloadJson, executionPath, allSteps),
+                EvaluateTokens(config.SaveToSentItems ?? "Yes", payloadJson, executionPath, allSteps),
+                resolvedAttachments, urlAttachments, RequireContent: subtype == "send-email-outlook"), ct);
 
             return JsonSerializer.Serialize(new { SentTo = resolvedTo, Subject = resolvedSubject });
         }
@@ -2947,6 +3091,16 @@ public class PipelineEngine : IPipelineEngine
                                 }
                             }
 
+                            // Date Modified / Last Modified By are system-managed and were just
+                            // stripped from row above (non-writable), so the loop's fallback branch
+                            // left them at their stale pre-update oldVal — even though ApplyAsync's
+                            // own UPDATE just set them for real. Same fix as RecordWriteService's
+                            // analogous backfill for the non-bulk update path.
+                            var bulkModifiedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedOn" && f.Fid.HasValue);
+                            if (bulkModifiedOnField != null) { afterValues[bulkModifiedOnField.Id] = DateTime.UtcNow; afterValues[bulkModifiedOnField.Fid!.Value] = DateTime.UtcNow; }
+                            var bulkModifiedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedBy" && f.Fid.HasValue);
+                            if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Id] = _queryContext.UserId; afterValues[bulkModifiedByField.Fid!.Value] = _queryContext.UserId; }
+
                             // UPDATE in DB on uow.Transaction via recordWriteService (with sanitized row)
                             await recordWriteService.ApplyAsync(
                                 table,
@@ -3031,6 +3185,11 @@ public class PipelineEngine : IPipelineEngine
                     var publicIds = addedRecords.Select(r => r.PublicId).ToList();
                     var publicIdToIdMap = await recordRepo.GetActiveRecordIdsByPublicIdsAsync(table, publicIds, uow.Transaction, ct);
                     var recordIdField = fields.FirstOrDefault(f => f.Fid == 3);
+                    // Date Created / Record Owner are system-managed and were stripped from row
+                    // earlier (non-writable), so cv (built purely from row) never carries them —
+                    // same fix as CreateRecordCommandHandler's analogous backfill.
+                    var bulkCreatedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
+                    var bulkCreatedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
 
                     foreach (var (pubId, r, cv) in addedRecords)
                     {
@@ -3044,6 +3203,8 @@ public class PipelineEngine : IPipelineEngine
                             cv[3] = id;
                             createdRecordIds.Add(id);
                         }
+                        if (bulkCreatedOnField != null) { cv[bulkCreatedOnField.Id] = DateTime.UtcNow; cv[bulkCreatedOnField.Fid!.Value] = DateTime.UtcNow; }
+                        if (bulkCreatedByField != null) { cv[bulkCreatedByField.Id] = _queryContext.UserId; cv[bulkCreatedByField.Fid!.Value] = _queryContext.UserId; }
 
                         addedChanges.Add(new PipelineRecordChange(
                             pubId,
@@ -3334,6 +3495,46 @@ public class PipelineEngine : IPipelineEngine
             _logger.LogError("Step type '{Type}' / subtype '{Subtype}' is not supported by the execution engine.", step.Type, step.Subtype);
             throw new NotSupportedException($"Step type '{step.Type}' / subtype '{step.Subtype}' is not supported by the execution engine.");
         }
+    }
+
+    public static Dictionary<string, object?> BuildCreatedRecordOutput(
+        Guid recordPublicId,
+        long recordId,
+        IReadOnlyList<AppField> fields,
+        IReadOnlyDictionary<long, object?> submittedValues,
+        IReadOnlyDictionary<string, object?>? persistedRecord)
+    {
+        var output = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["CreatedRecordPublicId"] = recordPublicId.ToString(),
+            ["RecordPublicId"] = recordPublicId.ToString(),
+            ["PublicId"] = recordPublicId.ToString(),
+            ["Id"] = recordId,
+            ["fid_3"] = recordId
+        };
+
+        if (persistedRecord is not null)
+        {
+            foreach (var alias in new[] { "CreatedOn", "CreatedBy", "ModifiedOn", "ModifiedBy" })
+                if (persistedRecord.TryGetValue(alias, out var value)) output[alias] = value;
+        }
+
+        foreach (var field in fields.Where(field => field.Fid.HasValue))
+        {
+            var fid = field.Fid!.Value;
+            var key = $"fid_{fid}";
+            var column = PhysicalNaming.GetPhysicalColumnName(field);
+            if (persistedRecord is not null && persistedRecord.TryGetValue(column, out var persistedValue))
+                output[key] = persistedValue;
+            else if (persistedRecord is not null && persistedRecord.TryGetValue(field.Name, out var namedValue))
+                output[key] = namedValue;
+            else if (submittedValues.TryGetValue(fid, out var submittedValue))
+                output[key] = submittedValue;
+            else
+                output.TryAdd(key, null);
+        }
+
+        return output;
     }
 
     private Dictionary<string, BulkUpsertSession> GetOrCreateBulkUpsertSessions(Dictionary<string, object> contextDict)
@@ -4464,6 +4665,25 @@ public class PipelineEngine : IPipelineEngine
                     }
                 }
             }
+            // A mapping like `{{ steps.trigger.headers.name }}` references a property of each item
+            // in an array (e.g. the webhook trigger's Headers, one {name, value} pair per request
+            // header) rather than of a single object. Outside a loop there's no single item to pick,
+            // so collect that property from every element and join them — e.g. two headers named
+            // Content-Type and Authorization become "Content-Type, Authorization" — instead of
+            // leaving the whole mapping unresolved.
+            else if (target is JsonElement arr && arr.ValueKind == JsonValueKind.Array)
+            {
+                var collected = new List<string>();
+                foreach (var item in arr.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object) continue;
+                    if (TryGetValue(context, span, item, member, out var itemValue) && itemValue != null)
+                        collected.Add(itemValue.ToString() ?? "");
+                }
+                if (collected.Count == 0) return false;
+                value = string.Join(", ", collected);
+                return true;
+            }
             return false;
         }
 
@@ -4556,9 +4776,12 @@ public class PipelineEngine : IPipelineEngine
     }
 
     private object? ParseRecordMappingValue(string value, AppField field, string? expression)
+        => ParseRecordMappingValueWithFormat(value, field, expression, null);
+
+    private object? ParseRecordMappingValueWithFormat(string value, AppField field, string? expression, string? dateFormat)
     {
         var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
-        try { return ParseValueType(value, field.TypeCode, label); }
+        try { return ParseValueTypeWithFormat(value, field.TypeCode, label, dateFormat); }
         catch (FormatException ex)
         {
             // Refer to a dynamic source without recording its possibly sensitive value.
@@ -4575,6 +4798,9 @@ public class PipelineEngine : IPipelineEngine
     }
 
     private object? ParseValueType(string valueStr, string typeCode, string fieldName)
+        => ParseValueTypeWithFormat(valueStr, typeCode, fieldName, null);
+
+    private object? ParseValueTypeWithFormat(string valueStr, string typeCode, string fieldName, string? dateFormat)
     {
         if (string.IsNullOrWhiteSpace(valueStr)) return null;
 
@@ -4593,9 +4819,39 @@ public class PipelineEngine : IPipelineEngine
                 decimal.TryParse(valueStr, out dVal)) return dVal;
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
-        if (new[] { "DATE", "DATE_TIME", "DATETIME", "TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
+        if (new[] { "DATE", "DATE_TIME", "DATETIME", "TIMESTAMP" }.Contains(normalizedCode))
         {
-            if (DateTime.TryParse(valueStr, out var dtVal)) return dtVal;
+            var canonicalFormats = normalizedCode == "DATE"
+                ? new[] { "yyyy-MM-dd" }
+                : new[] { "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd" };
+            if (DateTime.TryParseExact(valueStr.Trim(), canonicalFormats, CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces, out var dtVal)) return dtVal;
+
+            var dotNetDateFormat = dateFormat?.ToUpperInvariant() switch
+            {
+                "MM-DD-YY" => "MM-dd-yy",
+                "DD-MM-YYYY" => "dd-MM-yyyy",
+                "DD-MM-YY" => "dd-MM-yy",
+                "YYYY-MM-DD" => "yyyy-MM-dd",
+                _ => "MM-dd-yyyy"
+            };
+            var localizedFormats = normalizedCode == "DATE"
+                ? new[] { dotNetDateFormat, dotNetDateFormat.Replace('-', '/') }
+                : new[] {
+                    dotNetDateFormat + " h:mm tt", dotNetDateFormat + " h:mm:ss tt",
+                    dotNetDateFormat + " HH:mm", dotNetDateFormat + " HH:mm:ss",
+                    dotNetDateFormat.Replace('-', '/') + " h:mm tt",
+                    dotNetDateFormat.Replace('-', '/') + " HH:mm",
+                    dotNetDateFormat, dotNetDateFormat.Replace('-', '/')
+                };
+            if (DateTime.TryParseExact(valueStr.Trim(), localizedFormats, CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces, out dtVal)) return dtVal;
+            throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
+        }
+        if (normalizedCode is "TIME" or "TIME_OF_DAY")
+        {
+            if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm", "HH:mm:ss", "h:mm tt", "h:mm:ss tt" },
+                CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeVal)) return timeVal;
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
 
@@ -4707,17 +4963,6 @@ public class PipelineEngine : IPipelineEngine
     private class LoopStepConfig
     {
         public string? LoopOverStepId { get; set; }
-    }
-
-    private class SendEmailStepConfig
-    {
-        public string? ToAddresses { get; set; }
-        public string? Subject { get; set; }
-        public string? Body { get; set; }
-        public string? CcAddresses { get; set; }
-        public string? BccAddresses { get; set; }
-        public string? FromAddress { get; set; }
-        public List<string>? Attachments { get; set; }
     }
 
     private class HandleErrorsStepConfig
@@ -4945,6 +5190,7 @@ public class PipelineEngine : IPipelineEngine
         public string? Field { get; set; }
         [System.Text.Json.Serialization.JsonConverter(typeof(StringOrPrimitiveJsonConverter))]
         public string? Value { get; set; }
+        public string? FormatString { get; set; }
     }
 
     private static bool AreValuesEqual(object? val1, object? val2, string? typeCode)

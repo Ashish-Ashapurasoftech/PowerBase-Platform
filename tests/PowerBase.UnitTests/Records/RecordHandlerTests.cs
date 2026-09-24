@@ -176,6 +176,38 @@ public class RecordHandlerTests
             Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
+    [Fact]
+    public async Task CreateRecord_FiresTriggerInterceptor_WithCreatedOnAndCreatedByPopulated()
+    {
+        // Date Created / Record Owner are never submitted (they're system-managed), so a pipeline
+        // trigger firing off this create could never resolve {{steps.<trigger>.fid_1}} (Date
+        // Created) or fid_4 (Record Owner) unless this handler backfills them into the values
+        // dictionary handed to InterceptAsync — this is a regression test for that gap.
+        var table = MakeTable();
+        var nameField = new AppField { Id = 10, Fid = 6, Name = "C_name", Label = "Name" };
+        var createdOnField = new AppField { Id = 2, Fid = 1, Name = "S_dateCreated", Label = "Date Created", IsSystem = true, PhysicalColumnName = "CreatedOn" };
+        var createdByField = new AppField { Id = 4, Fid = 4, Name = "S_recordOwner", Label = "Record Owner", IsSystem = true, PhysicalColumnName = "CreatedBy" };
+        var recordIdField = new AppField { Id = 1, Fid = 3, Name = "S_recordId", Label = "Record ID#", IsSystem = true, PhysicalColumnName = "Id" };
+        var fields = new List<AppField> { recordIdField, createdOnField, createdByField, nameField };
+        var publicId = Guid.NewGuid();
+
+        _queryContext.UserId.Returns(40017L);
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(fields);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
+            .Returns(publicId);
+        _recordRepo.GetRecordIdByPublicIdAsync(table, publicId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(24L);
+        var sut = new CreateRecordCommandHandler(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _userRepo, Substitute.For<IMessagePublisher>(), _engine, _appRepo);
+
+        await sut.HandleAsync(new CreateRecordCommand(table.PublicId, new Dictionary<long, object?> { [6L] = "Ronak" }));
+
+        await _triggerInterceptor.Received(1).InterceptAsync(table, Arg.Any<IReadOnlyList<AppField>>(), publicId,
+            Arg.Is<IReadOnlyDictionary<long, object?>>(values =>
+                values.ContainsKey(1L) && values[1L] is DateTime &&
+                values.ContainsKey(4L) && Equals(values[4L], 40017L)),
+            "record-added", Arg.Any<CancellationToken>());
+    }
+
     // --- UpdateRecordCommandHandler ---
 
     [Fact]
@@ -186,7 +218,7 @@ public class RecordHandlerTests
         var recordId = Guid.NewGuid();
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
-        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appUserRepo, _userRepo, _auditRepo, _triggerInterceptor, _engine, _appRepo);
+        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appUserRepo, _userRepo, _auditRepo, _triggerInterceptor, _engine, _appRepo, _queryContext);
         var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow, Substitute.For<IMessagePublisher>());
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, recordId,
@@ -201,7 +233,7 @@ public class RecordHandlerTests
     public async Task UpdateRecord_EmptyFieldValues_SkipsUpdate()
     {
         var table = MakeTable();
-        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appUserRepo, _userRepo, _auditRepo, _triggerInterceptor, _engine, _appRepo);
+        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appUserRepo, _userRepo, _auditRepo, _triggerInterceptor, _engine, _appRepo, _queryContext);
         var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow, Substitute.For<IMessagePublisher>());
 
         await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, Guid.NewGuid(),
@@ -210,6 +242,38 @@ public class RecordHandlerTests
         await _recordRepo.DidNotReceiveWithAnyArgs().UpdateAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
             Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+    }
+
+    [Fact]
+    public async Task UpdateRecord_FiresTriggerInterceptor_WithModifiedOnAndModifiedByPopulated()
+    {
+        // Date Modified / Last Modified By are never submitted (they're system-managed), and
+        // UpdateAsync's own SQL sets them via SYSUTCDATETIME()/QueryContext.UserId — but the
+        // afterValues dictionary handed to InterceptAsync is built from the submitted values and
+        // otherwise falls back to the pre-update (often-still-null) oldRecord value for these two.
+        // Regression test for that gap.
+        var table = MakeTable();
+        var nameField = new AppField { Id = 10, Fid = 6, Name = "C_name", Label = "Name" };
+        var modifiedOnField = new AppField { Id = 3, Fid = 2, Name = "S_dateModified", Label = "Date Modified", IsSystem = true, PhysicalColumnName = "ModifiedOn" };
+        var modifiedByField = new AppField { Id = 5, Fid = 5, Name = "S_lastModifiedBy", Label = "Last Modified By", IsSystem = true, PhysicalColumnName = "ModifiedBy" };
+        var fields = new List<AppField> { modifiedOnField, modifiedByField, nameField };
+        var recordId = Guid.NewGuid();
+        var oldRecord = new Dictionary<string, object?> { ["Id"] = 24L, ["ModifiedOn"] = null, ["ModifiedBy"] = null, ["f_6"] = "Old" };
+
+        _queryContext.UserId.Returns(40017L);
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(fields);
+        _recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<CancellationToken>()).Returns(oldRecord);
+        IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appUserRepo, _userRepo, _auditRepo, _triggerInterceptor, _engine, _appRepo, _queryContext);
+        var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow, Substitute.For<IMessagePublisher>());
+
+        await sut.HandleAsync(new UpdateRecordCommand(table.PublicId, recordId, new Dictionary<long, object?> { [6L] = "New" }));
+
+        await _triggerInterceptor.Received(1).InterceptAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordId,
+            Arg.Is<IReadOnlyDictionary<long, object?>>(values =>
+                values.ContainsKey(2L) && values[2L] is DateTime &&
+                values.ContainsKey(5L) && Equals(values[5L], 40017L)),
+            "record-updated", Arg.Any<CancellationToken>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IReadOnlyList<long>>());
     }
 
     // --- DeleteRecordCommandHandler ---

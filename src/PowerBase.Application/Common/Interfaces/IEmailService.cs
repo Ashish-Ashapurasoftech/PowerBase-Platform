@@ -2,6 +2,7 @@ namespace PowerBase.Application.Common.Interfaces;
 
 public interface IEmailService
 {
+    Task SendPipelineEmailAsync(PipelineEmailMessage message, CancellationToken ct = default);
     Task SendInvitationEmailAsync(string toEmail, string tenantName, string inviterName, CancellationToken ct = default);
     Task SendInviteSetupEmailAsync(string toEmail, string tenantName, string inviterName, string setupLink, CancellationToken ct = default);
     Task SendPasswordResetEmailAsync(string toEmail, string resetLink, CancellationToken ct = default);

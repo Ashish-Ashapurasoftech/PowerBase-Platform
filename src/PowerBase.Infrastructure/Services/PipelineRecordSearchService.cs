@@ -38,7 +38,8 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService
         IReadOnlyList<AppField> fields,
         int? maxResults = null,
         FilterGroup? filterTree = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int page = 1)
     {
         var buildFieldColsMethod = typeof(RecordRepository).GetMethod("BuildFieldColumnList", BindingFlags.NonPublic | BindingFlags.Static);
         var buildFilterTreeMethod = typeof(RecordRepository).GetMethod("BuildFilterTreeWhere", BindingFlags.NonPublic | BindingFlags.Static);
@@ -56,7 +57,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService
         string paginationClause = "";
         if (maxResults.HasValue)
         {
-            parameters.Add("offset", 0);
+            parameters.Add("offset", (Math.Max(1, page) - 1) * maxResults.Value);
             parameters.Add("pageSize", maxResults.Value);
             paginationClause = "\nOFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY";
         }

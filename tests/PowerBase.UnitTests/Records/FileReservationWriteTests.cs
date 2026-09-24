@@ -35,7 +35,7 @@ public class FileReservationWriteTests
             Substitute.For<IRelationshipRepository>(),
             Substitute.For<IAppUserRepository>(), Substitute.For<IUserRepository>(),
             Substitute.For<IAuditRepository>(), Substitute.For<IPipelineTriggerInterceptor>(),
-            new FormulaEngine(), Substitute.For<IAppRepository>());
+            new FormulaEngine(), Substitute.For<IAppRepository>(), queryContext);
         var service = new FileRecordWriteService(inner, recordRepo, queryContext);
 
         var action = () => service.ApplyFileWriteAsync(table, new[] { field }, recordId,

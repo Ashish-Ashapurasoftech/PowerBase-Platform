@@ -102,6 +102,18 @@ public class AzureSearchService : IAzureSearchService
         return _searchClients.GetOrAdd(indexName, name => new SearchClient(new Uri(_endpoint), name, _credential));
     }
 
+    /// <summary>The fixed document fields every write (IndexRecordAsync/BulkIndexRecordsAsync)
+    /// assumes exist: "id"/"tenantId"/"appId"/"tableId". Returns fresh field instances each call
+    /// — a SearchField belongs to exactly one SearchIndex.Fields collection, so this is used both
+    /// to seed a brand-new index and to backfill one that's missing a base field.</summary>
+    private static List<SearchField> CreateBaseIndexFields() =>
+    [
+        new SimpleField("id", SearchFieldDataType.String) { IsKey = true, IsFilterable = true },
+        new SimpleField("tenantId", SearchFieldDataType.String) { IsFilterable = true },
+        new SimpleField("appId", SearchFieldDataType.Int64) { IsFilterable = true },
+        new SimpleField("tableId", SearchFieldDataType.Int64) { IsFilterable = true }
+    ];
+
     private async Task EnsureIndexAndFieldsExistAsync(string indexName, IEnumerable<string> fieldNames, CancellationToken ct)
     {
         if (!_isEnabled || _searchIndexClient == null) return;
@@ -120,15 +132,9 @@ public class AzureSearchService : IAzureSearchService
             }
             catch (RequestFailedException ex) when (ex.Status == 404)
             {
-                index = new SearchIndex(indexName)
-                {
-                    Fields = {
-                        new SimpleField("id", SearchFieldDataType.String) { IsKey = true, IsFilterable = true },
-                        new SimpleField("tenantId", SearchFieldDataType.String) { IsFilterable = true },
-                        new SimpleField("appId", SearchFieldDataType.Int64) { IsFilterable = true },
-                        new SimpleField("tableId", SearchFieldDataType.Int64) { IsFilterable = true }
-                    }
-                };
+                index = new SearchIndex(indexName);
+                foreach (var baseField in CreateBaseIndexFields())
+                    index.Fields.Add(baseField);
                 await _searchIndexClient.CreateIndexAsync(index, ct);
             }
 
@@ -138,6 +144,23 @@ public class AzureSearchService : IAzureSearchService
             }
 
             var updated = false;
+
+            // An index that already existed before this field set was introduced (or was
+            // provisioned by an older code path) can be missing one of the base document
+            // fields — e.g. "tenantId" — even though every write assumes it's there. Backfill
+            // any that are absent instead of failing every index call forever. Fields already
+            // present must not be re-added (Azure AI Search rejects redefining an existing
+            // field even with identical settings).
+            foreach (var baseField in CreateBaseIndexFields())
+            {
+                if (!knownFields.Contains(baseField.Name))
+                {
+                    index.Fields.Add(baseField);
+                    knownFields.Add(baseField.Name);
+                    updated = true;
+                }
+            }
+
             foreach (var fieldName in requiredFields)
             {
                 if (!knownFields.Contains(fieldName))

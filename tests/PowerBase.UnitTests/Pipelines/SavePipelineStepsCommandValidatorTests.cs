@@ -176,6 +176,27 @@ public class SavePipelineStepsCommandValidatorTests
         result.IsValid.Should().BeTrue();
     }
 
+    [Theory]
+    [InlineData("send-email")]
+    [InlineData("send-email-outlook")]
+    public async Task Validate_SendEmailAtStart_IsValid(string subtype)
+    {
+        var email = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_email",
+            Type = "email",
+            Subtype = subtype,
+            ConfigJson = "{\"toAddresses\":\"a@b.com\",\"subject\":\"Hi\",\"body\":\"Hello\"}",
+            IsValidated = true
+        };
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { email }, Array.Empty<byte>());
+
+        var result = await _validator.ValidateAsync(command);
+
+        result.Errors.Should().NotContain(e => e.ErrorMessage.Contains("A pipeline must begin with"));
+    }
+
     [Fact]
     public async Task Validate_InvalidFirstStepType_ReturnsError()
     {

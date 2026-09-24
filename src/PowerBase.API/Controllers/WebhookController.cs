@@ -84,6 +84,30 @@ public class WebhookController : ControllerBase
             return BadRequest(new { error = new { code = "INVALID_CONFIG", message = "The Incoming Request configuration is invalid." } });
         }
 
+        // 5b. Remember any new query-string parameter names so the pipeline builder can list
+        // them under URL Parameters once a real request has revealed the webhook's actual shape.
+        // Edits the raw ConfigJson node directly (never round-trips it through IncomingWebhookConfig)
+        // so every other saved property keeps the exact casing the Angular editor wrote it with.
+        if (Request.Query.Count > 0)
+        {
+            try
+            {
+                var observedKeys = Request.Query.Keys.Where(k => !string.IsNullOrEmpty(k)).ToList();
+                var node = System.Text.Json.Nodes.JsonNode.Parse(
+                    string.IsNullOrWhiteSpace(step.ConfigJson) ? "{}" : step.ConfigJson)!.AsObject();
+                var knownKeys = node["sampleUrlParamKeys"] is System.Text.Json.Nodes.JsonArray existing
+                    ? existing.Select(n => n?.GetValue<string>()).Where(k => !string.IsNullOrEmpty(k)).ToList()!
+                    : new List<string>();
+                var mergedKeys = knownKeys.Concat(observedKeys).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                if (mergedKeys.Count != knownKeys.Count)
+                {
+                    node["sampleUrlParamKeys"] = new System.Text.Json.Nodes.JsonArray(mergedKeys.Select(k => (System.Text.Json.Nodes.JsonNode)System.Text.Json.Nodes.JsonValue.Create(k)).ToArray());
+                    await _pipelineRepo.UpdateStepConfigJsonAsync(step.Id, node.ToJsonString(), step.RowVersion, ct);
+                }
+            }
+            catch { /* best-effort sample capture; must never block webhook execution */ }
+        }
+
         // 6. Match the six methods displayed by Incoming Request. ANY BELOW accepts all six.
         if (!IncomingWebhookConfig.Methods.Contains(Request.Method, StringComparer.OrdinalIgnoreCase))
             return StatusCode(StatusCodes.Status405MethodNotAllowed);

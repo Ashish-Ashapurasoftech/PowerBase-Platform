@@ -338,13 +338,43 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     {
         var result = new Dictionary<object, IReadOnlyDictionary<string, object?>>();
         if (values.Count == 0) return result;
-        if (columnName != "Id" && !fields.Any(f => PhysicalNaming.GetPhysicalColumnName(f) == columnName))
+        var mergeField = columnName == "Id" ? null : fields.FirstOrDefault(f => PhysicalNaming.GetPhysicalColumnName(f) == columnName);
+        if (columnName != "Id" && mergeField == null)
             throw new ArgumentException("The merge column must belong to the target table.", nameof(columnName));
 
         var connection = transaction.Connection ?? throw new InvalidOperationException("Bulk upsert requires an active transaction.");
         var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
         var fieldCols = BuildFieldColumnList(fields);
         var escapedColumnName = columnName.Replace("]", string.Concat(']', ']'));
+
+        if (mergeField != null && mergeField.IsEncrypted)
+        {
+            // The merge column stores ciphertext, so "[col] IN @chunk" against the caller's
+            // plaintext values can never match — every bulk-upsert row would be misread as new
+            // and inserted as a duplicate instead of being matched for update. Lock and decrypt
+            // every candidate row instead, then match in memory (mirrors CopyRecordsExecutor's
+            // encrypted merge-key index). This locks the whole table for the transaction's
+            // duration rather than just the candidate rows — an unavoidable trade-off of an
+            // exact-match lookup against ciphertext, not a partial fix.
+            var wanted = new HashSet<string>(
+                values.Select(v => v?.ToString()?.Trim()).Where(s => !string.IsNullOrEmpty(s))!,
+                StringComparer.OrdinalIgnoreCase);
+            var sql = $"""
+                SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+                FROM {PhysicalNaming.FullTableName(table.Id)} WITH (UPDLOCK, HOLDLOCK)
+                WHERE IsDeleted = 0
+                """;
+            var allRows = await connection.QueryAsync(new CommandDefinition(sql, transaction: transaction, cancellationToken: ct));
+            foreach (var row in allRows)
+            {
+                IReadOnlyDictionary<string, object?> dict = ToDictionary(row);
+                await enc.DecryptRowAsync((IDictionary<string, object?>)dict, fields, ct);
+                if (dict.TryGetValue(columnName, out var value) && value is string sval && wanted.Contains(sval.Trim()))
+                    result[sval] = dict;
+            }
+            return result;
+        }
+
         foreach (var chunk in values.Distinct().Chunk(500))
         {
             var sql = $"""

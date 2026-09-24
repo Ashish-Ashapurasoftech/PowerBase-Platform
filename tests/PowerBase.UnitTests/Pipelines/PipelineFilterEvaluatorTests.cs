@@ -308,5 +308,44 @@ public class PipelineFilterEvaluatorTests
         PipelineFilterEvaluator.EvaluateConditionOperator(left, "is", right, typeCategory: "DATE")
             .Should().BeTrue();
     }
+
+    // ── "On New Event" trigger filter on an encrypted field ─────────────────────────────────
+    // PipelineTriggerInterceptor builds valuesSource straight from the plaintext field-id→value
+    // dict the write path is about to persist (before SQL-side encryption ever runs), so this
+    // evaluator never sees ciphertext — it isn't part of the SQL LIKE/= ciphertext bug that
+    // affects Search Records / Copy Records. These confirm that holds even when the matched
+    // field is marked IsEncrypted, and that behavior is identical to an unencrypted field.
+
+    [Fact]
+    public void EvaluateRule_EncryptedField_Contains_MatchesPlaintextValueFromTriggerPayload()
+    {
+        var fields = new List<AppField> { new() { Id = 6, Fid = 6, Name = "Name", TypeCode = "TEXT", IsEncrypted = true } };
+        var rule = new TriggerFilterRule { Field = "Name", Operator = "contains", Value = "ronak" };
+
+        PipelineFilterEvaluator.EvaluateRule(rule, new Dictionary<long, object?> { [6] = "Ronak Dhamsaniya" }, fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateRule(rule, new Dictionary<long, object?> { [6] = "ronak dhamsaniya" }, fields).Should().BeTrue(); // case-insensitive
+        PipelineFilterEvaluator.EvaluateRule(rule, new Dictionary<long, object?> { [6] = "Someone Else" }, fields).Should().BeFalse();
+    }
+
+    [Fact]
+    public void EvaluateGroup_EncryptedAndNormalField_And_BehavesIdenticallyToUnencrypted()
+    {
+        var encryptedField = new AppField { Id = 6, Fid = 6, Name = "Name", TypeCode = "TEXT", IsEncrypted = true };
+        var normalField = new AppField { Id = 7, Fid = 7, Name = "Status", TypeCode = "TEXT", IsEncrypted = false };
+        var fields = new List<AppField> { encryptedField, normalField };
+        var group = new TriggerFilterGroup
+        {
+            LogicalOp = "AND",
+            Rules = new List<TriggerFilterRule>
+            {
+                new() { Field = "Name", Operator = "contains", Value = "ronak" },
+                new() { Field = "Status", Operator = "equals", Value = "Active" }
+            }
+        };
+
+        PipelineFilterEvaluator.EvaluateGroup(group, new Dictionary<long, object?> { [6] = "Ronak Dhamsaniya", [7] = "Active" }, fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateGroup(group, new Dictionary<long, object?> { [6] = "Ronak Dhamsaniya", [7] = "Inactive" }, fields).Should().BeFalse();
+        PipelineFilterEvaluator.EvaluateGroup(group, new Dictionary<long, object?> { [6] = "Someone Else", [7] = "Active" }, fields).Should().BeFalse();
+    }
 }
 

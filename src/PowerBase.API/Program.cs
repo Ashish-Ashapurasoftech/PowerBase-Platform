@@ -371,7 +371,10 @@ builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipeline.G
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineEditor.GetPipelineEditorQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelines.ListPipelinesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelineRuns.ListPipelineRunsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelineRuns.ListAppPipelineRunsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineRunSteps.GetPipelineRunStepsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineActivity.GetPipelineActivityQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelinesForPicker.ListPipelinesForPickerQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineSchedule.GetPipelineScheduleQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.UpdatePipelineSchedule.UpdatePipelineScheduleCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.DeletePipelineSchedule.DeletePipelineScheduleCommandHandler>();

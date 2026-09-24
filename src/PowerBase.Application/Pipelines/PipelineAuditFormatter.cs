@@ -864,7 +864,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 logMessage = $"Execution halted: {reason}";
             }
-            else if (subtype == "send-email" || subtype == "send-email-outlook")
+            else if (subtype == "send-email" || subtype == "send-email-outlook" || subtype == "send an email")
             {
                 var to = inputDict.TryGetValue("To", out var tVal) ? tVal?.ToString() : string.Empty;
                 var subject = inputDict.TryGetValue("Subject", out var sVal) ? sVal?.ToString() : string.Empty;

@@ -186,7 +186,9 @@ public sealed class MakeRequestExecutor
         }
         if (payloadType is "TEXT" or "Raw" or "XML") result = JsonSerializer.Serialize(body);
         if (string.IsNullOrEmpty(result)) result = "null";
-        return new(result, status, response.ReasonPhrase ?? "", response.Headers.Concat(response.Content.Headers).Where(x => !x.Key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase) && !x.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase)).ToDictionary(x => x.Key, x => string.Join(", ", x.Value), StringComparer.OrdinalIgnoreCase));
+        var reqHeaders = auditData != null && auditData.TryGetValue("Headers", out var hObj) && hObj is Dictionary<string, string> h ? h : new Dictionary<string, string>();
+        return new(result, status, response.ReasonPhrase ?? "", response.Headers.Concat(response.Content.Headers).Where(x => !x.Key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase) && !x.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase)).ToDictionary(x => x.Key, x => string.Join(", ", x.Value), StringComparer.OrdinalIgnoreCase),
+            request.RequestUri?.ToString() ?? "", reqHeaders);
     }
     private async Task AuthenticateAsync(MakeRequestDefinition config, HttpRequestMessage request, Func<string?, string> resolve, CancellationToken ct)
     {
@@ -260,4 +262,4 @@ public sealed class MakeRequestExecutor
         return data + "." + Base64(signature);
     }
 }
-public sealed record MakeRequestResult(string OutputJson, int StatusCode, string StatusMessage, Dictionary<string, string> ResponseHeaders);
+public sealed record MakeRequestResult(string OutputJson, int StatusCode, string StatusMessage, Dictionary<string, string> ResponseHeaders, string RequestUrl, Dictionary<string, string> RequestHeaders);

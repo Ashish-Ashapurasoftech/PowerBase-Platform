@@ -138,6 +138,16 @@ public class CreateRecordCommandHandler
             var recordId = await _recordRepo.GetRecordIdByPublicIdAsync(table, publicId, _uow.Transaction, ct);
             effectiveValues[3] = recordId;
 
+            // Date Created / Record Owner are system-managed — never present in effectiveValues
+            // otherwise, since nothing submits them — so a pipeline trigger firing off this create
+            // (via InterceptAsync below) could never resolve {{steps.<trigger>.fid_N}} for them.
+            // Looked up by PhysicalColumnName rather than a hardcoded fid, same as
+            // PhysicalNaming.GetPhysicalColumnName's system-field convention used elsewhere.
+            var createdOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
+            if (createdOnField != null) effectiveValues[createdOnField.Fid!.Value] = DateTime.UtcNow;
+            var createdByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
+            if (createdByField != null) effectiveValues[createdByField.Fid!.Value] = _queryContext.UserId;
+
             await _auditRepo.LogActivityAsync(
                 AuditActions.Created, AuditEntityTypes.Record, publicId.ToString(), $"Record added in {table.Name} with ID {publicId}", appId: table.AppId, ct: ct);
 
