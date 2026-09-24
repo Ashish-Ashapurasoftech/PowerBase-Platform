@@ -201,6 +201,8 @@ public class SavePipelineStepsCommandHandler
             }
             if (dto.Subtype == "copy-records" && dto.IsValidated)
                 await stepValidator.ValidateCopyRecordsStepAsync(dto.ConfigJson ?? "{}", ct);
+            if (dto.Subtype == "create-record")
+                await stepValidator.ValidateCreateRecordRequiredFieldsAsync(dto.ConfigJson ?? "{}", ct);
             if (dto.Children != null) await ValidateStepsConfigAsync(dto.Children, stepValidator, ct);
             if (dto.ElseChildren != null) await ValidateStepsConfigAsync(dto.ElseChildren, stepValidator, ct);
             if (dto.SuccessChildren != null) await ValidateStepsConfigAsync(dto.SuccessChildren, stepValidator, ct);
