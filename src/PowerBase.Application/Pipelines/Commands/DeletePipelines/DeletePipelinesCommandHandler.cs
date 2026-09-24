@@ -16,17 +16,20 @@ public class DeletePipelinesCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly IMainPipelineQueueRepository _queueRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IAppAccessService _appAccessService;
 
     public DeletePipelinesCommandHandler(
         IPipelineRepository pipelineRepo,
         IAuditRepository auditRepo,
         IMainPipelineQueueRepository queueRepo,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IAppAccessService appAccessService)
     {
         _pipelineRepo = pipelineRepo;
         _auditRepo = auditRepo;
         _queueRepo = queueRepo;
         _queryContext = queryContext;
+        _appAccessService = appAccessService;
     }
 
     public async Task HandleAsync(DeletePipelinesCommand command, CancellationToken ct = default)
@@ -53,6 +56,11 @@ public class DeletePipelinesCommandHandler
         foreach (var publicId in distinctIds)
         {
             var pipeline = await _pipelineRepo.GetByPublicIdAsync(publicId, ct);
+
+            // A PowerFlow may be managed from an app other than the one that owns it, so
+            // permission is checked against the pipeline's own app rather than the request's appId.
+            await _appAccessService.RequirePermissionByPipelinePublicIdAsync(publicId, PermissionCodes.PowerFlowsDelete, ct);
+
             pipelines.Add(pipeline);
         }
 
