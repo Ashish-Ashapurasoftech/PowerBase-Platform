@@ -7,4 +7,6 @@ public class UpdateFormSettingsRequest
     public bool ShowBuiltInFields { get; init; }
     public string SaveOptions { get; init; } = string.Empty;
     public string RowVersion { get; init; } = string.Empty;
+    /// <summary>Null leaves the Quick Peek flag unchanged.</summary>
+    public bool? IsQuickPeekForm { get; init; }
 }

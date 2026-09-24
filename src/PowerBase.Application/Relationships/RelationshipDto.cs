@@ -31,4 +31,7 @@ public sealed record RelationshipFieldDto(Guid PublicId, int Fid, string Name, s
     /// ReportLink → the reference field in the child table.
     /// Summary → the child field being aggregated (null for Count/Exists).</summary>
     public string? TargetFieldLabel { get; init; }
+
+    public Guid? SourceFieldPublicId { get; init; }
+    public Guid? TargetFieldPublicId { get; init; }
 }

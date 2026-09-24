@@ -163,7 +163,7 @@ public class CreateFieldCommandHandler
 
         // Auto-append the new field to all forms on this table where AutoAddNewFields=true
         var formsForTable = await _formRepo.ListByTableAsync(table.PublicId, ct);
-        foreach (var form in formsForTable.Where(f => f.AutoAddNewFields))
+        foreach (var form in formsForTable.Where(f => f.AutoAddNewFields && !f.IsQuickPeekForm))
         {
             await _formRepo.AppendFieldToLastSectionAsync(form.Id, field.Fid!.Value, ct);
         }

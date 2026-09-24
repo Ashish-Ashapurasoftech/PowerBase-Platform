@@ -38,6 +38,7 @@ public class UpdateFormSettingsCommandHandler
             command.ShowBuiltInFields,
             command.SaveOptions,
             command.RowVersion,
+            command.IsQuickPeekForm,
             ct);
 
         await _auditRepo.LogActivityAsync(

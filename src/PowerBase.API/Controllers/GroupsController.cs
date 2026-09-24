@@ -85,21 +85,28 @@ public class GroupsController : ControllerBase
         return Ok(new { data = result });
     }
 
-    /// <summary>List all groups (paginated)</summary>
+    /// <summary>List all groups (paginated and sorted)</summary>
     [HttpGet]
     [RequirePermission(PermissionCodes.AppsRead)]
     [ProducesResponseType(typeof(ApiListResponse<GroupDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ListGroups(
-        [FromQuery] string? search,
+        [FromQuery] string? search = null,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
+        [FromQuery] string sortBy = "name",
+        [FromQuery] bool sortDesc = false,
+        [FromQuery] string? sortOrder = null,
         CancellationToken ct = default)
     {
+        bool actualSortDesc = sortDesc || sortOrder?.ToLower() == "desc";
+
         var query = new ListGroupsQuery 
         { 
             Search = search, 
             Page = page, 
-            PageSize = pageSize 
+            PageSize = pageSize,
+            SortBy = sortBy,
+            SortDesc = actualSortDesc
         };
         var result = await _listHandler.HandleAsync(query, ct);
         return Ok(new ApiListResponse<GroupDto>(result.Items, result.Total, result.Page, result.PageSize));

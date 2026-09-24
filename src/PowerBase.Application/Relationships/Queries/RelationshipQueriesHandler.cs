@@ -100,6 +100,7 @@ public class RelationshipQueriesHandler
                 fields.Add(new(f.PublicId, f.Fid ?? 0, f.Label ?? f.Name, role, srcType)
                 {
                     SourceFieldLabel = srcLabel is not null ? $"{parent.Name}: {srcLabel}" : null,
+                    SourceFieldPublicId = srcField?.PublicId,
                 });
             }
 
@@ -114,6 +115,7 @@ public class RelationshipQueriesHandler
                 fields.Add(new(f.PublicId, f.Fid ?? 0, f.Label ?? f.Name, "summary", fn)
                 {
                     TargetFieldLabel = tLabel is not null ? $"{child.Name}: {tLabel}" : null,
+                    TargetFieldPublicId = tField?.PublicId,
                 });
             }
 
@@ -131,26 +133,34 @@ public class RelationshipQueriesHandler
 
                 // Source: null SourceFid → Record ID# on the parent table
                 string srcFLabel;
+                Guid? srcFPubId = null;
                 if (rls.SourceFid is int sFid)
                 {
                     var srcF = parentFields.FirstOrDefault(pf => pf.Fid == sFid);
                     srcFLabel = $"{parent.Name}: {(srcF is not null ? (srcF.Label ?? srcF.Name) : $"Field {sFid}")}";
+                    srcFPubId = srcF?.PublicId;
                 }
                 else
                 {
+                    var recIdF = parentFields.FirstOrDefault(pf => pf.IsSystem && pf.Fid == 3);
                     srcFLabel = $"{parent.Name}: Record ID#";
+                    srcFPubId = recIdF?.PublicId;
                 }
                 // Target: resolve TargetFid against the child table
                 string? tFLabel = null;
+                Guid? tFPubId = null;
                 if (rls.TargetFid is int tFid)
                 {
                     var tF = childFields.FirstOrDefault(cf => cf.Fid == tFid);
                     tFLabel = $"{child.Name}: {(tF is not null ? (tF.Label ?? tF.Name) : $"Field {tFid}")}";
+                    tFPubId = tF?.PublicId;
                 }
                 fields.Add(new(f.PublicId, f.Fid ?? 0, f.Label ?? f.Name, "reportlink", "ReportLink")
                 {
                     SourceFieldLabel = srcFLabel,
+                    SourceFieldPublicId = srcFPubId,
                     TargetFieldLabel = tFLabel,
+                    TargetFieldPublicId = tFPubId,
                 });
             }
 

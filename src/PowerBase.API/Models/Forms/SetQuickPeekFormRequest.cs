@@ -1,7 +1,7 @@
 namespace PowerBase.API.Models.Forms;
 
-/// <summary>FormId null clears the table's Quick Peek form.</summary>
+/// <summary>Enabled true flags the form as a Quick Peek form; false removes the flag.</summary>
 public class SetQuickPeekFormRequest
 {
-    public Guid? FormId { get; init; }
+    public bool Enabled { get; init; }
 }

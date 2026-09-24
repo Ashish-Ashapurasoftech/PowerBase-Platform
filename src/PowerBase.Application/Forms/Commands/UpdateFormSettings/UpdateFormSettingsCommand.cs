@@ -6,4 +6,5 @@ public record UpdateFormSettingsCommand(
     bool AutoAddNewFields,
     bool ShowBuiltInFields,
     string SaveOptions,
-    byte[] RowVersion);
+    byte[] RowVersion,
+    bool? IsQuickPeekForm = null);

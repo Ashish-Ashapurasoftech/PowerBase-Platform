@@ -149,6 +149,30 @@ public class ReportsController : ControllerBase
         return Ok(new ApiListResponse<ReportListItemResponse>(items, result.Total, result.Page, result.PageSize));
     }
 
+    /// <summary>Reports (visible to the caller) on this table that pin one of the given forms as
+    /// their Quick Peek form. Used to warn before a form is un-flagged or deleted, since those
+    /// reports would fall back to the table's default Quick Peek form.</summary>
+    [HttpGet("tables/{tableId:guid}/reports/quick-peek-usage")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<QuickPeekFormUsageResponse>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetQuickPeekFormUsage(Guid tableId, [FromQuery] Guid[] formIds, CancellationToken ct)
+    {
+        var wanted = formIds.ToHashSet();
+        var reports = await _listByTableHandler.HandleAsync(new ListReportsByTableQuery(tableId), ct);
+        IReadOnlyList<QuickPeekFormUsageResponse> usage = reports
+            // A report with its Quick Peek icon turned off never opens a Quick Peek form, so its
+            // (still-stored) pinned form isn't affected by the form being removed.
+            .Where(r => r.Definition.Options is { ShowQuickPeekIcon: true, QuickPeekFormId: Guid id } && wanted.Contains(id))
+            .Select(r => new QuickPeekFormUsageResponse
+            {
+                ReportId = r.Id,
+                ReportName = r.Name,
+                FormId = r.Definition.Options!.QuickPeekFormId!.Value,
+            })
+            .ToList();
+        return Ok(new ApiResponse<IReadOnlyList<QuickPeekFormUsageResponse>>(usage));
+    }
+
     /// <summary>Get report form settings.</summary>
     [HttpGet("tables/{tableId:guid}/reports/form-settings")]
     [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]

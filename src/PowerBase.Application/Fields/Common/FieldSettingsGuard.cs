@@ -119,7 +119,7 @@ public class FieldSettingsGuard
         var byFid = tableFields.Where(f => f.Fid.HasValue).ToDictionary(f => f.Fid!.Value);
         var errors = new Dictionary<string, string[]>();
 
-        void CheckTarget(string field, int? fid, string[]? allowedTypeCodes)
+        void CheckTarget(string field, int? fid, string[]? allowedTypeCodes, string[]? blockedTypeCodes = null)
         {
             if (fid is not int f) return;
             if (f == selfFieldId)
@@ -142,12 +142,19 @@ public class FieldSettingsGuard
                 errors[field] = [$"'{target.Label ?? target.Name}' is not a supported field type for this setting " +
                     $"(expected {string.Join("/", allowedTypeCodes)})."];
             }
+            else if (blockedTypeCodes is not null && blockedTypeCodes.Contains(target.TypeCode))
+            {
+                errors[field] = [$"'{target.Label ?? target.Name}' ({target.TypeCode}) cannot be written by an Action Button here."];
+            }
         }
 
-        var captureAllowed = parsed.Variant is ActionButtonVariants.Signature or ActionButtonVariants.File
-            ? new[] { "File" }
-            : null; // Prompt: the answer can reasonably land in many field types.
-        CheckTarget("Settings.CaptureFid", parsed.CaptureFid, captureAllowed);
+        // Prompt answers and Add Data values are plain values — a structured field (File,
+        // Address, MultiSelect, User, MultiUser) would be corrupted by a plain-string write.
+        string[] structuredTypes = ["File", "Address", "MultiSelect", "User", "MultiUser"];
+        var isSignatureOrFile = parsed.Variant is ActionButtonVariants.Signature or ActionButtonVariants.File;
+        CheckTarget("Settings.CaptureFid", parsed.CaptureFid,
+            isSignatureOrFile ? ["File"] : null,
+            isSignatureOrFile ? null : structuredTypes);
         CheckTarget("Settings.TimestampFid", parsed.TimestampFid, ["Date", "DateTime"]);
         CheckTarget("Settings.BoolGateFid", parsed.BoolGateFid, ["Boolean"]);
         CheckTarget("Settings.IpCaptureFid", parsed.IpCaptureFid, ["Text"]);
@@ -157,7 +164,7 @@ public class FieldSettingsGuard
         if (parsed.AddData is { Length: > 0 })
         {
             for (var i = 0; i < parsed.AddData.Length; i++)
-                CheckTarget($"Settings.AddData[{i}].TargetFid", parsed.AddData[i].TargetFid, null);
+                CheckTarget($"Settings.AddData[{i}].TargetFid", parsed.AddData[i].TargetFid, null, ["File"]);
         }
 
         if (errors.Count > 0)

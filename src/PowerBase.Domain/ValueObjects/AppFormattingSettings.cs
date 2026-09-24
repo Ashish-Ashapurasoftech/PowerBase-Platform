@@ -48,4 +48,8 @@ public class DateFormatSettings
 {
     /// <summary>MM-DD-YYYY, DD-MM-YYYY, YYYY-MM-DD, etc.</summary>
     public string FormatString { get; set; } = "MM-DD-YYYY";
+
+    /// <summary>Display separator only: "-" (default) or "/". Never affects parsing — typed
+    /// dates accept '-', '/' and '.' either way.</summary>
+    public string Separator { get; set; } = "-";
 }

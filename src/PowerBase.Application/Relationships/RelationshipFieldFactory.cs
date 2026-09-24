@@ -40,15 +40,21 @@ public sealed class RelationshipFieldFactory
         _fieldNameResolver = fieldNameResolver;
     }
 
-    /// <summary>Creates a relationship field (Reference/Lookup/Summary/ReportLink). Name is generated
-    /// from <paramref name="label"/> — callers never supply Name directly (see IFieldNameResolver).</summary>
     public async Task<AppField> CreateAsync(
         AppTable table, string typeCode, string label, bool isRequired, object settingsObj, CancellationToken ct)
     {
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(typeCode, ct) ?? throw new NotFoundException("FieldType", typeCode);
 
-        if (await _fieldRepo.LabelExistsInTableAsync(table.Id, label, ct: ct))
+        if (typeCode == nameof(Domain.Enums.FieldTypeCode.Lookup)
+            || typeCode == nameof(Domain.Enums.FieldTypeCode.Reference)
+            || typeCode == nameof(Domain.Enums.FieldTypeCode.ReportLink))
+        {
+            label = await ResolveUniqueLabelAsync(table.Id, label, ct);
+        }
+        else if (await _fieldRepo.LabelExistsInTableAsync(table.Id, label, ct: ct))
+        {
             throw new DuplicateException("Field", "label", label);
+        }
 
         var name = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, label, isSystem: false, ct);
 
@@ -88,9 +94,35 @@ public sealed class RelationshipFieldFactory
     {
         if (fids.Count == 0) return;
         var forms = await _formRepo.ListByTableAsync(tablePublicId, ct);
-        foreach (var form in forms.Where(f => f.AutoAddNewFields))
+        foreach (var form in forms.Where(f => f.AutoAddNewFields && !f.IsQuickPeekForm))
             foreach (var fid in fids)
                 await _formRepo.AppendFieldToLastSectionAsync(form.Id, fid, ct);
+    }
+
+    private async Task<string> ResolveUniqueLabelAsync(long tableId, string label, CancellationToken ct)
+    {
+        if (!await _fieldRepo.LabelExistsInTableAsync(tableId, label, ct: ct))
+            return label;
+
+        var baseLabel = label;
+        var suffix = 1;
+
+        var match = System.Text.RegularExpressions.Regex.Match(label, @"^(.*?)\s+(\d+)$");
+        if (match.Success)
+        {
+            baseLabel = match.Groups[1].Value;
+            if (int.TryParse(match.Groups[2].Value, out var n))
+                suffix = n + 1;
+        }
+
+        string candidate;
+        do
+        {
+            candidate = $"{baseLabel} {suffix}";
+            suffix++;
+        } while (await _fieldRepo.LabelExistsInTableAsync(tableId, candidate, ct: ct));
+
+        return candidate;
     }
 
     public static string Serialize(object settings) => JsonSerializer.Serialize(settings, JsonOpts);

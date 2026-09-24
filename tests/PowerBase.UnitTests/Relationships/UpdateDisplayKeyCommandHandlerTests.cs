@@ -44,7 +44,7 @@ public class UpdateDisplayKeyCommandHandlerTests
         new() { Id = id, Fid = fid, Name = name, Label = name, TypeCode = typeCode, IsUnique = isUnique, Settings = settings, PublicId = Guid.NewGuid() };
 
     /// <summary>A Lookup field on the child shaped like one the carry-over auto-chain would have left
-    /// behind for <paramref name="source"/> during an earlier switch-away from it as the override key.</summary>
+    /// behind for <paramref name="source"/> during an earlier switch-away from it as the alternate key.</summary>
     private static AppField StaleLookup(long id, int fid, AppField source) =>
         Field(id, fid, source.Label ?? source.Name, "Lookup",
             settings: $"{{\"relationshipId\":{RelId},\"referenceFid\":{ReferenceFid},\"sourceTableId\":{ParentTableId},\"sourceFid\":{source.Fid},\"sourceTypeCode\":\"{source.TypeCode}\"}}");
