@@ -25,7 +25,37 @@ namespace PowerBase.API.Controllers;
 [RequireAuth]
 public class PipelineConnectionsController : ControllerBase
 {
+    /// <summary>Unpaginated metadata source for pipeline App selectors.</summary>
+    [HttpGet("pipelines/metadata/apps")]
+    public async Task<IActionResult> GetCurrentTenantApps(
+        [FromServices] PowerBase.Application.Common.Interfaces.IQueryContext queryContext,
+        [FromServices] PowerBase.Application.Common.Interfaces.IAppRepository apps,
+        CancellationToken ct)
+    {
+        var items = (await apps.ListAllByUserAsync(queryContext.UserId, ct))
+            .Select(app => new ConnectionAppDto { PublicId = app.PublicId, Name = app.Name })
+            .ToList();
+        return Ok(new ApiListResponse<ConnectionAppDto>(items, items.Count, 1, items.Count));
+    }
+
+    /// <summary>Unpaginated metadata source for pipeline Table selectors.</summary>
+    [HttpGet("pipelines/metadata/apps/{appId:guid}/tables")]
+    public async Task<IActionResult> GetCurrentTenantTables(Guid appId,
+        [FromServices] PowerBase.Application.Common.Interfaces.IAppAccessService access,
+        [FromServices] PowerBase.Application.Common.Interfaces.IAppRepository apps,
+        [FromServices] PowerBase.Application.Common.Interfaces.IAppTableRepository tables,
+        CancellationToken ct)
+    {
+        await access.RequirePermissionByAppPublicIdAsync(appId, PowerBase.Domain.Constants.PermissionCodes.PowerFlowsRead, ct);
+        var app = await apps.GetByPublicIdAsync(appId, ct);
+        var items = (await tables.ListNavByAppAsync(app.Id, ct))
+            .Select(table => new ConnectionTableDto { PublicId = table.PublicId, Name = table.Name })
+            .ToList();
+        return Ok(new ApiListResponse<ConnectionTableDto>(items, items.Count, 1, items.Count));
+    }
+
     [HttpGet("pipelines/tables/{tableId:guid}/fields")]
+    [HttpGet("pipelines/metadata/tables/{tableId:guid}/fields")]
     public async Task<IActionResult> GetCurrentTenantFields(Guid tableId,
         [FromServices] PowerBase.Application.Common.Interfaces.IAppAccessService access,
         [FromServices] PowerBase.Application.Common.Interfaces.IAppTableRepository tables,
