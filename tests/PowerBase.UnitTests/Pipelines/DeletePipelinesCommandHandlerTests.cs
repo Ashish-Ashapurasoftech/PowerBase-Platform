@@ -16,7 +16,6 @@ namespace PowerBase.UnitTests.Pipelines;
 
 public class DeletePipelinesCommandHandlerTests
 {
-    private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
     private readonly IPipelineRepository _pipelineRepo = Substitute.For<IPipelineRepository>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
     private readonly IMainPipelineQueueRepository _queueRepo = Substitute.For<IMainPipelineQueueRepository>();
@@ -27,7 +26,6 @@ public class DeletePipelinesCommandHandlerTests
 
     public DeletePipelinesCommandHandlerTests()
     {
-        _appRepo.GetIdByPublicIdAsync(_appPublicId, Arg.Any<CancellationToken>()).Returns(_appId);
         _queryContext.TenantId.Returns(1L);
     }
 
@@ -36,7 +34,7 @@ public class DeletePipelinesCommandHandlerTests
     {
         // Arrange
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid>());
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
+        var handler = new DeletePipelinesCommandHandler(_pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act & Assert
         await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
@@ -49,7 +47,7 @@ public class DeletePipelinesCommandHandlerTests
     {
         // Arrange
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { Guid.NewGuid(), Guid.Empty });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
+        var handler = new DeletePipelinesCommandHandler(_pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act & Assert
         await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
@@ -58,12 +56,14 @@ public class DeletePipelinesCommandHandlerTests
     }
 
     [Fact]
-    public async Task HandleAsync_CrossAppPipeline_ThrowsUnauthorizedActionException()
+    public async Task HandleAsync_CrossAppPipeline_DeletesSuccessfully()
     {
-        // Arrange
+        // Arrange: PowerFlows may legitimately be used/managed across apps within the same tenant,
+        // so bulk delete must not reject a pipeline just because it belongs to a different app
+        // than the one the request was made from (matches single-delete behavior).
         var pipelineId1 = Guid.NewGuid();
         var pipeline1 = new Pipeline { PublicId = pipelineId1, AppId = _appId, Name = "Pipeline 1" };
-        
+
         var pipelineId2 = Guid.NewGuid();
         var pipeline2 = new Pipeline { PublicId = pipelineId2, AppId = 999L, Name = "Cross App Pipeline" }; // Belongs to different App
 
@@ -71,15 +71,23 @@ public class DeletePipelinesCommandHandlerTests
         _pipelineRepo.GetByPublicIdAsync(pipelineId2, Arg.Any<CancellationToken>()).Returns(pipeline2);
 
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { pipelineId1, pipelineId2 });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
+        var handler = new DeletePipelinesCommandHandler(_pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
-        // Act & Assert
-        await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
-            .Should().ThrowAsync<UnauthorizedActionException>()
-            .WithMessage("*do not belong to this application.*");
+        // Act
+        await handler.HandleAsync(command, CancellationToken.None);
 
-        // Verify no deletion occurred
-        await _pipelineRepo.DidNotReceiveWithAnyArgs().SoftDeleteManyAsync(null!, default);
+        // Assert: both pipelines deleted, each audited against its own owning app
+        await _pipelineRepo.Received(1).SoftDeleteManyAsync(
+            Arg.Is<IEnumerable<Guid>>(ids => ids.Count() == 2 && ids.Contains(pipelineId1) && ids.Contains(pipelineId2)),
+            Arg.Any<CancellationToken>());
+
+        await _auditRepo.Received(1).LogActivityAsync(
+            AuditActions.Deleted,
+            AuditEntityTypes.Pipeline,
+            pipelineId2.ToString(),
+            "Pipeline workflow deleted: Cross App Pipeline",
+            appId: 999L,
+            ct: Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -95,7 +103,7 @@ public class DeletePipelinesCommandHandlerTests
             .Returns(Task.FromException<Pipeline>(new NotFoundException("PowerFlow", nonexistentId)));
 
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { pipelineId1, nonexistentId });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
+        var handler = new DeletePipelinesCommandHandler(_pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act & Assert
         await handler.Invoking(h => h.HandleAsync(command, CancellationToken.None))
@@ -116,7 +124,7 @@ public class DeletePipelinesCommandHandlerTests
 
         // Pass duplicate IDs
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { pipelineId1, pipelineId1 });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
+        var handler = new DeletePipelinesCommandHandler(_pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act
         await handler.HandleAsync(command, CancellationToken.None);
@@ -150,7 +158,7 @@ public class DeletePipelinesCommandHandlerTests
         _pipelineRepo.GetByPublicIdAsync(draftId, Arg.Any<CancellationToken>()).Returns(draftPipeline);
 
         var command = new DeletePipelinesCommand(_appPublicId, new List<Guid> { activeId, draftId });
-        var handler = new DeletePipelinesCommandHandler(_appRepo, _pipelineRepo, _auditRepo, _queueRepo, _queryContext);
+        var handler = new DeletePipelinesCommandHandler(_pipelineRepo, _auditRepo, _queueRepo, _queryContext);
 
         // Act
         await handler.HandleAsync(command, CancellationToken.None);

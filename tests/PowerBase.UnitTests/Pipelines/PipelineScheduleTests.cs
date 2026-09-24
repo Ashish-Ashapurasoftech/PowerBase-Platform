@@ -695,7 +695,7 @@ public class PipelineScheduleTests
         appRepo.GetIdByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(5L);
         pipelineRepo.GetByPublicIdAsync(publicId, Arg.Any<CancellationToken>()).Returns(pipeline);
 
-        var handler = new DeletePipelinesCommandHandler(appRepo, pipelineRepo, auditRepo, queueRepo, queryContext);
+        var handler = new DeletePipelinesCommandHandler(pipelineRepo, auditRepo, queueRepo, queryContext);
         await handler.HandleAsync(new DeletePipelinesCommand(Guid.NewGuid(), new List<Guid> { publicId }), CancellationToken.None);
 
         await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), "Pipeline deleted", Arg.Any<CancellationToken>());
