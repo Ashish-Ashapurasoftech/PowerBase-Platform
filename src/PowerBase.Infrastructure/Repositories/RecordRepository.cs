@@ -1533,8 +1533,20 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                                resolvedField.TypeCode.Equals("Duration", StringComparison.OrdinalIgnoreCase) ||
                                resolvedField.TypeCode.Equals("RecordId", StringComparison.OrdinalIgnoreCase) ||
                                resolvedField.TypeCode.Equals("Integer", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("Float", StringComparison.OrdinalIgnoreCase) ||
+                               resolvedField.TypeCode.Equals("NumericRange", StringComparison.OrdinalIgnoreCase) ||
                                (resolvedField.IsSystem && resolvedField.PhysicalColumnName is "Id" or "CreatedBy" or "ModifiedBy")
-                           ));
+                            ));
+
+        var isBooleanCol = resolvedField != null && (
+            resolvedField.TypeCode.Equals("Boolean", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("Checkbox", StringComparison.OrdinalIgnoreCase));
+
+        var isDateCol = resolvedField != null && (
+            resolvedField.TypeCode.Equals("Date", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("DateTime", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("Date_Time", StringComparison.OrdinalIgnoreCase) ||
+            resolvedField.TypeCode.Equals("Timestamp", StringComparison.OrdinalIgnoreCase));
 
         Func<string?, object?> formatVal = rawVal =>
         {
@@ -1544,6 +1556,16 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 if (long.TryParse(rawVal, out var l)) return l;
                 if (decimal.TryParse(rawVal, out var d)) return d;
             }
+            if (isBooleanCol)
+            {
+                if (bool.TryParse(rawVal, out var b)) return b;
+                if (rawVal == "1") return true;
+                if (rawVal == "0") return false;
+            }
+            if (isDateCol && DateTime.TryParse(rawVal, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out var date))
+                return date;
             return rawVal;
         };
 
@@ -1603,11 +1625,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
                 return $"{targetExpr} <= @{pname}";
             }
-            case "date_eq":        p.Add(pname, cond.Value);        return $"CAST({colExpr} AS DATE) = @{pname}";
+            case "date_eq":        p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) = CAST(@{pname} AS DATE)";
+            case "date_ne":        p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) <> CAST(@{pname} AS DATE)";
             case "contains":       p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) LIKE @{pname}";
             case "notContains":    p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
             case "startsWith":     p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) LIKE @{pname}";
             case "notStartsWith":  p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
+            case "endsWith":       p.Add(pname, $"%{cond.Value?.ToLower()}");  return $"LOWER({stringColExpr}) LIKE @{pname}";
             case "wildcard":
             {
                 p.Add(pname, TranslateWildcardPattern(cond.Value ?? "").ToLower());

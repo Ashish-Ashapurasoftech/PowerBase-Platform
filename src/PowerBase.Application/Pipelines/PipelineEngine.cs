@@ -5291,6 +5291,7 @@ public class PipelineEngine : IPipelineEngine
             "contains" => "contains",
             "not-contains" => "notContains",
             "starts-with" => "startsWith",
+            "ends-with" => "endsWith",
             "is-empty" => "isEmpty",
             "is-not-empty" => "isNotEmpty",
             "is-true" => "eq",
@@ -5359,6 +5360,9 @@ public class PipelineEngine : IPipelineEngine
                 {
                     var rawValue = rule.Value;
                     var dbOp = MapUiOperatorToDbOperator(rule.Operator);
+                    var fieldCategory = PipelineFilterEvaluator.GetTypeCategory(field.TypeCode);
+                    if (fieldCategory == "DATE" && dbOp == "eq") dbOp = "date_eq";
+                    if (fieldCategory == "DATE" && dbOp == "ne") dbOp = "date_ne";
 
                     if (rule.Operator == "is_true" || rule.Operator == "is-true")
                     {
