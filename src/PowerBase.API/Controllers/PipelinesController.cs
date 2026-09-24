@@ -389,6 +389,7 @@ public class PipelinesController : ControllerBase
         Description = result.Description,
         VariablesJson = result.VariablesJson,
         IsActive = result.IsActive,
+        DateFormatString = result.DateFormatString,
         RowVersion = Convert.ToBase64String(result.RowVersion),
         Steps = result.Steps.Select(MapEditorStepResponse).ToList(),
         EditorTables = result.EditorTables.Select(t => new PipelineEditorTableDto

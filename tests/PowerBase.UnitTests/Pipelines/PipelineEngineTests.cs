@@ -2684,6 +2684,28 @@ public class PipelineEngineTests
     }
 
     [Fact]
+    public void RecordAction_DateMapping_UsesTheSuppliedAppDateFormat()
+    {
+        var field = new AppField { Fid = 6, Name = "event_date", Label = "Event date", TypeCode = "DATE" };
+        var method = typeof(PipelineEngine).GetMethod("ParseRecordMappingValueWithFormat", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        var parsed = method.Invoke(_engine, new object?[] { "05-04-2026", field, "05-04-2026", "DD-MM-YYYY" });
+
+        parsed.Should().Be(new DateTime(2026, 4, 5));
+    }
+
+    [Fact]
+    public void RecordAction_DateTimeMapping_AcceptsCanonicalPickerValue()
+    {
+        var field = new AppField { Fid = 6, Name = "starts_at", Label = "Starts at", TypeCode = "DATE_TIME" };
+        var method = typeof(PipelineEngine).GetMethod("ParseRecordMappingValueWithFormat", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        var parsed = method.Invoke(_engine, new object?[] { "2026-04-05T15:45:12", field, "2026-04-05T15:45:12", "DD-MM-YYYY" });
+
+        parsed.Should().Be(new DateTime(2026, 4, 5, 15, 45, 12));
+    }
+
+    [Fact]
     public void RecordAction_PhoneFormattedValue_MustNotBeCoercedToNumber()
     {
         var field = new AppField { Fid = 6, Name = "c_number", Label = "Number", TypeCode = "Number" };

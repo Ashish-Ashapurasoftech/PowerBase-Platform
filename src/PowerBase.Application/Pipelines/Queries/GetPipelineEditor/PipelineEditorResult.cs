@@ -16,6 +16,7 @@ public class PipelineEditorResult
     public string? Description { get; set; }
     public string? VariablesJson { get; set; }
     public bool IsActive { get; set; }
+    public string DateFormatString { get; set; } = "MM-DD-YYYY";
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
 
     // ─── Reconstructed step hierarchy (mirrors existing GetPipeline result) ──────

@@ -17,6 +17,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Transactions;
+using System.Globalization;
 using Microsoft.Extensions.Options;
 using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Formulas;
@@ -1838,7 +1839,7 @@ public class PipelineEngine : IPipelineEngine
                         // Quickbase single-record steps omit blank mappings instead of
                         // writing NULL (which would clear an existing value on update).
                         if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
-                        var parsedVal = ParseRecordMappingValue(resolvedValStr, field, mapping.Value);
+                        var parsedVal = ParseRecordMappingValueWithFormat(resolvedValStr, field, mapping.Value, mapping.FormatString);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -1950,7 +1951,7 @@ public class PipelineEngine : IPipelineEngine
                     {
                         var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
                         if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
-                        var parsedVal = ParseRecordMappingValue(resolvedValStr, field, mapping.Value);
+                        var parsedVal = ParseRecordMappingValueWithFormat(resolvedValStr, field, mapping.Value, mapping.FormatString);
                         values[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -4775,9 +4776,12 @@ public class PipelineEngine : IPipelineEngine
     }
 
     private object? ParseRecordMappingValue(string value, AppField field, string? expression)
+        => ParseRecordMappingValueWithFormat(value, field, expression, null);
+
+    private object? ParseRecordMappingValueWithFormat(string value, AppField field, string? expression, string? dateFormat)
     {
         var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
-        try { return ParseValueType(value, field.TypeCode, label); }
+        try { return ParseValueTypeWithFormat(value, field.TypeCode, label, dateFormat); }
         catch (FormatException ex)
         {
             // Refer to a dynamic source without recording its possibly sensitive value.
@@ -4794,6 +4798,9 @@ public class PipelineEngine : IPipelineEngine
     }
 
     private object? ParseValueType(string valueStr, string typeCode, string fieldName)
+        => ParseValueTypeWithFormat(valueStr, typeCode, fieldName, null);
+
+    private object? ParseValueTypeWithFormat(string valueStr, string typeCode, string fieldName, string? dateFormat)
     {
         if (string.IsNullOrWhiteSpace(valueStr)) return null;
 
@@ -4812,9 +4819,39 @@ public class PipelineEngine : IPipelineEngine
                 decimal.TryParse(valueStr, out dVal)) return dVal;
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
-        if (new[] { "DATE", "DATE_TIME", "DATETIME", "TIME", "TIME_OF_DAY", "TIMESTAMP" }.Contains(normalizedCode))
+        if (new[] { "DATE", "DATE_TIME", "DATETIME", "TIMESTAMP" }.Contains(normalizedCode))
         {
-            if (DateTime.TryParse(valueStr, out var dtVal)) return dtVal;
+            var canonicalFormats = normalizedCode == "DATE"
+                ? new[] { "yyyy-MM-dd" }
+                : new[] { "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd" };
+            if (DateTime.TryParseExact(valueStr.Trim(), canonicalFormats, CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces, out var dtVal)) return dtVal;
+
+            var dotNetDateFormat = dateFormat?.ToUpperInvariant() switch
+            {
+                "MM-DD-YY" => "MM-dd-yy",
+                "DD-MM-YYYY" => "dd-MM-yyyy",
+                "DD-MM-YY" => "dd-MM-yy",
+                "YYYY-MM-DD" => "yyyy-MM-dd",
+                _ => "MM-dd-yyyy"
+            };
+            var localizedFormats = normalizedCode == "DATE"
+                ? new[] { dotNetDateFormat, dotNetDateFormat.Replace('-', '/') }
+                : new[] {
+                    dotNetDateFormat + " h:mm tt", dotNetDateFormat + " h:mm:ss tt",
+                    dotNetDateFormat + " HH:mm", dotNetDateFormat + " HH:mm:ss",
+                    dotNetDateFormat.Replace('-', '/') + " h:mm tt",
+                    dotNetDateFormat.Replace('-', '/') + " HH:mm",
+                    dotNetDateFormat, dotNetDateFormat.Replace('-', '/')
+                };
+            if (DateTime.TryParseExact(valueStr.Trim(), localizedFormats, CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces, out dtVal)) return dtVal;
+            throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
+        }
+        if (normalizedCode is "TIME" or "TIME_OF_DAY")
+        {
+            if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm", "HH:mm:ss", "h:mm tt", "h:mm:ss tt" },
+                CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeVal)) return timeVal;
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
 
@@ -5153,6 +5190,7 @@ public class PipelineEngine : IPipelineEngine
         public string? Field { get; set; }
         [System.Text.Json.Serialization.JsonConverter(typeof(StringOrPrimitiveJsonConverter))]
         public string? Value { get; set; }
+        public string? FormatString { get; set; }
     }
 
     private static bool AreValuesEqual(object? val1, object? val2, string? typeCode)
