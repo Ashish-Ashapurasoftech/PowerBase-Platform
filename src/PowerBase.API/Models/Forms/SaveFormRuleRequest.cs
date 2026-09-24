@@ -17,7 +17,8 @@ public class SaveFormRuleRequest
 
 public class FormRuleConditionRequest
 {
-    public long AppFieldId { get; init; }
+    public string ConditionKind { get; init; } = "field";
+    public long? AppFieldId { get; init; }
     public string Operator { get; init; } = string.Empty;
     public string? Value { get; init; }
     public string? ValueType { get; init; }
@@ -34,5 +35,7 @@ public class FormRuleActionRequest
     public long? TargetSectionId { get; init; }
     public long? TargetBlockId { get; init; }
     public string? ActionValue { get; init; }
+    public bool RunOnceOnActivation { get; init; }
+    public bool IsExpressionValue { get; init; }
     public int DisplayOrder { get; init; }
 }

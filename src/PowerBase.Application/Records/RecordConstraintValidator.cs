@@ -84,7 +84,7 @@ public static class RecordConstraintValidator
                 continue;
             }
 
-            var isBlank = value is null || (value is string s && string.IsNullOrWhiteSpace(s));
+            var isBlank = PhysicalNaming.IsRequiredMissing(field.TypeCode, value);
 
             if (field.IsRequired && isBlank)
             {

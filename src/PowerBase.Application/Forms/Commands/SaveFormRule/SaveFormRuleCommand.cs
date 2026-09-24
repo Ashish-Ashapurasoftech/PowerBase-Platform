@@ -14,7 +14,7 @@ public record SaveFormRuleCommand(
     IReadOnlyList<FormRuleActionSpec> Actions,
     byte[] RowVersion);
 
-public record FormRuleConditionSpec(long AppFieldId, string Operator, string? Value, string? ValueType, long? ValueFieldId, int DisplayOrder);
+public record FormRuleConditionSpec(long? AppFieldId, string Operator, string? Value, string? ValueType, long? ValueFieldId, int DisplayOrder, string ConditionKind = "field");
 
 public record FormRuleActionSpec(
     string ActionType,
@@ -23,4 +23,6 @@ public record FormRuleActionSpec(
     long? TargetSectionId,
     long? TargetBlockId,
     string? ActionValue,
-    int DisplayOrder);
+    int DisplayOrder,
+    bool RunOnceOnActivation = false,
+    bool IsExpressionValue = false);

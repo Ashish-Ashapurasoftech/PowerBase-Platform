@@ -502,6 +502,8 @@ builder.Services.AddScoped<UpdateReportCommandHandler>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();
 builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetReportGridEditRules.GetReportGridEditRulesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportGridEditRules.UpdateReportGridEditRulesCommandHandler>();
 builder.Services.AddScoped<UpdateDefaultReportSettingsCommandHandler>();
 builder.Services.AddScoped<GetReportQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetOrCreateDefaultReportSettings.GetOrCreateDefaultReportSettingsQueryHandler>();

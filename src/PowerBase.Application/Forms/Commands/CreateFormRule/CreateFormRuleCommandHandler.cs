@@ -72,6 +72,7 @@ public class CreateFormRuleCommandHandler
         Conditions       = r.Conditions.Select(c => new FormRuleConditionDetail
         {
             Id           = c.Id,
+            ConditionKind = c.ConditionKind,
             AppFieldId   = c.AppFieldId,
             Operator     = c.Operator,
             Value        = c.Value,
@@ -81,14 +82,16 @@ public class CreateFormRuleCommandHandler
         }).ToList(),
         Actions = r.Actions.Select(a => new FormRuleActionDetail
         {
-            Id              = a.Id,
-            ActionType      = a.ActionType,
-            TargetType      = a.TargetType,
-            TargetElementId = a.TargetElementId,
-            TargetSectionId = a.TargetSectionId,
-            TargetBlockId   = a.TargetBlockId,
-            ActionValue     = a.ActionValue,
-            DisplayOrder    = a.DisplayOrder,
+            Id                  = a.Id,
+            ActionType          = a.ActionType,
+            TargetType          = a.TargetType,
+            TargetElementId     = a.TargetElementId,
+            TargetSectionId     = a.TargetSectionId,
+            TargetBlockId       = a.TargetBlockId,
+            ActionValue         = a.ActionValue,
+            RunOnceOnActivation = a.RunOnceOnActivation,
+            IsExpressionValue   = a.IsExpressionValue,
+            DisplayOrder        = a.DisplayOrder,
         }).ToList(),
     };
 }

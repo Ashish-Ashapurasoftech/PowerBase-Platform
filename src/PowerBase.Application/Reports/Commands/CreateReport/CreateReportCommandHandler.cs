@@ -147,6 +147,7 @@ public class CreateReportCommandHandler
                 YMax2 = command.Chart.YMax2,
                 LogScale2 = command.Chart.LogScale2,
                 GaugeFieldId = command.Chart.GaugeFieldId,
+                GaugeFunction = command.Chart.GaugeFunction,
                 GaugeLowMaxPercent = command.Chart.GaugeLowMaxPercent,
                 GaugeMediumMaxPercent = command.Chart.GaugeMediumMaxPercent,
                 DataLabelDisplayAs = string.IsNullOrWhiteSpace(command.Chart.DataLabelDisplayAs) ? "Value" : command.Chart.DataLabelDisplayAs,

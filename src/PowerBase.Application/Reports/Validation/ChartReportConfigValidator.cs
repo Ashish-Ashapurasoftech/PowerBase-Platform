@@ -32,6 +32,7 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
         { "Value", "PercentOfSeries" };
     private static readonly HashSet<string> AllowedGaugeGoalType = new(StringComparer.OrdinalIgnoreCase) { "Fixed", "DataValue" };
     private static readonly HashSet<string> AllowedGaugeGoalFunction = new(StringComparer.OrdinalIgnoreCase) { "Sum", "Avg" };
+    private static readonly HashSet<string> AllowedGaugeFunction = new(StringComparer.OrdinalIgnoreCase) { "Sum", "Avg", "Max", "Min" };
 
     public string ReportType => "Chart";
 
@@ -129,6 +130,10 @@ public sealed class ChartReportConfigValidator : IReportConfigValidator
             CommonReportValidationHelpers.RequirePopulated(chart.GaugeFieldId.HasValue, "chart.gaugeFieldId", "Gauge", errors);
             if (chart.GaugeFieldId.HasValue && !validFieldIds.Contains(chart.GaugeFieldId.Value))
                 CommonReportValidationHelpers.AddError(errors, "chart.gaugeFieldId", $"Unknown field ID: {chart.GaugeFieldId.Value}");
+
+            if (!string.IsNullOrWhiteSpace(chart.GaugeFunction) && !AllowedGaugeFunction.Contains(chart.GaugeFunction))
+                CommonReportValidationHelpers.AddError(errors, "chart.gaugeFunction",
+                    $"gaugeFunction must be one of: {string.Join(", ", AllowedGaugeFunction)}");
 
             var goalType = string.IsNullOrWhiteSpace(chart.GaugeGoalType) ? "Fixed" : chart.GaugeGoalType;
             if (!AllowedGaugeGoalType.Contains(goalType))

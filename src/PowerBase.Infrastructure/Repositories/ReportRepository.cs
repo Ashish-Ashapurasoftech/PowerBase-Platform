@@ -483,6 +483,57 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         return results.AsList();
     }
 
+    private const string GetGridEditRuleIdsSql = """
+        SELECT fr.PublicId
+        FROM meta.ReportGridEditRule g
+        JOIN meta.FormRule fr ON fr.Id = g.FormRuleId
+        JOIN meta.Report r ON r.Id = g.ReportId
+        WHERE r.PublicId = @reportPublicId
+        ORDER BY g.DisplayOrder
+        """;
+
+    private const string DeleteGridEditRulesSql = """
+        DELETE g FROM meta.ReportGridEditRule g
+        JOIN meta.Report r ON r.Id = g.ReportId
+        WHERE r.PublicId = @reportPublicId
+        """;
+
+    private const string InsertGridEditRuleSql = """
+        INSERT INTO meta.ReportGridEditRule (ReportId, FormRuleId, DisplayOrder)
+        SELECT r.Id, fr.Id, @displayOrder
+        FROM meta.Report r, meta.FormRule fr
+        WHERE r.PublicId = @reportPublicId AND fr.PublicId = @rulePublicId AND fr.IsDeleted = 0
+        """;
+
+    public async Task<IReadOnlyList<Guid>> GetGridEditRuleIdsAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var results = await connection.QueryAsync<Guid>(
+            new CommandDefinition(GetGridEditRuleIdsSql, new { reportPublicId }, cancellationToken: ct));
+        return results.AsList();
+    }
+
+    public async Task SetGridEditRulesAsync(Guid reportPublicId, IReadOnlyList<Guid> orderedFormRuleIds, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            await connection.ExecuteAsync(
+                new CommandDefinition(DeleteGridEditRulesSql, new { reportPublicId }, transaction: transaction, cancellationToken: ct));
+            for (var i = 0; i < orderedFormRuleIds.Count; i++)
+            {
+                await connection.ExecuteAsync(
+                    new CommandDefinition(InsertGridEditRuleSql,
+                        new { reportPublicId, rulePublicId = orderedFormRuleIds[i], displayOrder = i + 1 },
+                        transaction: transaction, cancellationToken: ct));
+            }
+            await transaction.CommitAsync(ct);
+        }
+        catch { await transaction.RollbackAsync(ct); throw; }
+    }
+
     public async Task<Dictionary<long, List<long>>> GetAppRoleReportsMapAsync(long appId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);

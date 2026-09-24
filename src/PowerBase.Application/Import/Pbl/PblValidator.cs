@@ -481,9 +481,12 @@ public class PblValidator
         "all", "any",
     };
 
+    // Kept in sync with SaveFormRuleCommandValidator.ValidOperators (a separate copy — this one
+    // validates an imported .pbl package's form rules, not a live save).
     private static readonly IReadOnlyCollection<string> ValidFormRuleOperators = new HashSet<string>(StringComparer.Ordinal)
     {
-        "eq", "ne", "contains", "notContains", "startsWith", "endsWith", "isEmpty", "isNotEmpty", "gt", "gte", "lt", "lte",
+        "eq", "ne", "contains", "notContains", "startsWith", "endsWith", "notStartsWith", "isEmpty", "isNotEmpty", "gt", "gte", "lt", "lte",
+        "includes", "notIncludes", "changed", "notChanged", "during", "notDuring",
     };
 
     private static readonly IReadOnlyCollection<string> ValidFormRuleActionTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)

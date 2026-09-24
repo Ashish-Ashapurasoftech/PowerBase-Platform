@@ -309,6 +309,7 @@ public class PagesController : ControllerBase
             YMax2 = chart.YMax2,
             LogScale2 = chart.LogScale2,
             GaugeFieldId = chart.GaugeFieldId,
+            GaugeFunction = chart.GaugeFunction,
             GaugeLowMaxPercent = chart.GaugeLowMaxPercent,
             GaugeMediumMaxPercent = chart.GaugeMediumMaxPercent,
         };

@@ -45,6 +45,8 @@ public sealed class RecordWriteService : IRecordWriteService
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly FormulaEngine _engine;
     private readonly IAppRepository _appRepo;
+    private readonly IFormRuleRepository _formRuleRepo;
+    private readonly IFormRepository _formRepo;
     private readonly IQueryContext _queryContext;
 
     public RecordWriteService(
@@ -58,6 +60,8 @@ public sealed class RecordWriteService : IRecordWriteService
         IPipelineTriggerInterceptor triggerInterceptor,
         FormulaEngine engine,
         IAppRepository appRepo,
+        IFormRuleRepository formRuleRepo,
+        IFormRepository formRepo,
         IQueryContext queryContext)
     {
         _tableRepo = tableRepo;
@@ -70,6 +74,8 @@ public sealed class RecordWriteService : IRecordWriteService
         _triggerInterceptor = triggerInterceptor;
         _engine = engine;
         _appRepo = appRepo;
+        _formRuleRepo = formRuleRepo;
+        _formRepo = formRepo;
         _queryContext = queryContext;
     }
 
@@ -151,6 +157,21 @@ public sealed class RecordWriteService : IRecordWriteService
         // CreateRecordCommandHandler), covering both plain record edits and Action Button writes
         // that go through this shared service.
         await CustomDataRuleValidator.ValidateAsync(table, fields, effectiveValues, _tableRepo, _fieldRepo, _recordRepo, _engine, ct);
+
+        // Form Rules — server-side mirror of the form's client-side rule evaluation, covering
+        // both plain record edits and Action Button writes that go through this shared service.
+        // oldValuesByFid (for 'changed'/'notChanged' conditions) is a cheap in-memory re-keying of
+        // the oldRecord snapshot already fetched above — separate from the beforeValues dict the
+        // audit/pipeline-diff block below builds for its own purpose, since that one isn't built
+        // yet at this point and (unlike this one) also needs afterValues/pipelineChangedFields
+        // computed alongside it.
+        var oldValuesByFid = fields
+            .Where(f => f.Fid.HasValue)
+            .ToDictionary(f => (long)f.Fid!.Value,
+                f => oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var ov) ? ov : null);
+        await FormRuleServerValidator.ValidateAsync(
+            table, fields, effectiveValues, oldValuesByFid, _queryContext.TenantRole, _queryContext.UserId,
+            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _engine, ct);
 
         await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct, onIndexMessageCreated);
 

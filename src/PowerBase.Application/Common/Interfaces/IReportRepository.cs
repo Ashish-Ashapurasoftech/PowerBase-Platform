@@ -35,4 +35,12 @@ public interface IReportRepository
     Task<IReadOnlyList<long>> GetReportRoleIdsAsync(long reportId, CancellationToken ct = default);
     Task<IReadOnlyList<Guid>> GetReportRolePublicIdsAsync(long reportId, CancellationToken ct = default);
     Task<Dictionary<long, List<long>>> GetAppRoleReportsMapAsync(long appId, CancellationToken ct = default);
+
+    /// <summary>The ordered list of Form Rule ids this report enforces during its own Grid Edit
+    /// (meta.ReportGridEditRule) — a client-side pre-check only; server-side write enforcement is
+    /// unchanged and still checks every active rule table-wide regardless of this list.</summary>
+    Task<IReadOnlyList<Guid>> GetGridEditRuleIdsAsync(Guid reportPublicId, CancellationToken ct = default);
+    /// <summary>Replaces the report's whole Grid Edit rule list (delete-then-reinsert, same shape
+    /// as SetReportRolesAsync) — DisplayOrder is assigned from the list's own order (1-based).</summary>
+    Task SetGridEditRulesAsync(Guid reportPublicId, IReadOnlyList<Guid> orderedFormRuleIds, CancellationToken ct = default);
 }
