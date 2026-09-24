@@ -13,12 +13,15 @@ public class SaveFormRuleCommandValidator : AbstractValidator<SaveFormRuleComman
 
     private static readonly HashSet<string> ValidOperators = new()
     {
-        "eq", "ne", "contains", "notContains", "startsWith", "endsWith",
+        "eq", "ne", "contains", "notContains", "startsWith", "endsWith", "notStartsWith",
         "isEmpty", "isNotEmpty", "gt", "gte", "lt", "lte",
         // "includes"/"notIncludes" (User/MultiUser fields, and now role conditions) were already
         // used by the frontend's rule builder but missing here, which would have rejected any
         // rule using them — added alongside "changed"/"notChanged" (field-change-detection).
         "includes", "notIncludes", "changed", "notChanged",
+        // Date-only relative-range containment ("is during the current/previous/next N <unit>") —
+        // see FormRuleServerValidator.ComputeDuringRange for the evaluation side.
+        "during", "notDuring",
     };
 
     private static readonly HashSet<string> ValidConditionLogic = new() { "all", "any" };

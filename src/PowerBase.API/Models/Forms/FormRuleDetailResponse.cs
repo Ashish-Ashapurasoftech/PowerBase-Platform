@@ -37,5 +37,6 @@ public class FormRuleActionResponse
     public long? TargetSectionId { get; init; }
     public long? TargetBlockId { get; init; }
     public string? ActionValue { get; init; }
+    public bool RunOnceOnActivation { get; init; }
     public int DisplayOrder { get; init; }
 }

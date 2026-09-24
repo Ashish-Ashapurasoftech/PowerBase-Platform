@@ -82,14 +82,15 @@ public class CreateFormRuleCommandHandler
         }).ToList(),
         Actions = r.Actions.Select(a => new FormRuleActionDetail
         {
-            Id              = a.Id,
-            ActionType      = a.ActionType,
-            TargetType      = a.TargetType,
-            TargetElementId = a.TargetElementId,
-            TargetSectionId = a.TargetSectionId,
-            TargetBlockId   = a.TargetBlockId,
-            ActionValue     = a.ActionValue,
-            DisplayOrder    = a.DisplayOrder,
+            Id                  = a.Id,
+            ActionType          = a.ActionType,
+            TargetType          = a.TargetType,
+            TargetElementId     = a.TargetElementId,
+            TargetSectionId     = a.TargetSectionId,
+            TargetBlockId       = a.TargetBlockId,
+            ActionValue         = a.ActionValue,
+            RunOnceOnActivation = a.RunOnceOnActivation,
+            DisplayOrder        = a.DisplayOrder,
         }).ToList(),
     };
 }

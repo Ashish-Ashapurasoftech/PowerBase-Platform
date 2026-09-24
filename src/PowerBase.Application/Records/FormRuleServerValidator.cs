@@ -1,5 +1,6 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Formula;
@@ -37,6 +38,7 @@ public static class FormRuleServerValidator
         IReadOnlyDictionary<long, object?> effectiveValues,
         IReadOnlyDictionary<long, object?>? oldValuesByFid,
         string? currentUserRole,
+        long currentUserId,
         IFormRuleRepository ruleRepo,
         IFormRepository formRepo,
         IAppTableRepository tableRepo,
@@ -46,7 +48,7 @@ public static class FormRuleServerValidator
         CancellationToken ct)
     {
         var violations = await CollectViolationsAsync(
-            table, fields, effectiveValues, oldValuesByFid, currentUserRole,
+            table, fields, effectiveValues, oldValuesByFid, currentUserRole, currentUserId,
             ruleRepo, formRepo, tableRepo, fieldRepo, recordRepo, engine, ct);
         if (violations.Count > 0)
             // Grouped, not a plain ToDictionary — more than one rule can flag the same field
@@ -64,6 +66,13 @@ public static class FormRuleServerValidator
     /// <param name="currentUserRole">The evaluating user's role name (IQueryContext.TenantRole),
     /// compared directly against a role condition's Value — same convention the frontend's
     /// AppPermissionService.roleName comparison uses.</param>
+    /// <param name="currentUserId">The evaluating user's numeric id (IQueryContext.UserId) —
+    /// resolves a User/MultiUser field condition's "the current user" option
+    /// (FormRuleCondition.Value containing the '__current_user__' sentinel). This is the numeric
+    /// space a User field's value lives in server-side (UserFieldValueResolver has already turned
+    /// any userPublicId into this same long id by the time effectiveValues reaches here) — NOT
+    /// the GUID the frontend's own resolution uses, which compares against the field's live
+    /// pre-save value instead (see AppPermissionsResult.CurrentUserPublicId).</param>
     /// <param name="recordId">Echoed back on each violation for the caller's own reporting; not
     /// used for lookup. Defaults to Guid.Empty for single-record callers that don't need it.</param>
     public static async Task<List<RecordConstraintViolation>> CollectViolationsAsync(
@@ -72,6 +81,7 @@ public static class FormRuleServerValidator
         IReadOnlyDictionary<long, object?> effectiveValues,
         IReadOnlyDictionary<long, object?>? oldValuesByFid,
         string? currentUserRole,
+        long currentUserId,
         IFormRuleRepository ruleRepo,
         IFormRepository formRepo,
         IAppTableRepository tableRepo,
@@ -103,7 +113,7 @@ public static class FormRuleServerValidator
             }
             else
             {
-                met = ConditionsMet(rule, effectiveValues, oldValuesByFid, currentUserRole);
+                met = ConditionsMet(rule, effectiveValues, oldValuesByFid, currentUserRole, currentUserId);
             }
             if (!met) continue;
 
@@ -138,7 +148,7 @@ public static class FormRuleServerValidator
                 // RecordConstraintValidator's own Required check for the same reason — nothing
                 // about this write is responsible for that field's existing, already-saved value).
                 if (!hasValue && !isCreate) continue;
-                var isBlank = !hasValue || value is null || (value is string s && string.IsNullOrWhiteSpace(s));
+                var isBlank = !hasValue || PhysicalNaming.IsRequiredMissing(field.TypeCode, value);
                 if (!isBlank) continue;
 
                 var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
@@ -153,7 +163,8 @@ public static class FormRuleServerValidator
         FormRule rule,
         IReadOnlyDictionary<long, object?> effectiveValues,
         IReadOnlyDictionary<long, object?>? oldValuesByFid,
-        string? currentUserRole)
+        string? currentUserRole,
+        long currentUserId)
     {
         if (rule.Conditions.Count == 0) return true;
 
@@ -173,8 +184,32 @@ public static class FormRuleServerValidator
             if (c.ConditionKind == "role")
                 return EvalOp(c.Operator, currentUserRole, c.Value);
 
+            // during/notDuring check range CONTAINMENT (is this date inside a computed
+            // {start,end} window), not a single-value comparison — doesn't fit EvalOp's
+            // (current, ruleValue) contract, so it's handled here the same way changed/notChanged
+            // is above. Mirrors the frontend's computeDuringRange (form-renderer.component.ts),
+            // but stays on UTC (DateTime.UtcNow.Date) rather than that method's local-date
+            // anchoring — same accepted, narrow client/server split 'today'/'yesterday' already
+            // has here, only reachable via a direct API call bypassing the form UI entirely.
+            if (c.Operator is "during" or "notDuring")
+            {
+                if (c.AppFieldId is not { } dfid || !effectiveValues.TryGetValue(dfid, out var dval) || dval is null)
+                    return false;
+                var dateStr = dval switch
+                {
+                    DateTime dt => dt.ToString("yyyy-MM-dd"),
+                    DateOnly d => d.ToString("yyyy-MM-dd"),
+                    _ => Convert.ToString(dval, System.Globalization.CultureInfo.InvariantCulture)?.Split('T')[0] ?? "",
+                };
+                var (count, unit) = ParseDuringValue(c.Value);
+                var direction = c.ValueType ?? "duringCurrent";
+                var (start, end) = ComputeDuringRange(direction, count, unit);
+                var inRange = string.CompareOrdinal(dateStr, start) >= 0 && string.CompareOrdinal(dateStr, end) <= 0;
+                return c.Operator == "during" ? inRange : !inRange;
+            }
+
             var fieldVal = c.AppFieldId is { } f && effectiveValues.TryGetValue(f, out var v) ? v : null;
-            var ruleVal = ResolveConditionValue(c, effectiveValues);
+            var ruleVal = ResolveConditionValue(c, effectiveValues, currentUserId);
             return EvalOp(c.Operator, fieldVal, ruleVal);
         }).ToList();
 
@@ -200,8 +235,10 @@ public static class FormRuleServerValidator
 
     /// <summary>Resolves a condition's relative-date valueType ('today'/'yesterday'/'tomorrow'/
     /// 'pastDays'/'futureDays'/'field') into a plain comparable string, mirroring the frontend's
-    /// resolveConditionValue. Falls back to the condition's literal Value for everything else.</summary>
-    private static string? ResolveConditionValue(FormRuleCondition c, IReadOnlyDictionary<long, object?> effectiveValues)
+    /// resolveConditionValue. Falls back to the condition's literal Value for everything else —
+    /// substituting the '__current_user__' sentinel (comma-joined alongside literal userIds for
+    /// includes/notIncludes, or standalone for eq/ne) with the evaluating user's own id first.</summary>
+    private static string? ResolveConditionValue(FormRuleCondition c, IReadOnlyDictionary<long, object?> effectiveValues, long currentUserId)
     {
         var today = DateTime.UtcNow.Date;
         string Fmt(DateTime d) => d.ToString("yyyy-MM-dd");
@@ -218,8 +255,70 @@ public static class FormRuleServerValidator
                     return Convert.ToString(refVal, System.Globalization.CultureInfo.InvariantCulture);
                 return null;
             default:
+                if (c.Value is not null && c.Value.Contains("__current_user__"))
+                    return string.Join(',', c.Value.Split(',').Select(s => s.Trim() == "__current_user__" ? currentUserId.ToString() : s.Trim()));
                 return c.Value;
         }
+    }
+
+    private static readonly string[] DuringUnits = ["day", "week", "month", "quarter", "year"];
+
+    /// <summary>"count:unit" (e.g. "2:month") — same encoding the frontend's parseDuringValue
+    /// (both rule-condition-row.component.ts's UI copy and form-renderer.component.ts's runtime
+    /// copy) and the report engine's ParseDuringValue (filter-condition-operators.ts) use.
+    /// Malformed/missing input falls back to 1 week.</summary>
+    private static (int Count, string Unit) ParseDuringValue(string? value)
+    {
+        var parts = (value ?? "").Split(':');
+        var count = parts.Length > 0 && int.TryParse(parts[0], out var c) && c > 0 ? c : 1;
+        var unit = parts.Length > 1 && DuringUnits.Contains(parts[1]) ? parts[1] : "week";
+        return (count, unit);
+    }
+
+    /// <summary>Port of RunReportQueryHandler's ResolveDuringCondition/ComputeDuringRange (the
+    /// report Static Filters' "is during" resolution) — same period-boundary math (Monday-aligned
+    /// weeks, calendar month/quarter/year starts, "previous" excludes the current in-progress
+    /// period, "next" starts the day after the current period ends), anchored to
+    /// DateTime.UtcNow.Date like every other date resolution in THIS file (see
+    /// ResolveConditionValue's 'today') — see ConditionsMet's call site for why this stays UTC
+    /// rather than matching the frontend's local-date version.</summary>
+    private static (string Start, string End) ComputeDuringRange(string direction, int count, string unit)
+    {
+        var today = DateTime.UtcNow.Date;
+        string Fmt(DateTime d) => d.ToString("yyyy-MM-dd");
+
+        DateTime StartOfPeriod(DateTime d) => unit switch
+        {
+            "day" => d.Date,
+            "month" => new DateTime(d.Year, d.Month, 1),
+            "quarter" => new DateTime(d.Year, ((d.Month - 1) / 3) * 3 + 1, 1),
+            "year" => new DateTime(d.Year, 1, 1),
+            _ => d.Date.AddDays(d.DayOfWeek == DayOfWeek.Sunday ? -6 : 1 - (int)d.DayOfWeek), // week, Monday-aligned
+        };
+
+        DateTime AddUnits(DateTime d, int amount) => unit switch
+        {
+            "day" => d.AddDays(amount),
+            "month" => d.AddMonths(amount),
+            "quarter" => d.AddMonths(amount * 3),
+            "year" => d.AddYears(amount),
+            _ => d.AddDays(amount * 7), // week
+        };
+
+        DateTime EndOfPeriod(DateTime periodStart) => AddUnits(periodStart, 1).AddDays(-1);
+
+        var curStart = StartOfPeriod(today);
+        var curEnd = EndOfPeriod(curStart);
+
+        if (direction == "duringPrevious")
+            return (Fmt(AddUnits(curStart, -count)), Fmt(curStart.AddDays(-1)));
+
+        if (direction == "duringNext")
+            return (Fmt(curEnd.AddDays(1)), Fmt(EndOfPeriod(AddUnits(curStart, count))));
+
+        // duringCurrent (and any unrecognized ValueType — same fail-open default the frontend and
+        // report engine both use)
+        return (Fmt(curStart), Fmt(curEnd));
     }
 
     private static bool EvalOp(string op, object? formVal, string? ruleVal)
@@ -242,6 +341,8 @@ public static class FormRuleServerValidator
             case "ne": return v != r;
             case "contains": return v.Contains(r, StringComparison.OrdinalIgnoreCase);
             case "notContains": return !v.Contains(r, StringComparison.OrdinalIgnoreCase);
+            case "startsWith": return v.StartsWith(r, StringComparison.OrdinalIgnoreCase);
+            case "notStartsWith": return !v.StartsWith(r, StringComparison.OrdinalIgnoreCase);
             case "isEmpty": return v == "";
             case "isNotEmpty": return v != "";
             case "includes":
@@ -250,17 +351,33 @@ public static class FormRuleServerValidator
             case "notIncludes":
                 return !r.Split(',').Select(s => s.Trim())
                     .Any(id => v.Split(',').Select(s => s.Trim()).Contains(id));
+            // Falls through Date -> Number -> ordinal string comparison — the last tier is what
+            // makes gt/lt/gte/lte meaningful for a genuine text field (alphabetical "is after"/
+            // "is before"), now that the client's text group offers these operators too;
+            // previously anything that was neither a parseable date nor number returned false
+            // unconditionally, silently disagreeing with the client-side mirror in evalOp
+            // (form-renderer.component.ts) once that grew the same string fallback.
             case "gt": case "lt": case "gte": case "lte":
             {
                 double? vd = DateTime.TryParse(v, out var vdt) ? vdt.Ticks : (double.TryParse(v, out var vn) ? vn : null);
                 double? rd = DateTime.TryParse(r, out var rdt) ? rdt.Ticks : (double.TryParse(r, out var rn) ? rn : null);
-                if (vd is null || rd is null) return false;
+                if (vd is not null && rd is not null)
+                {
+                    return op switch
+                    {
+                        "gt" => vd > rd,
+                        "lt" => vd < rd,
+                        "gte" => vd >= rd,
+                        _ => vd <= rd,
+                    };
+                }
+                var cmp = string.CompareOrdinal(v, r);
                 return op switch
                 {
-                    "gt" => vd > rd,
-                    "lt" => vd < rd,
-                    "gte" => vd >= rd,
-                    _ => vd <= rd,
+                    "gt" => cmp > 0,
+                    "lt" => cmp < 0,
+                    "gte" => cmp >= 0,
+                    _ => cmp <= 0,
                 };
             }
             default: return false;

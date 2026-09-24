@@ -70,13 +70,14 @@ public class SaveFormRuleCommandHandler
 
         var actions = command.Actions.Select(a => new FormRuleAction
         {
-            ActionType      = a.ActionType,
-            TargetType      = a.TargetType,
-            TargetElementId = a.TargetElementId,
-            TargetSectionId = a.TargetSectionId,
-            TargetBlockId   = a.TargetBlockId,
-            ActionValue     = a.ActionValue,
-            DisplayOrder    = a.DisplayOrder,
+            ActionType          = a.ActionType,
+            TargetType          = a.TargetType,
+            TargetElementId     = a.TargetElementId,
+            TargetSectionId     = a.TargetSectionId,
+            TargetBlockId       = a.TargetBlockId,
+            ActionValue         = a.ActionValue,
+            RunOnceOnActivation = a.RunOnceOnActivation,
+            DisplayOrder        = a.DisplayOrder,
         }).ToList();
 
         await _ruleRepo.SaveRuleBodyAsync(

@@ -21,24 +21,34 @@ public record AppPermissionsResult(
     IReadOnlyList<AppGranularTablePermission> TablePermissions,
     IReadOnlyList<AppGranularFieldPermission> FieldPermissions,
     IReadOnlyList<AppGranularRecordFilter> RecordFilters,
-    long CurrentUserId = 0);
+    long CurrentUserId = 0,
+    // A User/MultiUser field's live value on the frontend is the user's PublicId (GUID) — see
+    // rule-condition-row.component.ts's userOptions — not the numeric CurrentUserId above (which
+    // is what the *backend* compares against once UserFieldValueResolver has resolved the field
+    // to its physical numeric id). The client needs THIS one to resolve a rule condition's
+    // "<the current user>" option (FormRuleCondition.value === '__current_user__') against a
+    // User field's own live value.
+    Guid CurrentUserPublicId = default);
 
 public class GetAppPermissionsQueryHandler
 {
     private readonly IAppRepository _appRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IAppRolePermissionRepository _permRepo;
+    private readonly IUserRepository _userRepo;
     private readonly IQueryContext _queryContext;
 
     public GetAppPermissionsQueryHandler(
         IAppRepository appRepo,
         IAppUserRepository appUserRepo,
         IAppRolePermissionRepository permRepo,
+        IUserRepository userRepo,
         IQueryContext queryContext)
     {
         _appRepo = appRepo;
         _appUserRepo = appUserRepo;
         _permRepo = permRepo;
+        _userRepo = userRepo;
         _queryContext = queryContext;
     }
 
@@ -47,6 +57,8 @@ public class GetAppPermissionsQueryHandler
         var appId = await _appRepo.GetIdByPublicIdAsync(query.AppPublicId, ct);
         var permissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
         var roleName = await _appUserRepo.GetUserRoleNameAsync(appId, _queryContext.UserId, ct);
+        var currentUserPublicIds = await _userRepo.GetPublicIdsByIdsAsync([_queryContext.UserId], ct);
+        var currentUserPublicId = currentUserPublicIds.GetValueOrDefault(_queryContext.UserId);
 
         // Fetch all role IDs for this user in this app — includes both direct assignments
         // (multi-role supported) and group-based role assignments via UNION.
@@ -55,7 +67,7 @@ public class GetAppPermissionsQueryHandler
         // If the user has no roles at all (not directly assigned and not in any group
         // that has access to this app), return flat permissions only (no granular perms).
         if (roleIds.Count == 0)
-            return new AppPermissionsResult(roleName, permissions, [], [], [], _queryContext.UserId);
+            return new AppPermissionsResult(roleName, permissions, [], [], [], _queryContext.UserId, currentUserPublicId);
 
         var roleTablePerms = new Dictionary<long, IReadOnlyList<TablePermissionRow>>();
         var roleFieldPerms = new Dictionary<long, IReadOnlyList<FieldPermissionScopedRow>>();
@@ -155,7 +167,7 @@ public class GetAppPermissionsQueryHandler
             }
         }
 
-        return new AppPermissionsResult(roleName, permissions, mergedTablePerms, mergedFieldPerms, mergedFilters, _queryContext.UserId);
+        return new AppPermissionsResult(roleName, permissions, mergedTablePerms, mergedFieldPerms, mergedFilters, _queryContext.UserId, currentUserPublicId);
     }
 
     private static string ResolveScope(IEnumerable<string> scopes)

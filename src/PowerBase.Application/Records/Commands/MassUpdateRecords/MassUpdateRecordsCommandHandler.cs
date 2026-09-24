@@ -205,7 +205,7 @@ public class MassUpdateRecordsCommandHandler
                 violations.AddRange(recordViolations.Where(v => !(v.ConstraintType == "Unique" && inRequestDuplicateFids.Contains(v.FieldId))));
 
                 var formRuleViolations = await FormRuleServerValidator.CollectViolationsAsync(
-                    table, fields, effectiveValues, oldValuesByFid, _queryContext.TenantRole,
+                    table, fields, effectiveValues, oldValuesByFid, _queryContext.TenantRole, _queryContext.UserId,
                     _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _engine, ct, recordPublicId);
                 violations.AddRange(formRuleViolations);
             }

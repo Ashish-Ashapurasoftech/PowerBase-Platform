@@ -23,4 +23,5 @@ public record FormRuleActionSpec(
     long? TargetSectionId,
     long? TargetBlockId,
     string? ActionValue,
-    int DisplayOrder);
+    int DisplayOrder,
+    bool RunOnceOnActivation = false);
