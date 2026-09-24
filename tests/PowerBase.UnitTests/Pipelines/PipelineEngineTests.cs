@@ -577,6 +577,33 @@ public class PipelineEngineTests
             .Should().Be("First: Rec_1, Second: Rec_2");
     }
 
+    [Fact]
+    public void EvaluateTokens_PropertyOfArrayOfObjects_JoinsEachItemsValue()
+    {
+        // Mapping a Create Record field straight to the webhook trigger's "Headers > Name" picker
+        // entry produces a token like {{steps.trigger.headers.name}} with no index — since Headers
+        // is an array (one {name, value} pair per request header), that must join every item's
+        // name rather than leave the whole mapping unresolved.
+        var payload = JsonSerializer.Serialize(new
+        {
+            steps = new
+            {
+                trigger = new
+                {
+                    headers = new[]
+                    {
+                        new { name = "Content-Type", value = "application/json" },
+                        new { name = "Authorization", value = "Bearer abc" }
+                    }
+                }
+            }
+        });
+
+        InvokeEvaluateTokens("{{steps.trigger.headers.name}}", payload).Should().Be("Content-Type, Authorization");
+        InvokeEvaluateTokens("{{steps.trigger.headers.value}}", payload).Should().Be("application/json, Bearer abc");
+        InvokeEvaluateTokens("{{steps.trigger.headers[1].name}}", payload).Should().Be("Authorization");
+    }
+
     private bool InvokeEvaluateConditionOperator(string leftVal, string op, string rightVal)
     {
         var method = typeof(PipelineEngine).GetMethod("EvaluateConditionOperator", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -2654,6 +2681,28 @@ public class PipelineEngineTests
         format.Message.Should().Contain("Field 'Number'").And.Contain("steps.ref_request.number");
         format.Message.Should().NotContain("c_number").And.NotContain("private-invalid-text");
         PipelineEngine.IsCatchablePipelineStepError(format).Should().BeTrue();
+    }
+
+    [Fact]
+    public void RecordAction_DateMapping_UsesTheSuppliedAppDateFormat()
+    {
+        var field = new AppField { Fid = 6, Name = "event_date", Label = "Event date", TypeCode = "DATE" };
+        var method = typeof(PipelineEngine).GetMethod("ParseRecordMappingValueWithFormat", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        var parsed = method.Invoke(_engine, new object?[] { "05-04-2026", field, "05-04-2026", "DD-MM-YYYY" });
+
+        parsed.Should().Be(new DateTime(2026, 4, 5));
+    }
+
+    [Fact]
+    public void RecordAction_DateTimeMapping_AcceptsCanonicalPickerValue()
+    {
+        var field = new AppField { Fid = 6, Name = "starts_at", Label = "Starts at", TypeCode = "DATE_TIME" };
+        var method = typeof(PipelineEngine).GetMethod("ParseRecordMappingValueWithFormat", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        var parsed = method.Invoke(_engine, new object?[] { "2026-04-05T15:45:12", field, "2026-04-05T15:45:12", "DD-MM-YYYY" });
+
+        parsed.Should().Be(new DateTime(2026, 4, 5, 15, 45, 12));
     }
 
     [Fact]

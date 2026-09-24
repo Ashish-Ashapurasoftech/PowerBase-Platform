@@ -22,6 +22,8 @@ using System;
 using System.Text.Json;
 using PowerBase.Application.Pipelines.Queries.ListPipelineRuns;
 using PowerBase.Application.Pipelines.Queries.GetPipelineRunSteps;
+using PowerBase.Application.Pipelines.Queries.GetPipelineActivity;
+using PowerBase.Application.Pipelines.Queries.ListPipelinesForPicker;
 
 namespace PowerBase.API.Controllers;
 
@@ -387,6 +389,7 @@ public class PipelinesController : ControllerBase
         Description = result.Description,
         VariablesJson = result.VariablesJson,
         IsActive = result.IsActive,
+        DateFormatString = result.DateFormatString,
         RowVersion = Convert.ToBase64String(result.RowVersion),
         Steps = result.Steps.Select(MapEditorStepResponse).ToList(),
         EditorTables = result.EditorTables.Select(t => new PipelineEditorTableDto
@@ -580,6 +583,70 @@ public class PipelinesController : ControllerBase
         var query = new ListPipelineRunsQuery(publicId, page, pageSize);
         var result = await handler.HandleAsync(query, ct);
         return Ok(new ApiListResponse<PipelineRunDto>(result.Items, result.TotalCount, result.Page, result.PageSize));
+    }
+
+    /// <summary>Activity view: execution runs across every pipeline in an app, with pagination and
+    /// optional pipeline/date-range filters, all applied server-side.</summary>
+    [HttpGet("apps/{appId:guid}/pipelines/runs")]
+    [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiListResponse<AppPipelineRunDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListAppRuns(
+        Guid appId,
+        [FromServices] ListAppPipelineRunsQueryHandler handler,
+        [FromQuery] Guid? pipelinePublicId = null,
+        [FromQuery] DateTime? fromDate = null,
+        [FromQuery] DateTime? toDate = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 10,
+        CancellationToken ct = default)
+    {
+        var query = new ListAppPipelineRunsQuery(appId, pipelinePublicId, fromDate, toDate, page, pageSize);
+        var result = await handler.HandleAsync(query, ct);
+        return Ok(new ApiListResponse<AppPipelineRunDto>(result.Items, result.TotalCount, result.Page, result.PageSize));
+    }
+
+    /// <summary>Dedicated Activity feed: execution runs across every pipeline in an app, with
+    /// pagination and optional pipeline/date-range filters. Its own endpoint, separate from
+    /// <see cref="ListAppRuns"/>, so the Activity tab's server contract is free to evolve on its own.</summary>
+    [HttpGet("apps/{appId:guid}/pipelines/activity")]
+    [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiListResponse<AppPipelineRunDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetActivity(
+        Guid appId,
+        [FromServices] GetPipelineActivityQueryHandler handler,
+        [FromQuery] Guid? pipelinePublicId = null,
+        [FromQuery] DateTime? fromDate = null,
+        [FromQuery] DateTime? toDate = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 10,
+        CancellationToken ct = default)
+    {
+        var query = new GetPipelineActivityQuery(appId, pipelinePublicId, fromDate, toDate, page, pageSize);
+        var result = await handler.HandleAsync(query, ct);
+        return Ok(new ApiListResponse<AppPipelineRunDto>(result.Items, result.TotalCount, result.Page, result.PageSize));
+    }
+
+    /// <summary>Lightweight, unpaged id/name list of this app's PowerFlows for filter dropdowns —
+    /// not the full paginated pipelines list, which is scoped by creator and sized for a data grid.</summary>
+    [HttpGet("apps/{appId:guid}/pipelines/picker")]
+    [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<PipelinePickerItemResponse>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> ListPipelinesForPicker(
+        Guid appId,
+        [FromServices] ListPipelinesForPickerQueryHandler handler,
+        CancellationToken ct = default)
+    {
+        var result = await handler.HandleAsync(new ListPipelinesForPickerQuery(appId), ct);
+        var items = result.Select(p => new PipelinePickerItemResponse(p.PublicId, p.Name)).ToList();
+        return Ok(new ApiResponse<IReadOnlyList<PipelinePickerItemResponse>>(items));
     }
 
     [HttpGet("pipelines/runs/{runPublicId:guid}/steps")]

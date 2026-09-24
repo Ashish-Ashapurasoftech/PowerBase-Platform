@@ -287,6 +287,8 @@ public sealed class FileSettingsValidator : FieldSettingsValidatorBase<FileSetti
     {
         var errors = new Dictionary<string, string[]>();
         ValidateColumnWidth(s.ColumnWidth, errors);
+        if (s.RevisionLimit is < 1 or > 100)
+            AddError(errors, "Settings.RevisionLimit", "RevisionLimit must be between 1 and 100.");
         return errors;
     }
 }

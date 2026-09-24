@@ -67,6 +67,8 @@ public class GetPipelineEditorQueryHandlerTests
 
         _appRepo.GetPublicIdByIdAsync(appId, Arg.Any<CancellationToken>())
             .Returns(appPublicId);
+        _appRepo.GetByIdAsync(appId, Arg.Any<CancellationToken>())
+            .Returns(new App { Id = appId, PublicId = appPublicId, Formatting = "{\"date\":{\"formatString\":\"DD-MM-YYYY\"}}" });
 
         var steps = new List<PipelineStep>
         {
@@ -98,6 +100,7 @@ public class GetPipelineEditorQueryHandlerTests
         result.Name.Should().Be("Flow Test");
         result.Description.Should().Be("Desc");
         result.IsActive.Should().BeTrue();
+        result.DateFormatString.Should().Be("DD-MM-YYYY");
         result.Steps.Should().HaveCount(1);
         result.Steps[0].RefId.Should().Be("ref_1001");
         result.Steps[0].Label.Should().Be("Step 1");

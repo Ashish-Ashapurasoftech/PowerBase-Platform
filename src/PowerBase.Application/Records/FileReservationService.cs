@@ -1,11 +1,14 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.FieldSettings;
+using System.Text.Json;
 
 namespace PowerBase.Application.Records;
 
 public sealed record FileReservationResult(
     bool IsReserved, bool IsReservedByMe, bool CanRelease,
+    bool CanViewRevisions, bool CanRestoreRevisions, bool CanDeleteRevisions, int RevisionLimit,
     string? ReservedBy, string? Comment, DateTime? ReservedOn, string Value);
 
 public sealed class FileReservationService
@@ -40,7 +43,7 @@ public sealed class FileReservationService
     public async Task<FileReservationResult> GetAsync(Guid tablePublicId, Guid recordPublicId, long fid, CancellationToken ct)
     {
         var loaded = await LoadAsync(tablePublicId, recordPublicId, fid, requireModify: false, ct);
-        return await ToResultAsync(loaded.Value, loaded.Table.AppId, ct);
+        return await ToResultAsync(loaded.Value, loaded.Table.AppId, loaded.Field, loaded.CanModify, ct);
     }
 
     public async Task<FileReservationResult> ReserveAsync(Guid tablePublicId, Guid recordPublicId, long fid, string? comment, CancellationToken ct)
@@ -55,14 +58,15 @@ public sealed class FileReservationService
         await _writeService.ApplyFileWriteAsync(loaded.Table, loaded.Fields, recordPublicId,
             new Dictionary<long, object?> { [fid] = value }, AuditActions.Updated,
             "File attachment reserved", ct, suppressInterception: true);
-        return await ToResultAsync(value, loaded.Table.AppId, ct);
+        return await ToResultAsync(value, loaded.Table.AppId, loaded.Field, loaded.CanModify, ct);
     }
 
     public async Task<FileReservationResult> ReleaseAsync(Guid tablePublicId, Guid recordPublicId, long fid, CancellationToken ct)
     {
         var loaded = await LoadAsync(tablePublicId, recordPublicId, fid, requireModify: true, ct);
         var existing = FileReservationContract.Read(loaded.Value);
-        if (existing == null) return await ToResultAsync(loaded.Value?.ToString() ?? string.Empty, loaded.Table.AppId, ct);
+        if (existing == null) return await ToResultAsync(loaded.Value?.ToString() ?? string.Empty,
+            loaded.Table.AppId, loaded.Field, loaded.CanModify, ct);
         var isAdmin = await IsAppManagerAsync(loaded.Table.AppId, ct);
         if (existing.UserId != _queryContext.UserId && !isAdmin)
             throw new UnauthorizedActionException($"This file is reserved by {existing.UserName}.");
@@ -72,7 +76,7 @@ public sealed class FileReservationService
             new Dictionary<long, object?> { [fid] = value }, AuditActions.Updated,
             "File attachment reservation released", ct, suppressInterception: true,
             bypassFileReservation: true);
-        return await ToResultAsync(value, loaded.Table.AppId, ct);
+        return await ToResultAsync(value, loaded.Table.AppId, loaded.Field, loaded.CanModify, ct);
     }
 
     public async Task<string?> DeleteRevisionAsync(Guid tablePublicId, Guid recordPublicId, long fid, string path, CancellationToken ct)
@@ -82,10 +86,13 @@ public sealed class FileReservationService
         IReadOnlyCollection<string> paths, CancellationToken ct)
     {
         var loaded = await LoadAsync(tablePublicId, recordPublicId, fid, requireModify: true, ct);
+        if (!await IsAppManagerAsync(loaded.Table.AppId, ct))
+            throw new UnauthorizedActionException("Only an application manager can delete file revisions.");
         var reservation = FileReservationContract.Read(loaded.Value);
         if (reservation != null && reservation.UserId != _queryContext.UserId &&
             !await IsAppManagerAsync(loaded.Table.AppId, ct))
             throw new UnauthorizedActionException($"This file is reserved by {reservation.UserName}.");
+        var pathsBeforeDelete = FileReservationContract.ReferencedPaths(loaded.Value);
         string? value;
         try { value = FileReservationContract.DeleteRevisions(loaded.Value, paths); }
         catch (InvalidOperationException ex) { throw new ConflictException(ex.Message); }
@@ -93,12 +100,45 @@ public sealed class FileReservationService
             new Dictionary<long, object?> { [fid] = value }, AuditActions.Updated,
             "File attachment revision deleted", ct, suppressInterception: true,
             bypassFileReservation: true);
-        foreach (var path in paths)
-            await _fileStorage.DeleteAsync(path, ct);
+        var pathsAfterDelete = FileReservationContract.ReferencedPaths(value);
+        foreach (var removedPath in pathsBeforeDelete.Except(pathsAfterDelete, StringComparer.Ordinal))
+            await _fileStorage.DeleteAsync(removedPath, ct);
         return value;
     }
 
-    private async Task<(PowerBase.Domain.Entities.AppTable Table, IReadOnlyList<PowerBase.Domain.Entities.AppField> Fields, object? Value)> LoadAsync(
+    public async Task<string> RestoreRevisionAsync(Guid tablePublicId, Guid recordPublicId, long fid,
+        string path, CancellationToken ct)
+    {
+        var loaded = await LoadAsync(tablePublicId, recordPublicId, fid, requireModify: true, ct);
+        var settings = ReadSettings(loaded.Field.Settings);
+        if (settings.AllowOlderVersionsAsCurrent == false)
+            throw new UnauthorizedActionException("Revision history is disabled for this field.");
+        var reservation = FileReservationContract.Read(loaded.Value);
+        if (reservation != null && reservation.UserId != _queryContext.UserId &&
+            !await IsAppManagerAsync(loaded.Table.AppId, ct))
+            throw new UnauthorizedActionException($"This file is reserved by {reservation.UserName}.");
+        string value;
+        var revisionLimit = settings.KeepAllRevisions == true
+            ? 100 : Math.Clamp(settings.RevisionLimit ?? 3, 1, 100);
+        var pathsBeforeRestore = FileReservationContract.ReferencedPaths(loaded.Value);
+        try
+        {
+            value = FileReservationContract.RestoreRevision(
+                loaded.Value, path, _queryContext.UserName, DateTime.UtcNow, revisionLimit);
+        }
+        catch (InvalidOperationException ex) { throw new ConflictException(ex.Message); }
+        await _writeService.ApplyFileWriteAsync(loaded.Table, loaded.Fields, recordPublicId,
+            new Dictionary<long, object?> { [fid] = value }, AuditActions.Updated,
+            "File attachment revision restored", ct, suppressInterception: true,
+            bypassFileReservation: true);
+        var pathsAfterRestore = FileReservationContract.ReferencedPaths(value);
+        foreach (var removedPath in pathsBeforeRestore.Except(pathsAfterRestore, StringComparer.Ordinal))
+            await _fileStorage.DeleteAsync(removedPath, ct);
+        return value;
+    }
+
+    private async Task<(PowerBase.Domain.Entities.AppTable Table, IReadOnlyList<PowerBase.Domain.Entities.AppField> Fields,
+        PowerBase.Domain.Entities.AppField Field, bool CanModify, object? Value)> LoadAsync(
         Guid tablePublicId, Guid recordPublicId, long fid, bool requireModify, CancellationToken ct)
     {
         var table = await _tableRepo.GetByPublicIdAsync(tablePublicId, ct);
@@ -106,6 +146,8 @@ public sealed class FileReservationService
         var field = fields.FirstOrDefault(f => f.Fid == fid && string.Equals(f.TypeCode, "File", StringComparison.OrdinalIgnoreCase))
             ?? throw new NotFoundException("File field", fid);
         var access = await _permissionEnforcer.GetTableAccessAsync(table, fields, ct);
+        var canModify = access.Unrestricted ||
+            (access.ModifyScope != RecordScopes.None && access.EditableFieldIds.Contains(fid));
         if (!access.Unrestricted)
         {
             if (!access.CanView || !access.VisibleFields.Any(f => f.Id == field.Id))
@@ -119,18 +161,37 @@ public sealed class FileReservationService
         row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var value);
         if (value == null || string.IsNullOrWhiteSpace(value.ToString()))
             throw new InvalidOperationException("A file must be attached before it can be reserved.");
-        return (table, fields, value);
+        return (table, fields, field, canModify, value);
     }
 
-    private async Task<FileReservationResult> ToResultAsync(object? value, long appId, CancellationToken ct)
+    private async Task<FileReservationResult> ToResultAsync(object? value, long appId,
+        PowerBase.Domain.Entities.AppField field, bool canModify, CancellationToken ct)
     {
         var reservation = FileReservationContract.Read(value);
         var isAdmin = await IsAppManagerAsync(appId, ct);
+        var settings = ReadSettings(field.Settings);
+        var canViewRevisions = settings.AllowOlderVersionsAsCurrent != false;
+        var revisionLimit = settings.KeepAllRevisions == true
+            ? 100 : Math.Clamp(settings.RevisionLimit ?? 3, 1, 100);
         return new FileReservationResult(
             reservation != null, reservation?.UserId == _queryContext.UserId,
             reservation?.UserId == _queryContext.UserId || isAdmin,
+            canViewRevisions,
+            canViewRevisions && canModify && (reservation == null || reservation.UserId == _queryContext.UserId || isAdmin),
+            isAdmin, revisionLimit,
             reservation?.UserName, reservation?.Comment, reservation?.ReservedOn,
             value?.ToString() ?? string.Empty);
+    }
+
+    private static FileSettings ReadSettings(string? settingsJson)
+    {
+        if (string.IsNullOrWhiteSpace(settingsJson)) return new FileSettings();
+        try
+        {
+            return JsonSerializer.Deserialize<FileSettings>(settingsJson,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new FileSettings();
+        }
+        catch (JsonException) { return new FileSettings(); }
     }
 
     private async Task<bool> IsAppManagerAsync(long appId, CancellationToken ct)

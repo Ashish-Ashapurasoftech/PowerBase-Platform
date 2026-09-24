@@ -45,6 +45,46 @@ public class PipelineStepValidatorTests
         );
     }
 
+    [Fact]
+    public async Task ValidateCreateRecord_MissingRequiredField_ReturnsFieldMappingError()
+    {
+        var tableId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 20, PublicId = tableId });
+        _fieldRepo.ListByTableAsync(20, Arg.Any<CancellationToken>()).Returns([
+            new AppField { Fid = 6, Name = "C_name", Label = "Customer Name", TypeCode = "Text", IsRequired = true },
+            new AppField { Fid = 7, Name = "C_notes", Label = "Notes", TypeCode = "Text", IsRequired = false }
+        ]);
+        var config = JsonSerializer.Serialize(new {
+            connectionPublicId = PipelineStepValidator.SystemConnectionIds.First(),
+            tablePublicId = tableId,
+            fieldMappings = new[] { new { field = "fid_7", value = "optional" } }
+        });
+
+        var act = () => _validator.ValidateCreateRecordRequiredFieldsAsync(config, CancellationToken.None);
+
+        var error = await act.Should().ThrowAsync<ValidationException>();
+        error.Which.Errors.Should().ContainKey("FieldMappings");
+        error.Which.Errors["FieldMappings"].Should().Contain("'Customer Name' is required.");
+    }
+
+    [Fact]
+    public async Task ValidateCreateRecord_RequiredDynamicValue_Passes()
+    {
+        var tableId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 20, PublicId = tableId });
+        _fieldRepo.ListByTableAsync(20, Arg.Any<CancellationToken>()).Returns([
+            new AppField { Fid = 6, Name = "C_name", Label = "Customer Name", TypeCode = "Text", IsRequired = true }
+        ]);
+        var config = JsonSerializer.Serialize(new {
+            connectionPublicId = PipelineStepValidator.SystemConnectionIds.First(),
+            tablePublicId = tableId,
+            fieldMappings = new[] { new { field = "fid_6", value = "{{steps.ref_1.fid_6}}" } }
+        });
+
+        await _validator.Invoking(validator => validator.ValidateCreateRecordRequiredFieldsAsync(config, CancellationToken.None))
+            .Should().NotThrowAsync();
+    }
+
 
     [Theory]
     [InlineData("10", true, true)]

@@ -153,6 +153,33 @@ public class MassUpdateRecordsCommandHandler
             }
         }
 
+        // Required + per-record DB Unique check, reusing the same validator every other write path uses.
+        // Unique violations already reported above (in-request duplicates) are dropped here to avoid
+        // reporting the same field/record twice under two different reasons.
+        foreach (var recordId in foundIds)
+        {
+            var recordViolations = await RecordConstraintValidator.CollectViolationsAsync(
+                table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: idMap[recordId], ct, recordId, appDateFormat: dateFormat);
+            violations.AddRange(recordViolations.Where(v => !(v.ConstraintType == "Unique" && inRequestDuplicateFids.Contains(v.FieldId))));
+        }
+
+        if (violations.Count > 0)
+            throw new RecordConstraintViolationException(violations);
+
+        // Date Modified / Last Modified By are system-managed — mass-update explicitly forbids
+        // setting them (see the systemIds check above), so effectiveValues never carries them,
+        // and the afterValues snapshot below would otherwise fall back to the pre-update
+        // (often-still-null) oldVal for these two, exactly like the single-record update path.
+        // This must be a *separate* dictionary from effectiveValues: that one is also handed to
+        // MassUpdateAsync below, whose generic per-fid column mapping targets the wrong physical
+        // column (f_2 instead of ModifiedOn) for a system field.
+        var triggerValues = new Dictionary<long, object?>(effectiveValues);
+        var modifiedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedOn" && f.Fid.HasValue);
+        if (modifiedOnField != null) triggerValues[modifiedOnField.Fid!.Value] = DateTime.UtcNow;
+        var modifiedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedBy" && f.Fid.HasValue);
+        if (modifiedByField != null) triggerValues[modifiedByField.Fid!.Value] = _queryContext.UserId;
+
+        // Pre-fetch snapshots for pipeline trigger interceptor before executing mass update
         // Required + per-record DB Unique check (RecordConstraintValidator) and Form Rule
         // Require/Prevent Save violations (FormRuleServerValidator), merged into the same
         // per-record loop as the pipeline-trigger snapshot fetch below — oldRecord (needed for
@@ -181,7 +208,7 @@ public class MassUpdateRecordsCommandHandler
                         beforeValues[f.Fid.Value] = oldVal;
                         oldValuesByFid[f.Fid.Value] = oldVal;
 
-                        if (effectiveValues.TryGetValue(f.Fid.Value, out var newVal))
+                        if (triggerValues.TryGetValue(f.Fid.Value, out var newVal))
                         {
                             afterValues[f.Id] = newVal;
                             afterValues[f.Fid.Value] = newVal;

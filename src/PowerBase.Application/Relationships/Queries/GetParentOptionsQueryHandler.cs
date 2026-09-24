@@ -62,7 +62,7 @@ public class GetParentOptionsQueryHandler
             labelFields = combined;
 
             // The closed-input text (ReferenceOption.Label) always reads like the standard Record
-            // ID# key does: the parent's descriptive/picker field, never the raw override key value
+            // ID# key does: the parent's descriptive/picker field, never the raw alternate key value
             // (e.g. a phone number). The key field still shows as column 1 in the multi-column list
             // above so users can see both while picking; falls back to the key field itself only if
             // the parent has no separate descriptive field configured.

@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.ValueObjects;
 
 namespace PowerBase.Application.Pipelines.Queries.GetPipelineEditor;
 
@@ -70,6 +71,7 @@ public class GetPipelineEditorQueryHandler
         // ── 1. Load pipeline ─────────────────────────────────────────────────────
         var pipeline = await _pipelineRepo.GetByPublicIdAsync(query.PublicId, ct);
         var appPublicId = await _appRepo.GetPublicIdByIdAsync(pipeline.AppId, ct);
+        var app = await _appRepo.GetByIdAsync(pipeline.AppId, ct);
 
         var flatSteps = await _pipelineRepo.GetStepsByPipelineIdAsync(pipeline.Id, ct);
 
@@ -137,6 +139,7 @@ public class GetPipelineEditorQueryHandler
             Description = pipeline.Description,
             VariablesJson = pipeline.VariablesJson,
             IsActive = pipeline.IsActive,
+            DateFormatString = AppFormattingSettings.GetDateFormatString(app?.Formatting),
             RowVersion = pipeline.RowVersion ?? Array.Empty<byte>(),
             Steps = rootSteps,
             EditorTables = editorTables,

@@ -36,6 +36,8 @@ public interface IPipelineRepository
     Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineListItemDetail>> ListByUserPagedAsync(long userId, int page, int pageSize, string? search, string sortBy, bool sortDesc, bool? isActive, CancellationToken ct = default);
     Task<int> CountByUserAsync(long userId, string? search, bool? isActive, CancellationToken ct = default);
+    /// <summary>Every non-deleted pipeline's id/name for this app, unpaged — for filter dropdowns only.</summary>
+    Task<IReadOnlyList<(Guid PublicId, string Name)>> ListNamesByAppIdAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> ListAllActiveAsync(CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> FindCallablePipelinesAsync(long ownerId, string callDefinition, CancellationToken ct = default);
     Task<(Guid PublicId, long Id)> CreateAsync(Pipeline pipeline, IDbTransaction? transaction = null, CancellationToken ct = default);
@@ -69,6 +71,8 @@ public interface IPipelineRepository
     Task<PipelineRun?> GetRunByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineRun>> GetRunsByPipelineIdAsync(long pipelineId, int page, int pageSize, CancellationToken ct = default);
     Task<int> CountRunsByPipelineIdAsync(long pipelineId, CancellationToken ct = default);
+    Task<IReadOnlyList<(PipelineRun Run, string PipelineName, Guid PipelinePublicId)>> GetRunsByAppIdAsync(long appId, long? pipelineId, DateTime? fromDate, DateTime? toDate, int page, int pageSize, CancellationToken ct = default);
+    Task<int> CountRunsByAppIdAsync(long appId, long? pipelineId, DateTime? fromDate, DateTime? toDate, CancellationToken ct = default);
 
     // Staging table operations for On New Bulk Event
     Task InsertBulkEventRecordsAsync(List<PipelineBulkEventRecord> records, IDbTransaction? transaction = null, CancellationToken ct = default);
@@ -84,6 +88,7 @@ public interface IPipelineRepository
     Task InvalidateStepsReferencingFieldAsync(int fid, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<PipelineStep?> GetStepByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<bool> UpdateStepLastTriggeredOnAsync(long stepId, DateTime? oldTime, DateTime newTime, byte[] rowVersion, CancellationToken ct = default);
+    Task<bool> UpdateStepConfigJsonAsync(long stepId, string configJson, byte[] rowVersion, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineStep>> GetActiveScheduleStepsAsync(CancellationToken ct = default);
 
     Task<PipelineSchedule?> GetScheduleByPipelineIdAsync(long pipelineId, CancellationToken ct = default);

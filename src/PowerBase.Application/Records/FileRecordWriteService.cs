@@ -2,6 +2,8 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.FieldSettings;
+using System.Text.Json;
 
 namespace PowerBase.Application.Records;
 
@@ -91,11 +93,24 @@ public sealed class FileRecordWriteService : IRecordWriteService, IFileRecordWri
                         $"This file is reserved by {reservation.UserName} and cannot be replaced.");
                 effectiveValues[field.Fid.Value] =
                     FileReservationContract.PreserveReservation(
-                        oldValue, newValue, _queryContext.UserName, DateTime.UtcNow);
+                        oldValue, newValue, _queryContext.UserName, DateTime.UtcNow,
+                        GetRevisionLimit(field.Settings));
             }
         }
 
         return await _inner.ApplyAsync(table, fields, recordPublicId, effectiveValues, auditAction,
             entityTitle, ct, transaction, suppressInterception, onIndexMessageCreated, oldRecord);
+    }
+
+    private static int GetRevisionLimit(string? settingsJson)
+    {
+        if (string.IsNullOrWhiteSpace(settingsJson)) return 3;
+        try
+        {
+            var settings = JsonSerializer.Deserialize<FileSettings>(settingsJson,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return settings?.KeepAllRevisions == true ? 100 : Math.Clamp(settings?.RevisionLimit ?? 3, 1, 100);
+        }
+        catch (JsonException) { return 3; }
     }
 }

@@ -6,7 +6,7 @@ using PowerBase.Application.Common.Interfaces;
 
 namespace PowerBase.Infrastructure.Services;
 
-public class EmailService : IEmailService
+public partial class EmailService : IEmailService
 {
     private readonly IConfiguration _config;
     private readonly ILogger<EmailService> _logger;

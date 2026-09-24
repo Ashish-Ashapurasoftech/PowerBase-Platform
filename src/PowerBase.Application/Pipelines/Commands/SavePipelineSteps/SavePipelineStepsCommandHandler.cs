@@ -201,6 +201,11 @@ public class SavePipelineStepsCommandHandler
             }
             if (dto.Subtype == "copy-records" && dto.IsValidated)
                 await stepValidator.ValidateCopyRecordsStepAsync(dto.ConfigJson ?? "{}", ct);
+            // Incomplete editor steps are persisted as drafts so later steps are not lost.
+            // Validated steps (including activation saves and direct API submissions marked
+            // complete) still receive authoritative database-backed required-field validation.
+            if (dto.Subtype == "create-record" && dto.IsValidated)
+                await stepValidator.ValidateCreateRecordRequiredFieldsAsync(dto.ConfigJson ?? "{}", ct);
             if (dto.Children != null) await ValidateStepsConfigAsync(dto.Children, stepValidator, ct);
             if (dto.ElseChildren != null) await ValidateStepsConfigAsync(dto.ElseChildren, stepValidator, ct);
             if (dto.SuccessChildren != null) await ValidateStepsConfigAsync(dto.SuccessChildren, stepValidator, ct);
