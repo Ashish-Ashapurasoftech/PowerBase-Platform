@@ -44,12 +44,13 @@ public static class FormRuleServerValidator
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
+        IUserRepository userRepo,
         FormulaEngine engine,
         CancellationToken ct)
     {
         var violations = await CollectViolationsAsync(
             table, fields, effectiveValues, oldValuesByFid, currentUserRole, currentUserId,
-            ruleRepo, formRepo, tableRepo, fieldRepo, recordRepo, engine, ct);
+            ruleRepo, formRepo, tableRepo, fieldRepo, recordRepo, userRepo, engine, ct);
         if (violations.Count > 0)
             // Grouped, not a plain ToDictionary — more than one rule can flag the same field
             // (e.g. two separate Require rules), which a flat ToDictionary can't hold.
@@ -87,6 +88,7 @@ public static class FormRuleServerValidator
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
+        IUserRepository userRepo,
         FormulaEngine engine,
         CancellationToken ct,
         Guid recordId = default)
@@ -98,6 +100,11 @@ public static class FormRuleServerValidator
 
         var fieldsByFid = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
         var isCreate = oldValuesByFid is null;
+        // A User/MultiUser field's raw value is a numeric user id (or comma-joined ids) — 'contains'
+        // is a free-text name/email search, so every id any rule's 'contains' condition might need
+        // is resolved to a display name once, up front, rather than per-condition (mirrors the
+        // frontend's resolveUserDisplayNames, called from form-renderer.component.ts's conditionsMet).
+        var userNames = await ResolveContainsUserNamesAsync(rules, fieldsByFid, effectiveValues, userRepo, ct);
 
         // A rule's Require/PreventSave actions target a form-layout element (TargetElementId),
         // not an AppField directly — resolved to AppFieldId via that rule's own form layout,
@@ -113,7 +120,7 @@ public static class FormRuleServerValidator
             }
             else
             {
-                met = ConditionsMet(rule, effectiveValues, oldValuesByFid, currentUserRole, currentUserId);
+                met = ConditionsMet(rule, effectiveValues, oldValuesByFid, currentUserRole, currentUserId, fieldsByFid, userNames);
             }
             if (!met) continue;
 
@@ -131,9 +138,12 @@ public static class FormRuleServerValidator
             {
                 if (action.ActionType == "PreventSave")
                 {
-                    var message = string.IsNullOrWhiteSpace(action.ActionValue)
-                        ? $"This change is not allowed ('{rule.Name}')."
-                        : action.ActionValue;
+                    string? message = null;
+                    if (action.IsExpressionValue && !string.IsNullOrWhiteSpace(action.ActionValue))
+                        message = await EvaluateExpressionActionValueAsync(action.ActionValue, table, fields, effectiveValues, tableRepo, fieldRepo, recordRepo, engine, ct);
+                    else if (!string.IsNullOrWhiteSpace(action.ActionValue))
+                        message = action.ActionValue;
+                    message ??= $"This change is not allowed ('{rule.Name}').";
                     violations.Add(new RecordConstraintViolation(recordId, 0, "FormRule", message));
                     continue;
                 }
@@ -164,7 +174,9 @@ public static class FormRuleServerValidator
         IReadOnlyDictionary<long, object?> effectiveValues,
         IReadOnlyDictionary<long, object?>? oldValuesByFid,
         string? currentUserRole,
-        long currentUserId)
+        long currentUserId,
+        IReadOnlyDictionary<long, AppField> fieldsByFid,
+        IReadOnlyDictionary<long, string> userNames)
     {
         if (rule.Conditions.Count == 0) return true;
 
@@ -208,12 +220,232 @@ public static class FormRuleServerValidator
                 return c.Operator == "during" ? inRange : !inRange;
             }
 
+            // DateRange/NumericRange: eq/ne compares the field's WHOLE {start,end} range against a
+            // literal start/end pair (rule-condition-row.component.ts's rangeValue JSON encoding);
+            // contains/notContains checks whether a single literal point falls inside the field's
+            // range. Mirrors form-renderer.component.ts's identical range block — neither fits
+            // EvalOp's (current, ruleValue) contract, so it's handled entirely here, same as
+            // during/notDuring above.
+            var rangeTypeCode = c.AppFieldId is { } rtf && fieldsByFid.TryGetValue(rtf, out var rangeField) ? rangeField.TypeCode : null;
+            if (rangeTypeCode is "DateRange" or "NumericRange")
+            {
+                if (c.AppFieldId is not { } rfid) return false;
+                var range = ParseRangeValue(effectiveValues.TryGetValue(rfid, out var rraw) ? rraw : null);
+                if (c.Operator == "isEmpty") return range is null || (range.Value.Start is null && range.Value.End is null);
+                if (c.Operator == "isNotEmpty") return range is not null && (range.Value.Start is not null || range.Value.End is not null);
+                if (c.Operator is "eq" or "ne")
+                {
+                    var ruleRange = ParseRangeValue(c.Value);
+                    var equal = RangesEqual(range, ruleRange, rangeTypeCode);
+                    return c.Operator == "eq" ? equal : !equal;
+                }
+                var within = PointWithinRange(range, c.Value, rangeTypeCode);
+                return c.Operator == "contains" ? within : !within;
+            }
+
             var fieldVal = c.AppFieldId is { } f && effectiveValues.TryGetValue(f, out var v) ? v : null;
-            var ruleVal = ResolveConditionValue(c, effectiveValues, currentUserId);
-            return EvalOp(c.Operator, fieldVal, ruleVal);
+            var typeCode = rangeTypeCode;
+            object? normalizedVal = NormalizeForCompare(typeCode, fieldVal);
+            // Only 'contains' — eq/ne/includes/notIncludes must keep comparing raw user ids, which
+            // NormalizeForCompare already leaves untouched (it only special-cases File/Address/
+            // DateTime), mirroring the frontend's own contains-only gating in conditionsMet.
+            if ((typeCode == "User" || typeCode == "MultiUser") && c.Operator == "contains")
+                normalizedVal = ResolveUserDisplayNames(fieldVal, userNames);
+            var ruleVal = ResolveConditionValue(c, effectiveValues, currentUserId, fieldsByFid);
+            return EvalOp(c.Operator, normalizedVal, ruleVal);
         }).ToList();
 
         return rule.ConditionLogic == "all" ? results.All(r => r) : results.Any(r => r);
+    }
+
+    /// <summary>A DateRange/NumericRange field's raw value is a JSON "{start,end}" blob (or,
+    /// depending on the repository's own deserialization, an already-parsed IDictionary) — mirrors
+    /// the frontend's parseRangeValue. Each part is null when absent; both null collapses to a
+    /// null range (an open-ended single-sided range is meaningfully different from empty).</summary>
+    private static (string? Start, string? End)? ParseRangeValue(object? raw)
+    {
+        if (raw is null) return null;
+        string? start, end;
+        if (raw is System.Collections.IDictionary dict)
+        {
+            start = dict["start"]?.ToString();
+            end = dict["end"]?.ToString();
+        }
+        else
+        {
+            var json = raw as string;
+            if (json is null) return null;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+                start = GetRangePart(doc.RootElement, "start");
+                end = GetRangePart(doc.RootElement, "end");
+            }
+            catch (System.Text.Json.JsonException) { return null; }
+        }
+        if (string.IsNullOrEmpty(start)) start = null;
+        if (string.IsNullOrEmpty(end)) end = null;
+        return start is null && end is null ? null : (start, end);
+    }
+
+    /// <summary>Reads a "start"/"end" property as text regardless of whether it was serialized as a
+    /// JSON string or a JSON number (a NumericRange's parts may be either, depending on what wrote
+    /// them) — unlike JsonElement.GetString(), which throws for a Number-kind value.</summary>
+    private static string? GetRangePart(System.Text.Json.JsonElement obj, string key)
+    {
+        if (!obj.TryGetProperty(key, out var v) || v.ValueKind == System.Text.Json.JsonValueKind.Null) return null;
+        return v.ValueKind switch
+        {
+            System.Text.Json.JsonValueKind.String => v.GetString(),
+            System.Text.Json.JsonValueKind.Number => v.GetRawText(),
+            _ => null,
+        };
+    }
+
+    /// <summary>eq/ne's whole-range comparison — mirrors the frontend's rangesEqual: a
+    /// NumericRange compares both parts numerically ("5" and "5.0" match), a DateRange compares
+    /// calendar days only (strips any time component). Two null ranges (both blank) count as
+    /// equal.</summary>
+    private static bool RangesEqual((string? Start, string? End)? a, (string? Start, string? End)? b, string typeCode)
+    {
+        string? Norm(string? v)
+        {
+            if (string.IsNullOrEmpty(v)) return null;
+            return typeCode == "NumericRange"
+                ? (double.TryParse(v, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n.ToString(System.Globalization.CultureInfo.InvariantCulture) : v)
+                : v.Split('T')[0];
+        }
+        return Norm(a?.Start) == Norm(b?.Start) && Norm(a?.End) == Norm(b?.End);
+    }
+
+    /// <summary>contains/notContains — mirrors the frontend's pointWithinRange: is this single
+    /// literal point (a date, or a number) inside the field's [start, end] range, inclusive on
+    /// both ends? A missing start/end means that side is open-ended, not "never matches".</summary>
+    private static bool PointWithinRange((string? Start, string? End)? range, string? ruleValue, string typeCode)
+    {
+        if (range is null || string.IsNullOrEmpty(ruleValue)) return false;
+        if (typeCode == "NumericRange")
+        {
+            if (!double.TryParse(ruleValue, System.Globalization.CultureInfo.InvariantCulture, out var v)) return false;
+            var s = range.Value.Start != null && double.TryParse(range.Value.Start, System.Globalization.CultureInfo.InvariantCulture, out var sv) ? sv : double.NegativeInfinity;
+            var e = range.Value.End != null && double.TryParse(range.Value.End, System.Globalization.CultureInfo.InvariantCulture, out var ev) ? ev : double.PositiveInfinity;
+            return v >= s && v <= e;
+        }
+        var vDate = ruleValue.Split('T')[0];
+        if (range.Value.Start != null && string.CompareOrdinal(vDate, range.Value.Start.Split('T')[0]) < 0) return false;
+        if (range.Value.End != null && string.CompareOrdinal(vDate, range.Value.End.Split('T')[0]) > 0) return false;
+        return true;
+    }
+
+    /// <summary>Server-side mirror of the frontend's normalizeFieldValueForCompare
+    /// (form-renderer.component.ts) — File's raw JSON blob becomes a comma-joined filename list,
+    /// Address's raw JSON blob becomes a comma-joined non-empty-parts text, and a DateTime field's
+    /// value gets minute precision ("yyyy-MM-ddTHH:mm") instead of EvalOp's own date-only
+    /// formatting (a plain Date field is deliberately left as a raw DateTime — EvalOp already
+    /// formats those as date-only, which is correct for Date; only DateTime needs the extra
+    /// time-of-day component). Anything else (typeCode null/unrecognized) passes through
+    /// unchanged.</summary>
+    private static object? NormalizeForCompare(string? typeCode, object? raw)
+    {
+        if (raw is null) return raw;
+        if (typeCode == "File") return ExtractFileNames(raw);
+        if (typeCode == "Address") return ExtractAddressText(raw);
+        if (typeCode == "DateTime" && raw is DateTime dt) return dt.ToString("yyyy-MM-ddTHH:mm");
+        return raw;
+    }
+
+    /// <summary>Mirrors the frontend's extractFileNames — a File field's raw value is a JSON blob
+    /// (a single {name,...} object, or an array of them), never a plain string worth comparing
+    /// verbatim.</summary>
+    private static string ExtractFileNames(object? raw)
+    {
+        var json = raw as string;
+        if (json is null) return Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture) ?? "";
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var names = new List<string>();
+            void AddName(System.Text.Json.JsonElement item)
+            {
+                if (item.ValueKind == System.Text.Json.JsonValueKind.Object
+                    && item.TryGetProperty("name", out var n) && n.ValueKind == System.Text.Json.JsonValueKind.String)
+                    names.Add(n.GetString()!);
+            }
+            if (root.ValueKind == System.Text.Json.JsonValueKind.Array)
+                foreach (var item in root.EnumerateArray()) AddName(item);
+            else
+                AddName(root);
+            return string.Join(", ", names);
+        }
+        catch (System.Text.Json.JsonException) { return json; }
+    }
+
+    /// <summary>Mirrors the frontend's extractAddressText — an Address field's raw value is a JSON
+    /// blob ({street1, street2, city, state, zip, country}), flattened to its non-empty parts
+    /// comma-joined, the same shape ExtractFileNames produces for a filename list.</summary>
+    private static string ExtractAddressText(object? raw)
+    {
+        var json = raw as string;
+        if (json is null) return Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture) ?? "";
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return "";
+            string[] keys = ["street1", "street2", "city", "state", "zip", "country"];
+            var parts = new List<string>();
+            foreach (var k in keys)
+                if (doc.RootElement.TryGetProperty(k, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(v.GetString()))
+                    parts.Add(v.GetString()!);
+            return string.Join(", ", parts);
+        }
+        catch (System.Text.Json.JsonException) { return json; }
+    }
+
+    /// <summary>Gathers every user id any active rule's 'contains' condition on a User/MultiUser
+    /// field might need a display name for, and resolves them all in one batched call — mirrors
+    /// the frontend's resolveUserDisplayNames, just done once up front here rather than lazily per
+    /// condition (this runs before the per-rule Conditions loop, so it has to look across every
+    /// rule's conditions at once instead of one rule's).</summary>
+    private static async Task<IReadOnlyDictionary<long, string>> ResolveContainsUserNamesAsync(
+        IReadOnlyList<FormRule> rules,
+        IReadOnlyDictionary<long, AppField> fieldsByFid,
+        IReadOnlyDictionary<long, object?> effectiveValues,
+        IUserRepository userRepo,
+        CancellationToken ct)
+    {
+        var ids = new HashSet<long>();
+        foreach (var rule in rules)
+        {
+            if (rule.IsExpressionMode) continue;
+            foreach (var c in rule.Conditions)
+            {
+                if (c.Operator != "contains" || c.AppFieldId is not { } fid) continue;
+                if (!fieldsByFid.TryGetValue(fid, out var field)) continue;
+                if (field.TypeCode != "User" && field.TypeCode != "MultiUser") continue;
+                if (!effectiveValues.TryGetValue(fid, out var raw) || raw is null) continue;
+                var raws = Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture) ?? "";
+                foreach (var part in raws.Split(','))
+                    if (long.TryParse(part.Trim(), out var uid)) ids.Add(uid);
+            }
+        }
+        if (ids.Count == 0) return new Dictionary<long, string>();
+        return await userRepo.GetNamesByIdsAsync(ids, ct);
+    }
+
+    /// <summary>Mirrors the frontend's resolveUserDisplayNames — a User/MultiUser field's raw value
+    /// is a numeric user id (or comma-joined ids), never a display name, so 'contains' (a free-text
+    /// name/email search) needs each id resolved via the userNames map built by
+    /// ResolveContainsUserNamesAsync first. An id with no resolvable name (deleted user, bad data)
+    /// falls back to the raw id text rather than being dropped.</summary>
+    private static string ResolveUserDisplayNames(object? raw, IReadOnlyDictionary<long, string> userNames)
+    {
+        if (raw is null) return "";
+        var raws = Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture) ?? "";
+        return string.Join(", ", raws.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0)
+            .Select(id => long.TryParse(id, out var uid) && userNames.TryGetValue(uid, out var name) ? name : id));
     }
 
     /// <summary>Normalized equality for 'changed'/'notChanged' — mirrors the frontend's
@@ -238,7 +470,7 @@ public static class FormRuleServerValidator
     /// resolveConditionValue. Falls back to the condition's literal Value for everything else —
     /// substituting the '__current_user__' sentinel (comma-joined alongside literal userIds for
     /// includes/notIncludes, or standalone for eq/ne) with the evaluating user's own id first.</summary>
-    private static string? ResolveConditionValue(FormRuleCondition c, IReadOnlyDictionary<long, object?> effectiveValues, long currentUserId)
+    private static string? ResolveConditionValue(FormRuleCondition c, IReadOnlyDictionary<long, object?> effectiveValues, long currentUserId, IReadOnlyDictionary<long, AppField> fieldsByFid)
     {
         var today = DateTime.UtcNow.Date;
         string Fmt(DateTime d) => d.ToString("yyyy-MM-dd");
@@ -252,7 +484,18 @@ public static class FormRuleServerValidator
             case "futureDays": return Fmt(today.AddDays(int.TryParse(c.Value, out var fd) ? fd : 0));
             case "field":
                 if (c.ValueFieldId is { } vf && effectiveValues.TryGetValue(vf, out var refVal) && refVal != null)
-                    return Convert.ToString(refVal, System.Globalization.CultureInfo.InvariantCulture);
+                {
+                    // A referenced Date/DateTime field's raw value is still a live DateTime here —
+                    // Convert.ToString(DateTime) produces its default culture-formatted text (e.g.
+                    // "01/06/2026 00:00:00"), never an ISO date, so a "the value in the field"
+                    // comparison against another Date field silently never matched. Fmt() covers it
+                    // the same way the 'today' branches above already do; NormalizeForCompare covers
+                    // File/Address/DateTime-precision the same as the condition's OWN field.
+                    var refTypeCode = fieldsByFid.TryGetValue(vf, out var refField) ? refField.TypeCode : null;
+                    var normalizedRef = NormalizeForCompare(refTypeCode, refVal);
+                    if (normalizedRef is DateTime refDt) return Fmt(refDt);
+                    return Convert.ToString(normalizedRef, System.Globalization.CultureInfo.InvariantCulture);
+                }
                 return null;
             default:
                 if (c.Value is not null && c.Value.Contains("__current_user__"))
@@ -413,5 +656,43 @@ public static class FormRuleServerValidator
 
         try { return engine.Evaluate(compiled, context, options).AsBool(); }
         catch (FormulaEvaluationException) { return false; }
+    }
+
+    /// <summary>Server-side mirror of resolving a formula-mode PreventSave message (ActionValue
+    /// is a formula expression when FormRuleAction.IsExpressionValue is true — see migration
+    /// 060_formruleaction_add_is_expression_value.sql). Only PreventSave needs this here: Require/
+    /// PreventSave are the only two actions this validator enforces at all (see the class doc
+    /// comment) — ChangeLabel/ChangeValue/DisplayMessage's own formula-mode values are resolved
+    /// entirely client-side (FormRendererComponent.evaluateRules), same as every other UI-only
+    /// action. No expectedType constraint (null) — a PreventSave message could reasonably be built
+    /// from Text, Number, Date, etc. concatenation. Fail-open like EvaluateExpressionConditionAsync
+    /// above: a compile/evaluate failure returns null, and the caller falls back to the rule's
+    /// generic default message rather than surfacing a broken one.</summary>
+    private static async Task<string?> EvaluateExpressionActionValueAsync(
+        string expressionText,
+        AppTable table,
+        IReadOnlyList<AppField> fields,
+        IReadOnlyDictionary<long, object?> effectiveValues,
+        IAppTableRepository tableRepo,
+        IAppFieldRepository fieldRepo,
+        IRecordRepository recordRepo,
+        FormulaEngine engine,
+        CancellationToken ct)
+    {
+        var schema = new AppFieldSchema(fields);
+        var aliasSchema = await AppTableAliasSchema.BuildAsync(tableRepo, table.AppId, ct);
+        var compiled = engine.Compile(expressionText, schema, null, aliasSchema);
+        if (compiled.HasErrors) return null;
+
+        var crossTable = new CrossTableQueryContext(tableRepo, fieldRepo, recordRepo, table);
+        var context = new CrossTableRecordContext(new ValuesRecordContext(effectiveValues), crossTable);
+        var options = new EvaluationOptions { TableId = table.PublicId.ToString() };
+
+        try
+        {
+            var raw = FormulaRawValue.ToRaw(engine.Evaluate(compiled, context, options));
+            return raw is null ? null : Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture);
+        }
+        catch (FormulaEvaluationException) { return null; }
     }
 }

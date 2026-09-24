@@ -139,7 +139,7 @@ public class CreateRecordCommandHandler
         // 'changed'/'notChanged' conditions never match here.
         await FormRuleServerValidator.ValidateAsync(
             table, fields, effectiveValues, oldValuesByFid: null, _queryContext.TenantRole, _queryContext.UserId,
-            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _engine, ct);
+            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _engine, ct);
 
         Guid publicId;
         PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;

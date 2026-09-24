@@ -57,6 +57,27 @@ public class SaveFormRuleCommandHandler
             }
         }
 
+        // Same compile-check for any action whose ActionValue is a formula expression
+        // (ChangeLabel/ChangeValue/DisplayMessage/PreventSave, gated by IsExpressionValue) — no
+        // single expectedType applies across all four (ChangeValue's varies by target field,
+        // the rest are free-form text), so expectedType is left null (any result type compiles).
+        var expressionActionErrors = new List<string>();
+        if (command.Actions.Any(a => a.IsExpressionValue && !string.IsNullOrWhiteSpace(a.ActionValue)))
+        {
+            var tableId = await _formRepo.GetTableIdByFormIdAsync(rule.FormId, ct);
+            if (tableId is { } tid)
+            {
+                var tableFields = await _fieldRepo.ListByTableAsync(tid, ct);
+                foreach (var a in command.Actions.Where(a => a.IsExpressionValue && !string.IsNullOrWhiteSpace(a.ActionValue)))
+                {
+                    var errors = _exprValidator.Validate(a.ActionValue, tableFields, null);
+                    expressionActionErrors.AddRange(errors.Select(e => $"{a.ActionType}: {e}"));
+                }
+            }
+        }
+        if (expressionActionErrors.Count > 0)
+            throw new ValidationException(new Dictionary<string, string[]> { ["Actions"] = expressionActionErrors.ToArray() });
+
         var conditions = command.Conditions.Select(c => new FormRuleCondition
         {
             ConditionKind = c.ConditionKind,
@@ -77,6 +98,7 @@ public class SaveFormRuleCommandHandler
             TargetBlockId       = a.TargetBlockId,
             ActionValue         = a.ActionValue,
             RunOnceOnActivation = a.RunOnceOnActivation,
+            IsExpressionValue   = a.IsExpressionValue,
             DisplayOrder        = a.DisplayOrder,
         }).ToList();
 

@@ -25,6 +25,7 @@ public class MassUpdateRecordsCommandHandler
     private readonly FormulaEngine _engine;
     private readonly IFormRuleRepository _formRuleRepo;
     private readonly IFormRepository _formRepo;
+    private readonly IUserRepository _userRepo;
 
     public MassUpdateRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -40,7 +41,8 @@ public class MassUpdateRecordsCommandHandler
         IMessagePublisher messagePublisher,
         FormulaEngine engine,
         IFormRuleRepository formRuleRepo,
-        IFormRepository formRepo)
+        IFormRepository formRepo,
+        IUserRepository userRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -56,6 +58,7 @@ public class MassUpdateRecordsCommandHandler
         _engine = engine;
         _formRuleRepo = formRuleRepo;
         _formRepo = formRepo;
+        _userRepo = userRepo;
     }
 
     public async Task<int> HandleAsync(MassUpdateRecordsCommand command, CancellationToken ct = default)
@@ -206,7 +209,7 @@ public class MassUpdateRecordsCommandHandler
 
                 var formRuleViolations = await FormRuleServerValidator.CollectViolationsAsync(
                     table, fields, effectiveValues, oldValuesByFid, _queryContext.TenantRole, _queryContext.UserId,
-                    _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _engine, ct, recordPublicId);
+                    _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _engine, ct, recordPublicId);
                 violations.AddRange(formRuleViolations);
             }
             catch (NotFoundException)

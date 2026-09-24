@@ -171,7 +171,7 @@ public sealed class RecordWriteService : IRecordWriteService
                 f => oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var ov) ? ov : null);
         await FormRuleServerValidator.ValidateAsync(
             table, fields, effectiveValues, oldValuesByFid, _queryContext.TenantRole, _queryContext.UserId,
-            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _engine, ct);
+            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _engine, ct);
 
         await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct, onIndexMessageCreated);
 

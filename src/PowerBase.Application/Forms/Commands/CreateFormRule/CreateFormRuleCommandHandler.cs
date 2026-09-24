@@ -90,6 +90,7 @@ public class CreateFormRuleCommandHandler
             TargetBlockId       = a.TargetBlockId,
             ActionValue         = a.ActionValue,
             RunOnceOnActivation = a.RunOnceOnActivation,
+            IsExpressionValue   = a.IsExpressionValue,
             DisplayOrder        = a.DisplayOrder,
         }).ToList(),
     };

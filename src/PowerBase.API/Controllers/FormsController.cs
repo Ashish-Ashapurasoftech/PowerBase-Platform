@@ -395,7 +395,7 @@ public class FormsController : ControllerBase
         var conditions = request.Conditions.Select(c =>
             new FormRuleConditionSpec(c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder, c.ConditionKind)).ToList();
         var actions = request.Actions.Select(a =>
-            new FormRuleActionSpec(a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder, a.RunOnceOnActivation)).ToList();
+            new FormRuleActionSpec(a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder, a.RunOnceOnActivation, a.IsExpressionValue)).ToList();
 
         await _saveRuleHandler.HandleAsync(new SaveFormRuleCommand(
             ruleId, request.Name, request.Description, request.Tags, request.IsActive,
@@ -610,6 +610,7 @@ public class FormsController : ControllerBase
             TargetBlockId       = a.TargetBlockId,
             ActionValue         = a.ActionValue,
             RunOnceOnActivation = a.RunOnceOnActivation,
+            IsExpressionValue   = a.IsExpressionValue,
             DisplayOrder        = a.DisplayOrder,
         }).ToList(),
     };

@@ -24,4 +24,5 @@ public record FormRuleActionSpec(
     long? TargetBlockId,
     string? ActionValue,
     int DisplayOrder,
-    bool RunOnceOnActivation = false);
+    bool RunOnceOnActivation = false,
+    bool IsExpressionValue = false);

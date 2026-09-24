@@ -20,6 +20,8 @@ using PowerBase.Application.Reports.Queries.ExportReport;
 using PowerBase.Application.Reports.Queries.ResolveDefaultReport;
 using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Application.Reports.Commands.UpdateReportFormOverrides;
+using PowerBase.Application.Reports.Queries.GetReportGridEditRules;
+using PowerBase.Application.Reports.Commands.UpdateReportGridEditRules;
 using PowerBase.Application.Forms.Queries.ListForms;
 using PowerBase.API.Models.Forms;
 using PowerBase.Application.Reports.Queries.GetReportPreviewMetadata;
@@ -47,6 +49,8 @@ public class ReportsController : ControllerBase
     private readonly UpdateReportFormOverridesCommandHandler _updateReportFormOverridesHandler;
     private readonly ListFormsQueryHandler _listFormsHandler;
     private readonly GetReportPreviewMetadataQueryHandler _previewMetadataHandler;
+    private readonly GetReportGridEditRulesQueryHandler _getGridEditRulesHandler;
+    private readonly UpdateReportGridEditRulesCommandHandler _updateGridEditRulesHandler;
 
     public ReportsController(
         CreateReportCommandHandler createHandler,
@@ -65,7 +69,9 @@ public class ReportsController : ControllerBase
         ResolveDefaultReportQueryHandler resolveDefaultReportHandler,
         UpdateReportFormOverridesCommandHandler updateReportFormOverridesHandler,
         ListFormsQueryHandler listFormsHandler,
-        GetReportPreviewMetadataQueryHandler previewMetadataHandler)
+        GetReportPreviewMetadataQueryHandler previewMetadataHandler,
+        GetReportGridEditRulesQueryHandler getGridEditRulesHandler,
+        UpdateReportGridEditRulesCommandHandler updateGridEditRulesHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -84,6 +90,8 @@ public class ReportsController : ControllerBase
         _updateReportFormOverridesHandler = updateReportFormOverridesHandler;
         _listFormsHandler = listFormsHandler;
         _previewMetadataHandler = previewMetadataHandler;
+        _getGridEditRulesHandler = getGridEditRulesHandler;
+        _updateGridEditRulesHandler = updateGridEditRulesHandler;
     }
 
     /// <summary>Save a report definition for a table.</summary>
@@ -209,6 +217,40 @@ public class ReportsController : ControllerBase
     {
         var overrides = request.ReportOverrides.Select(o => new ReportFormOverrideCommandDto(o.ReportId, o.FormId)).ToList();
         await _updateReportFormOverridesHandler.HandleAsync(new UpdateReportFormOverridesCommand(tableId, overrides), ct);
+        return NoContent();
+    }
+
+    /// <summary>Every Require/PreventSave/Enable/Disable/ChangeValue/DisplayMessage-bearing rule
+    /// on the table, plus this report's currently selected/ordered subset — backs the "Grid Edit &amp;
+    /// Form Rules" picker. This is a client-side pre-check config only; server-side write
+    /// enforcement (FormRuleServerValidator) is unaffected by it.</summary>
+    [HttpGet("tables/{tableId:guid}/reports/{reportId:guid}/grid-edit-rules")]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<ReportGridEditRulesResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetGridEditRules(Guid tableId, Guid reportId, CancellationToken ct)
+    {
+        var result = await _getGridEditRulesHandler.HandleAsync(new GetReportGridEditRulesQuery(tableId, reportId), ct);
+        var response = new ReportGridEditRulesResponse
+        {
+            Candidates = result.Candidates.Select(c => new GridEditRuleCandidateResponse
+            {
+                Id = c.Id,
+                RuleName = c.RuleName,
+                FormName = c.FormName,
+                FormId = c.FormId,
+            }).ToList(),
+            SelectedRuleIds = result.SelectedRuleIds.ToList(),
+        };
+        return Ok(new ApiResponse<ReportGridEditRulesResponse>(response));
+    }
+
+    /// <summary>Replaces this report's Grid Edit rule selection wholesale, in the given order.</summary>
+    [HttpPut("tables/{tableId:guid}/reports/{reportId:guid}/grid-edit-rules")]
+    [RequireAppPermission(PermissionCodes.ReportsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> UpdateGridEditRules(Guid tableId, Guid reportId, [FromBody] UpdateReportGridEditRulesRequest request, CancellationToken ct)
+    {
+        await _updateGridEditRulesHandler.HandleAsync(new UpdateReportGridEditRulesCommand(reportId, request.OrderedFormRuleIds), ct);
         return NoContent();
     }
 
