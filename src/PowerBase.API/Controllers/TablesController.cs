@@ -206,7 +206,7 @@ public class TablesController : ControllerBase
         RecordCount = t.RecordCount,
         IsShowInBar = t.IsShowInBar,
         CreatedOn = t.CreatedOn,
-        Fields = t.Fields.Select(MapFieldToResponse).ToList(),
+        Fields = t.Fields.Select(f => MapFieldToResponse(f)).ToList(),
     };
 
     private static TableResponse MapToResponse(GetTableResult r) => new()
@@ -226,7 +226,7 @@ public class TablesController : ControllerBase
         RecordCount = r.Table.RecordCount,
         IsShowInBar = r.Table.IsShowInBar,
         CreatedOn = r.Table.CreatedOn,
-        Fields = r.Fields.Select(MapFieldToResponse).ToList(),
+        Fields = r.Fields.Select(f => MapFieldToResponse(f, r.SummarySourceSettings.GetValueOrDefault(f.Id))).ToList(),
     };
 
     private static TableSummaryResponse MapToSummaryResponse(CreateTableResult r) => new()
@@ -295,7 +295,7 @@ public class TablesController : ControllerBase
     private static int? ResolveKeyFieldFid(long? keyFieldId, IReadOnlyList<AppField> fields) =>
         keyFieldId is null ? null : fields.FirstOrDefault(f => f.Id == keyFieldId.Value)?.Fid;
 
-    private static FieldResponse MapFieldToResponse(AppField f) => new()
+    private static FieldResponse MapFieldToResponse(AppField f, string? summarySourceSettings = null) => new()
     {
         Id = f.Id,
         PublicId = f.PublicId,
@@ -318,5 +318,6 @@ public class TablesController : ControllerBase
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,
+        SummarySourceSettings = summarySourceSettings,
     };
 }

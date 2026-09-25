@@ -548,10 +548,10 @@ public static class QblToPblConverter
         }
     }
 
-    /// <summary>PowerBase's SummaryFunctions is {Count, Exists, Sum, Avg, Min, Max}; QBL's is
-    /// {Count, Total, Average, Maximum, Minimum, StdDeviation, CombinedText, DistinctCount}.
-    /// StdDeviation/CombinedText/DistinctCount have no PowerBase equivalent — flagged by the
-    /// caller, never approximated into a different function.</summary>
+    /// <summary>PowerBase's SummaryFunctions is {Count, Exists, Sum, Avg, Min, Max, DistinctCount,
+    /// CombinedText}; QBL's is {Count, Total, Average, Maximum, Minimum, StdDeviation, CombinedText,
+    /// DistinctCount}. StdDeviation has no PowerBase equivalent — flagged by the caller, never
+    /// approximated into a different function.</summary>
     private static string? MapSummaryFunction(string qblFunction) => qblFunction switch
     {
         "Count" => "Count",
@@ -560,6 +560,8 @@ public static class QblToPblConverter
         "Maximum" => "Max",
         "Minimum" => "Min",
         "AnyRelatedRecords" => "Exists",
+        "DistinctCount" => "DistinctCount",
+        "CombinedText" => "CombinedText",
         _ => null,
     };
 

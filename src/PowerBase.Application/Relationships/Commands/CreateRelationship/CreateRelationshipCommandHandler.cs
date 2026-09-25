@@ -52,6 +52,29 @@ public class CreateRelationshipCommandHandler
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
         var childFields = await _fieldRepo.ListByTableAsync(child.Id, ct);
 
+        // Validate every summary spec up front — before any field is created — so a bad
+        // function/target combination can't leave a half-built relationship behind. Function names
+        // are normalized to their canonical casing here, and that normalized list is what's stored.
+        var summaries = new List<CreateSummarySpec>(command.Summaries.Count);
+        App? app = command.Summaries.Count > 0 ? await _appRepo.GetByIdAsync(parent.AppId, ct) : null;
+        foreach (var spec in command.Summaries)
+        {
+            var function = SummaryFunctions.Normalize(spec.Function)
+                ?? throw new ValidationException(new Dictionary<string, string[]> { ["summaries"] = [$"Unknown summary function '{spec.Function}'."] });
+            var target = spec.TargetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == spec.TargetFid) : null;
+            SummaryTargetValidator.Validate(function, spec.TargetFid, target, spec.TargetSubField);
+
+            // An existing field reused as the reference keeps its own encryption flag; a brand-new
+            // reference is encrypted exactly when the app is (covered by the app check).
+            var encryptionProblem = command.ReferenceFieldFid is int refFid
+                ? SummaryEncryptionGuard.FindProblem(app!, childFields, refFid, spec.TargetFid, null, null)
+                : SummaryEncryptionGuard.FindProblem(app!, childFields, spec.TargetFid, null, null);
+            if (encryptionProblem is not null)
+                throw new ValidationException(new Dictionary<string, string[]> { ["summaries"] = [encryptionProblem] });
+
+            summaries.Add(spec with { Function = function });
+        }
+
         // 1. Reference field on the child (physical FK column). Settings get the relationship id after creation.
         //    Two paths: create a brand-new Reference field, or convert an existing child Number field in place.
         AppField refField;
@@ -78,6 +101,11 @@ public class CreateRelationshipCommandHandler
 
             var refType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Reference, ct)
                 ?? throw new NotFoundException("FieldType", "Reference");
+
+            // A Number field some Summary already sums/averages can't silently become a Reference —
+            // checked before anything is written, so a refusal leaves no half-built relationship.
+            await SummaryDependencyGuard.EnsureTypeChangeKeepsSummariesValidAsync(
+                existing, FieldTypeCodeNames.Reference, _relRepo, _tableRepo, _fieldRepo, ct);
 
             await _fieldRepo.UpdateFieldTypeAsync(
                 existing.Id, refType.Id,
@@ -162,7 +190,7 @@ public class CreateRelationshipCommandHandler
 
         // 4. Summary fields on the parent.
         var parentAddFids = new List<int>();
-        foreach (var spec in command.Summaries)
+        foreach (var spec in summaries)
         {
             var target = spec.TargetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == spec.TargetFid) : null;
             ValidateSubField(spec.TargetSubField, target?.TypeCode, "targetSubField");

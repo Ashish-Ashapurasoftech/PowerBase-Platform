@@ -7,10 +7,13 @@ namespace PowerBase.Application.Relationships.Commands.AddSummaryField;
 /// is one of <see cref="Domain.FieldSettings.SummaryFunctions"/> (Count/Exists/Sum/Avg/Min/Max);
 /// <paramref name="TargetFid"/> is required for Sum/Avg/Min/Max and null for Count/Exists.
 /// <paramref name="MatchingCriteria"/> optionally restricts which child records are summarized.
+/// <paramref name="CombinedText"/> holds the delimiter / sort / distinct options, used only when
+/// <paramref name="Function"/> is CombinedText.
 /// </summary>
 public record AddSummaryFieldCommand(
     Guid RelationshipPublicId,
     string Label,
     string Function,
     int? TargetFid,
-    FilterGroup? MatchingCriteria);
+    FilterGroup? MatchingCriteria,
+    CombinedTextOptions? CombinedText = null);

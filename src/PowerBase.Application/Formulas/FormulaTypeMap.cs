@@ -61,14 +61,16 @@ internal static class FormulaTypeMap
         return string.IsNullOrWhiteSpace(s?.SourceTypeCode) ? FormulaType.Text : FieldType(s!.SourceTypeCode!, null);
     }
 
-    /// <summary>Count/Sum/Avg present as Number; Min/Max present as the aggregated field's type.</summary>
+    /// <summary>Count/Sum/Avg/DistinctCount present as Number; Min/Max as the aggregated field's
+    /// type; CombinedText as Text.</summary>
     private static FormulaType? SummaryResultType(string? settingsJson)
     {
         var s = ParseSummarySettings(settingsJson);
         if (s is null) return FormulaType.Number;
-        return s.Function switch
+        return SummaryFunctions.Normalize(s.Function) switch
         {
             "Exists" => FormulaType.Bool,
+            "CombinedText" => FormulaType.Text,
             "Min" or "Max" when !string.IsNullOrWhiteSpace(s.TargetTypeCode) => FieldType(s.TargetTypeCode!, null),
             _ => FormulaType.Number,
         };

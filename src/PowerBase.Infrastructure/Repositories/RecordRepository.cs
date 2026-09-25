@@ -373,13 +373,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (parentKeyValues.Count == 0) return result;
 
         var refCol = PhysicalNaming.ColumnName(referenceFid);
-        // Address sub-field targeting: aggregate the JSON_VALUE-extracted sub-key instead of the
-        // raw column, same JSON_VALUE pattern already used for Address report filters below.
-        string TargetColExpr() => targetFid.HasValue
-            ? (string.IsNullOrWhiteSpace(targetSubField)
-                ? PhysicalNaming.ColumnName(targetFid.Value)
-                : $"JSON_VALUE({PhysicalNaming.ColumnName(targetFid.Value)}, '$.{System.Text.RegularExpressions.Regex.Replace(targetSubField, "[^a-zA-Z0-9_]", "")}')")
-            : "";
+        string TargetColExpr() => targetFid.HasValue ? TargetColumnExpr(targetFid.Value, targetSubField) : "";
         var aggExpr = function switch
         {
             "Count" => "COUNT(*)",
@@ -388,6 +382,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             "Avg" when targetFid.HasValue => $"AVG(CAST({TargetColExpr()} AS DECIMAL(18,4)))",
             "Min" when targetFid.HasValue => $"MIN({TargetColExpr()})",
             "Max" when targetFid.HasValue => $"MAX({TargetColExpr()})",
+            // Any column type: cast to text so NULLIF can also drop blank strings (a cleared text
+            // field) alongside the NULLs COUNT already skips — NULLIF(decimalCol, '') would throw.
+            "DistinctCount" when targetFid.HasValue => $"COUNT(DISTINCT NULLIF(CAST({TargetColExpr()} AS NVARCHAR(MAX)), N''))",
             _ => "COUNT(*)",
         };
 
@@ -411,6 +408,48 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         return result;
     }
+
+    public async Task<IReadOnlyList<(object ParentKey, object Value)>> ListValuesByReferenceAsync(
+        AppTable childTable, int referenceFid, int targetFid, string? targetSubField,
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree,
+        int? sortFid, bool sortDescending, CancellationToken ct = default)
+    {
+        var result = new List<(object, object)>();
+        if (parentKeyValues.Count == 0) return result;
+
+        var refCol = PhysicalNaming.ColumnName(referenceFid);
+        var targetExpr = TargetColumnExpr(targetFid, targetSubField);
+        var dir = sortDescending ? "DESC" : "ASC";
+        var order = sortFid.HasValue ? $"{PhysicalNaming.ColumnName(sortFid.Value)} {dir}, Id {dir}" : $"Id {dir}";
+
+        var parameters = new DynamicParameters();
+        parameters.Add("parentKeyValues", parentKeyValues);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
+
+        var sql = $"""
+            SELECT {refCol} AS ParentKey, {targetExpr} AS Value
+            FROM {PhysicalNaming.FullTableName(childTable.Id)}
+            WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues AND {targetExpr} IS NOT NULL{filterWhere}
+            ORDER BY {refCol}, {order}
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        foreach (var row in rows)
+        {
+            var dict = (IDictionary<string, object>)row;
+            if (dict.TryGetValue("ParentKey", out var pk) && pk is not null && pk != DBNull.Value
+                && dict.TryGetValue("Value", out var v) && v is not null && v != DBNull.Value)
+                result.Add((pk, v));
+        }
+        return result;
+    }
+
+    /// <summary>The SQL expression for a summary's target: its f_{fid} column, or — for a composite
+    /// Address field's sub-key — the JSON_VALUE-extracted part (same pattern as Address report filters).</summary>
+    private static string TargetColumnExpr(int targetFid, string? targetSubField) =>
+        string.IsNullOrWhiteSpace(targetSubField)
+            ? PhysicalNaming.ColumnName(targetFid)
+            : $"JSON_VALUE({PhysicalNaming.ColumnName(targetFid)}, '$.{System.Text.RegularExpressions.Regex.Replace(targetSubField, "[^a-zA-Z0-9_]", "")}')";
 
     public async Task<IReadOnlyDictionary<long, object?>> GetColumnValuesByIdsAsync(
         AppTable table, string columnName, IReadOnlyCollection<long> ids, CancellationToken ct = default)

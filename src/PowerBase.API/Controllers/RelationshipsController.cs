@@ -13,6 +13,7 @@ using PowerBase.Application.Relationships.Commands.UpdateDisplayKey;
 using PowerBase.Application.Relationships.Queries;
 using PowerBase.Application.Records.Queries.ListRecords;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.FieldSettings;
 
 namespace PowerBase.API.Controllers;
 
@@ -141,7 +142,9 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> AddSummary(Guid appId, Guid id, [FromBody] AddSummaryFieldRequest request, CancellationToken ct)
     {
-        var command = new AddSummaryFieldCommand(id, request.Label, request.Function, request.TargetFid, request.MatchingCriteria);
+        var command = new AddSummaryFieldCommand(id, request.Label, request.Function, request.TargetFid, request.MatchingCriteria,
+            new CombinedTextOptions(request.Delimiter ?? SummaryFunctions.DefaultCombinedTextDelimiter,
+                request.SortFid, request.SortDescending, request.DistinctValues));
         var result = await _addSummary.HandleAsync(command, ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }

@@ -569,11 +569,23 @@ public sealed class SummarySettings
     public string? TargetTypeCode { get; set; }
     /// <summary>When the target field is a composite Address field, the JSON sub-key to aggregate
     /// (one of <see cref="AddressSubFields.All"/>) instead of the whole address. Only meaningful
-    /// with Count/Exists/Min/Max — Sum/Avg over an address sub-value (always text) makes no sense
-    /// and is rejected at creation time.</summary>
+    /// with Count/Exists — an address sub-value is always text, so Sum/Avg/Min/Max over it are
+    /// rejected at creation time (see SummaryTargetValidator).</summary>
     public string? TargetSubField { get; set; }
     /// <summary>Optional child-record filter (serialized FilterGroup JSON) applied before aggregating.</summary>
     public string? FilterTree { get; set; }
+
+    // ── Combined Text only (ignored by every other function) ──
+
+    /// <summary>The literal separator placed between values (e.g. ", ", "\n", " | ");
+    /// null ⇒ <see cref="SummaryFunctions.DefaultCombinedTextDelimiter"/>.</summary>
+    public string? Delimiter { get; set; }
+    /// <summary>Child field Fid whose value orders the joined values; null ⇒ record creation order.</summary>
+    public int? SortFid { get; set; }
+    /// <summary>Reverse the order (by <see cref="SortFid"/>, or newest record first when unset).</summary>
+    public bool SortDescending { get; set; }
+    /// <summary>Include each unique value only once (at its first position in the sort order).</summary>
+    public bool DistinctValues { get; set; }
 }
 
 /// <summary>The JSON keys an Address field's composite value is stored under (confirmed real
@@ -631,8 +643,24 @@ public static class SummaryFunctions
     public const string Avg = "Avg";
     public const string Min = "Min";
     public const string Max = "Max";
+    /// <summary>Number of unique non-empty values of the target field across the related children.</summary>
+    public const string DistinctCount = "DistinctCount";
+    /// <summary>One text value joining the target field's non-empty values from every related
+    /// child (oldest record first), separated by <see cref="DefaultCombinedTextDelimiter"/>.</summary>
+    public const string CombinedText = "CombinedText";
 
-    public static readonly string[] All = [Count, Exists, Sum, Avg, Min, Max];
+    public const string DefaultCombinedTextDelimiter = ", ";
+    public const int MaxCombinedTextDelimiterLength = 10;
+
+    public static readonly string[] All = [Count, Exists, Sum, Avg, Min, Max, DistinctCount, CombinedText];
+
+    /// <summary>The canonical spelling of <paramref name="function"/> ("sum" → "Sum"), or null when it
+    /// isn't a summary function. Every create/import path stores this form, and readers normalize
+    /// through it too, because the aggregation code matches function names exactly.</summary>
+    public static string? Normalize(string? function) =>
+        string.IsNullOrWhiteSpace(function)
+            ? null
+            : All.FirstOrDefault(f => string.Equals(f, function.Trim(), StringComparison.OrdinalIgnoreCase));
 }
 
 // ── Action Button field settings ────────────────────────────────────────────

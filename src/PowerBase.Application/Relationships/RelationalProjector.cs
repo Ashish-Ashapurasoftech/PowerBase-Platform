@@ -1,4 +1,5 @@
 using System.Text.Json;
+using PowerBase.Application.Common.Formatting;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Reports;
@@ -22,15 +23,23 @@ public sealed class RelationalProjector : IRelationalProjector
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IRelationshipRepository _relRepo;
+    private readonly IAppRepository _appRepo;
+
+    /// <summary>Each app's display formatting, loaded once per projector (scoped per request) the
+    /// first time a Combined Text summary needs it — keyed by AppId, since one scope (e.g. a
+    /// pipeline copy) can project tables from more than one app.</summary>
+    private readonly Dictionary<long, Domain.ValueObjects.AppFormattingSettings> _appFormatting = new();
+    private readonly Dictionary<long, App> _apps = new();
 
     public RelationalProjector(
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
-        IRelationshipRepository relRepo)
+        IRelationshipRepository relRepo, IAppRepository appRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _relRepo = relRepo;
+        _appRepo = appRepo;
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>> ProjectAsync(
@@ -186,28 +195,129 @@ public sealed class RelationalProjector : IRelationalProjector
         var parentKeyValues = aggKeys.Where(k => k is not null).Select(k => k!).Distinct().ToList();
         if (parentKeyValues.Count == 0) return;
 
+        var app = await GetAppAsync(table.AppId, ct);
+        var childFieldsByTable = new Dictionary<long, IReadOnlyList<AppField>>();
+
         foreach (var field in summaryFields)
         {
             var s = FormulaTypeMap.ParseSummarySettings(field.Settings);
-            if (s?.ChildTableId is not long childId || s.ReferenceFid is not int refFid || string.IsNullOrWhiteSpace(s.Function))
+            // Canonical casing: rows imported before names were normalized may say "sum".
+            var function = SummaryFunctions.Normalize(s?.Function);
+            if (s?.ChildTableId is not long childId || s.ReferenceFid is not int refFid || function is null)
+            {
+                for (var i = 0; i < rows.Count; i++) maps[i][field.Fid!.Value] = null;
+                continue;
+            }
+
+            if (!childFieldsByTable.TryGetValue(childId, out var childFields))
+            {
+                childFields = await _fieldRepo.ListByTableAsync(childId, ct);
+                childFieldsByTable[childId] = childFields;
+            }
+            var filter = ParseFilter(s.FilterTree);
+
+            // A summary reading an encrypted column is shown blank and never computed: SQL can't
+            // aggregate ciphertext, and Combined Text would otherwise put it on screen.
+            var sortFid = function == SummaryFunctions.CombinedText ? s.SortFid : null;
+            if (SummaryEncryptionGuard.FindProblem(app, childFields, refFid, s.TargetFid, sortFid, filter) is not null)
+            {
+                for (var i = 0; i < rows.Count; i++) maps[i][field.Fid!.Value] = null;
+                continue;
+            }
+
+            // A summary saved before today's rules (e.g. Sum over a formula field, which has no column
+            // and would fail the whole read, or Combined Text over a User field, which would show raw
+            // ids) is shown blank rather than computed wrong — same rule as creation.
+            if (s.TargetFid is int tFid && childFields.FirstOrDefault(f => f.Fid == tFid) is { } targetField
+                && SummaryTargetValidator.FindProblem(function, targetField, s.TargetSubField) is not null)
             {
                 for (var i = 0; i < rows.Count; i++) maps[i][field.Fid!.Value] = null;
                 continue;
             }
 
             var childTable = await _tableRepo.GetByIdAsync(childId, ct);
-            var filter = ParseFilter(s.FilterTree);
-            var agg = await _recordRepo.AggregateByReferenceAsync(childTable, refFid, s.Function!, s.TargetFid, parentKeyValues, filter, s.TargetSubField, ct);
+            var agg = function == SummaryFunctions.CombinedText && s.TargetFid is int targetFid
+                ? await CombineTextAsync(app, childTable, childFields, refFid, targetFid, s, parentKeyValues, filter, ct)
+                : await _recordRepo.AggregateByReferenceAsync(childTable, refFid, function, s.TargetFid, parentKeyValues, filter, s.TargetSubField, ct);
 
-            var isCount = string.Equals(s.Function, SummaryFunctions.Count, StringComparison.OrdinalIgnoreCase);
-            var isExists = string.Equals(s.Function, SummaryFunctions.Exists, StringComparison.OrdinalIgnoreCase);
+            // Match results to parents by value, not by boxed type: a reference that was converted
+            // from a Number field is a DECIMAL column, so its keys come back as 42.0000m while the
+            // parent row Ids here are 42L — and a decimal never equals a long as an object key.
+            var aggByKey = new Dictionary<string, object?>();
+            foreach (var (key, value) in agg)
+                if (NormalizeParentKey(key) is { } k) aggByKey[k] = value;
+
+            var isCount = function is SummaryFunctions.Count or SummaryFunctions.DistinctCount;
+            var isExists = function == SummaryFunctions.Exists;
             for (var i = 0; i < rows.Count; i++)
             {
-                // No matching children: Count → 0, Exists → false, others → null.
-                if (aggKeys[i] is object key && agg.TryGetValue(key, out var v)) maps[i][field.Fid!.Value] = v;
+                // No matching children: Count/DistinctCount → 0, Exists → false, others → null.
+                if (NormalizeParentKey(aggKeys[i]) is { } key && aggByKey.TryGetValue(key, out var v)) maps[i][field.Fid!.Value] = v;
                 else maps[i][field.Fid!.Value] = isCount ? 0 : isExists ? false : null;
             }
         }
+    }
+
+    /// <summary>A parent key's canonical text — numbers by value (42L, 42.0000m → "42"), anything
+    /// else as its trimmed text — so keys of different CLR types still match.</summary>
+    internal static string? NormalizeParentKey(object? key) => key switch
+    {
+        null => null,
+        decimal or double or float or long or int or short or byte =>
+            Convert.ToDecimal(key, System.Globalization.CultureInfo.InvariantCulture)
+                .ToString("0.############################", System.Globalization.CultureInfo.InvariantCulture),
+        _ => Convert.ToString(key, System.Globalization.CultureInfo.InvariantCulture)?.Trim(),
+    };
+
+    /// <summary>The app (encryption flag + display formatting), loaded once per app per projector
+    /// (scoped per request); one scope — e.g. a pipeline copy — can project more than one app.</summary>
+    private async Task<App> GetAppAsync(long appId, CancellationToken ct)
+    {
+        if (!_apps.TryGetValue(appId, out var app))
+        {
+            app = await _appRepo.GetByIdAsync(appId, ct);
+            _apps[appId] = app;
+        }
+        return app;
+    }
+
+    /// <summary>
+    /// Combined Text: each child value is rendered with its field's display format (the app's
+    /// Formatting + the field's own Behavior Settings — "$1,200.00", "09-23-2026", "2 hrs"), blanks
+    /// dropped, then joined with the delimiter. Distinct compares the displayed text, so values that
+    /// differ only in storage (100 vs 100.0000) still collapse. Returns parentKey → text; parents
+    /// with nothing to show are absent (→ null).
+    /// </summary>
+    private async Task<IReadOnlyDictionary<object, object?>> CombineTextAsync(
+        App app, AppTable childTable, IReadOnlyList<AppField> childFields, int refFid, int targetFid, SummarySettings s,
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filter, CancellationToken ct)
+    {
+        var options = CombinedTextOptions.From(s);
+        var rows = await _recordRepo.ListValuesByReferenceAsync(childTable, refFid, targetFid, s.TargetSubField,
+            parentKeyValues, filter, options.SortFid, options.SortDescending, ct);
+        if (rows.Count == 0) return new Dictionary<object, object?>();
+
+        // An Address sub-key is plain text; otherwise format as the target field currently is.
+        var target = childFields.FirstOrDefault(f => f.Fid == targetFid);
+        var typeCode = string.IsNullOrWhiteSpace(s.TargetSubField) ? target?.TypeCode ?? s.TargetTypeCode ?? "Text" : "Text";
+        if (!_appFormatting.TryGetValue(app.Id, out var appFormatting))
+        {
+            appFormatting = DisplayValueFormatter.ParseAppFormatting(app.Formatting);
+            _appFormatting[app.Id] = appFormatting;
+        }
+
+        var result = new Dictionary<object, object?>();
+        foreach (var group in rows.GroupBy(r => r.ParentKey))
+        {
+            var texts = group
+                .Select(r => DisplayValueFormatter.Format(r.Value, typeCode, target?.Settings, appFormatting))
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Select(t => t!);
+            if (options.DistinctValues) texts = texts.Distinct(StringComparer.Ordinal);
+            var joined = string.Join(options.Delimiter, texts);
+            if (joined.Length > 0) result[group.Key] = joined;
+        }
+        return result;
     }
 
     /// <summary>Pulls one JSON property out of a composite Address field's raw stored value

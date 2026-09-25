@@ -19,6 +19,7 @@ public class AddSummaryFieldCommandHandler
     private readonly RelationshipFieldFactory _fieldFactory;
     private readonly RelationshipQueriesHandler _queries;
     private readonly IAuditRepository _auditRepo;
+    private readonly IAppRepository _appRepo;
 
     public AddSummaryFieldCommandHandler(
         IRelationshipRepository relRepo,
@@ -26,7 +27,8 @@ public class AddSummaryFieldCommandHandler
         IAppFieldRepository fieldRepo,
         RelationshipFieldFactory fieldFactory,
         RelationshipQueriesHandler queries,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IAppRepository appRepo)
     {
         _relRepo = relRepo;
         _tableRepo = tableRepo;
@@ -34,18 +36,18 @@ public class AddSummaryFieldCommandHandler
         _fieldFactory = fieldFactory;
         _queries = queries;
         _auditRepo = auditRepo;
+        _appRepo = appRepo;
     }
 
     public async Task<RelationshipDto> HandleAsync(AddSummaryFieldCommand command, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(command.Label))
             throw new ValidationException(new Dictionary<string, string[]> { ["label"] = ["Summary field label is required."] });
-        if (!SummaryFunctions.All.Contains(command.Function))
-            throw new ValidationException(new Dictionary<string, string[]> { ["function"] = [$"Unknown summary function '{command.Function}'."] });
+        // Stored in canonical casing ("sum" → "Sum"): the aggregation code matches names exactly.
+        var function = SummaryFunctions.Normalize(command.Function)
+            ?? throw new ValidationException(new Dictionary<string, string[]> { ["function"] = [$"Unknown summary function '{command.Function}'."] });
 
-        var needsTarget = command.Function is not (SummaryFunctions.Count or SummaryFunctions.Exists);
-        if (needsTarget && command.TargetFid is null)
-            throw new ValidationException(new Dictionary<string, string[]> { ["targetFid"] = [$"{command.Function} requires a field to summarize."] });
+        var needsTarget = function is not (SummaryFunctions.Count or SummaryFunctions.Exists);
 
         var rel = await _relRepo.GetByPublicIdAsync(command.RelationshipPublicId, ct)
             ?? throw new NotFoundException("Relationship", command.RelationshipPublicId);
@@ -55,8 +57,15 @@ public class AddSummaryFieldCommandHandler
         var childFields = await _fieldRepo.ListByTableAsync(child.Id, ct);
 
         var target = command.TargetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == command.TargetFid) : null;
-        if (needsTarget && target is null)
-            throw new NotFoundException("Field", command.TargetFid!);
+        SummaryTargetValidator.Validate(function, command.TargetFid, target, targetSubField: null);
+        var combinedText = SummaryTargetValidator.ValidateCombinedTextOptions(function, command.CombinedText, childFields);
+
+        // Encrypted columns can't be summarized yet — refuse rather than create a summary that
+        // would compute nothing (or expose ciphertext).
+        var app = await _appRepo.GetByIdAsync(parent.AppId, ct);
+        if (SummaryEncryptionGuard.FindProblem(app, childFields, rel.ReferenceFid,
+                needsTarget ? command.TargetFid : null, combinedText?.SortFid, command.MatchingCriteria) is { } encryptionProblem)
+            throw new ValidationException(new Dictionary<string, string[]> { ["targetFid"] = [encryptionProblem] });
 
         var filterJson = command.MatchingCriteria is { Nodes.Count: > 0 }
             ? JsonSerializer.Serialize(command.MatchingCriteria, JsonOpts)
@@ -69,10 +78,14 @@ public class AddSummaryFieldCommandHandler
                 RelationshipId = rel.Id,
                 ChildTableId = child.Id,
                 ReferenceFid = rel.ReferenceFid,
-                Function = command.Function,
+                Function = function,
                 TargetFid = needsTarget ? command.TargetFid : null,
                 TargetTypeCode = target?.TypeCode,
                 FilterTree = filterJson,
+                Delimiter = combinedText?.Delimiter,
+                SortFid = combinedText?.SortFid,
+                SortDescending = combinedText?.SortDescending ?? false,
+                DistinctValues = combinedText?.DistinctValues ?? false,
             }, ct);
 
         await _fieldFactory.AppendToAutoAddFormsAsync(parent.PublicId, new[] { summary.Fid!.Value }, ct);

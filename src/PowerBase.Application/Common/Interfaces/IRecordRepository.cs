@@ -72,11 +72,20 @@ public interface IRecordRepository
     /// aggregate value.</summary>
     /// <param name="targetSubField">When the target field is a composite Address field, the JSON
     /// sub-key (see <see cref="PowerBase.Domain.FieldSettings.AddressSubFields"/>) to aggregate
-    /// instead of the whole value. Only meaningful with Count/Exists/Min/Max.</param>
+    /// instead of the whole value. Only meaningful with Count/Exists/DistinctCount.</param>
     Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
         IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
         CancellationToken ct = default);
+
+    /// <summary>The target field's raw non-NULL values for every child of the given parents, in
+    /// display order — grouped by parent, then by <paramref name="sortFid"/> (or record creation
+    /// order when null), then Id. Feeds the Combined Text summary, which formats each value with its
+    /// field's display format before joining (hence raw rows, not a SQL STRING_AGG).</summary>
+    Task<IReadOnlyList<(object ParentKey, object Value)>> ListValuesByReferenceAsync(
+        AppTable childTable, int referenceFid, int targetFid, string? targetSubField,
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree,
+        int? sortFid, bool sortDescending, CancellationToken ct = default);
 
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
