@@ -11,7 +11,7 @@ public interface IFormRepository
     Task<IReadOnlyList<Form>> ListByTableAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> CreateAsync(Form form, CancellationToken ct = default);
     Task<int> UpdateSettingsAsync(Guid publicId, string name, bool autoAddNewFields, bool showBuiltInFields,
-        string saveOptions, byte[] rowVersion, bool? isQuickPeekForm = null, CancellationToken ct = default);
+        string saveOptions, byte[] rowVersion, bool? isQuickPeekForm = null, bool? isQuickPeekDefault = null, CancellationToken ct = default);
     Task<int> DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<FormSection>> GetLayoutAsync(long formId, CancellationToken ct = default);
     Task<IReadOnlyList<FormPage>> GetPagesAsync(long formId, CancellationToken ct = default);
@@ -38,8 +38,10 @@ public interface IFormRepository
     /// <summary>Flags/un-flags one form as a Quick Peek form. Non-exclusive: other forms on the
     /// table keep their own flag.</summary>
     Task SetQuickPeekFormAsync(Guid formPublicId, bool enabled, CancellationToken ct = default);
-    /// <summary>The table's default Quick Peek form: the first flagged form by display order,
-    /// or null if none is flagged.</summary>
+    /// <summary>Makes this form the table's default Quick Peek form (flagging it and clearing the
+    /// previous default). A no-op if it already is the default.</summary>
+    Task SetQuickPeekDefaultAsync(Guid formPublicId, CancellationToken ct = default);
+    /// <summary>The table's default Quick Peek form (IsQuickPeekDefault), or null if none.</summary>
     Task<Form?> GetQuickPeekFormAsync(Guid tablePublicId, CancellationToken ct = default);
     Task<IReadOnlyList<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)>> GetRoleFormOverridesAsync(Guid tablePublicId, CancellationToken ct = default);
     Task UpdateRoleFormOverridesAsync(Guid tablePublicId, IEnumerable<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)> overrides, CancellationToken ct = default);

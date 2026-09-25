@@ -67,5 +67,8 @@ public interface IAppUserRepository
     Task<Guid?> GetUserRolePublicIdAsync(long appId, long userId, CancellationToken ct = default);
     Task<IReadOnlySet<string>> GetUserAppPermissionsAsync(long appId, long userId, CancellationToken ct = default);
     Task<IReadOnlyList<long>> GetUserAppRoleIdsAsync(long appId, long userId, CancellationToken ct = default);
+    /// <summary>Names of every role the user holds in this app — direct assignments plus group-derived
+    /// ones (same sources as <see cref="GetUserAppRoleIdsAsync"/>). Backs role conditions in Form Rules.</summary>
+    Task<IReadOnlyList<string>> GetUserAppRoleNamesAsync(long appId, long userId, CancellationToken ct = default);
     Task<PowerBase.Application.Groups.Queries.GetUserEffectivePermissions.UserEffectivePermissionsDto> GetUserEffectivePermissionsAsync(Guid userPublicId, CancellationToken ct = default);
 }

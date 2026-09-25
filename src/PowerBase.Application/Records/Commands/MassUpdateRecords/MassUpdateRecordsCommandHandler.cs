@@ -26,6 +26,7 @@ public class MassUpdateRecordsCommandHandler
     private readonly IFormRuleRepository _formRuleRepo;
     private readonly IFormRepository _formRepo;
     private readonly IUserRepository _userRepo;
+    private readonly IAppUserRepository _appUserRepo;
 
     public MassUpdateRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -42,7 +43,8 @@ public class MassUpdateRecordsCommandHandler
         FormulaEngine engine,
         IFormRuleRepository formRuleRepo,
         IFormRepository formRepo,
-        IUserRepository userRepo)
+        IUserRepository userRepo,
+        IAppUserRepository appUserRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -59,6 +61,7 @@ public class MassUpdateRecordsCommandHandler
         _formRuleRepo = formRuleRepo;
         _formRepo = formRepo;
         _userRepo = userRepo;
+        _appUserRepo = appUserRepo;
     }
 
     public async Task<int> HandleAsync(MassUpdateRecordsCommand command, CancellationToken ct = default)
@@ -235,8 +238,8 @@ public class MassUpdateRecordsCommandHandler
                 violations.AddRange(recordViolations.Where(v => !(v.ConstraintType == "Unique" && inRequestDuplicateFids.Contains(v.FieldId))));
 
                 var formRuleViolations = await FormRuleServerValidator.CollectViolationsAsync(
-                    table, fields, effectiveValues, oldValuesByFid, _queryContext.TenantRole, _queryContext.UserId,
-                    _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _engine, ct, recordPublicId);
+                    table, fields, effectiveValues, oldValuesByFid, _queryContext.UserId,
+                    _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _appUserRepo, _engine, ct, recordPublicId);
                 violations.AddRange(formRuleViolations);
             }
             catch (NotFoundException)

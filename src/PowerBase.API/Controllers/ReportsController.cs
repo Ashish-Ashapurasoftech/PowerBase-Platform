@@ -21,6 +21,8 @@ using PowerBase.Application.Reports.Queries.ResolveDefaultReport;
 using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Application.Reports.Commands.UpdateReportFormOverrides;
 using PowerBase.Application.Reports.Queries.GetReportGridEditRules;
+using PowerBase.Application.Reports.Queries.GetGridEditFormRules;
+using PowerBase.Application.Reports.Queries.GetReportGridEditRuntime;
 using PowerBase.Application.Reports.Commands.UpdateReportGridEditRules;
 using PowerBase.Application.Forms.Queries.ListForms;
 using PowerBase.API.Models.Forms;
@@ -51,6 +53,8 @@ public class ReportsController : ControllerBase
     private readonly GetReportPreviewMetadataQueryHandler _previewMetadataHandler;
     private readonly GetReportGridEditRulesQueryHandler _getGridEditRulesHandler;
     private readonly UpdateReportGridEditRulesCommandHandler _updateGridEditRulesHandler;
+    private readonly GetGridEditFormRulesQueryHandler _getGridEditFormRulesHandler;
+    private readonly GetReportGridEditRuntimeQueryHandler _getGridEditRuntimeHandler;
 
     public ReportsController(
         CreateReportCommandHandler createHandler,
@@ -71,7 +75,9 @@ public class ReportsController : ControllerBase
         ListFormsQueryHandler listFormsHandler,
         GetReportPreviewMetadataQueryHandler previewMetadataHandler,
         GetReportGridEditRulesQueryHandler getGridEditRulesHandler,
-        UpdateReportGridEditRulesCommandHandler updateGridEditRulesHandler)
+        UpdateReportGridEditRulesCommandHandler updateGridEditRulesHandler,
+        GetGridEditFormRulesQueryHandler getGridEditFormRulesHandler,
+        GetReportGridEditRuntimeQueryHandler getGridEditRuntimeHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -92,6 +98,8 @@ public class ReportsController : ControllerBase
         _previewMetadataHandler = previewMetadataHandler;
         _getGridEditRulesHandler = getGridEditRulesHandler;
         _updateGridEditRulesHandler = updateGridEditRulesHandler;
+        _getGridEditFormRulesHandler = getGridEditFormRulesHandler;
+        _getGridEditRuntimeHandler = getGridEditRuntimeHandler;
     }
 
     /// <summary>Save a report definition for a table.</summary>
@@ -220,38 +228,83 @@ public class ReportsController : ControllerBase
         return NoContent();
     }
 
-    /// <summary>Every Require/PreventSave/Enable/Disable/ChangeValue/DisplayMessage-bearing rule
-    /// on the table, plus this report's currently selected/ordered subset — backs the "Grid Edit &amp;
-    /// Form Rules" picker. This is a client-side pre-check config only; server-side write
-    /// enforcement (FormRuleServerValidator) is unaffected by it.</summary>
+    /// <summary>Backs the "Grid Edit &amp; Form Rules" picker: every form on the table with its applicable
+    /// rule count, the forms this report selected, and the rules of THOSE forms only (applied in
+    /// priority order, plus the ones moved aside). Client-side pre-check config only; server-side write
+    /// enforcement (FormRuleServerValidator) is unaffected.</summary>
     [HttpGet("tables/{tableId:guid}/reports/{reportId:guid}/grid-edit-rules")]
     [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<ReportGridEditRulesResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetGridEditRules(Guid tableId, Guid reportId, CancellationToken ct)
     {
         var result = await _getGridEditRulesHandler.HandleAsync(new GetReportGridEditRulesQuery(tableId, reportId), ct);
+        static GridEditRuleResponse Map(GridEditRuleState r) => new()
+        {
+            Id = r.Id, RuleName = r.RuleName, FormId = r.FormId, FormName = r.FormName,
+        };
         var response = new ReportGridEditRulesResponse
         {
-            Candidates = result.Candidates.Select(c => new GridEditRuleCandidateResponse
-            {
-                Id = c.Id,
-                RuleName = c.RuleName,
-                FormName = c.FormName,
-                FormId = c.FormId,
-            }).ToList(),
-            SelectedRuleIds = result.SelectedRuleIds.ToList(),
+            Forms = result.Forms.Select(f => new GridEditFormOptionResponse { Id = f.Id, Name = f.Name, RuleCount = f.RuleCount }).ToList(),
+            SelectedFormIds = result.SelectedFormIds.ToList(),
+            Applied = result.Applied.Select(Map).ToList(),
+            Available = result.Available.Select(Map).ToList(),
         };
         return Ok(new ApiResponse<ReportGridEditRulesResponse>(response));
     }
 
-    /// <summary>Replaces this report's Grid Edit rule selection wholesale, in the given order.</summary>
+    /// <summary>The applicable rules of one form — fetched when that form is selected in the picker.</summary>
+    [HttpGet("tables/{tableId:guid}/forms/{formId:guid}/grid-edit-rules")]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<List<GridEditRuleResponse>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetGridEditFormRules(Guid tableId, Guid formId, CancellationToken ct)
+    {
+        var rules = await _getGridEditFormRulesHandler.HandleAsync(new GetGridEditFormRulesQuery(tableId, formId), ct);
+        var response = rules.Select(r => new GridEditRuleResponse { Id = r.Id, RuleName = r.RuleName, FormId = r.FormId, FormName = r.FormName }).ToList();
+        return Ok(new ApiResponse<List<GridEditRuleResponse>>(response));
+    }
+
+    /// <summary>Replaces this report's Grid Edit config: selected forms, applied rules (priority order),
+    /// and the rules of those forms moved aside.</summary>
     [HttpPut("tables/{tableId:guid}/reports/{reportId:guid}/grid-edit-rules")]
     [RequireAppPermission(PermissionCodes.ReportsUpdate, AppAccessResolver.ByTableId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> UpdateGridEditRules(Guid tableId, Guid reportId, [FromBody] UpdateReportGridEditRulesRequest request, CancellationToken ct)
     {
-        await _updateGridEditRulesHandler.HandleAsync(new UpdateReportGridEditRulesCommand(reportId, request.OrderedFormRuleIds), ct);
+        await _updateGridEditRulesHandler.HandleAsync(
+            new UpdateReportGridEditRulesCommand(reportId, request.FormIds, request.AppliedRuleIds, request.ExcludedRuleIds), ct);
         return NoContent();
+    }
+
+    /// <summary>Everything the report grid needs to enforce the applied rules, in ONE request: each rule with
+    /// its conditions, actions and element->field map, in priority order. Called when Grid Edit is turned on.</summary>
+    [HttpGet("tables/{tableId:guid}/reports/{reportId:guid}/grid-edit-rules/runtime")]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<List<GridEditRuntimeRuleResponse>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetGridEditRuntime(Guid tableId, Guid reportId, CancellationToken ct)
+    {
+        var rules = await _getGridEditRuntimeHandler.HandleAsync(new GetReportGridEditRuntimeQuery(reportId), ct);
+        var response = rules.Select(r => new GridEditRuntimeRuleResponse
+        {
+            Id = r.Id,
+            Name = r.Name,
+            FormId = r.FormId,
+            IsExpressionMode = r.IsExpressionMode,
+            ExpressionText = r.ExpressionText,
+            ConditionLogic = r.ConditionLogic,
+            Conditions = r.Conditions.Select(c => new FormRuleConditionResponse
+            {
+                ConditionKind = c.ConditionKind, AppFieldId = c.AppFieldId, Operator = c.Operator,
+                Value = c.Value, ValueType = c.ValueType, ValueFieldId = c.ValueFieldId, DisplayOrder = c.DisplayOrder,
+            }).ToList(),
+            Actions = r.Actions.Select(a => new FormRuleActionResponse
+            {
+                ActionType = a.ActionType, TargetType = a.TargetType, TargetElementId = a.TargetElementId,
+                TargetSectionId = a.TargetSectionId, TargetBlockId = a.TargetBlockId, ActionValue = a.ActionValue,
+                RunOnceOnActivation = a.RunOnceOnActivation, IsExpressionValue = a.IsExpressionValue, DisplayOrder = a.DisplayOrder,
+            }).ToList(),
+            ElementFieldMap = r.ElementFieldMap,
+        }).ToList();
+        return Ok(new ApiResponse<List<GridEditRuntimeRuleResponse>>(response));
     }
 
     /// <summary>List all reports for an app.</summary>

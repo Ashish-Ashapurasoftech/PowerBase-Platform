@@ -1,4 +1,5 @@
 using Dapper;
+using PowerBase.Application.Reports;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
@@ -483,55 +484,221 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         return results.AsList();
     }
 
-    private const string GetGridEditRuleIdsSql = """
-        SELECT fr.PublicId
-        FROM meta.ReportGridEditRule g
-        JOIN meta.FormRule fr ON fr.Id = g.FormRuleId
-        JOIN meta.Report r ON r.Id = g.ReportId
-        WHERE r.PublicId = @reportPublicId
+    // ── Grid Edit & Form Rules ───────────────────────────────────────────────────────────────────
+    // "Applicable" rule = active, not deleted, with at least one action a client-side grid pre-check
+    // can act on. Tested with EXISTS (not a DISTINCT join) so a rule with several such actions is
+    // never expanded into duplicate rows that then need de-duplicating.
+
+    private const string GridEditActionTypes = "'Require','PreventSave','Enable','Disable','ChangeValue','DisplayMessage'";
+
+    private const string ApplicableRuleExists = $"""
+        EXISTS (SELECT 1 FROM meta.FormRuleAction a WHERE a.FormRuleId = r.Id AND a.ActionType IN ({GridEditActionTypes}))
+        """;
+
+    private const string ListGridEditFormOptionsSql = $"""
+        SELECT f.PublicId AS Id, f.Name,
+               (SELECT COUNT(*) FROM meta.FormRule r
+                 WHERE r.FormId = f.Id AND r.IsDeleted = 0 AND r.IsActive = 1 AND {ApplicableRuleExists}) AS RuleCount
+        FROM meta.Form f
+        WHERE f.AppTableId = @appTableId AND f.IsDeleted = 0
+        ORDER BY f.DisplayOrder, f.Name
+        """;
+
+    private const string GetGridEditFormIdsSql = """
+        SELECT f.PublicId
+        FROM meta.ReportGridEditForm g
+        JOIN meta.Report rep ON rep.Id = g.ReportId
+        JOIN meta.Form f ON f.Id = g.FormId AND f.IsDeleted = 0
+        WHERE rep.PublicId = @reportPublicId
         ORDER BY g.DisplayOrder
         """;
 
+    // Stored rows (in their saved priority order) first; rules with no stored row — added to a
+    // selected form since the last save, which apply automatically — after them, in form then rule order.
+    private const string ListGridEditRuleStatesSql = $"""
+        SELECT r.PublicId AS Id, r.Name AS RuleName, f.PublicId AS FormId, f.Name AS FormName,
+               CAST(ISNULL(g.IsExcluded, 0) AS BIT) AS IsExcluded
+        FROM meta.ReportGridEditForm rf
+        JOIN meta.Report rep ON rep.Id = rf.ReportId
+        JOIN meta.Form f ON f.Id = rf.FormId AND f.IsDeleted = 0
+        JOIN meta.FormRule r ON r.FormId = f.Id AND r.IsDeleted = 0 AND r.IsActive = 1
+        LEFT JOIN meta.ReportGridEditRule g ON g.ReportId = rf.ReportId AND g.FormRuleId = r.Id
+        WHERE rep.PublicId = @reportPublicId AND {ApplicableRuleExists}
+        ORDER BY CASE WHEN g.Id IS NULL THEN 1 ELSE 0 END, g.DisplayOrder, rf.DisplayOrder, r.DisplayOrder, r.Id
+        """;
+
+    private const string ListGridEditRulesForFormSql = $"""
+        SELECT r.PublicId AS Id, r.Name AS RuleName, f.PublicId AS FormId, f.Name AS FormName
+        FROM meta.FormRule r
+        JOIN meta.Form f ON f.Id = r.FormId
+        WHERE f.PublicId = @formPublicId AND f.AppTableId = @appTableId AND f.IsDeleted = 0
+          AND r.IsDeleted = 0 AND r.IsActive = 1 AND {ApplicableRuleExists}
+        ORDER BY r.DisplayOrder, r.Id
+        """;
+
+    private const string DeleteGridEditFormsSql = """
+        DELETE g FROM meta.ReportGridEditForm g JOIN meta.Report r ON r.Id = g.ReportId WHERE r.PublicId = @reportPublicId
+        """;
+
     private const string DeleteGridEditRulesSql = """
-        DELETE g FROM meta.ReportGridEditRule g
-        JOIN meta.Report r ON r.Id = g.ReportId
-        WHERE r.PublicId = @reportPublicId
+        DELETE g FROM meta.ReportGridEditRule g JOIN meta.Report r ON r.Id = g.ReportId WHERE r.PublicId = @reportPublicId
+        """;
+
+    // Both inserts join through the report's own table (f.AppTableId = rep.AppTableId) so a crafted
+    // request can't attach another table's form or rule to this report.
+    private const string InsertGridEditFormSql = """
+        INSERT INTO meta.ReportGridEditForm (ReportId, FormId, DisplayOrder)
+        SELECT rep.Id, f.Id, @displayOrder
+        FROM meta.Report rep JOIN meta.Form f ON f.PublicId = @formPublicId AND f.AppTableId = rep.AppTableId AND f.IsDeleted = 0
+        WHERE rep.PublicId = @reportPublicId
         """;
 
     private const string InsertGridEditRuleSql = """
-        INSERT INTO meta.ReportGridEditRule (ReportId, FormRuleId, DisplayOrder)
-        SELECT r.Id, fr.Id, @displayOrder
-        FROM meta.Report r, meta.FormRule fr
-        WHERE r.PublicId = @reportPublicId AND fr.PublicId = @rulePublicId AND fr.IsDeleted = 0
+        INSERT INTO meta.ReportGridEditRule (ReportId, FormRuleId, DisplayOrder, IsExcluded)
+        SELECT rep.Id, fr.Id, @displayOrder, @isExcluded
+        FROM meta.Report rep
+        JOIN meta.FormRule fr ON fr.PublicId = @rulePublicId AND fr.IsDeleted = 0
+        JOIN meta.Form f ON f.Id = fr.FormId AND f.AppTableId = rep.AppTableId
+        WHERE rep.PublicId = @reportPublicId
         """;
 
-    public async Task<IReadOnlyList<Guid>> GetGridEditRuleIdsAsync(Guid reportPublicId, CancellationToken ct = default)
+    // One batch, one round trip: the ordered applied rules are staged once in a table variable (its
+    // IDENTITY preserves the ORDER BY), then conditions, actions and each form's element->field map
+    // are read for exactly those rules/forms.
+    private const string GetGridEditRuntimeSql = $"""
+        DECLARE @rules TABLE (Seq INT IDENTITY(1,1), RuleId BIGINT, FormId BIGINT);
+        INSERT INTO @rules (RuleId, FormId)
+        SELECT r.Id, r.FormId
+        FROM meta.ReportGridEditForm rf
+        JOIN meta.Report rep ON rep.Id = rf.ReportId
+        JOIN meta.Form f ON f.Id = rf.FormId AND f.IsDeleted = 0
+        JOIN meta.FormRule r ON r.FormId = f.Id AND r.IsDeleted = 0 AND r.IsActive = 1
+        LEFT JOIN meta.ReportGridEditRule g ON g.ReportId = rf.ReportId AND g.FormRuleId = r.Id
+        WHERE rep.PublicId = @reportPublicId AND ISNULL(g.IsExcluded, 0) = 0 AND {ApplicableRuleExists}
+        ORDER BY CASE WHEN g.Id IS NULL THEN 1 ELSE 0 END, g.DisplayOrder, rf.DisplayOrder, r.DisplayOrder, r.Id;
+
+        SELECT r.Id AS RuleId, t.FormId AS FormInternalId, r.PublicId, r.Name, f.PublicId AS FormPublicId,
+               r.IsExpressionMode, r.ExpressionText, r.ConditionLogic
+        FROM @rules t JOIN meta.FormRule r ON r.Id = t.RuleId JOIN meta.Form f ON f.Id = t.FormId
+        ORDER BY t.Seq;
+
+        SELECT c.FormRuleId, c.ConditionKind, c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder
+        FROM meta.FormRuleCondition c JOIN @rules t ON t.RuleId = c.FormRuleId
+        ORDER BY c.FormRuleId, c.DisplayOrder;
+
+        SELECT a.FormRuleId, a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId,
+               a.ActionValue, a.RunOnceOnActivation, a.IsExpressionValue, a.DisplayOrder
+        FROM meta.FormRuleAction a JOIN @rules t ON t.RuleId = a.FormRuleId
+        ORDER BY a.FormRuleId, a.DisplayOrder;
+
+        SELECT s.FormId, e.Id AS ElementId, e.AppFieldId
+        FROM meta.FormElement e JOIN meta.FormSection s ON s.Id = e.FormSectionId
+        WHERE s.FormId IN (SELECT FormId FROM @rules) AND e.AppFieldId IS NOT NULL;
+        """;
+
+    public async Task<IReadOnlyList<GridEditFormOption>> ListGridEditFormOptionsAsync(long appTableId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var results = await connection.QueryAsync<Guid>(
-            new CommandDefinition(GetGridEditRuleIdsSql, new { reportPublicId }, cancellationToken: ct));
-        return results.AsList();
+        var rows = await connection.QueryAsync<GridEditFormOption>(
+            new CommandDefinition(ListGridEditFormOptionsSql, new { appTableId }, cancellationToken: ct));
+        return rows.AsList();
     }
 
-    public async Task SetGridEditRulesAsync(Guid reportPublicId, IReadOnlyList<Guid> orderedFormRuleIds, CancellationToken ct = default)
+    public async Task<IReadOnlyList<Guid>> GetGridEditFormIdsAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<Guid>(
+            new CommandDefinition(GetGridEditFormIdsSql, new { reportPublicId }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<IReadOnlyList<GridEditRuleState>> ListGridEditRuleStatesAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<GridEditRuleState>(
+            new CommandDefinition(ListGridEditRuleStatesSql, new { reportPublicId }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<IReadOnlyList<GridEditRuleItem>> ListGridEditRulesForFormAsync(long appTableId, Guid formPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<GridEditRuleItem>(
+            new CommandDefinition(ListGridEditRulesForFormSql, new { appTableId, formPublicId }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task SetGridEditConfigAsync(Guid reportPublicId, IReadOnlyList<Guid> formIds,
+        IReadOnlyList<Guid> appliedRuleIds, IReadOnlyList<Guid> excludedRuleIds, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
         try
         {
-            await connection.ExecuteAsync(
-                new CommandDefinition(DeleteGridEditRulesSql, new { reportPublicId }, transaction: transaction, cancellationToken: ct));
-            for (var i = 0; i < orderedFormRuleIds.Count; i++)
-            {
-                await connection.ExecuteAsync(
-                    new CommandDefinition(InsertGridEditRuleSql,
-                        new { reportPublicId, rulePublicId = orderedFormRuleIds[i], displayOrder = i + 1 },
-                        transaction: transaction, cancellationToken: ct));
-            }
+            await connection.ExecuteAsync(new CommandDefinition(DeleteGridEditRulesSql, new { reportPublicId }, transaction: transaction, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition(DeleteGridEditFormsSql, new { reportPublicId }, transaction: transaction, cancellationToken: ct));
+
+            // Dapper runs a statement once per element of an enumerable parameter, on the same
+            // connection/transaction — one call per list instead of a hand-written loop.
+            if (formIds.Count > 0)
+                await connection.ExecuteAsync(new CommandDefinition(InsertGridEditFormSql,
+                    formIds.Select((id, i) => new { reportPublicId, formPublicId = id, displayOrder = i + 1 }).ToList(),
+                    transaction: transaction, cancellationToken: ct));
+
+            var ruleRows = appliedRuleIds.Select((id, i) => new { reportPublicId, rulePublicId = id, displayOrder = i + 1, isExcluded = false })
+                .Concat(excludedRuleIds.Select(id => new { reportPublicId, rulePublicId = id, displayOrder = 0, isExcluded = true }))
+                .ToList();
+            if (ruleRows.Count > 0)
+                await connection.ExecuteAsync(new CommandDefinition(InsertGridEditRuleSql, ruleRows, transaction: transaction, cancellationToken: ct));
+
             await transaction.CommitAsync(ct);
         }
         catch { await transaction.RollbackAsync(ct); throw; }
+    }
+
+    public async Task<IReadOnlyList<GridEditRuntimeRule>> GetGridEditRuntimeAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        using var multi = await connection.QueryMultipleAsync(
+            new CommandDefinition(GetGridEditRuntimeSql, new { reportPublicId }, cancellationToken: ct));
+
+        var ruleRows   = (await multi.ReadAsync<GridEditRuntimeRuleRow>()).ToList();
+        var conditions = (await multi.ReadAsync<FormRuleCondition>()).ToLookup(c => c.FormRuleId);
+        var actions    = (await multi.ReadAsync<FormRuleAction>()).ToLookup(a => a.FormRuleId);
+        var elements   = (await multi.ReadAsync<GridEditElementRow>()).ToLookup(e => e.FormId);
+
+        return ruleRows.Select(r => new GridEditRuntimeRule
+        {
+            Id = r.PublicId,
+            Name = r.Name,
+            FormId = r.FormPublicId,
+            IsExpressionMode = r.IsExpressionMode,
+            ExpressionText = r.ExpressionText,
+            ConditionLogic = r.ConditionLogic,
+            Conditions = conditions[r.RuleId].ToList(),
+            Actions = actions[r.RuleId].ToList(),
+            ElementFieldMap = elements[r.FormInternalId].ToDictionary(e => e.ElementId, e => (long)e.AppFieldId),
+        }).ToList();
+    }
+
+    private sealed class GridEditRuntimeRuleRow
+    {
+        public long RuleId { get; set; }
+        public long FormInternalId { get; set; }
+        public Guid PublicId { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public Guid FormPublicId { get; set; }
+        public bool IsExpressionMode { get; set; }
+        public string? ExpressionText { get; set; }
+        public string ConditionLogic { get; set; } = "all";
+    }
+
+    private sealed class GridEditElementRow
+    {
+        public long FormId { get; set; }
+        public long ElementId { get; set; }
+        public int AppFieldId { get; set; }
     }
 
     public async Task<Dictionary<long, List<long>>> GetAppRoleReportsMapAsync(long appId, CancellationToken ct = default)

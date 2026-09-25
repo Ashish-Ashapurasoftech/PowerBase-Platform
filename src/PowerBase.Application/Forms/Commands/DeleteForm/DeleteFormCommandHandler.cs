@@ -27,6 +27,10 @@ public class DeleteFormCommandHandler
         if (form.IsDefault)
             throw new BadRequestException("FORM_DEFAULT_DELETE", "The default form cannot be deleted.");
 
+        if (form.IsQuickPeekDefault)
+            throw new BadRequestException("QUICK_PEEK_DEFAULT_DELETE",
+                "The default Quick Peek form cannot be deleted. Make another Quick Peek form the default first.");
+
         await _formRepo.DeleteAsync(command.FormPublicId, ct);
 
         await _auditRepo.LogActivityAsync(

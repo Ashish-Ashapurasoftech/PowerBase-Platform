@@ -206,6 +206,17 @@ public class FormsController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Make a form the table's default Quick Peek form (flagging it if needed). The
+    /// previous default stays a Quick Peek form.</summary>
+    [HttpPut("forms/{publicId:guid}/quick-peek/default")]
+    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByFormPublicId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> SetQuickPeekDefault(Guid publicId, CancellationToken ct)
+    {
+        await _setQuickPeekFormHandler.HandleAsync(new SetQuickPeekDefaultCommand(publicId), ct);
+        return NoContent();
+    }
+
     /// <summary>Create a new form for a table.</summary>
     [HttpPost("tables/{tableId:guid}/forms")]
     [RequireAppPermission(PermissionCodes.FormsCreate, AppAccessResolver.ByTableId)]
@@ -244,7 +255,7 @@ public class FormsController : ControllerBase
         var rowVersion = Convert.FromBase64String(request.RowVersion);
         await _updateSettingsHandler.HandleAsync(new UpdateFormSettingsCommand(
             publicId, request.Name, request.AutoAddNewFields, request.ShowBuiltInFields,
-            request.SaveOptions, rowVersion, request.IsQuickPeekForm), ct);
+            request.SaveOptions, rowVersion, request.IsQuickPeekForm, request.IsQuickPeekDefault), ct);
         return NoContent();
     }
 
@@ -461,6 +472,7 @@ public class FormsController : ControllerBase
         Name            = f.Name,
         IsDefault       = f.IsDefault,
         IsQuickPeekForm = f.IsQuickPeekForm,
+        IsQuickPeekDefault = f.IsQuickPeekDefault,
         DisplayOrder    = f.DisplayOrder,
         CreatedOn       = f.CreatedOn,
     };
@@ -471,6 +483,7 @@ public class FormsController : ControllerBase
         Name              = f.Name,
         IsDefault         = f.IsDefault,
         IsQuickPeekForm   = f.IsQuickPeekForm,
+        IsQuickPeekDefault = f.IsQuickPeekDefault,
         AutoAddNewFields  = f.AutoAddNewFields,
         ShowBuiltInFields = f.ShowBuiltInFields,
         SaveOptions       = f.SaveOptions.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList(),

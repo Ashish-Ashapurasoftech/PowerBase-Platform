@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Models;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Common.Interfaces;
@@ -36,11 +37,23 @@ public interface IReportRepository
     Task<IReadOnlyList<Guid>> GetReportRolePublicIdsAsync(long reportId, CancellationToken ct = default);
     Task<Dictionary<long, List<long>>> GetAppRoleReportsMapAsync(long appId, CancellationToken ct = default);
 
-    /// <summary>The ordered list of Form Rule ids this report enforces during its own Grid Edit
-    /// (meta.ReportGridEditRule) — a client-side pre-check only; server-side write enforcement is
-    /// unchanged and still checks every active rule table-wide regardless of this list.</summary>
-    Task<IReadOnlyList<Guid>> GetGridEditRuleIdsAsync(Guid reportPublicId, CancellationToken ct = default);
-    /// <summary>Replaces the report's whole Grid Edit rule list (delete-then-reinsert, same shape
-    /// as SetReportRolesAsync) — DisplayOrder is assigned from the list's own order (1-based).</summary>
-    Task SetGridEditRulesAsync(Guid reportPublicId, IReadOnlyList<Guid> orderedFormRuleIds, CancellationToken ct = default);
+    // ── Grid Edit & Form Rules — a report selects FORMS; every active applicable rule of a selected
+    //    form applies automatically except the ones the user excluded. Client-side pre-check config
+    //    only: server-side write enforcement (FormRuleServerValidator) is unaffected by it. ──
+
+    /// <summary>Every form on the table with its applicable-rule count (one aggregate query).</summary>
+    Task<IReadOnlyList<GridEditFormOption>> ListGridEditFormOptionsAsync(long appTableId, CancellationToken ct = default);
+    /// <summary>The forms this report has selected, in the order saved.</summary>
+    Task<IReadOnlyList<Guid>> GetGridEditFormIdsAsync(Guid reportPublicId, CancellationToken ct = default);
+    /// <summary>Applicable, active rules of the report's SELECTED forms only, in the report's priority
+    /// order (stored order first, then rules with no stored row — e.g. added since — in form/rule order).</summary>
+    Task<IReadOnlyList<GridEditRuleState>> ListGridEditRuleStatesAsync(Guid reportPublicId, CancellationToken ct = default);
+    /// <summary>Applicable, active rules of ONE form — fetched when the user selects that form.</summary>
+    Task<IReadOnlyList<GridEditRuleItem>> ListGridEditRulesForFormAsync(long appTableId, Guid formPublicId, CancellationToken ct = default);
+    /// <summary>Replaces the report's whole Grid Edit config in one transaction. <paramref name="appliedRuleIds"/>
+    /// is the priority order; <paramref name="excludedRuleIds"/> are rules of selected forms moved aside.</summary>
+    Task SetGridEditConfigAsync(Guid reportPublicId, IReadOnlyList<Guid> formIds,
+        IReadOnlyList<Guid> appliedRuleIds, IReadOnlyList<Guid> excludedRuleIds, CancellationToken ct = default);
+    /// <summary>What the grid needs to enforce the applied rules, in one round trip.</summary>
+    Task<IReadOnlyList<GridEditRuntimeRule>> GetGridEditRuntimeAsync(Guid reportPublicId, CancellationToken ct = default);
 }

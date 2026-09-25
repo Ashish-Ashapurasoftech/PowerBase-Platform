@@ -27,6 +27,7 @@ public class CreateRecordCommandHandler
     private readonly IAppRepository _appRepo;
     private readonly IFormRuleRepository _formRuleRepo;
     private readonly IFormRepository _formRepo;
+    private readonly IAppUserRepository _appUserRepo;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -44,7 +45,8 @@ public class CreateRecordCommandHandler
         FormulaEngine engine,
         IAppRepository appRepo,
         IFormRuleRepository formRuleRepo,
-        IFormRepository formRepo)
+        IFormRepository formRepo,
+        IAppUserRepository appUserRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -62,6 +64,7 @@ public class CreateRecordCommandHandler
         _appRepo = appRepo;
         _formRuleRepo = formRuleRepo;
         _formRepo = formRepo;
+        _appUserRepo = appUserRepo;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -138,8 +141,8 @@ public class CreateRecordCommandHandler
         // violate a Require/Prevent Save form rule. No "before" values exist yet on create, so
         // 'changed'/'notChanged' conditions never match here.
         await FormRuleServerValidator.ValidateAsync(
-            table, fields, effectiveValues, oldValuesByFid: null, _queryContext.TenantRole, _queryContext.UserId,
-            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _engine, ct);
+            table, fields, effectiveValues, oldValuesByFid: null, _queryContext.UserId,
+            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _appUserRepo, _engine, ct);
 
         Guid publicId;
         PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;

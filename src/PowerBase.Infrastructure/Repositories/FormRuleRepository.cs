@@ -1,6 +1,5 @@
 using Dapper;
 using PowerBase.Application.Common.Interfaces;
-using PowerBase.Application.Forms;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
@@ -293,25 +292,6 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         return await conn.ExecuteAsync(
             new CommandDefinition(SetActiveSql, new { publicId, isActive, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
-    }
-
-    private const string ListGridEditCandidatesByTableIdSql = """
-        SELECT DISTINCT r.PublicId AS Id, r.Name AS RuleName, f.Name AS FormName, f.PublicId AS FormId
-        FROM meta.FormRule r
-        JOIN meta.Form f ON f.Id = r.FormId
-        JOIN meta.FormRuleAction a ON a.FormRuleId = r.Id
-        WHERE f.AppTableId = @appTableId
-          AND r.IsDeleted = 0 AND r.IsActive = 1
-          AND a.ActionType IN ('Require','PreventSave','Enable','Disable','ChangeValue','DisplayMessage')
-        ORDER BY FormName, RuleName
-        """;
-
-    public async Task<IReadOnlyList<FormRuleGridEditCandidate>> ListGridEditCandidatesByTableIdAsync(long appTableId, CancellationToken ct = default)
-    {
-        await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var results = await conn.QueryAsync<FormRuleGridEditCandidate>(
-            new CommandDefinition(ListGridEditCandidatesByTableIdSql, new { appTableId }, cancellationToken: ct));
-        return results.AsList();
     }
 
     public async Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default)

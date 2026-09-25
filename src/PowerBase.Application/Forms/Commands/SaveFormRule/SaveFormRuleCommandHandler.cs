@@ -58,19 +58,36 @@ public class SaveFormRuleCommandHandler
         }
 
         // Same compile-check for any action whose ActionValue is a formula expression
-        // (ChangeLabel/ChangeValue/DisplayMessage/PreventSave, gated by IsExpressionValue) — no
-        // single expectedType applies across all four (ChangeValue's varies by target field,
-        // the rest are free-form text), so expectedType is left null (any result type compiles).
+        // (ChangeLabel/ChangeValue/DisplayMessage/PreventSave, gated by IsExpressionValue).
+        // ChangeLabel/DisplayMessage/PreventSave stay unconstrained (expectedType null) — whatever
+        // they produce is turned into text before use. ChangeValue is different: its result is
+        // written straight into the TARGET field's control, so the formula must produce that
+        // field's own type (a Text result into a Rating field used to validate fine and misbehave
+        // later) — resolved via the action's target form element -> AppField -> TypeCode.
         var expressionActionErrors = new List<string>();
-        if (command.Actions.Any(a => a.IsExpressionValue && !string.IsNullOrWhiteSpace(a.ActionValue)))
+        var expressionActions = command.Actions.Where(a => a.IsExpressionValue && !string.IsNullOrWhiteSpace(a.ActionValue)).ToList();
+        if (expressionActions.Count > 0)
         {
             var tableId = await _formRepo.GetTableIdByFormIdAsync(rule.FormId, ct);
             if (tableId is { } tid)
             {
                 var tableFields = await _fieldRepo.ListByTableAsync(tid, ct);
-                foreach (var a in command.Actions.Where(a => a.IsExpressionValue && !string.IsNullOrWhiteSpace(a.ActionValue)))
+                Dictionary<long, long?>? elementFieldMap = null;
+                foreach (var a in expressionActions)
                 {
-                    var errors = _exprValidator.Validate(a.ActionValue, tableFields, null);
+                    FormulaType? expected = null;
+                    if (a.ActionType == "ChangeValue" && a.TargetElementId is { } elementId)
+                    {
+                        elementFieldMap ??= (await _formRepo.GetLayoutAsync(rule.FormId, ct))
+                            .SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements)
+                            .ToDictionary(e => e.Id, e => e.AppFieldId);
+                        if (elementFieldMap.TryGetValue(elementId, out var fid) && fid is { } fidVal)
+                        {
+                            var target = tableFields.FirstOrDefault(f => f.Fid.HasValue && (long)f.Fid.Value == fidVal);
+                            expected = ExpectedTypeForTarget(target?.TypeCode);
+                        }
+                    }
+                    var errors = _exprValidator.Validate(a.ActionValue, tableFields, expected);
                     expressionActionErrors.AddRange(errors.Select(e => $"{a.ActionType}: {e}"));
                 }
             }
@@ -121,4 +138,21 @@ public class SaveFormRuleCommandHandler
             AuditActions.Updated, AuditEntityTypes.FormRule, rule.Id.ToString(),
             ct: ct);
     }
+
+    /// <summary>The formula type a Change value formula must produce to fit a target field of this
+    /// TypeCode, or null when no single formula type matches (MultiSelect, File, Address, ranges,
+    /// …) — those stay unconstrained. Mirrors the frontend's expectedTypeFor
+    /// (rule-action-row.component.ts) so the live "Valid" badge and this save-time check agree.</summary>
+    private static FormulaType? ExpectedTypeForTarget(string? typeCode) => typeCode switch
+    {
+        "Text" or "TextMultiLine" or "RichText" or "Email" or "Phone" or "Url" or "SingleSelect" => FormulaType.Text,
+        "Number" or "Currency" or "Percent" or "Rating" => FormulaType.Number,
+        "Date" => FormulaType.Date,
+        "DateTime" => FormulaType.DateTime,
+        "Time" => FormulaType.Time,
+        "Duration" => FormulaType.Duration,
+        "Boolean" => FormulaType.Bool,
+        "User" => FormulaType.User,
+        _ => null,
+    };
 }

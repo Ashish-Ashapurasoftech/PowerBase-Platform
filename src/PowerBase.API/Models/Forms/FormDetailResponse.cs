@@ -6,6 +6,7 @@ public class FormDetailResponse
     public string Name { get; init; } = string.Empty;
     public bool IsDefault { get; init; }
     public bool IsQuickPeekForm { get; init; }
+    public bool IsQuickPeekDefault { get; init; }
     public bool AutoAddNewFields { get; init; }
     public bool ShowBuiltInFields { get; init; }
     public List<string> SaveOptions { get; init; } = [];
