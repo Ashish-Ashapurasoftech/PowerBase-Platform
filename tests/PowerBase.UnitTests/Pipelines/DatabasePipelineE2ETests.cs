@@ -122,6 +122,19 @@ public class DatabasePipelineE2ETests
     }
 
     [Fact]
+    public void E2E_07_CreateRecord_MultipleDynamicFields_AreEvaluatedInOrder()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            steps = new { ref_trigger = new { fid_6 = "Ronak", fid_7 = "ronak@example.com" } }
+        });
+
+        InvokeEvaluateTokens(
+            "{{steps.ref_trigger.fid_6}} {{steps.ref_trigger.fid_7}}",
+            payload).Should().Be("Ronak ronak@example.com");
+    }
+
+    [Fact]
     public async Task E2E_08_UpdateRecord_MutatesTargetRecord_ReturnsChangedFields()
     {
         var payload = JsonSerializer.Serialize(new { steps = new { ref_update = new { ChangedFieldIds = new[] { "fid_1" } } } });
