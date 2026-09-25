@@ -29,6 +29,8 @@ public sealed class SendEmailStepConfig
     public string? AttachmentUrl { get; set; }
     public string? AttachmentFileName { get; set; }
     public string? AttachmentMimeType { get; set; }
+    public string? UploadedAttachments { get; set; }
+    public string? AttachmentReferences { get; set; }
 
     public void Normalize()
     {
@@ -71,5 +73,56 @@ public sealed class SendEmailStepConfig
             result.Add(new(urls[index], name, type));
         }
         return result;
+    }
+
+    public IReadOnlyList<StoredFile> ResolveStoredAttachments(Func<string?, string> resolve)
+    {
+        var result = new List<StoredFile>();
+        AddStoredFiles(result, resolve(UploadedAttachments));
+        var references = (AttachmentReferences ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n');
+        foreach (var reference in references.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            AddStoredFiles(result, resolve(reference));
+        if (result.Count > 50)
+            throw new InvalidOperationException("An email may contain at most 50 uploaded or previous-step attachments.");
+        return result;
+    }
+
+    private static void AddStoredFiles(List<StoredFile> result, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return;
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(value);
+            if (document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var item in document.RootElement.EnumerateArray()) AddStoredFile(result, item);
+            }
+            else AddStoredFile(result, document.RootElement);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // A previous step may expose only the stored path. Keep the display name safe and useful.
+            result.Add(new StoredFile { Name = Path.GetFileName(value), Path = value.Trim() });
+        }
+    }
+
+    private static void AddStoredFile(List<StoredFile> result, System.Text.Json.JsonElement item)
+    {
+        if (item.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            AddStoredFiles(result, item.GetString());
+            return;
+        }
+        if (item.ValueKind != System.Text.Json.JsonValueKind.Object) return;
+        static string? Read(System.Text.Json.JsonElement source, string name) =>
+            source.TryGetProperty(name, out var value) ? value.GetString() :
+            source.TryGetProperty(char.ToUpperInvariant(name[0]) + name[1..], out value) ? value.GetString() : null;
+        var path = Read(item, "path");
+        if (string.IsNullOrWhiteSpace(path)) return;
+        result.Add(new StoredFile {
+            Path = path,
+            Name = Read(item, "name") ?? Path.GetFileName(path),
+            ContentType = Read(item, "type") ?? Read(item, "contentType")
+        });
     }
 }

@@ -54,7 +54,7 @@ public partial class EmailService
             if (message.To.Count == 0) throw new InvalidOperationException("Email requires at least one To address.");
             if (email.RequireContent && (string.IsNullOrWhiteSpace(email.Subject) || string.IsNullOrWhiteSpace(email.Body)))
                 throw new InvalidOperationException("Email subject and body are required.");
-            message.Subject = email.Subject;
+            message.Subject = NormalizeSubject(email.Subject);
             message.IsBodyHtml = contentType == "html";
             message.Body = message.IsBodyHtml && !LooksLikeHtml(email.Body)
                 ? WebUtility.HtmlEncode(email.Body).Replace("\r\n", "\n").Replace('\r', '\n').Replace("\n", "<br>\r\n")
@@ -70,6 +70,24 @@ public partial class EmailService
                     throw new InvalidOperationException("Email attachments exceed the 25 MB total size limit.");
                 message.Attachments.Add(new Attachment(path));
             }
+            foreach (var attachment in email.ContentAttachments ?? [])
+            {
+                attachmentSize += attachment.Content.LongLength;
+                if (attachmentSize > EmailAttachmentDownloader.MaxBytes)
+                    throw new InvalidOperationException("Email attachments exceed the 25 MB total size limit.");
+                var stream = new MemoryStream(attachment.Content, writable: false);
+                try
+                {
+                    message.Attachments.Add(string.IsNullOrWhiteSpace(attachment.MimeType)
+                        ? new Attachment(stream, attachment.FileName)
+                        : new Attachment(stream, attachment.FileName, attachment.MimeType));
+                }
+                catch
+                {
+                    stream.Dispose();
+                    throw;
+                }
+            }
             // SMTP has no Sent Items operation. Retention is controlled by the provider.
             return message;
         }
@@ -84,6 +102,17 @@ public partial class EmailService
         value,
         @"<\s*(?:!doctype|html|body|p|div|span|br|table|tr|td|th|h[1-6]|a|ul|ol|li|style|strong|b|em|i)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// SMTP subjects are a single header value. Dynamic pipeline fields can legitimately
+    /// contain line breaks (for example a multi-line text field), but MailMessage rejects
+    /// CR/LF in Subject. Collapse all control whitespace without changing visible text.
+    /// </summary>
+    internal static string NormalizeSubject(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        return Regex.Replace(value, @"[\u0000-\u001F\u007F]+", " ").Trim();
+    }
 
     private static void AddRecipients(MailAddressCollection recipients, string? value)
     {

@@ -2472,6 +2472,26 @@ public class PipelineEngine : IPipelineEngine
             }
 
             var urlAttachments = config.ResolveUrlAttachments(value => EvaluateTokens(value, payloadJson, executionPath, allSteps));
+            var storedAttachments = config.ResolveStoredAttachments(value => EvaluateTokens(value, payloadJson, executionPath, allSteps));
+            var contentAttachments = new List<PipelineEmailContentAttachment>();
+            if (storedAttachments.Count > 0)
+            {
+                if (fileStorageService is not IFileStorageReadService readableStorage)
+                    throw new InvalidOperationException("The configured file storage provider cannot read email attachments.");
+                long totalBytes = 0;
+                foreach (var attachment in storedAttachments)
+                {
+                    await using var stream = await readableStorage.OpenReadAsync(attachment.Path, ct);
+                    using var buffer = new MemoryStream();
+                    await stream.CopyToAsync(buffer, ct);
+                    totalBytes += buffer.Length;
+                    if (totalBytes > 25L * 1024 * 1024)
+                        throw new InvalidOperationException("Email attachments exceed the 25 MB total size limit.");
+                    contentAttachments.Add(new PipelineEmailContentAttachment(
+                        string.IsNullOrWhiteSpace(attachment.Name) ? "attachment" : Path.GetFileName(attachment.Name),
+                        attachment.ContentType, buffer.ToArray()));
+                }
+            }
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 To = resolvedTo,
@@ -2481,7 +2501,8 @@ public class PipelineEngine : IPipelineEngine
                 From = resolvedFrom,
                 Body = resolvedBody,
                 Attachments = resolvedAttachments,
-                UrlAttachmentCount = urlAttachments.Count
+                UrlAttachmentCount = urlAttachments.Count,
+                StoredAttachmentCount = contentAttachments.Count
             });
 
             await _emailService.SendPipelineEmailAsync(new PipelineEmailMessage(
@@ -2490,7 +2511,7 @@ public class PipelineEngine : IPipelineEngine
                 EvaluateTokens(config.ContentType ?? "HTML", payloadJson, executionPath, allSteps),
                 EvaluateTokens(config.Importance ?? "Normal", payloadJson, executionPath, allSteps),
                 EvaluateTokens(config.SaveToSentItems ?? "Yes", payloadJson, executionPath, allSteps),
-                resolvedAttachments, urlAttachments, RequireContent: subtype == "send-email-outlook"), ct);
+                resolvedAttachments, urlAttachments, contentAttachments, RequireContent: subtype == "send-email-outlook"), ct);
 
             return JsonSerializer.Serialize(new { SentTo = resolvedTo, Subject = resolvedSubject });
         }
