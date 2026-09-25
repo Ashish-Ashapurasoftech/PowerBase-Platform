@@ -133,7 +133,7 @@ public class SavePipelineStepsCommandHandler
             {
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
-                    { "Steps", new[] { "Creating new canvas schedule triggers is deprecated. Please configure schedule settings using the pipeline details panel." } }
+                    { "Steps", new[] { "Creating new canvas schedule triggers is deprecated. Please configure schedule settings using the PowerFlow details panel." } }
                 });
             }
         }

@@ -39,7 +39,7 @@ public sealed class RequestConnectionService : IRequestConnectionService
         {
             var row=await _repository.GetConnectionByPublicIdAsync(connectionId,ct);
             if(row==null || row.IsDeleted || row.Type!="http-request" || row.CreatedBy!=ownerId || row.PipelineId!=pipelineId)
-                throw new UnauthorizedAccessException("HTTP connection is not available to this pipeline owner.");
+                throw new UnauthorizedAccessException("HTTP connection is not available to this PowerFlow owner.");
             var credentials=Read(row);
             if(!credentials.Connected) throw new InvalidOperationException("Connect the HTTP account before running this step.");
             if(credentials.Config.AuthType=="OAuth 2.0" && credentials.Config.OAuthGrantType!="Client credentials" && credentials.ExpiresAt<=DateTimeOffset.UtcNow.AddSeconds(30))

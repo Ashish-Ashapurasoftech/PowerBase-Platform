@@ -343,7 +343,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                                 if (destinationAccess.ModifyScope == RecordScopes.OwnRecords) await enforcer.EnsureRecordOwnedAsync(destination, publicId, ct);
                             }
                             await writes.ApplyAsync(destination, destinationFields, publicId, values, AuditActions.Updated,
-                                "Record updated via Pipeline Copy Records", ct, uow.Transaction);
+                                "Record updated via PowerFlow Copy Records", ct, uow.Transaction);
                             receipt = new(false, true);
                         }
                         else
@@ -372,7 +372,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                             var copyCreatedByField = destinationFields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
                             if (copyCreatedByField != null) values[copyCreatedByField.Fid!.Value] = queryContext.UserId;
                             await services.GetRequiredService<IAuditRepository>().LogActivityAsync(AuditActions.Created, AuditEntityTypes.Record,
-                                publicId.ToString(), "Record created via Pipeline Copy Records", appId: destination.AppId, ct: ct);
+                                publicId.ToString(), "Record created via PowerFlow Copy Records", appId: destination.AppId, ct: ct);
                             await tableRepo.IncrementRecordCountAsync(destination.Id, ct);
                             await services.GetRequiredService<IPipelineTriggerInterceptor>().InterceptAsync(destination, destinationFields, publicId, values, "record-added", ct);
                             if (merge.IsEncrypted && keyStr != null)

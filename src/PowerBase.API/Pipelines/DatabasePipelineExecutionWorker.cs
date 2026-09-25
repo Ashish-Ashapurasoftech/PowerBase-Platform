@@ -253,7 +253,7 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                 if (pipeline == null || pipeline.IsDeleted)
                 {
                     _logger.LogWarning("Worker-side Deferral Gate: Pipeline {PipelineId} (Tenant {TenantId}) is Deleted. Marking job {JobId} as Skipped.", job.PipelineId, job.TenantId, job.Id);
-                    await queueRepo.MarkSkippedAsync(job.Id, _workerId, claimToken, "Pipeline deleted", ct);
+                    await queueRepo.MarkSkippedAsync(job.Id, _workerId, claimToken, "PowerFlow deleted", ct);
                     return;
                 }
                 else if (!pipeline.IsActive)
@@ -466,12 +466,12 @@ public class DatabasePipelineExecutionWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Pipeline trigger subscription lookup failed or returned duplicates: {ex.Message}");
+                throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"PowerFlow trigger subscription lookup failed or returned duplicates: {ex.Message}");
             }
 
             if (subscription == null)
             {
-                throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Active pipeline trigger subscription not found for step {job.TriggerStepRefId}.");
+                throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Active PowerFlow trigger subscription not found for step {job.TriggerStepRefId}.");
             }
 
             // Bind Subscription to the exact Owner Tenant
@@ -486,21 +486,21 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                 var creatorId = pipeline.CreatedBy;
                 if (creatorId <= 0)
                 {
-                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline creator ID is invalid.");
+                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("PowerFlow creator ID is invalid.");
                 }
 
                 var userRepo = services.GetRequiredService<IUserRepository>();
                 var creatorUser = await userRepo.GetByIdAsync(creatorId, ct);
                 if (creatorUser == null || !creatorUser.IsActive || creatorUser.IsDeleted)
                 {
-                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Pipeline creator user {creatorId} is inactive, deleted, or does not exist.");
+                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"PowerFlow creator user {creatorId} is inactive, deleted, or does not exist.");
                 }
 
                 var tenantRepo = services.GetRequiredService<ITenantRepository>();
                 var isCreatorMember = await tenantRepo.IsActiveMemberAsync(creatorId, ct);
                 if (!isCreatorMember)
                 {
-                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Pipeline creator user {creatorId} is not an active member of owner tenant {job.TenantId}.");
+                    throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"PowerFlow creator user {creatorId} is not an active member of owner tenant {job.TenantId}.");
                 }
 
                 // Verify the saved connection and target tenant match

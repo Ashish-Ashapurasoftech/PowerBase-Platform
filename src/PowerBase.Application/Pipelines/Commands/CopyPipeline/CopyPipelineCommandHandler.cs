@@ -218,7 +218,7 @@ public class CopyPipelineCommandHandler
                 AuditActions.Created,
                 AuditEntityTypes.Pipeline,
                 newPublicId.ToString(),
-                $"Pipeline workflow copied: {newName} (from {source.Name})",
+                $"PowerFlow workflow copied: {newName} (from {source.Name})",
                 appId: source.AppId,
                 ct: ct);
 

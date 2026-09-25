@@ -125,7 +125,7 @@ public class DatabasePipelineOutboxRelay : BackgroundService
                         {
                             // Pipeline no longer exists, mark as skipped
                             await pipelineRepo.UpdateOutboxItemStatusAsync(
-                                item.Id, _workerId, 2, failedOn: DateTime.UtcNow, error: $"Pipeline with ID {item.PipelineId} not found.", ct: ct);
+                                item.Id, _workerId, 2, failedOn: DateTime.UtcNow, error: $"PowerFlow with ID {item.PipelineId} not found.", ct: ct);
                             continue;
                         }
 

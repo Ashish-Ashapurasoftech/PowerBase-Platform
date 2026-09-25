@@ -216,7 +216,7 @@ public class PipelineEngine : IPipelineEngine
                         {
                             if (run.LockedUntil.HasValue && run.LockedUntil.Value > DateTime.UtcNow)
                             {
-                                throw new PipelineRunRunningException($"Pipeline run {messageGuid.Value} is actively locked by worker {run.LockedBy} until {run.LockedUntil.Value:o}.");
+                                throw new PipelineRunRunningException($"PowerFlow run {messageGuid.Value} is actively locked by worker {run.LockedBy} until {run.LockedUntil.Value:o}.");
                             }
 
                             // Lease expired: attempt stale reclaim
@@ -349,12 +349,12 @@ public class PipelineEngine : IPipelineEngine
             if (pipelineMeta == null)
             {
                 isSkipped = true;
-                skipReason = "Missing Pipeline metadata";
+                skipReason = "Missing PowerFlow metadata";
             }
             else if (pipelineMeta.IsDeleted)
             {
                 isSkipped = true;
-                skipReason = "Pipeline is deleted";
+                skipReason = "PowerFlow is deleted";
             }
 
             // Mismatch validation before execution starts
@@ -371,7 +371,7 @@ public class PipelineEngine : IPipelineEngine
 
             var eventName = task.TriggerEvent?.ToLowerInvariant() ?? "manual";
             if (!isSkipped && eventName == "pipeline-called" && task.TriggeredBy != pipelineMeta!.CreatedBy)
-                throw new PipelineNonRetryableException("Callable execution must use the called pipeline owner's identity.");
+                throw new PipelineNonRetryableException("Callable execution must use the called PowerFlow owner's identity.");
             var normalizedEventName = eventName.Replace("-", "").Replace("_", "");
             if (normalizedEventName is "recordadded" or "recordupdated" or "recorddeleted" or "newevent")
             {
@@ -409,11 +409,11 @@ public class PipelineEngine : IPipelineEngine
                     var isPauseRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "pause";
                     if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot && !isPauseRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event requires a Search/Query, Make Request, Copy Records, Prepare Bulk Record Upsert, or Pause first step.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("PowerFlow schedule trigger event requires a Search/Query, Make Request, Copy Records, Prepare Bulk Record Upsert, or Pause first step.");
                     }
                     if (activeSteps.Any(s => s.Type == "trigger"))
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Pipeline schedule trigger event is incompatible with trigger steps on the canvas.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("PowerFlow schedule trigger event is incompatible with trigger steps on the canvas.");
                     }
                 }
                 else if (normalizedEventName == "schedule")
@@ -455,7 +455,7 @@ public class PipelineEngine : IPipelineEngine
                 if (!pipelineMeta.IsActive)
                 {
                     isSkipped = true;
-                    skipReason = "Pipeline is inactive";
+                    skipReason = "PowerFlow is inactive";
                 }
                 else
                 {
@@ -885,11 +885,11 @@ public class PipelineEngine : IPipelineEngine
             var pipeline = await _pipelineRepo.GetByIdAsync(step.PipelineId, ct);
             if (pipeline != null && pipeline.IsDeleted)
             {
-                throw new PipelineStopExecutionException("Execution halted: Pipeline was deleted.");
+                throw new PipelineStopExecutionException("Execution halted: PowerFlow was deleted.");
             }
             else if (pipeline != null && !pipeline.IsActive)
             {
-                throw new PipelineStopExecutionException("Execution halted: Pipeline was deactivated.");
+                throw new PipelineStopExecutionException("Execution halted: PowerFlow was deactivated.");
             }
 
             var currentPath = $"{executionPath}/{step.RefId}";
@@ -1261,7 +1261,7 @@ public class PipelineEngine : IPipelineEngine
         {
             if (!Guid.TryParse(connectionPublicId, out var requestAccount) ||
                 await _tenantRepo.GetTenantForUserAsync(requestAccount, createdBy, ct) == null)
-                throw new UnauthorizedAccessException("The selected PowerBase account is unavailable to the pipeline owner.");
+                throw new UnauthorizedAccessException("The selected PowerBase account is unavailable to the PowerFlow owner.");
         }
         if (accountScope != null)
         {
@@ -1552,7 +1552,7 @@ public class PipelineEngine : IPipelineEngine
                 !envelope.TryGetProperty("CallDefinition", out var receivedDefinition) || receivedDefinition.GetString() != definition.Definition ||
                 !envelope.TryGetProperty("Arguments", out var args) || args.ValueKind != JsonValueKind.Object ||
                 !envelope.TryGetProperty("TriggerStepId", out var triggerId) || triggerId.GetInt64() != step.Id)
-                throw new PipelineNonRetryableException("Pipeline Called requires a matching callable invocation.");
+                throw new PipelineNonRetryableException("PowerFlow Called requires a matching callable invocation.");
             var received = new Dictionary<string, object?>(StringComparer.Ordinal);
             foreach (var name in definition.Arguments)
             {
@@ -2020,7 +2020,7 @@ public class PipelineEngine : IPipelineEngine
                 }
 
                 var persisted = await recordWriteService.ApplyAsync(
-                    table, fields, recordPublicId, values, AuditActions.Updated, "Record updated via Pipeline action step", ct, uow.Transaction);
+                    table, fields, recordPublicId, values, AuditActions.Updated, "Record updated via PowerFlow action step", ct, uow.Transaction);
                 var outputJson = JsonSerializer.Serialize(new { UpdatedRecordPublicId = recordPublicId.ToString(), FieldCount = persisted.Count });
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
@@ -2130,7 +2130,7 @@ public class PipelineEngine : IPipelineEngine
                 Reason = reason
             });
 
-            throw new PipelineStopExecutionException(string.IsNullOrWhiteSpace(reason) ? "Execution halted by pipeline stop action." : reason);
+            throw new PipelineStopExecutionException(string.IsNullOrWhiteSpace(reason) ? "Execution halted by PowerFlow stop action." : reason);
         }
         else if (string.Equals(step.Type, "condition", StringComparison.OrdinalIgnoreCase) || string.Equals(step.Subtype, "condition", StringComparison.OrdinalIgnoreCase))
         {
@@ -3153,7 +3153,7 @@ public class PipelineEngine : IPipelineEngine
                                 recordPublicId.Value,
                                 row,
                                 Domain.Constants.AuditActions.Updated,
-                                $"Pipeline '{step.PipelineId}' step '{step.Id}' updated record {recordPublicId.Value}",
+                                $"PowerFlow '{step.PipelineId}' step '{step.Id}' updated record {recordPublicId.Value}",
                                 ct,
                                 uow.Transaction,
                                 suppressInterception: true,
@@ -3458,13 +3458,13 @@ public class PipelineEngine : IPipelineEngine
                 if (recordWriteService is IFileRecordWriteService fileRecordWriteService)
                 {
                     await fileRecordWriteService.ApplyFileWriteAsync(table, fields, recordPublicId,
-                        fileValues, AuditActions.Updated, "File uploaded via Pipeline action step",
+                        fileValues, AuditActions.Updated, "File uploaded via PowerFlow action step",
                         ct, uow.Transaction);
                 }
                 else
                 {
                     await recordWriteService.ApplyAsync(table, fields, recordPublicId,
-                        fileValues, AuditActions.Updated, "File uploaded via Pipeline action step",
+                        fileValues, AuditActions.Updated, "File uploaded via PowerFlow action step",
                         ct, uow.Transaction);
                 }
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
@@ -4363,7 +4363,7 @@ public class PipelineEngine : IPipelineEngine
             bool isDynamicInput = System.Text.RegularExpressions.Regex.IsMatch(input.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
             if (isDynamicInput && (string.IsNullOrEmpty(result) || result.Contains("{{") || result.Contains("[NOT_FOUND]")))
             {
-                throw new PipelineStepException($"Failed to resolve dynamic token '{input}' in pipeline step execution context.");
+                throw new PipelineStepException($"Failed to resolve dynamic token '{input}' in PowerFlow step execution context.");
             }
 
             return result;
@@ -4377,7 +4377,7 @@ public class PipelineEngine : IPipelineEngine
             bool isDynamicInput = System.Text.RegularExpressions.Regex.IsMatch(input.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
             if (isDynamicInput)
             {
-                throw new PipelineStepException($"Failed to resolve dynamic token '{input}' in pipeline step execution context: {ex.Message}");
+                throw new PipelineStepException($"Failed to resolve dynamic token '{input}' in PowerFlow step execution context: {ex.Message}");
             }
             return input;
         }

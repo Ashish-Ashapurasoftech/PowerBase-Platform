@@ -914,7 +914,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(SoftDeleteConnectionSql, new { publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
         if (affected == 0)
-            throw new NotFoundException("PipelineConnection", publicId);
+            throw new NotFoundException("PowerFlowConnection", publicId);
     }
 
     public async Task<(Guid PublicId, long Id)> CreateRunAsync(PipelineRun run, CancellationToken ct = default)
@@ -1451,7 +1451,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         var affected = await connection.ExecuteAsync(
             new CommandDefinition(sql, new { publicId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
         if (affected == 0)
-            throw new NotFoundException("PipelineSchedule", publicId);
+            throw new NotFoundException("PowerFlowSchedule", publicId);
     }
 
     public async Task<IReadOnlyList<PipelineSchedule>> GetActivePipelineSchedulesAsync(CancellationToken ct = default)

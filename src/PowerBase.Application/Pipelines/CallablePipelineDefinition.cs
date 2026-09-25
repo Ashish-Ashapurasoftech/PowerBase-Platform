@@ -24,7 +24,7 @@ public sealed record CallablePipelineDefinition(string Definition, string Name, 
         {
             using var document = JsonDocument.Parse(configJson ?? "{}");
             var config = document.RootElement;
-            if (config.ValueKind != JsonValueKind.Object) throw new PipelineNonRetryableException("Callable pipeline configuration must be a JSON object.");
+            if (config.ValueKind != JsonValueKind.Object) throw new PipelineNonRetryableException("Callable PowerFlow configuration must be a JSON object.");
             var definition = Parse(config.TryGetProperty("callDefinition", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null);
             if (caller && definition.Arguments.Count > 0)
             {
@@ -37,7 +37,7 @@ public sealed record CallablePipelineDefinition(string Definition, string Name, 
         }
         catch (JsonException)
         {
-            throw new PipelineNonRetryableException("Callable pipeline configuration must be valid JSON.");
+            throw new PipelineNonRetryableException("Callable PowerFlow configuration must be valid JSON.");
         }
     }
 }

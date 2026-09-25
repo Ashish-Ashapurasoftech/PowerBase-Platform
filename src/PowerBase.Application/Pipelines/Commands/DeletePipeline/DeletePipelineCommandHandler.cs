@@ -44,7 +44,7 @@ public class DeletePipelineCommandHandler
         // Immediate best-effort queue terminalization (failure does not block response, logged via catch)
         try
         {
-            await _queueRepo.CancelPendingJobsForPipelinesAsync(_queryContext.TenantId, new[] { pipeline.Id }, "Pipeline deleted", ct);
+            await _queueRepo.CancelPendingJobsForPipelinesAsync(_queryContext.TenantId, new[] { pipeline.Id }, "PowerFlow deleted", ct);
         }
         catch (System.Exception ex)
         {
@@ -68,7 +68,7 @@ public class DeletePipelineCommandHandler
             AuditActions.Deleted,
             AuditEntityTypes.Pipeline,
             pipeline.PublicId.ToString(),
-            $"Pipeline workflow deleted: {pipeline.Name}",
+            $"PowerFlow workflow deleted: {pipeline.Name}",
             appId: pipeline.AppId,
             ct: ct);
     }

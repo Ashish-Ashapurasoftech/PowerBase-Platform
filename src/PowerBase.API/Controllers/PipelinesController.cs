@@ -563,7 +563,7 @@ public class PipelinesController : ControllerBase
         };
 
         queue.QueueTask(task);
-        return Ok(new { message = "Pipeline run requested and enqueued.", messageId = messageId.ToString(), correlationId });
+        return Ok(new { message = "PowerFlow run requested and enqueued.", messageId = messageId.ToString(), correlationId });
     }
 
     /// <summary>List pipeline execution runs with pagination.</summary>
@@ -665,11 +665,11 @@ public class PipelinesController : ControllerBase
     {
         var run = await pipelineRepo.GetRunByPublicIdAsync(runPublicId, ct);
         if (run == null)
-            return NotFound(new { error = new { code = "NOT_FOUND", message = $"PipelineRun {runPublicId} not found." } });
+            return NotFound(new { error = new { code = "NOT_FOUND", message = $"PowerFlow run {runPublicId} not found." } });
 
         var pipeline = await pipelineRepo.GetByIdAsync(run.PipelineId, ct);
         if (pipeline == null)
-            return NotFound(new { error = new { code = "NOT_FOUND", message = "Parent Pipeline not found." } });
+            return NotFound(new { error = new { code = "NOT_FOUND", message = "Parent PowerFlow not found." } });
 
         try
         {

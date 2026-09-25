@@ -152,7 +152,7 @@ public class UpdatePipelineCommandHandler
         var affected = await _pipelineRepo.UpdateAsync(pipeline, null, ct);
         if (affected == 0)
         {
-            throw new ConcurrencyException("Pipeline config has been modified by another process. Please reload and try again.");
+            throw new ConcurrencyException("PowerFlow config has been modified by another process. Please reload and try again.");
         }
 
         var logger = _serviceProvider.GetService<ILogger<UpdatePipelineCommandHandler>>();
@@ -186,7 +186,7 @@ public class UpdatePipelineCommandHandler
             AuditActions.Updated,
             AuditEntityTypes.Pipeline,
             pipeline.PublicId.ToString(),
-            $"Pipeline workflow updated: {command.Name} (Active: {command.IsActive})",
+            $"PowerFlow workflow updated: {command.Name} (Active: {command.IsActive})",
             appId: pipeline.AppId,
             ct: ct);
     }

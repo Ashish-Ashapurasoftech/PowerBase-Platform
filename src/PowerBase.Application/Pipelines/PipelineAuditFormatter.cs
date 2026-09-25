@@ -314,8 +314,8 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 foreach (var entry in inputDict) friendlyInput[entry.Key] = entry.Value;
                 foreach (var entry in outputDict) friendlyOutput[entry.Key] = entry.Value;
                 logMessage = status == "Success"
-                    ? subtype == "pipeline-called" ? "Pipeline called; arguments received." : "Pipeline call queued."
-                    : $"Callable pipeline step {status.ToLowerInvariant()}.";
+                    ? subtype == "pipeline-called" ? "PowerFlow called; arguments received." : "PowerFlow call queued."
+                    : $"Callable PowerFlow step {status.ToLowerInvariant()}.";
             }
             else if (type == "trigger" && subtype == "new-bulk-event")
             {
@@ -594,7 +594,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["RecordPublicId"] = recordGuidStr;
 
-                logMessage = $@"Record ""{recordDisplayName}"" was {eventTypeStr?.ToLowerInvariant() ?? "added"} to {tableName} and triggered this pipeline.";
+                logMessage = $@"Record ""{recordDisplayName}"" was {eventTypeStr?.ToLowerInvariant() ?? "added"} to {tableName} and triggered this PowerFlow.";
             }
             else if (subtype == "search-records")
             {
@@ -857,7 +857,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             }
             else if (subtype == "stop")
             {
-                var reason = inputDict.TryGetValue("Reason", out var rObj) ? rObj?.ToString() : "Execution halted by pipeline stop action.";
+                var reason = inputDict.TryGetValue("Reason", out var rObj) ? rObj?.ToString() : "Execution halted by PowerFlow stop action.";
                 friendlyInput["Reason"] = reason;
                 friendlyOutput["Status"] = "Stopped";
                 friendlyOutput["Reason"] = reason;
