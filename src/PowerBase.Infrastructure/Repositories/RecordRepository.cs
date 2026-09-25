@@ -284,13 +284,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
             foreach (var opt in list)
             {
-                if (NeedsDecrypt(enc, f1) && opt.Value1 is not null)
+                if (opt.Value1 is not null && (NeedsDecrypt(enc, f1) || opt.Value1.Length >= 40))
                     opt.Value1 = await enc.DecryptValueAsync(opt.Value1, ct);
-                if (NeedsDecrypt(enc, f2) && opt.Value2 is not null)
+                if (opt.Value2 is not null && (NeedsDecrypt(enc, f2) || opt.Value2.Length >= 40))
                     opt.Value2 = await enc.DecryptValueAsync(opt.Value2, ct);
-                if (NeedsDecrypt(enc, f3) && opt.Value3 is not null)
+                if (opt.Value3 is not null && (NeedsDecrypt(enc, f3) || opt.Value3.Length >= 40))
                     opt.Value3 = await enc.DecryptValueAsync(opt.Value3, ct);
-                if (NeedsDecrypt(enc, fLabel) && opt.Label is not null)
+                if (opt.Label is not null && (NeedsDecrypt(enc, fLabel) || opt.Label.Length >= 40))
                     opt.Label = await enc.DecryptValueAsync(opt.Label, ct);
             }
         }
@@ -455,11 +455,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, new { ids }, cancellationToken: ct));
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         foreach (var row in rows)
         {
             var dict = (IDictionary<string, object>)row;
             if (dict.TryGetValue("Id", out var idVal) && idVal is not null)
-                result[Convert.ToInt64(idVal)] = dict.TryGetValue("KeyColumnValue", out var v) && v != DBNull.Value ? v : null;
+            {
+                var val = dict.TryGetValue("KeyColumnValue", out var v) && v != DBNull.Value ? v : null;
+                if (val is string str && enc.IsActive)
+                {
+                    val = await enc.DecryptValueAsync(str, ct);
+                }
+                result[Convert.ToInt64(idVal)] = val;
+            }
         }
         return result;
     }

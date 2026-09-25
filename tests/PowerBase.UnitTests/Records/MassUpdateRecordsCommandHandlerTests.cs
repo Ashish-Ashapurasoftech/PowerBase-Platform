@@ -29,7 +29,7 @@ public class MassUpdateRecordsCommandHandlerTests
     private static AppField MakeField(int fid, bool isRequired = false, bool isUnique = false) =>
         new() { Id = fid, Fid = fid, Name = $"C_field{fid}", Label = $"Field {fid}", TypeCode = "Text", IsRequired = isRequired, IsUnique = isUnique };
 
-    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _appRepo, _messagePublisher);
+    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _appRepo, _messagePublisher, new PowerBase.Formula.FormulaEngine(), Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(), Substitute.For<IUserRepository>());
 
     public MassUpdateRecordsCommandHandlerTests()
     {
