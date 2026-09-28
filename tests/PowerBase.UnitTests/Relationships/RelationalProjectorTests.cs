@@ -166,4 +166,71 @@ public class RelationalProjectorTests
 
         result[0].Should().BeEmpty();
     }
+
+    [Fact]
+    public async Task Lookup_with_encrypted_parent_field_maps_decrypted_value_by_fid_or_physical_name()
+    {
+        // Child table: lookup (fid 11) points to parent field (fid 5, IsEncrypted = true)
+        var childFields = new List<AppField>
+        {
+            Field(10, "Employee", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}"),
+            Field(11, "Employee - SSN", "Lookup", "{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":99,\"sourceFid\":5,\"sourceTypeCode\":\"Text\"}"),
+        };
+        var childRows = Rows(
+            new Dictionary<string, object?> { ["Id"] = 1L, [PhysicalNaming.ColumnName(10)] = 42L });
+
+        var parentTable = new AppTable { Id = 99, AppId = 1, Name = "Employee" };
+        var ssnField = Field(5, "SSN", "Text");
+        ssnField.IsEncrypted = true;
+        ssnField.PhysicalColumnName = "SSN";
+
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(parentTable);
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>()).Returns(new List<AppField> { ssnField });
+
+        // RecordRepository decrypts and returns the row with f_5
+        _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>
+            {
+                [42L] = new Dictionary<string, object?> { [PhysicalNaming.ColumnName(5)] = "123-45-6789" },
+            });
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 7 }, childFields, childRows);
+
+        result[0][11].Should().Be("123-45-6789");
+    }
+
+    [Fact]
+    public async Task Reference_display_key_with_encrypted_parent_field_projects_plaintext()
+    {
+        var childFields = new List<AppField>
+        {
+            Field(10, "Customer", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}"),
+        };
+        var childRows = Rows(
+            new Dictionary<string, object?> { ["Id"] = 1L, [PhysicalNaming.ColumnName(10)] = 42L });
+
+        var parentTable = new AppTable { Id = 99, AppId = 1, Name = "Customer" };
+        var nameField = Field(5, "Name", "Text");
+        nameField.IsEncrypted = true;
+        nameField.PhysicalColumnName = "CustName";
+
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(parentTable);
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>()).Returns(new List<AppField> { nameField });
+        _relRepo.ListByChildTableAsync(7, Arg.Any<CancellationToken>())
+            .Returns(new List<Relationship>
+            {
+                new() { Id = 1, ReferenceFid = 10, ParentTableId = 99, ChildTableId = 7, DisplayKeyFieldId = 5 }
+            });
+
+        // RecordRepository returns decrypted row
+        _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>
+            {
+                [42L] = new Dictionary<string, object?> { [PhysicalNaming.ColumnName(5)] = "Acme Corp" },
+            });
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 7 }, childFields, childRows);
+
+        result[0][10].Should().Be("Acme Corp");
+    }
 }

@@ -137,10 +137,15 @@ public sealed class RelationalProjector : IRelationalProjector
                     if (resolvedParentId.TryGetValue((i, settings!.ReferenceFid!.Value), out var pid) && pid is long parentId
                         && parentRows.TryGetValue(parentId, out var prow))
                     {
-                        var srcCol = parentFieldsByFid.TryGetValue(settings.SourceFid!.Value, out var srcField)
-                            ? (srcField.PhysicalColumnName ?? PhysicalNaming.ColumnName(settings.SourceFid.Value))
-                            : PhysicalNaming.ColumnName(settings.SourceFid.Value);
-                        if (prow.TryGetValue(srcCol, out var v))
+                        var fidCol = PhysicalNaming.ColumnName(settings.SourceFid!.Value);
+                        var srcCol = parentFieldsByFid.TryGetValue(settings.SourceFid.Value, out var srcField)
+                            ? (srcField.PhysicalColumnName ?? fidCol)
+                            : fidCol;
+                        if (!prow.TryGetValue(srcCol, out var v))
+                        {
+                            prow.TryGetValue(fidCol, out v);
+                        }
+                        if (v is not null)
                             value = string.IsNullOrWhiteSpace(settings.SourceSubField) ? v : ExtractJsonSubField(v, settings.SourceSubField);
                     }
                     maps[i][field.Fid!.Value] = value;
@@ -153,12 +158,19 @@ public sealed class RelationalProjector : IRelationalProjector
                 {
                     if (displayKeyByRefFid[field.Fid!.Value] is not AppField displayKey) continue;
                     var displayKeyCol = KeyFieldResolver.ColumnName(displayKey);
+                    var displayKeyFidCol = displayKey.Fid.HasValue ? PhysicalNaming.ColumnName(displayKey.Fid.Value) : null;
                     if (resolvedParentId.TryGetValue((i, field.Fid!.Value), out var pid) && pid is long parentId
-                        && parentRows.TryGetValue(parentId, out var prow)
-                        && prow.TryGetValue(displayKeyCol, out var displayKeyValue))
+                        && parentRows.TryGetValue(parentId, out var prow))
                     {
-                        // Store the display-key value string so RecordResult.FromRow can pick it up.
-                        maps[i][field.Fid!.Value] = KeyFieldResolver.FormatForSubmit(displayKeyValue);
+                        if (!prow.TryGetValue(displayKeyCol, out var displayKeyValue) && displayKeyFidCol != null)
+                        {
+                            prow.TryGetValue(displayKeyFidCol, out displayKeyValue);
+                        }
+                        if (displayKeyValue is not null)
+                        {
+                            // Store the display-key value string so RecordResult.FromRow can pick it up.
+                            maps[i][field.Fid!.Value] = KeyFieldResolver.FormatForSubmit(displayKeyValue);
+                        }
                     }
                 }
             }
