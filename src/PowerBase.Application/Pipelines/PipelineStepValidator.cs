@@ -241,6 +241,66 @@ public class PipelineStepValidator
     }
 
     /// <summary>
+    /// Validates a Search Records step's Advanced Query syntax against the selected table's fields at
+    /// save time, so a typo surfaces immediately rather than the first time the PowerFlow runs. Simple
+    /// Filter mode needs no equivalent check here — its rule/operator shape is already enforced by the
+    /// UI and by <see cref="PipelineFilterEvaluator.ValidateRule"/> when it runs.
+    /// </summary>
+    public async Task ValidateSearchRecordsStepAsync(string configJson, CancellationToken ct)
+    {
+        SearchRecordsValidationConfig config;
+        try
+        {
+            config = JsonSerializer.Deserialize<SearchRecordsValidationConfig>(configJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? throw new InvalidOperationException();
+        }
+        catch
+        {
+            throw new ValidationException(new Dictionary<string, string[]> { ["ConfigJson"] = new[] { "Configuration is malformed." } });
+        }
+
+        if (config.IsSimpleFilter || string.IsNullOrWhiteSpace(config.AdvancedQuery)) return;
+
+        var tableRef = config.TableId ?? config.TableLabel;
+        if (string.IsNullOrEmpty(tableRef) || !Guid.TryParse(tableRef, out var tableGuid)) return;
+
+        async Task Validate(TargetTenantRepos repos)
+        {
+            var table = await repos.TableRepo.GetByPublicIdAsync(tableGuid, ct);
+            var fields = await repos.FieldRepo.ListByTableAsync(table.Id, ct);
+            try
+            {
+                CopyRecordsDefinition.ParseQuery(config.AdvancedQuery, fields);
+            }
+            catch (ValidationException vex)
+            {
+                throw new ValidationException(new Dictionary<string, string[]> { ["AdvancedQuery"] = new[] { vex.Message } });
+            }
+        }
+
+        if (!string.IsNullOrEmpty(config.ConnectionPublicId) && Guid.TryParse(config.ConnectionPublicId, out var connectionId) && !SystemConnectionIds.Contains(connectionId))
+        {
+            var account = await TryResolveSavedAccountAsync(connectionId, ct);
+            if (account != null)
+            {
+                await using var repos = await OpenAccountReposAsync(account, ct);
+                await Validate(repos);
+                return;
+            }
+            var tenant = await _tenantRepo.GetTenantForUserAsync(connectionId, _queryContext.UserId, ct);
+            if (tenant != null && tenant.Id != _queryContext.TenantId)
+            {
+                if (_targetScopeFactory == null)
+                    throw new ValidationException(new Dictionary<string, string[]> { ["ConnectionPublicId"] = new[] { "Target connection validation is unavailable." } });
+                await using var repos = await _targetScopeFactory(tenant.Id);
+                await Validate(repos);
+                return;
+            }
+        }
+        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService));
+    }
+
+    /// <summary>
     /// Validates Create Record required fields against authoritative table metadata. Client-provided
     /// required flags are deliberately ignored, so API callers cannot bypass the rule.
     /// </summary>
@@ -514,21 +574,38 @@ public class PipelineStepValidator
             }
 
             // 4b. Filters Validation
-            if (config.Filters != null)
+            if (!config.IsSimpleFilter)
             {
-                var mockGroup = new TriggerFilterGroup { LogicalOp = "AND", Rules = config.Filters };
-                if (!PipelineFilterEvaluator.IsGroupCompletelyBlank(mockGroup))
+                if (!string.IsNullOrWhiteSpace(config.AdvancedQuery))
                 {
-                    PipelineFilterEvaluator.ValidateGroup(mockGroup, fields, errors, "Filters");
+                    try
+                    {
+                        CopyRecordsDefinition.ParseQuery(config.AdvancedQuery, fields);
+                    }
+                    catch (ValidationException vex)
+                    {
+                        AddError(errors, "AdvancedQuery", vex.Message);
+                    }
                 }
             }
-            if (config.FilterGroups != null)
+            else
             {
-                for (int i = 0; i < config.FilterGroups.Count; i++)
+                if (config.Filters != null)
                 {
-                    if (!PipelineFilterEvaluator.IsGroupCompletelyBlank(config.FilterGroups[i]))
+                    var mockGroup = new TriggerFilterGroup { LogicalOp = "AND", Rules = config.Filters };
+                    if (!PipelineFilterEvaluator.IsGroupCompletelyBlank(mockGroup))
                     {
-                        PipelineFilterEvaluator.ValidateGroup(config.FilterGroups[i], fields, errors, $"FilterGroups[{i}]");
+                        PipelineFilterEvaluator.ValidateGroup(mockGroup, fields, errors, "Filters");
+                    }
+                }
+                if (config.FilterGroups != null)
+                {
+                    for (int i = 0; i < config.FilterGroups.Count; i++)
+                    {
+                        if (!PipelineFilterEvaluator.IsGroupCompletelyBlank(config.FilterGroups[i]))
+                        {
+                            PipelineFilterEvaluator.ValidateGroup(config.FilterGroups[i], fields, errors, $"FilterGroups[{i}]");
+                        }
                     }
                 }
             }
@@ -591,5 +668,16 @@ public class PipelineStepValidator
         public int? MaxRecords { get; set; }
         public List<TriggerFilterRule>? Filters { get; set; }
         public List<TriggerFilterGroup>? FilterGroups { get; set; }
+        public bool IsSimpleFilter { get; set; } = true;
+        public string? AdvancedQuery { get; set; }
+    }
+
+    private class SearchRecordsValidationConfig
+    {
+        public string? ConnectionPublicId { get; set; }
+        public string? TableId { get; set; }
+        public string? TableLabel { get; set; }
+        public bool IsSimpleFilter { get; set; } = true;
+        public string? AdvancedQuery { get; set; }
     }
 }

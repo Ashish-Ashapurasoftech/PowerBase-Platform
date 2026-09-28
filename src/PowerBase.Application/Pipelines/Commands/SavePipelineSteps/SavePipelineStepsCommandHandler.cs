@@ -201,6 +201,8 @@ public class SavePipelineStepsCommandHandler
             }
             if (dto.Subtype == "copy-records" && dto.IsValidated)
                 await stepValidator.ValidateCopyRecordsStepAsync(dto.ConfigJson ?? "{}", ct);
+            if (dto.Subtype == "search-records" && dto.IsValidated)
+                await stepValidator.ValidateSearchRecordsStepAsync(dto.ConfigJson ?? "{}", ct);
             // Incomplete editor steps are persisted as drafts so later steps are not lost.
             // Validated steps (including activation saves and direct API submissions marked
             // complete) still receive authoritative database-backed required-field validation.

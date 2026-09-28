@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Pipelines;
@@ -459,6 +462,113 @@ public static class PipelineFilterEvaluator
     public static bool TryParseDateTime(string input, out DateTime date)
     {
         return DateTime.TryParse(input, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out date);
+    }
+
+    /// <summary>
+    /// In-memory evaluator for the Quickbase advanced-query grammar's parsed tree
+    /// (<see cref="FilterGroup"/>/<see cref="FilterNode"/>/<see cref="FilterCondition"/>, produced by
+    /// <see cref="CopyRecordsDefinition.ParseQuery"/>). Search Records hands this same tree to the SQL
+    /// layer (RecordRepository/PipelineRecordSearchService); trigger steps (On New Event) have no SQL
+    /// round-trip, so they evaluate it here against the changed record's in-memory field values instead —
+    /// same grammar, same operators, two execution paths.
+    /// </summary>
+    public static bool EvaluateFilterGroup(FilterGroup? group, IReadOnlyDictionary<long, object?> valuesSource, IReadOnlyList<AppField> fields, ILogger? logger = null)
+    {
+        if (group == null || group.Nodes == null || group.Nodes.Count == 0) return true;
+
+        var isAnd = !string.Equals(group.Logic, "or", StringComparison.OrdinalIgnoreCase);
+        foreach (var node in group.Nodes)
+        {
+            bool nodeResult = node.Condition != null
+                ? EvaluateFilterCondition(node.Condition, valuesSource, fields, logger)
+                : EvaluateFilterGroup(node.Group, valuesSource, fields, logger);
+
+            if (isAnd && !nodeResult) return false;
+            if (!isAnd && nodeResult) return true;
+        }
+
+        return isAnd;
+    }
+
+    private static bool EvaluateFilterCondition(FilterCondition condition, IReadOnlyDictionary<long, object?> valuesSource, IReadOnlyList<AppField> fields, ILogger? logger)
+    {
+        var field = fields.FirstOrDefault(f => f.Fid == condition.FieldId);
+        if (field == null)
+        {
+            logger?.LogWarning("Advanced query field ID '{FieldId}' not found in AppFields list.", condition.FieldId);
+            return false;
+        }
+
+        var leftVal = ReadFieldValue(field, valuesSource);
+
+        string rightVal;
+        if (string.Equals(condition.ValueMode, "field", StringComparison.OrdinalIgnoreCase))
+        {
+            var otherField = condition.ValueFieldId.HasValue ? fields.FirstOrDefault(f => f.Fid == condition.ValueFieldId.Value) : null;
+            rightVal = otherField != null ? ReadFieldValue(otherField, valuesSource) : string.Empty;
+        }
+        else
+        {
+            rightVal = condition.Value ?? string.Empty;
+        }
+
+        var typeCategory = GetTypeCategory(field.TypeCode);
+
+        switch (condition.Operator)
+        {
+            case "eq": return EvaluateConditionOperator(leftVal, "equals", rightVal, typeCategory, logger);
+            case "ne": return EvaluateConditionOperator(leftVal, "not_equals", rightVal, typeCategory, logger);
+            case "contains": return EvaluateConditionOperator(leftVal, "contains", rightVal, typeCategory, logger);
+            case "notContains": return EvaluateConditionOperator(leftVal, "not_contains", rightVal, typeCategory, logger);
+            case "startsWith": return EvaluateConditionOperator(leftVal, "starts_with", rightVal, typeCategory, logger);
+            case "notStartsWith": return EvaluateConditionOperator(leftVal, "not_starts_with", rightVal, typeCategory, logger);
+            case "gt": return EvaluateConditionOperator(leftVal, "greater_than", rightVal, typeCategory, logger);
+            case "gte": return EvaluateConditionOperator(leftVal, "greater_than_or_equals", rightVal, typeCategory, logger);
+            case "lt": return EvaluateConditionOperator(leftVal, "less_than", rightVal, typeCategory, logger);
+            case "lte": return EvaluateConditionOperator(leftVal, "less_than_or_equals", rightVal, typeCategory, logger);
+            case "wildcard": return IsWildcardMatch(leftVal, rightVal);
+            case "notWildcard": return !IsWildcardMatch(leftVal, rightVal);
+            case "includes":
+            case "notIncludes":
+                {
+                    var parts = leftVal.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim());
+                    var has = parts.Any(p => p.Equals(rightVal, StringComparison.OrdinalIgnoreCase));
+                    return condition.Operator == "includes" ? has : !has;
+                }
+            default:
+                logger?.LogWarning("Unsupported advanced query operator '{Operator}' in trigger filter evaluation.", condition.Operator);
+                return false;
+        }
+    }
+
+    private static string ReadFieldValue(AppField field, IReadOnlyDictionary<long, object?> valuesSource)
+    {
+        object? valObj = null;
+        if (valuesSource.TryGetValue(field.Id, out var directVal)) valObj = directVal;
+        else if (field.Fid.HasValue && valuesSource.TryGetValue(field.Fid.Value, out var fidVal)) valObj = fidVal;
+        return valObj?.ToString() ?? string.Empty;
+    }
+
+    /// <summary>Quickbase's WC/XWC wildcard grammar: '*' = any run of characters, '?' = any single
+    /// character, '\*'/'\?' = the literal character (see CopyRecordsDefinition's query parser, which
+    /// preserves that exact escaping when building this string).</summary>
+    private static bool IsWildcardMatch(string value, string pattern)
+    {
+        var sb = new StringBuilder("^");
+        for (var i = 0; i < pattern.Length; i++)
+        {
+            var c = pattern[i];
+            if (c == '\\' && i + 1 < pattern.Length && (pattern[i + 1] == '*' || pattern[i + 1] == '?'))
+            {
+                sb.Append(Regex.Escape(pattern[i + 1].ToString()));
+                i++;
+            }
+            else if (c == '*') sb.Append(".*");
+            else if (c == '?') sb.Append('.');
+            else sb.Append(Regex.Escape(c.ToString()));
+        }
+        sb.Append('$');
+        return Regex.IsMatch(value, sb.ToString(), RegexOptions.IgnoreCase);
     }
 
     public static bool IsRuleCompletelyBlank(TriggerFilterRule rule)

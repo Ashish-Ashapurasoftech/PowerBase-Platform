@@ -1651,7 +1651,18 @@ public class PipelineEngine : IPipelineEngine
             FilterGroup? filterTree = null;
             string? evaluatedFilterVal = null;
 
-            if (config.FilterGroups != null && config.FilterGroups.Any(g => !PipelineFilterEvaluator.IsGroupCompletelyBlank(g)))
+            if (!config.IsSimpleFilter && !string.IsNullOrWhiteSpace(config.AdvancedQuery))
+            {
+                try
+                {
+                    filterTree = CopyRecordsDefinition.ParseQuery(config.AdvancedQuery, fields);
+                }
+                catch (PowerBase.Domain.Exceptions.ValidationException vex)
+                {
+                    throw new InvalidOperationException($"Search Records step {step.Id} has an invalid Advanced Query: {vex.Message}");
+                }
+            }
+            else if (config.FilterGroups != null && config.FilterGroups.Any(g => !PipelineFilterEvaluator.IsGroupCompletelyBlank(g)))
             {
                 var outerGroup = new FilterGroup { Logic = "or", Nodes = new List<FilterNode>() };
                 foreach (var g in config.FilterGroups)
@@ -1706,6 +1717,7 @@ public class PipelineEngine : IPipelineEngine
                 FilterValue = evaluatedFilterVal,
                 FilterGroupsCount = config.FilterGroups?.Count ?? 0,
                 FiltersCount = config.Filters?.Count ?? 0,
+                IsSimpleFilter = config.IsSimpleFilter,
                 MaxResults = limit
             });
 
@@ -5433,6 +5445,8 @@ public class PipelineEngine : IPipelineEngine
         public int? MaxResults { get; set; }
         public List<TriggerFilterRule>? Filters { get; set; }
         public List<TriggerFilterGroup>? FilterGroups { get; set; }
+        public bool IsSimpleFilter { get; set; } = true;
+        public string? AdvancedQuery { get; set; }
     }
 
     private bool IsSqlDeadlock(Exception ex)

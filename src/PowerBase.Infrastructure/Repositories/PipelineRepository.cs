@@ -1696,14 +1696,16 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                     TriggerFieldsJson = @TriggerFieldsJson,
                     FiltersJson = @FiltersJson,
                     FilterGroupsJson = @FilterGroupsJson,
+                    IsSimpleFilter = @IsSimpleFilter,
+                    AdvancedQuery = @AdvancedQuery,
                     LimitRecords = @LimitRecords,
                     MaxRecords = @MaxRecords,
                     TriggerSubtype = @TriggerSubtype,
                     IsActive = @IsActive,
                     LastModifiedOn = SYSUTCDATETIME()
             WHEN NOT MATCHED THEN
-                INSERT (OwnerTenantId, OwnerPipelineId, PipelinePublicId, TriggerStepPublicId, TriggerStepRefId, TargetTenantId, TargetAppPublicId, TargetTablePublicId, TargetConnectionPublicId, TriggerOnAdded, TriggerOnModified, TriggerOnDeleted, TriggerOnAnyField, TriggerFieldsJson, FiltersJson, FilterGroupsJson, LimitRecords, MaxRecords, TriggerSubtype, IsActive, CreatedOn, LastModifiedOn)
-                VALUES (@OwnerTenantId, @OwnerPipelineId, @PipelinePublicId, @TriggerStepPublicId, @TriggerStepRefId, @TargetTenantId, @TargetAppPublicId, @TargetTablePublicId, @TargetConnectionPublicId, @TriggerOnAdded, @TriggerOnModified, @TriggerOnDeleted, @TriggerOnAnyField, @TriggerFieldsJson, @FiltersJson, @FilterGroupsJson, @LimitRecords, @MaxRecords, @TriggerSubtype, @IsActive, SYSUTCDATETIME(), SYSUTCDATETIME());
+                INSERT (OwnerTenantId, OwnerPipelineId, PipelinePublicId, TriggerStepPublicId, TriggerStepRefId, TargetTenantId, TargetAppPublicId, TargetTablePublicId, TargetConnectionPublicId, TriggerOnAdded, TriggerOnModified, TriggerOnDeleted, TriggerOnAnyField, TriggerFieldsJson, FiltersJson, FilterGroupsJson, IsSimpleFilter, AdvancedQuery, LimitRecords, MaxRecords, TriggerSubtype, IsActive, CreatedOn, LastModifiedOn)
+                VALUES (@OwnerTenantId, @OwnerPipelineId, @PipelinePublicId, @TriggerStepPublicId, @TriggerStepRefId, @TargetTenantId, @TargetAppPublicId, @TargetTablePublicId, @TargetConnectionPublicId, @TriggerOnAdded, @TriggerOnModified, @TriggerOnDeleted, @TriggerOnAnyField, @TriggerFieldsJson, @FiltersJson, @FilterGroupsJson, @IsSimpleFilter, @AdvancedQuery, @LimitRecords, @MaxRecords, @TriggerSubtype, @IsActive, SYSUTCDATETIME(), SYSUTCDATETIME());
             """;
 
         var parameters = new
@@ -1724,6 +1726,8 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             TriggerFieldsJson = config.TriggerFields != null ? System.Text.Json.JsonSerializer.Serialize(config.TriggerFields) : null,
             FiltersJson = config.Filters != null ? System.Text.Json.JsonSerializer.Serialize(config.Filters) : null,
             FilterGroupsJson = config.FilterGroups != null ? System.Text.Json.JsonSerializer.Serialize(config.FilterGroups) : null,
+            IsSimpleFilter = config.IsSimpleFilter,
+            AdvancedQuery = config.AdvancedQuery,
             LimitRecords = config.LimitRecords,
             MaxRecords = config.MaxRecords,
             TriggerSubtype = triggerStep.Subtype,
@@ -1763,6 +1767,8 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         public int? MaxRecords { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterRule>? Filters { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterGroup>? FilterGroups { get; set; }
+        public bool IsSimpleFilter { get; set; } = true;
+        public string? AdvancedQuery { get; set; }
     }
 
     public async Task InsertBulkEventRecordsAsync(List<PipelineBulkEventRecord> records, IDbTransaction? transaction = null, CancellationToken ct = default)

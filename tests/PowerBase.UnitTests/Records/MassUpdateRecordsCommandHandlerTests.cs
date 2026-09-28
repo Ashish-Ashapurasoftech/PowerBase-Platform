@@ -23,13 +23,17 @@ public class MassUpdateRecordsCommandHandlerTests
     private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
     private readonly IMessagePublisher _messagePublisher = Substitute.For<IMessagePublisher>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly PowerBase.Formula.FormulaEngine _engine = new();
+    private readonly IFormRuleRepository _formRuleRepo = Substitute.For<IFormRuleRepository>();
+    private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
+    private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
 
     private static AppTable MakeTable(long id = 5) => new() { Id = id, PublicId = Guid.NewGuid(), Name = "T" };
 
     private static AppField MakeField(int fid, bool isRequired = false, bool isUnique = false) =>
         new() { Id = fid, Fid = fid, Name = $"C_field{fid}", Label = $"Field {fid}", TypeCode = "Text", IsRequired = isRequired, IsUnique = isUnique };
 
-    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _appRepo, _messagePublisher);
+    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _appRepo, _messagePublisher, _engine, _formRuleRepo, _formRepo, _userRepo);
 
     public MassUpdateRecordsCommandHandlerTests()
     {

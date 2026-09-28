@@ -228,6 +228,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                         TriggerFieldsJson = config.TriggerFields != null ? JsonSerializer.Serialize(config.TriggerFields) : null,
                         FiltersJson = config.Filters != null ? JsonSerializer.Serialize(config.Filters) : null,
                         FilterGroupsJson = config.FilterGroups != null ? JsonSerializer.Serialize(config.FilterGroups) : null,
+                        IsSimpleFilter = config.IsSimpleFilter,
+                        AdvancedQuery = config.AdvancedQuery,
                         LimitRecords = config.LimitRecords,
                         MaxRecords = config.MaxRecords,
                         TriggerSubtype = triggerStep.Subtype
@@ -315,29 +317,45 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                             var valuesSource = change.EventType == PipelineRecordEventType.Deleted ? change.BeforeValues : change.AfterValues;
                             bool filtersMatch = true;
 
-                            var filters = !string.IsNullOrEmpty(sub.FiltersJson) 
-                                ? JsonSerializer.Deserialize<List<PowerBase.Application.Pipelines.TriggerFilterRule>>(sub.FiltersJson) 
-                                : null;
-                            var filterGroups = !string.IsNullOrEmpty(sub.FilterGroupsJson) 
-                                ? JsonSerializer.Deserialize<List<PowerBase.Application.Pipelines.TriggerFilterGroup>>(sub.FilterGroupsJson) 
-                                : null;
-
-                            var nonBlankGroups = filterGroups?
-                                .Where(g => !PowerBase.Application.Pipelines.PipelineFilterEvaluator.IsGroupCompletelyBlank(g))
-                                .ToList();
-
-                            var nonBlankRules = filters?
-                                .Where(r => !PowerBase.Application.Pipelines.PipelineFilterEvaluator.IsRuleCompletelyBlank(r))
-                                .ToList();
-
-                            if (nonBlankGroups != null && nonBlankGroups.Any())
+                            if (!sub.IsSimpleFilter && !string.IsNullOrWhiteSpace(sub.AdvancedQuery))
                             {
-                                filtersMatch = nonBlankGroups.Any(g => PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(g, valuesSource, fields, _logger));
+                                try
+                                {
+                                    var parsedTree = PowerBase.Application.Pipelines.CopyRecordsDefinition.ParseQuery(sub.AdvancedQuery, fields);
+                                    filtersMatch = PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateFilterGroup(parsedTree, valuesSource, fields, _logger);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex, "Pipeline {PipelineId}: On New Event Advanced Query failed to evaluate; skipping trigger match for this subscription.", sub.OwnerPipelineId);
+                                    filtersMatch = false;
+                                }
                             }
-                            else if (nonBlankRules != null && nonBlankRules.Any())
+                            else
                             {
-                                var mockGroup = new PowerBase.Application.Pipelines.TriggerFilterGroup { LogicalOp = "AND", Rules = nonBlankRules };
-                                filtersMatch = PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(mockGroup, valuesSource, fields, _logger);
+                                var filters = !string.IsNullOrEmpty(sub.FiltersJson)
+                                    ? JsonSerializer.Deserialize<List<PowerBase.Application.Pipelines.TriggerFilterRule>>(sub.FiltersJson)
+                                    : null;
+                                var filterGroups = !string.IsNullOrEmpty(sub.FilterGroupsJson)
+                                    ? JsonSerializer.Deserialize<List<PowerBase.Application.Pipelines.TriggerFilterGroup>>(sub.FilterGroupsJson)
+                                    : null;
+
+                                var nonBlankGroups = filterGroups?
+                                    .Where(g => !PowerBase.Application.Pipelines.PipelineFilterEvaluator.IsGroupCompletelyBlank(g))
+                                    .ToList();
+
+                                var nonBlankRules = filters?
+                                    .Where(r => !PowerBase.Application.Pipelines.PipelineFilterEvaluator.IsRuleCompletelyBlank(r))
+                                    .ToList();
+
+                                if (nonBlankGroups != null && nonBlankGroups.Any())
+                                {
+                                    filtersMatch = nonBlankGroups.Any(g => PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(g, valuesSource, fields, _logger));
+                                }
+                                else if (nonBlankRules != null && nonBlankRules.Any())
+                                {
+                                    var mockGroup = new PowerBase.Application.Pipelines.TriggerFilterGroup { LogicalOp = "AND", Rules = nonBlankRules };
+                                    filtersMatch = PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(mockGroup, valuesSource, fields, _logger);
+                                }
                             }
 
                             if (filtersMatch)
@@ -680,6 +698,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         public int? MaxRecords { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterRule>? Filters { get; set; }
         public List<PowerBase.Application.Pipelines.TriggerFilterGroup>? FilterGroups { get; set; }
+        public bool IsSimpleFilter { get; set; } = true;
+        public string? AdvancedQuery { get; set; }
     }
 
     private class TriggerSubscription
@@ -701,6 +721,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         public string? TriggerFieldsJson { get; set; }
         public string? FiltersJson { get; set; }
         public string? FilterGroupsJson { get; set; }
+        public bool IsSimpleFilter { get; set; } = true;
+        public string? AdvancedQuery { get; set; }
         public bool LimitRecords { get; set; }
         public int? MaxRecords { get; set; }
         public string TriggerSubtype { get; set; } = "new-event";
