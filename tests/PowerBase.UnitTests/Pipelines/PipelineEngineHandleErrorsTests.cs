@@ -184,7 +184,7 @@ public class PipelineEngineHandleErrorsTests
         _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
         _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 10 });
         _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
-        _recordRepo.GetByPublicIdAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+        _recordRepo.GetByPublicIdAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?> { { "id", 100 } });
         _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { { 100, new Dictionary<string, object?> { { "id", 100 } } }, { 200, new Dictionary<string, object?> { { "id", 200 } } } });

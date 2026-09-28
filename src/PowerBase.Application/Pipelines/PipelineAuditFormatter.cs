@@ -213,7 +213,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
         {
             using (var suppressScope = new System.Transactions.TransactionScope(System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled))
             {
-                var record = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+                var record = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct: ct);
                 if (record != null)
                 {
                     var valuesDict = new Dictionary<string, object?>();

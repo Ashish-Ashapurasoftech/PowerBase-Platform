@@ -133,7 +133,7 @@ public sealed class RecordWriteService : IRecordWriteService
 
         // Bulk upsert already loaded the row on its transaction. Reusing that snapshot avoids a
         // second connection waiting on locks held by the bulk commit itself.
-        var oldRecord = existingRecord ?? await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+        var oldRecord = existingRecord ?? await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, transaction, ct);
 
         var effectiveValues = new Dictionary<long, object?>(fieldValues);
         foreach (var kvp in refOverrides)
@@ -151,7 +151,7 @@ public sealed class RecordWriteService : IRecordWriteService
         var recordId = Convert.ToInt64(oldRecord["Id"]);
         var app = await _appRepo.GetByIdAsync(table.AppId, ct);
         var dateFormat = AppFormattingSettings.GetDateFormatString(app.Formatting);
-        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct, appDateFormat: dateFormat);
+        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct, appDateFormat: dateFormat, transaction: transaction);
 
         // Custom Data Rule — same formula-based save gate as record creation (see
         // CreateRecordCommandHandler), covering both plain record edits and Action Button writes

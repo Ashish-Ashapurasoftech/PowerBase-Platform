@@ -53,7 +53,7 @@ public class MassUpdateRecordsCommandHandlerTests
         _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new[] { field });
         _recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, long> { [recordId] = 1 });
-        _recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordId, Arg.Any<CancellationToken>())
+        _recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?> { ["f_1"] = "before" });
         var transaction = Substitute.For<IDbTransaction>();
         IDbTransaction? active = null;
@@ -131,7 +131,7 @@ public class MassUpdateRecordsCommandHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(fields);
         _recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns((IReadOnlyDictionary<Guid, long>)idMap);
-        _recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<CancellationToken>()).Returns(oldRecord);
+        _recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(oldRecord);
         _recordRepo.MassUpdateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>(), Arg.Any<Action<SearchIndexMessage>>(), Arg.Any<IDbTransaction>())
             .Returns(1);
 
@@ -201,7 +201,7 @@ public class MassUpdateRecordsCommandHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
         _recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns((IReadOnlyDictionary<Guid, long>)idMap);
-        _recordRepo.HasValueDuplicateAsync(table, field, "taken", 100L, Arg.Any<CancellationToken>()).Returns(true);
+        _recordRepo.HasValueDuplicateAsync(table, field, "taken", 100L, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(true);
 
         var sut = CreateSut();
         var ex = await sut.Invoking(s => s.HandleAsync(new MassUpdateRecordsCommand(table.PublicId, recordIds, new Dictionary<long, object?> { [1L] = "taken" })))

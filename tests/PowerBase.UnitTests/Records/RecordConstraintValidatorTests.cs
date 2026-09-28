@@ -82,7 +82,7 @@ public class RecordConstraintValidatorTests
         var table = MakeTable();
         var field = MakeField(1, isUnique: true);
         var values = new Dictionary<long, object?> { [1L] = "taken@example.com" };
-        _recordRepo.HasValueDuplicateAsync(table, field, "taken@example.com", null, Arg.Any<CancellationToken>()).Returns(true);
+        _recordRepo.HasValueDuplicateAsync(table, field, "taken@example.com", null, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(true);
 
         await FluentActions.Invoking(() =>
                 RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None))
@@ -95,7 +95,7 @@ public class RecordConstraintValidatorTests
         var table = MakeTable();
         var field = MakeField(1, isUnique: true);
         var values = new Dictionary<long, object?> { [1L] = "unique@example.com" };
-        _recordRepo.HasValueDuplicateAsync(table, field, "unique@example.com", null, Arg.Any<CancellationToken>()).Returns(false);
+        _recordRepo.HasValueDuplicateAsync(table, field, "unique@example.com", null, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(false);
 
         await FluentActions.Invoking(() =>
                 RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None))
@@ -108,13 +108,13 @@ public class RecordConstraintValidatorTests
         var table = MakeTable();
         var field = MakeField(1, isUnique: true);
         var values = new Dictionary<long, object?> { [1L] = "same@example.com" };
-        _recordRepo.HasValueDuplicateAsync(table, field, "same@example.com", 42L, Arg.Any<CancellationToken>()).Returns(false);
+        _recordRepo.HasValueDuplicateAsync(table, field, "same@example.com", 42L, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(false);
 
         await FluentActions.Invoking(() =>
                 RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: false, excludeRecordId: 42, CancellationToken.None))
             .Should().NotThrowAsync();
 
-        await _recordRepo.Received(1).HasValueDuplicateAsync(table, field, "same@example.com", 42L, Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).HasValueDuplicateAsync(table, field, "same@example.com", 42L, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

@@ -2079,7 +2079,7 @@ public class PipelineEngine : IPipelineEngine
             var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
             var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
 
-            var oldRecord = await recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+            var oldRecord = await recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct: ct);
             var oldValuesDict = new Dictionary<long, object?>();
             foreach (var field in fields)
             {

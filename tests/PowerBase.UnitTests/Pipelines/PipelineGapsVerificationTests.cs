@@ -209,7 +209,7 @@ public class PipelineGapsVerificationTests
         var table = new AppTable { Id = 100, PublicId = tableGuid };
         tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
         fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
-        recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordPublicId, Arg.Any<CancellationToken>())
+        recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordPublicId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?>());
 
         // Act

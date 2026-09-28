@@ -356,7 +356,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                             var overrides = await ReferenceWriteValidator.ValidateAsync(destinationFields, values, tableRepo, fieldRepo, records, relRepo, ct);
                             foreach (var pair in overrides) values[pair.Key] = pair.Value;
                             await UserFieldValueResolver.ResolveAsync(services.GetRequiredService<IUserRepository>(), destinationFields, values, ct);
-                            await RecordConstraintValidator.ValidateAsync(destination, destinationFields, values, records, true, null, ct);
+                            await RecordConstraintValidator.ValidateAsync(destination, destinationFields, values, records, true, null, ct, transaction: uow.Transaction);
                             await CustomDataRuleValidator.ValidateAsync(destination, destinationFields, values, tableRepo, fieldRepo, records, services.GetRequiredService<FormulaEngine>(), ct);
                             var publicId = await records.CreateAsync(destination, destinationFields, values, uow.Transaction, ct);
                             var identityField = destinationFields.SingleOrDefault(f => f.IsSystem && f.PhysicalColumnName == "Id" && f.Fid.HasValue);

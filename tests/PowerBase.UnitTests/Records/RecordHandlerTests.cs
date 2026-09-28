@@ -265,7 +265,7 @@ public class RecordHandlerTests
         _queryContext.UserId.Returns(40017L);
         _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
         _fieldRepo.ListByTableAsync(table.Id).Returns(fields);
-        _recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<CancellationToken>()).Returns(oldRecord);
+        _recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(oldRecord);
         IRecordWriteService writeService = new RecordWriteService(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appUserRepo, _userRepo, _auditRepo, _triggerInterceptor, _engine, _appRepo, _formRuleRepo, _formRepo, _queryContext);
         var sut = new UpdateRecordCommandHandler(_tableRepo, _fieldRepo, _enforcer, writeService, _uow, Substitute.For<IMessagePublisher>());
 
@@ -389,7 +389,7 @@ public class RecordHandlerTests
 
         // Repository must never be called — no DB hit for a blocked user
         await _recordRepo.DidNotReceive().GetByPublicIdAsync(
-            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

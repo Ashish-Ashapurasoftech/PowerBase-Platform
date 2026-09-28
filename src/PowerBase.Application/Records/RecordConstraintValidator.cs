@@ -39,9 +39,10 @@ public static class RecordConstraintValidator
         bool isCreate,
         long? excludeRecordId,
         CancellationToken ct,
-        string? appDateFormat = null)
+        string? appDateFormat = null,
+        System.Data.IDbTransaction? transaction = null)
     {
-        var violations = await CollectViolationsAsync(table, fields, effectiveValues, recordRepo, isCreate, excludeRecordId, ct, appDateFormat: appDateFormat);
+        var violations = await CollectViolationsAsync(table, fields, effectiveValues, recordRepo, isCreate, excludeRecordId, ct, appDateFormat: appDateFormat, transaction: transaction);
         if (violations.Count > 0)
             // Grouped (not a plain ToDictionary) because a single field can now fail more than one
             // check in the same write (e.g. both Unique and Max Length) — a flat ToDictionary would
@@ -65,7 +66,8 @@ public static class RecordConstraintValidator
         long? excludeRecordId,
         CancellationToken ct,
         Guid recordId = default,
-        string? appDateFormat = null)
+        string? appDateFormat = null,
+        System.Data.IDbTransaction? transaction = null)
     {
         var violations = new List<RecordConstraintViolation>();
 
@@ -94,7 +96,7 @@ public static class RecordConstraintValidator
 
             if (field.IsUnique && !isBlank && !PhysicalNaming.IsRangeTypeCode(field.TypeCode))
             {
-                if (await recordRepo.HasValueDuplicateAsync(table, field, value!, excludeRecordId, ct))
+                if (await recordRepo.HasValueDuplicateAsync(table, field, value!, excludeRecordId, transaction, ct))
                     violations.Add(new RecordConstraintViolation(recordId, fid, "Unique", $"'{label}' must be unique — this value is already in use."));
             }
 

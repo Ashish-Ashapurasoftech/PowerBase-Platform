@@ -1361,7 +1361,7 @@ public class PipelineTriggersAndExternalActionsTests
         fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
 
         var recordData = new Dictionary<string, object?> { { "f_101", "New" } };
-        recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<CancellationToken>()).Returns(recordData);
+        recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(recordData);
 
         var command = new BulkDeleteRecordsCommand(table.PublicId, new List<Guid> { recordId });
         await handler.HandleAsync(command, CancellationToken.None);
@@ -1687,7 +1687,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         var recordPublicId = Guid.NewGuid();
         var oldRecord = new Dictionary<string, object?> { ["Id"] = 100L, ["f_6"] = "Draft" };
-        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<CancellationToken>())
+        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
@@ -1729,7 +1729,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         var recordPublicId = Guid.NewGuid();
         var oldRecord = new Dictionary<string, object?> { ["Id"] = 100L, ["f_6"] = "Published" };
-        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<CancellationToken>())
+        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
@@ -1773,7 +1773,7 @@ public class PipelineTriggersAndExternalActionsTests
         recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, long> { [recId1] = 1L, [recId2] = 2L });
 
-        recordRepo.GetByPublicIdAsync(table, fields, Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+        recordRepo.GetByPublicIdAsync(table, fields, Arg.Any<Guid>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?> { ["f_6"] = "Old" });
 
         recordRepo.MassUpdateAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>(), Arg.Any<System.Data.IDbTransaction>())
