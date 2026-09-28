@@ -1625,8 +1625,23 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
                 return $"{targetExpr} <= @{pname}";
             }
-            case "date_eq":        p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) = CAST(@{pname} AS DATE)";
-            case "date_ne":        p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) <> CAST(@{pname} AS DATE)";
+            //case "date_eq": p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) = CAST(@{pname} AS DATE)";
+            //case "date_ne": p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) <> CAST(@{pname} AS DATE)";
+
+            // date_* operators compare a calendar day, not an instant. The column stores a UTC
+            // instant (Date Created/Modified are timestamps, not dates), and the picker value is
+            // the exact UTC instant of the picked day's local midnight — so CAST(col AS DATE) =
+            // CAST(@val AS DATE) truncates the column to its own UTC calendar day, which is not
+            // necessarily the local day the user picked (two records "the same local day" can sit
+            // on different UTC calendar days depending on time-of-day). A day-window comparison
+            // anchored on that local-midnight instant matches the day the user actually picked,
+            // regardless of which UTC day each row's timestamp happens to fall on.
+            case "date_eq":  p.Add(pname, formatVal(cond.Value)); return $"({colExpr} >= @{pname} AND {colExpr} < DATEADD(day, 1, @{pname}))";
+            case "date_ne":  p.Add(pname, formatVal(cond.Value)); return $"NOT ({colExpr} >= @{pname} AND {colExpr} < DATEADD(day, 1, @{pname}))";
+            case "date_gt":  p.Add(pname, formatVal(cond.Value)); return $"{colExpr} >= DATEADD(day, 1, @{pname})";
+            case "date_gte": p.Add(pname, formatVal(cond.Value)); return $"{colExpr} >= @{pname}";
+            case "date_lt":  p.Add(pname, formatVal(cond.Value)); return $"{colExpr} < @{pname}";
+            case "date_lte": p.Add(pname, formatVal(cond.Value)); return $"{colExpr} < DATEADD(day, 1, @{pname})";
             case "contains":       p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) LIKE @{pname}";
             case "notContains":    p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
             case "startsWith":     p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) LIKE @{pname}";

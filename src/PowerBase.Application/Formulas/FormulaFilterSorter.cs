@@ -228,7 +228,17 @@ public static class FormulaFilterSorter
             "notContains"   => val?.ToString()?.Contains(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
             "startsWith"    => val?.ToString()?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
             "notStartsWith" => val?.ToString()?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
-            "date_eq"       => val is DateTime dt && DateTime.TryParse(c.Value, out var dv) && dt.Date == dv.Date,
+            // date_* operators compare a calendar day, not an instant — c.Value is the exact UTC
+            // instant of the picked day's local midnight (see RecordRepository's date_* SQL cases),
+            // so the window [dv, dv+1day) is the local day the user picked, regardless of which UTC
+            // calendar day the row's own timestamp falls on. `dt.Date == dv.Date` truncated both
+            // sides to their raw UTC calendar day instead, which is not the same thing.
+            "date_eq"       => val is DateTime dtEq && DateTime.TryParse(c.Value, out var dvEq) && dtEq >= dvEq && dtEq < dvEq.AddDays(1),
+            "date_ne"       => !(val is DateTime dtNe && DateTime.TryParse(c.Value, out var dvNe) && dtNe >= dvNe && dtNe < dvNe.AddDays(1)),
+            "date_gt"       => val is DateTime dtGt && DateTime.TryParse(c.Value, out var dvGt) && dtGt >= dvGt.AddDays(1),
+            "date_gte"      => val is DateTime dtGte && DateTime.TryParse(c.Value, out var dvGte) && dtGte >= dvGte,
+            "date_lt"       => val is DateTime dtLt && DateTime.TryParse(c.Value, out var dvLt) && dtLt < dvLt,
+            "date_lte"      => val is DateTime dtLte && DateTime.TryParse(c.Value, out var dvLte) && dtLte < dvLte.AddDays(1),
             "in"            => ParseValueList(c.Value).Any(v => CompareValues(val, v) == 0),
             "notIn"         => !ParseValueList(c.Value).Any(v => CompareValues(val, v) == 0),
             _               => true,

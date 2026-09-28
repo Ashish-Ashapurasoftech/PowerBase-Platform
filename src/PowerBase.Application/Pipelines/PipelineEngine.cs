@@ -5394,8 +5394,19 @@ public class PipelineEngine : IPipelineEngine
                     var rawValue = rule.Value;
                     var dbOp = MapUiOperatorToDbOperator(rule.Operator);
                     var fieldCategory = PipelineFilterEvaluator.GetTypeCategory(field.TypeCode);
-                    if (fieldCategory == "DATE" && dbOp == "eq") dbOp = "date_eq";
-                    if (fieldCategory == "DATE" && dbOp == "ne") dbOp = "date_ne";
+                    if (fieldCategory == "DATE")
+                    {
+                        dbOp = dbOp switch
+                        {
+                            "eq" => "date_eq",
+                            "ne" => "date_ne",
+                            "gt" => "date_gt",
+                            "gte" => "date_gte",
+                            "lt" => "date_lt",
+                            "lte" => "date_lte",
+                            _ => dbOp
+                        };
+                    }
 
                     if (rule.Operator == "is_true" || rule.Operator == "is-true")
                     {

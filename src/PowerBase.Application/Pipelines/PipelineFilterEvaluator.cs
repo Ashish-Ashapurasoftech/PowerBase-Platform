@@ -302,41 +302,50 @@ public static class PipelineFilterEvaluator
                         return false;
                     }
 
-                    var lDateOnly = lDate.Date;
-                    var rDateOnly = rDate.Date;
+                    // A date-only rule value (the picker never collects a time) marks the exact UTC
+                    // instant of the picked calendar day's local midnight (frontend: Date.toISOString()).
+                    // The field's own value is a full timestamp (Date Created/Modified are UTC
+                    // instants, not calendar dates), so truncating both sides to `.Date` compared
+                    // raw UTC calendar days — two records "the same local day" can land on different
+                    // UTC calendar days depending on time-of-day, silently excluding them. Comparing
+                    // the untruncated left value against the [rDate, rDate+1day) window anchored on
+                    // that local-midnight instant instead matches the calendar day the user actually
+                    // picked, regardless of which UTC day each record's timestamp happens to fall on.
+                    var dayStart = rDate;
+                    var dayEnd = rDate.AddDays(1);
 
                     switch (normalizedOp)
                     {
                         case "equals":
                         case "=":
                         case "is":
-                            return lDateOnly == rDateOnly;
+                            return lDate >= dayStart && lDate < dayEnd;
                         case "not_equals":
                         case "<>":
                         case "!=":
                         case "is_not":
                         case "is-not":
-                            return lDateOnly != rDateOnly;
+                            return !(lDate >= dayStart && lDate < dayEnd);
                         case "greater_than":
                         case ">":
                         case "is-after":
                         case "after":
-                            return lDateOnly > rDateOnly;
+                            return lDate >= dayEnd;
                         case "greater_than_or_equals":
                         case ">=":
                         case "is-on-or-after":
                         case "on-or-after":
-                            return lDateOnly >= rDateOnly;
+                            return lDate >= dayStart;
                         case "less_than":
                         case "<":
                         case "is-before":
                         case "before":
-                            return lDateOnly < rDateOnly;
+                            return lDate < dayStart;
                         case "less_than_or_equals":
                         case "<=":
                         case "is-on-or-before":
                         case "on-or-before":
-                            return lDateOnly <= rDateOnly;
+                            return lDate < dayEnd;
                         default:
                             return false;
                     }
