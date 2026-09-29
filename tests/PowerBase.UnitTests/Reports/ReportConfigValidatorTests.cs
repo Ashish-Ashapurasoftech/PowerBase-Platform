@@ -1,4 +1,5 @@
 using FluentAssertions;
+using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Entities;
@@ -643,5 +644,21 @@ public class ReportConfigValidatorTests
         registry.IsSupported("Summary").Should().BeTrue();
         registry.IsSupported("Chart").Should().BeTrue();
         registry.IsSupported("GridEdit").Should().BeFalse();
+    }
+
+    [Fact]
+    public void ValidateFilterGroup_ParentFieldComparisonInAReport_IsRefused()
+    {
+        // A report has no parent record — "parentField" is for Summary matching criteria only.
+        var group = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 1, Operator = "gte", ValueMode = "parentField", ValueFieldId = 1 } }],
+        };
+        var errors = new Dictionary<string, string[]>();
+
+        CommonReportValidationHelpers.ValidateFilterGroup(group, [1L], errors);
+
+        errors["filterTree"].Should().ContainSingle(e => e.Contains("only available in a summary field's matching criteria"));
     }
 }

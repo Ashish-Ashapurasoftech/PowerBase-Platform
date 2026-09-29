@@ -84,24 +84,36 @@ public class GetParentOptionsQueryHandler
         return new GetParentOptionsResult(headers, options);
     }
 
+    /// <summary>
+    /// Returns true when <paramref name="f"/> has a physical storage column that can be
+    /// projected directly in a SQL SELECT.  Formula / Lookup / Summary / ReportLink fields
+    /// are computed at read time and have no physical column — using them in a query
+    /// causes "Invalid column name 'f_N'" SQL errors.
+    /// </summary>
+    private static bool HasPhysicalColumn(AppField f)
+        => f.Fid.HasValue && !Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode);
+
     private static IReadOnlyList<AppField> ResolveLabelFields(AppTable parent, IReadOnlyList<AppField> parentFields)
     {
         var fields = new List<AppField>();
 
         if (parent.DefaultRecordPickerField1Id.HasValue)
         {
-            var f1 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField1Id.Value);
+            // Silently skip computed fields (Formula/Lookup/Summary/ReportLink): they have no
+            // physical SQL column and would crash SearchForReferenceAsync with an invalid column
+            // name error. The resolution falls through to the next tier automatically.
+            var f1 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField1Id.Value && HasPhysicalColumn(f));
             if (f1 != null) fields.Add(f1);
 
             if (parent.DefaultRecordPickerField2Id.HasValue)
             {
-                var f2 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField2Id.Value);
+                var f2 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField2Id.Value && HasPhysicalColumn(f));
                 if (f2 != null) fields.Add(f2);
             }
 
             if (parent.DefaultRecordPickerField3Id.HasValue)
             {
-                var f3 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField3Id.Value);
+                var f3 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField3Id.Value && HasPhysicalColumn(f));
                 if (f3 != null) fields.Add(f3);
             }
 
@@ -110,12 +122,13 @@ public class GetParentOptionsQueryHandler
 
         if (parent.DisplayFieldId.HasValue)
         {
-            var display = parentFields.FirstOrDefault(f => f.Id == parent.DisplayFieldId.Value);
+            // Same guard: skip if the configured display field is computed.
+            var display = parentFields.FirstOrDefault(f => f.Id == parent.DisplayFieldId.Value && HasPhysicalColumn(f));
             if (display is not null) return [display];
         }
+
         // Fall back to the first non-system, non-computed field with a physical column.
-        var fallback = parentFields.FirstOrDefault(f => !f.IsSystem && f.Fid.HasValue
-            && !Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode));
+        var fallback = parentFields.FirstOrDefault(f => !f.IsSystem && HasPhysicalColumn(f));
         if (fallback != null) return [fallback];
 
         // Ultimate fallback: Record ID# (Fid 3), so a table with zero business fields still shows

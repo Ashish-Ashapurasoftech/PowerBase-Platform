@@ -50,6 +50,35 @@ public class SummaryEncryptionGuardTests
         SummaryEncryptionGuard.FindProblem(PlainApp, ChildFields(referenceEncrypted: true), 10, targetFid: null, null, null)
             .Should().Contain("reference field");
 
+    private static FilterGroup Compare(long fid, string valueMode, long valueFid) => new()
+    {
+        Logic = "and",
+        Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = fid, Operator = "gte", ValueMode = valueMode, ValueFieldId = valueFid } }],
+    };
+
+    [Fact]
+    public void EncryptedField_UsedOnlyAsTheOtherSideOfAFieldComparison_IsBlocked() =>
+        SummaryEncryptionGuard.FindProblem(PlainApp, ChildFields(amountEncrypted: true), 10, targetFid: null, null, Compare(12, "field", 11))
+            .Should().Contain("'Amount'");
+
+    [Fact]
+    public void EncryptedParentField_ComparedTo_IsBlocked_AndNamed()
+    {
+        List<AppField> parentFields = [new() { Id = 6, Fid = 6, Name = "Start Date", TypeCode = "Date", IsEncrypted = true }];
+
+        SummaryEncryptionGuard.FindProblem(PlainApp, ChildFields(), 10, targetFid: null, null, Compare(1, "parentField", 6), parentFields)
+            .Should().Contain("'Start Date'");
+    }
+
+    [Fact]
+    public void PlainParentField_ComparedTo_IsFine()
+    {
+        List<AppField> parentFields = [new() { Id = 6, Fid = 6, Name = "Start Date", TypeCode = "Date" }];
+
+        SummaryEncryptionGuard.FindProblem(PlainApp, ChildFields(), 10, targetFid: null, null, Compare(1, "parentField", 6), parentFields)
+            .Should().BeNull();
+    }
+
     [Fact]
     public void SystemFields_AreNeverTreatedAsEncrypted() =>
         SummaryEncryptionGuard.IsEncrypted(EncryptedApp, ChildFields().Single(f => f.IsSystem)).Should().BeFalse();

@@ -31,6 +31,14 @@ public class AddSummaryFieldRequest
     public bool DistinctValues { get; set; }
 }
 
+/// <summary>Edit an existing summary field: same shape as <see cref="AddSummaryFieldRequest"/>, plus
+/// an optional reason recorded on the field's version history.</summary>
+public class UpdateSummaryFieldRequest : AddSummaryFieldRequest
+{
+    /// <summary>Why the summary changed (shown in the field's Version History). Optional.</summary>
+    public string? CommitMessage { get; set; }
+}
+
 /// <summary>Change an existing relationship's display key override (scoped to this relationship only).</summary>
 public class UpdateDisplayKeyRequest
 {

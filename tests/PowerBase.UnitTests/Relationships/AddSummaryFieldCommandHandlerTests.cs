@@ -95,7 +95,7 @@ public class AddSummaryFieldCommandHandlerTests
     [InlineData("Sum", 5)]     // Sum on Text
     [InlineData("Max", 5)]     // Max on Text
     [InlineData("Avg", 7)]     // Avg on Date
-    [InlineData("Sum", 8)]     // any function on a formula field
+    [InlineData("CombinedText", 8)]   // a function the formula's (numeric) result type does not support
     public async Task Handle_FunctionNotValidForField_ThrowsValidation_AndCreatesNothing(string function, int targetFid)
     {
         await FluentActions.Invoking(() => _handler.HandleAsync(Command(function, targetFid)))
@@ -210,5 +210,39 @@ public class AddSummaryFieldCommandHandlerTests
         _created = null;
         await _handler.HandleAsync(Command("Count", null, new FilterGroup { Logic = "and", Nodes = [] }));
         SavedSettings().FilterTree.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Handle_NestedMatchingCriteria_SavedWithGroupsAndValueModes()
+    {
+        var criteria = new FilterGroup
+        {
+            Logic = "and",
+            Nodes =
+            [
+                new FilterNode { Group = new FilterGroup { Logic = "or", Nodes =
+                [
+                    new FilterNode { Condition = new FilterCondition { FieldId = 5, Operator = "eq", Value = "Open" } },
+                    new FilterNode { Condition = new FilterCondition { FieldId = 7, Operator = "during", ValueMode = "duringCurrent", Value = "1:week" } },
+                ] } },
+            ],
+        };
+
+        await _handler.HandleAsync(Command("Count", null, criteria));
+
+        var saved = JsonSerializer.Deserialize<FilterGroup>(SavedSettings().FilterTree!, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+        var group = saved.Nodes.Single().Group!;
+        group.Logic.Should().Be("or");
+        group.Nodes[1].Condition!.ValueMode.Should().Be("duringCurrent");
+    }
+
+    [Fact]
+    public async Task Handle_MatchingCriteriaWithCurrentUser_ThrowsValidation_AndCreatesNothing()
+    {
+        var criteria = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 5, Operator = "isCurrentUser" } }] };
+
+        (await FluentActions.Invoking(() => _handler.HandleAsync(Command("Count", null, criteria)))
+            .Should().ThrowAsync<ValidationException>()).Which.Errors.Should().ContainKey("matchingCriteria");
+        _created.Should().BeNull();
     }
 }

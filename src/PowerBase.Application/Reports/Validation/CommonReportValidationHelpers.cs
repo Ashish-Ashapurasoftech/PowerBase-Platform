@@ -1,3 +1,4 @@
+using PowerBase.Application.Relationships;
 using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Domain.Entities;
 
@@ -62,7 +63,11 @@ public static class CommonReportValidationHelpers
             AddError(errors, "columns", $"Unknown field IDs: {string.Join(", ", invalid)}");
     }
 
-    public static void ValidateFilterGroup(FilterGroup? group, HashSet<long> validFieldIds, IDictionary<string, string[]> errors, int depth = 1)
+    /// <param name="validParentFieldIds">The parent table's Fids, when the filter is a Summary field's
+    /// matching criteria — the only place "parentField" conditions mean anything. Null (reports and
+    /// every other filter) refuses them.</param>
+    public static void ValidateFilterGroup(FilterGroup? group, HashSet<long> validFieldIds, IDictionary<string, string[]> errors,
+        int depth = 1, HashSet<long>? validParentFieldIds = null)
     {
         if (group is null)
             return;
@@ -89,10 +94,19 @@ public static class CommonReportValidationHelpers
                     if (!FieldComparableOperators.Contains(cond.Operator))
                         AddError(errors, "filterTree", $"Operator '{cond.Operator}' does not support comparing to another field.");
                 }
+                else if (ParentFieldScope.IsParentFieldMode(cond.ValueMode))
+                {
+                    if (validParentFieldIds is null)
+                        AddError(errors, "filterTree", "Comparing to a parent record's field is only available in a summary field's matching criteria.");
+                    else if (!cond.ValueFieldId.HasValue || !validParentFieldIds.Contains(cond.ValueFieldId.Value))
+                        AddError(errors, "filterTree", $"'valueMode: parentField' requires a valid valueFieldId on the parent table (got: {cond.ValueFieldId?.ToString() ?? "null"}).");
+                    if (!FieldComparableOperators.Contains(cond.Operator))
+                        AddError(errors, "filterTree", $"Operator '{cond.Operator}' does not support comparing to another field.");
+                }
             }
 
             if (node.Group is { } sub)
-                ValidateFilterGroup(sub, validFieldIds, errors, depth + 1);
+                ValidateFilterGroup(sub, validFieldIds, errors, depth + 1, validParentFieldIds);
         }
     }
 

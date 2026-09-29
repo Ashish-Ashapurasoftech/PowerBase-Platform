@@ -10,6 +10,7 @@ using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Relationships.Commands.DeleteRelationship;
 using PowerBase.Application.Relationships.Commands.RemoveRelationshipField;
 using PowerBase.Application.Relationships.Commands.UpdateDisplayKey;
+using PowerBase.Application.Relationships.Commands.UpdateSummaryField;
 using PowerBase.Application.Relationships.Queries;
 using PowerBase.Application.Records.Queries.ListRecords;
 using PowerBase.Domain.Constants;
@@ -27,6 +28,7 @@ public class RelationshipsController : ControllerBase
     private readonly GetChildRecordsForParentQueryHandler _childRecords;
     private readonly AddLookupFieldsCommandHandler _addLookups;
     private readonly AddSummaryFieldCommandHandler _addSummary;
+    private readonly UpdateSummaryFieldCommandHandler _updateSummary;
     private readonly RemoveRelationshipFieldCommandHandler _removeField;
     private readonly UpdateDisplayKeyCommandHandler _updateDisplayKey;
 
@@ -38,6 +40,7 @@ public class RelationshipsController : ControllerBase
         GetChildRecordsForParentQueryHandler childRecords,
         AddLookupFieldsCommandHandler addLookups,
         AddSummaryFieldCommandHandler addSummary,
+        UpdateSummaryFieldCommandHandler updateSummary,
         RemoveRelationshipFieldCommandHandler removeField,
         UpdateDisplayKeyCommandHandler updateDisplayKey)
     {
@@ -48,6 +51,7 @@ public class RelationshipsController : ControllerBase
         _childRecords = childRecords;
         _addLookups = addLookups;
         _addSummary = addSummary;
+        _updateSummary = updateSummary;
         _removeField = removeField;
         _updateDisplayKey = updateDisplayKey;
     }
@@ -146,6 +150,25 @@ public class RelationshipsController : ControllerBase
             new CombinedTextOptions(request.Delimiter ?? SummaryFunctions.DefaultCombinedTextDelimiter,
                 request.SortFid, request.SortDescending, request.DistinctValues));
         var result = await _addSummary.HandleAsync(command, ct);
+        return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
+    /// <summary>Edit a summary field of a relationship: label, calculation, matching criteria and Combined Text options.
+    /// A change of result type (e.g. Count → Combined Text) is refused with 409 while formulas, lookups or report
+    /// filters depend on the field.</summary>
+    [HttpPut("apps/{appId:guid}/relationships/{id:guid}/summaries/{fieldId:guid}")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> UpdateSummary(Guid appId, Guid id, Guid fieldId, [FromBody] UpdateSummaryFieldRequest request, CancellationToken ct)
+    {
+        var command = new UpdateSummaryFieldCommand(id, fieldId, request.Label, request.Function, request.TargetFid, request.MatchingCriteria,
+            new CombinedTextOptions(request.Delimiter ?? SummaryFunctions.DefaultCombinedTextDelimiter,
+                request.SortFid, request.SortDescending, request.DistinctValues),
+            request.CommitMessage);
+        var result = await _updateSummary.HandleAsync(command, ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
 

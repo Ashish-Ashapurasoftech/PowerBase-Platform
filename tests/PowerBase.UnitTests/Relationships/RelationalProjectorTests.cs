@@ -1,6 +1,7 @@
 using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Formulas;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -14,8 +15,11 @@ public class RelationalProjectorTests
     private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
     private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
     private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
+    private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
 
-    private RelationalProjector NewProjector() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appRepo);
+    private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
+
+    private RelationalProjector NewProjector() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appRepo, _userRepo, _formulaProjector);
 
     public RelationalProjectorTests()
     {
@@ -63,7 +67,7 @@ public class RelationalProjectorTests
 
     private void CountReturns(Dictionary<object, object?> result) =>
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, Arg.Any<string>(), Arg.Any<int?>(),
-                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
             .Returns(result);
 
     private Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>> ProjectOneSummary(string settings, long appId = 0) =>
@@ -96,7 +100,145 @@ public class RelationalProjectorTests
 
         result[0][20].Should().Be(12m);
         await _recordRepo.Received(1).AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Sum", 30,
-            Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>());
+    }
+
+    // ── Matching criteria: resolved like a report's filter before reaching SQL ─────────────────
+
+    private static readonly List<AppField> CriteriaChildFields =
+        [Field(10, "Item", "Reference"), Field(40, "Due", "Date"), Field(41, "Owner", "User")];
+
+    /// <summary>Projects a Count summary saved with these criteria; returns the filter and field
+    /// lookup the Count query was given.</summary>
+    private async Task<(Application.Reports.FilterGroup? Filter, IReadOnlyDictionary<long, AppField>? Fields)> CriteriaSentToSql(string criteria)
+    {
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(CriteriaChildFields);
+        Application.Reports.FilterGroup? filter = null;
+        IReadOnlyDictionary<long, AppField>? fields = null;
+        _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Count", null, Arg.Any<IReadOnlyCollection<object>>(),
+                Arg.Do<Application.Reports.FilterGroup?>(f => filter = f), Arg.Any<string?>(),
+                Arg.Do<IReadOnlyDictionary<long, AppField>?>(d => fields = d), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, object?>());
+
+        await ProjectOneSummary(System.Text.Json.JsonSerializer.Serialize(
+            new { childTableId = 77, referenceFid = 10, function = "Count", filterTree = criteria }));
+        return (filter, fields);
+    }
+
+    // ── Matching criteria comparing to the parent record's own field ──────────────────────────
+
+    private const string BetweenParentDates =
+        """{"logic":"and","nodes":[{"condition":{"fieldId":40,"operator":"gte","valueMode":"parentField","valueFieldId":6}},{"condition":{"fieldId":40,"operator":"lte","valueMode":"parentField","valueFieldId":7}}]}""";
+
+    [Fact]
+    public async Task Summary_criteria_on_parent_fields_reads_the_whole_parent_table_and_passes_its_scope()
+    {
+        // The projected field list holds only the summary (e.g. what the viewer's role can see);
+        // the parent's Start/End Date still have to be known, so they come from the table itself.
+        _fieldRepo.ListByTableAsync(5, Arg.Any<CancellationToken>())
+            .Returns(new List<AppField> { Field(6, "Start Date", "Date"), Field(7, "End Date", "Date") });
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(CriteriaChildFields);
+        Application.Reports.FilterGroup? filter = null;
+        ParentFieldScope? scope = null;
+        _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Count", null, Arg.Any<IReadOnlyCollection<object>>(),
+                Arg.Do<Application.Reports.FilterGroup?>(f => filter = f), Arg.Any<string?>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(),
+                Arg.Do<ParentFieldScope?>(s => scope = s), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, object?> { [1L] = 4 });
+
+        var result = await ProjectOneSummary(System.Text.Json.JsonSerializer.Serialize(
+            new { childTableId = 77, referenceFid = 10, function = "Count", filterTree = BetweenParentDates }));
+
+        result[0][20].Should().Be(4);
+        scope.Should().NotBeNull();
+        scope!.ParentTableId.Should().Be(5);
+        scope.ReferenceFid.Should().Be(10);
+        scope.ParentFieldsByFid.Keys.Should().BeEquivalentTo(new long[] { 6, 7 });
+        filter!.Nodes.Select(n => n.Condition!.ValueMode).Should().AllBe("parentField");   // left for SQL, not resolved away
+    }
+
+    [Fact]
+    public async Task Summary_criteria_without_parent_fields_does_not_load_the_parent_table()
+    {
+        await CriteriaSentToSql("""{"logic":"and","nodes":[{"condition":{"fieldId":40,"operator":"eq","value":"2026-09-28"}}]}""");
+
+        await _fieldRepo.DidNotReceive().ListByTableAsync(5, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Summary_criteria_on_a_deleted_parent_field_is_shown_blank_not_computed_without_it()
+    {
+        // End Date (fid 7) is gone: dropping its condition would count children past the end.
+        _fieldRepo.ListByTableAsync(5, Arg.Any<CancellationToken>())
+            .Returns(new List<AppField> { Field(6, "Start Date", "Date") });
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(CriteriaChildFields);
+
+        var result = await ProjectOneSummary(System.Text.Json.JsonSerializer.Serialize(
+            new { childTableId = 77, referenceFid = 10, function = "Count", filterTree = BetweenParentDates }));
+
+        result[0][20].Should().BeNull();
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Summary_criteria_on_an_encrypted_parent_field_is_shown_blank()
+    {
+        _fieldRepo.ListByTableAsync(5, Arg.Any<CancellationToken>())
+            .Returns(new List<AppField> { Field(6, "Start Date", "Date"), new() { Id = 7, Fid = 7, Name = "End Date", TypeCode = "Date", IsEncrypted = true } });
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(CriteriaChildFields);
+
+        var result = await ProjectOneSummary(System.Text.Json.JsonSerializer.Serialize(
+            new { childTableId = 77, referenceFid = 10, function = "Count", filterTree = BetweenParentDates }));
+
+        result[0][20].Should().BeNull();
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Summary_criteria_relative_date_becomes_todays_date()
+    {
+        var (filter, _) = await CriteriaSentToSql(
+            """{"logic":"and","nodes":[{"condition":{"fieldId":40,"operator":"date_eq","valueMode":"today"}}]}""");
+
+        var cond = filter!.Nodes.Single().Condition!;
+        cond.Value.Should().Be(DateTime.UtcNow.Date.ToString("yyyy-MM-dd"));
+        cond.ValueMode.Should().Be("literal");
+    }
+
+    [Fact]
+    public async Task Summary_criteria_is_during_becomes_a_date_range_inside_its_group()
+    {
+        var (filter, _) = await CriteriaSentToSql(
+            """{"logic":"or","nodes":[{"group":{"logic":"and","nodes":[{"condition":{"fieldId":40,"operator":"during","valueMode":"duringCurrent","value":"1:week"}}]}}]}""");
+
+        var range = filter!.Nodes.Single().Group!.Nodes.Single().Group!;
+        range.Logic.Should().Be("and");
+        range.Nodes.Select(n => n.Condition!.Operator).Should().Equal("gte", "lte");
+    }
+
+    [Fact]
+    public async Task Summary_criteria_picked_user_becomes_the_stored_user_id()
+    {
+        var picked = Guid.NewGuid();
+        _userRepo.GetByPublicIdAsync(picked, Arg.Any<CancellationToken>()).Returns(new User { Id = 7 });
+
+        var (filter, _) = await CriteriaSentToSql(
+            $$$"""{"logic":"and","nodes":[{"condition":{"fieldId":41,"operator":"eq","value":"{{{picked}}}"}}]}""");
+
+        filter!.Nodes.Single().Condition!.Value.Should().Be("7");
+    }
+
+    [Fact]
+    public async Task Summary_criteria_is_built_with_the_child_field_types()
+    {
+        var (_, fields) = await CriteriaSentToSql(
+            """{"logic":"and","nodes":[{"condition":{"fieldId":40,"operator":"isEmpty"}}]}""");
+
+        fields.Should().NotBeNull();
+        fields![40].TypeCode.Should().Be("Date");
     }
 
     [Fact]
@@ -109,7 +251,7 @@ public class RelationalProjectorTests
 
         result[0][20].Should().BeNull();
         result[1][20].Should().BeNull();
-        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default);
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default, default);
     }
 
     [Fact]
@@ -124,11 +266,13 @@ public class RelationalProjectorTests
         var result = await ProjectOneSummary("{\"childTableId\":77,\"referenceFid\":10,\"function\":\"CombinedText\",\"targetFid\":31}");
 
         result[0][20].Should().BeNull();
-        await _recordRepo.DidNotReceiveWithAnyArgs().ListValuesByReferenceAsync(default!, default, default, default, default!, default, default, default, default);
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListValuesByReferenceAsync(default!, default, default, default, default!, default, default, default, default, default);
     }
 
     [Theory]
-    [InlineData("Sum", "Formula_Number")]      // saved before SF-09: no column → would fail the whole read
+    [InlineData("Sum", "Formula_Time")]        // a formula result that can't be summarized
+    [InlineData("CombinedText", "Formula_Number")]   // a function the formula's result type doesn't support
+    [InlineData("Sum", "Summary")]             // no column, and not a formula
     [InlineData("CombinedText", "User")]       // saved before today: would show raw user ids
     public async Task Summary_saved_under_older_rules_is_blank_and_never_computed(string function, string targetType)
     {
@@ -138,8 +282,43 @@ public class RelationalProjectorTests
         var result = await ProjectOneSummary($"{{\"childTableId\":77,\"referenceFid\":10,\"function\":\"{function}\",\"targetFid\":32}}");
 
         result[0][20].Should().BeNull();
-        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default);
-        await _recordRepo.DidNotReceiveWithAnyArgs().ListValuesByReferenceAsync(default!, default, default, default, default!, default, default, default, default);
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default, default);
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListValuesByReferenceAsync(default!, default, default, default, default!, default, default, default, default, default);
+    }
+
+    [Theory]
+    [InlineData("Sum", "Formula_Number", new object?[] { 10.5, 4.5, null }, 15.0)]
+    [InlineData("Avg", "Formula_Number", new object?[] { 10.0, 20.0, null }, 15.0)]
+    [InlineData("Max", "Formula_Duration", new object?[] { 30.0, 90.0 }, 90.0)]
+    [InlineData("Min", "Formula_Date", new object?[] { "2026-03-01", "2026-01-15" }, "2026-01-15")]
+    [InlineData("Max", "Formula_DateTime", new object?[] { "2026-01-15T08:00:00", "2026-01-15T17:30:00" }, "2026-01-15T17:30:00")]
+    [InlineData("DistinctCount", "Formula_Bool", new object?[] { true, false, true, null }, 2)]
+    [InlineData("DistinctCount", "Formula_Text", new object?[] { "a", "A", "b", "", null }, 2)]
+    [InlineData("CombinedText", "Formula_Email", new object?[] { "a@x.com", null, "b@x.com" }, "a@x.com, b@x.com")]
+    public async Task Summary_over_formula_field_is_computed_from_each_child_row(string function, string formulaType, object?[] childValues, object expected)
+    {
+        const int formulaFid = 32;
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        var childFields = new List<AppField> { Field(10, "Item", "Reference"), Field(formulaFid, "F", formulaType) };
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(childFields);
+
+        // All children belong to parent 1; parent 2 has none.
+        var childRows = Rows(childValues.Select((_, i) => new Dictionary<string, object?>
+            { ["Id"] = (long)i + 1, [PhysicalNaming.ColumnName(10)] = 1L }).ToArray());
+        _recordRepo.ListRowsByReferenceAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 10,
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(),
+                Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
+            .Returns(childRows);
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(childValues
+                .Select(v => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?> { [formulaFid] = v is double d ? (decimal)d : v })
+                .ToList());
+
+        var result = await ProjectOneSummary($"{{\"childTableId\":77,\"referenceFid\":10,\"function\":\"{function}\",\"targetFid\":{formulaFid}}}");
+
+        result[0][20].Should().Be(expected is double e ? (decimal)e : expected);
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default, default);
     }
 
     [Fact]
@@ -156,7 +335,7 @@ public class RelationalProjectorTests
 
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Invoice Item" });
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Count", null,
-                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<object, object?> { [1L] = 3 });
 
         var result = await NewProjector().ProjectAsync(new AppTable { Id = 5 }, parentFields, parentRows);
@@ -178,7 +357,7 @@ public class RelationalProjectorTests
 
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Task" });
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "DistinctCount", 30,
-                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<object, object?> { [1L] = 2 });
 
         var result = await NewProjector().ProjectAsync(new AppTable { Id = 5 }, parentFields, parentRows);
@@ -206,7 +385,7 @@ public class RelationalProjectorTests
         _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField> { Field(31, "Target", targetType, targetSettings) });
         _appRepo.GetByIdAsync(9, Arg.Any<CancellationToken>()).Returns(new App { Id = 9, Formatting = appFormatting });
         _recordRepo.ListValuesByReferenceAsync(Arg.Any<AppTable>(), 10, 31, Arg.Any<string?>(),
-                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<int?>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<int?>(), Arg.Any<bool>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
             .Returns(values.Select(v => ((object)v.Parent, v.Value)).ToList());
 
         return await NewProjector().ProjectAsync(new AppTable { Id = 5, AppId = 9 }, parentFields, parentRows);
@@ -265,7 +444,7 @@ public class RelationalProjectorTests
         await RunCombinedText("Text", null, ",\"sortFid\":7,\"sortDescending\":true", null, (1L, "x"));
 
         await _recordRepo.Received(1).ListValuesByReferenceAsync(Arg.Any<AppTable>(), 10, 31, Arg.Any<string?>(),
-            Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), 7, true, Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), 7, true, Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -274,7 +453,7 @@ public class RelationalProjectorTests
         await RunCombinedText("Text", null, "", null, (1L, "x"));
 
         await _recordRepo.Received(1).ListValuesByReferenceAsync(Arg.Any<AppTable>(), 10, 31, Arg.Any<string?>(),
-            Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), null, false, Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), null, false, Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -291,7 +470,7 @@ public class RelationalProjectorTests
 
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, Name = "Invoice Item" });
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Exists", null,
-                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<object, object?> { [1L] = true });
 
         var result = await NewProjector().ProjectAsync(new AppTable { Id = 5 }, parentFields, parentRows);
