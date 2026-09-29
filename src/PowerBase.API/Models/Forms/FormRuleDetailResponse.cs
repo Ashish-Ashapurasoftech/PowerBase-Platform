@@ -27,6 +27,14 @@ public class FormRuleConditionResponse
     public string? ValueType { get; init; }
     public long? ValueFieldId { get; init; }
     public int DisplayOrder { get; init; }
+    public string? ChangeFromOperator { get; init; }
+    public string? ChangeFromValue { get; init; }
+    public string? ChangeFromValueType { get; init; }
+    public long? ChangeFromValueFieldId { get; init; }
+    public string? ChangeToOperator { get; init; }
+    public string? ChangeToValue { get; init; }
+    public string? ChangeToValueType { get; init; }
+    public long? ChangeToValueFieldId { get; init; }
 }
 
 public class FormRuleActionResponse

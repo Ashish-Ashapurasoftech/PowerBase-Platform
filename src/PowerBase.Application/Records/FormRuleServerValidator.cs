@@ -201,7 +201,24 @@ public static class FormRuleServerValidator
                 // No "before" at all (create) — a field can't have "changed" from nothing it was
                 // ever loaded with, so 'changed' never matches and 'notChanged' always does.
                 var changed = oldValuesByFid != null && !ValuesEqual(oldVal, newVal);
-                return c.Operator == "changed" ? changed : !changed;
+                var baseResult = c.Operator == "changed" ? changed : !changed;
+                if (!baseResult) return false;
+
+                // Optional refinement — "changed FROM x TO y": does the OLD value additionally match
+                // ChangeFrom*, and/or does the NEW value match ChangeTo*? Both use the SAME
+                // operator/value vocabulary as a normal field condition (eq/ne/gt/lt/during/isEmpty/
+                // …), just evaluated against a specific snapshot instead of "the current value".
+                // Either half absent (null operator) is simply not checked. Mirrors the frontend's
+                // identical refinement in form-renderer.component.ts/grid-rule-evaluator.ts.
+                if (!string.IsNullOrEmpty(c.ChangeFromOperator) && !EvaluateSnapshotCondition(
+                        c.ChangeFromOperator, c.ChangeFromValue, c.ChangeFromValueType, c.ChangeFromValueFieldId,
+                        fid, oldVal, effectiveValues, currentUserId, fieldsByFid, userNames))
+                    return false;
+                if (!string.IsNullOrEmpty(c.ChangeToOperator) && !EvaluateSnapshotCondition(
+                        c.ChangeToOperator, c.ChangeToValue, c.ChangeToValueType, c.ChangeToValueFieldId,
+                        fid, newVal, effectiveValues, currentUserId, fieldsByFid, userNames))
+                    return false;
+                return true;
             }
 
             if (c.ConditionKind == "role")
@@ -267,6 +284,61 @@ public static class FormRuleServerValidator
         }).ToList();
 
         return rule.ConditionLogic == "all" ? results.All(r => r) : results.Any(r => r);
+    }
+
+    /// <summary>Evaluates ONE operator/value/valueType/valueFieldId spec (the same shape a normal
+    /// field condition has) against an explicit snapshot value (the field's OLD or NEW value for a
+    /// 'changed'/'notChanged' refinement) rather than always pulling the field's CURRENT value —
+    /// otherwise identical to the tail of ConditionsMet's main per-condition switch (during/
+    /// notDuring range-containment, DateRange/NumericRange whole-range or point-in-range, then the
+    /// generic NormalizeForCompare+ResolveConditionValue+EvalOp path). A field reference
+    /// (valueType 'field') still resolves against the CURRENT effectiveValues, same as everywhere
+    /// else — only the compared field's OWN value is the snapshot.</summary>
+    private static bool EvaluateSnapshotCondition(
+        string op, string? value, string? valueType, long? valueFieldId,
+        long fid, object? snapshotVal,
+        IReadOnlyDictionary<long, object?> effectiveValues, long currentUserId,
+        IReadOnlyDictionary<long, AppField> fieldsByFid, IReadOnlyDictionary<long, string> userNames)
+    {
+        var typeCode = fieldsByFid.TryGetValue(fid, out var fld) ? fld.TypeCode : null;
+
+        if (op is "during" or "notDuring")
+        {
+            if (snapshotVal is null) return false;
+            var dateStr = snapshotVal switch
+            {
+                DateTime dt => dt.ToString("yyyy-MM-dd"),
+                DateOnly d => d.ToString("yyyy-MM-dd"),
+                _ => Convert.ToString(snapshotVal, System.Globalization.CultureInfo.InvariantCulture)?.Split('T')[0] ?? "",
+            };
+            var (count, unit) = ParseDuringValue(value);
+            var direction = valueType ?? "duringCurrent";
+            var (start, end) = ComputeDuringRange(direction, count, unit);
+            var inRange = string.CompareOrdinal(dateStr, start) >= 0 && string.CompareOrdinal(dateStr, end) <= 0;
+            return op == "during" ? inRange : !inRange;
+        }
+
+        if (typeCode is "DateRange" or "NumericRange")
+        {
+            var range = ParseRangeValue(snapshotVal);
+            if (op == "isEmpty") return range is null || (range.Value.Start is null && range.Value.End is null);
+            if (op == "isNotEmpty") return range is not null && (range.Value.Start is not null || range.Value.End is not null);
+            if (op is "eq" or "ne")
+            {
+                var ruleRange = ParseRangeValue(value);
+                var equal = RangesEqual(range, ruleRange, typeCode);
+                return op == "eq" ? equal : !equal;
+            }
+            var within = PointWithinRange(range, value, typeCode);
+            return op == "contains" ? within : !within;
+        }
+
+        var normalizedVal = NormalizeForCompare(typeCode, snapshotVal);
+        if ((typeCode == "User" || typeCode == "MultiUser") && op == "contains")
+            normalizedVal = ResolveUserDisplayNames(snapshotVal, userNames);
+        var synthetic = new FormRuleCondition { AppFieldId = fid, Operator = op, Value = value, ValueType = valueType, ValueFieldId = valueFieldId };
+        var ruleVal = ResolveConditionValue(synthetic, effectiveValues, currentUserId, fieldsByFid);
+        return EvalOp(op, normalizedVal, ruleVal);
     }
 
     /// <summary>A DateRange/NumericRange field's raw value is a JSON "{start,end}" blob (or,

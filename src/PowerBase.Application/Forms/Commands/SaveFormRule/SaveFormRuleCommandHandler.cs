@@ -104,6 +104,14 @@ public class SaveFormRuleCommandHandler
             ValueType    = c.ValueType,
             ValueFieldId = c.ValueFieldId,
             DisplayOrder = c.DisplayOrder,
+            ChangeFromOperator = c.ChangeFromOperator,
+            ChangeFromValue = c.ChangeFromValue,
+            ChangeFromValueType = c.ChangeFromValueType,
+            ChangeFromValueFieldId = c.ChangeFromValueFieldId,
+            ChangeToOperator = c.ChangeToOperator,
+            ChangeToValue = c.ChangeToValue,
+            ChangeToValueType = c.ChangeToValueType,
+            ChangeToValueFieldId = c.ChangeToValueFieldId,
         }).ToList();
 
         var actions = command.Actions.Select(a => new FormRuleAction

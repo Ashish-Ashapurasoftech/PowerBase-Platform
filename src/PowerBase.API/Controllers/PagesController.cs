@@ -232,7 +232,7 @@ public class PagesController : ControllerBase
                 Chart = MapChartConfigDto(w.Chart),
                 Result = w.Result is null ? null : new ReportRunResponse
                 {
-                    Columns = w.Result.Columns.Select(c => new ReportColumnDto { FieldId = c.FieldId, Name = c.Name, TypeCode = c.TypeCode }).ToList(),
+                    Columns = w.Result.Columns.Select(c => new ReportColumnDto { FieldId = c.FieldId, Key = c.Key, Name = c.Name, TypeCode = c.TypeCode }).ToList(),
                     Rows = w.Result.Items.Select(i => new RecordResponse
                     {
                         Id = i.Id,

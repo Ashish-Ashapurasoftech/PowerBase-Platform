@@ -1,5 +1,6 @@
 using FluentValidation;
 using PowerBase.Domain.Enums;
+using System.Linq;
 
 namespace PowerBase.Application.Forms.Commands.SaveFormRule;
 
@@ -23,6 +24,8 @@ public class SaveFormRuleCommandValidator : AbstractValidator<SaveFormRuleComman
         // see FormRuleServerValidator.ComputeDuringRange for the evaluation side.
         "during", "notDuring",
     };
+
+    private static readonly HashSet<string> ValidChangeSpecOperators = new(ValidOperators.Where(o => o != "changed" && o != "notChanged"));
 
     private static readonly HashSet<string> ValidConditionLogic = new() { "all", "any" };
 
@@ -67,6 +70,14 @@ public class SaveFormRuleCommandValidator : AbstractValidator<SaveFormRuleComman
             c.RuleFor(x => x.Operator)
                 .Must(o => ValidOperators.Contains(o))
                 .WithMessage($"Operator must be one of: {string.Join(", ", ValidOperators)}");
+            // "changed FROM x TO y" refinement — each half's operator uses the same vocabulary as a
+            // normal condition, minus 'changed'/'notChanged' themselves (nesting one isn't meaningful).
+            c.RuleFor(x => x.ChangeFromOperator)
+                .Must(o => o is null || ValidChangeSpecOperators.Contains(o))
+                .WithMessage($"ChangeFromOperator must be one of: {string.Join(", ", ValidChangeSpecOperators)}");
+            c.RuleFor(x => x.ChangeToOperator)
+                .Must(o => o is null || ValidChangeSpecOperators.Contains(o))
+                .WithMessage($"ChangeToOperator must be one of: {string.Join(", ", ValidChangeSpecOperators)}");
         });
 
         RuleForEach(x => x.Actions).ChildRules(a =>

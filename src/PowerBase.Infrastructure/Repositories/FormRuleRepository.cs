@@ -50,7 +50,9 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
         """;
 
     private const string ListActiveByTableIdConditionsSql = """
-        SELECT c.Id, c.FormRuleId, c.ConditionKind, c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder
+        SELECT c.Id, c.FormRuleId, c.ConditionKind, c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder,
+               c.ChangeFromOperator, c.ChangeFromValue, c.ChangeFromValueType, c.ChangeFromValueFieldId,
+               c.ChangeToOperator, c.ChangeToValue, c.ChangeToValueType, c.ChangeToValueFieldId
         FROM meta.FormRuleCondition c
         JOIN meta.FormRule r ON r.Id = c.FormRuleId
         JOIN meta.Form f ON f.Id = r.FormId
@@ -70,7 +72,9 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
         """;
 
     private const string ListConditionsSql = """
-        SELECT c.Id, c.FormRuleId, c.ConditionKind, c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder
+        SELECT c.Id, c.FormRuleId, c.ConditionKind, c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder,
+               c.ChangeFromOperator, c.ChangeFromValue, c.ChangeFromValueType, c.ChangeFromValueFieldId,
+               c.ChangeToOperator, c.ChangeToValue, c.ChangeToValueType, c.ChangeToValueFieldId
         FROM meta.FormRuleCondition c
         JOIN meta.FormRule r ON r.Id = c.FormRuleId
         WHERE r.FormId = @formId AND r.IsDeleted = 0
@@ -118,8 +122,12 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
     private const string DeleteActionsSql    = "DELETE FROM meta.FormRuleAction    WHERE FormRuleId = @formRuleId";
 
     private const string InsertConditionSql = """
-        INSERT INTO meta.FormRuleCondition (FormRuleId, ConditionKind, AppFieldId, Operator, Value, ValueType, ValueFieldId, DisplayOrder)
-        VALUES (@formRuleId, @conditionKind, @appFieldId, @operator, @value, @valueType, @valueFieldId, @displayOrder)
+        INSERT INTO meta.FormRuleCondition (FormRuleId, ConditionKind, AppFieldId, Operator, Value, ValueType, ValueFieldId, DisplayOrder,
+                                             ChangeFromOperator, ChangeFromValue, ChangeFromValueType, ChangeFromValueFieldId,
+                                             ChangeToOperator, ChangeToValue, ChangeToValueType, ChangeToValueFieldId)
+        VALUES (@formRuleId, @conditionKind, @appFieldId, @operator, @value, @valueType, @valueFieldId, @displayOrder,
+                @changeFromOperator, @changeFromValue, @changeFromValueType, @changeFromValueFieldId,
+                @changeToOperator, @changeToValue, @changeToValueType, @changeToValueFieldId)
         """;
 
     private const string InsertActionSql = """
@@ -153,7 +161,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
         if (rule is null) throw new NotFoundException("FormRule", publicId);
 
         var conditions = await conn.QueryAsync<FormRuleCondition>(
-            new CommandDefinition("SELECT Id, FormRuleId, ConditionKind, AppFieldId, Operator, Value, ValueType, ValueFieldId, DisplayOrder FROM meta.FormRuleCondition WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
+            new CommandDefinition("SELECT Id, FormRuleId, ConditionKind, AppFieldId, Operator, Value, ValueType, ValueFieldId, DisplayOrder, ChangeFromOperator, ChangeFromValue, ChangeFromValueType, ChangeFromValueFieldId, ChangeToOperator, ChangeToValue, ChangeToValueType, ChangeToValueFieldId FROM meta.FormRuleCondition WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
                 new { ruleId = rule.Id }, cancellationToken: ct));
         rule.Conditions = conditions.ToList();
 
@@ -262,7 +270,9 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
         await conn.ExecuteAsync(new CommandDefinition(DeleteActionsSql,    new { formRuleId = ruleId }, tx, cancellationToken: ct));
 
         foreach (var c in conditions)
-            await conn.ExecuteAsync(new CommandDefinition(InsertConditionSql, new { formRuleId = ruleId, conditionKind = c.ConditionKind, appFieldId = c.AppFieldId, @operator = c.Operator, value = c.Value, valueType = c.ValueType, valueFieldId = c.ValueFieldId, displayOrder = c.DisplayOrder }, tx, cancellationToken: ct));
+            await conn.ExecuteAsync(new CommandDefinition(InsertConditionSql, new { formRuleId = ruleId, conditionKind = c.ConditionKind, appFieldId = c.AppFieldId, @operator = c.Operator, value = c.Value, valueType = c.ValueType, valueFieldId = c.ValueFieldId, displayOrder = c.DisplayOrder,
+                changeFromOperator = c.ChangeFromOperator, changeFromValue = c.ChangeFromValue, changeFromValueType = c.ChangeFromValueType, changeFromValueFieldId = c.ChangeFromValueFieldId,
+                changeToOperator = c.ChangeToOperator, changeToValue = c.ChangeToValue, changeToValueType = c.ChangeToValueType, changeToValueFieldId = c.ChangeToValueFieldId }, tx, cancellationToken: ct));
 
         foreach (var a in actions)
             await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new { formRuleId = ruleId, actionType = a.ActionType, targetType = a.TargetType, targetElementId = a.TargetElementId, targetSectionId = a.TargetSectionId, targetBlockId = a.TargetBlockId, actionValue = a.ActionValue, runOnceOnActivation = a.RunOnceOnActivation, isExpressionValue = a.IsExpressionValue, displayOrder = a.DisplayOrder }, tx, cancellationToken: ct));
@@ -320,7 +330,9 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
             await conn.OpenAsync(ct);
             await using var tx = await conn.BeginTransactionAsync(ct);
             foreach (var c in source.Conditions)
-                await conn.ExecuteAsync(new CommandDefinition(InsertConditionSql, new { formRuleId = newId, conditionKind = c.ConditionKind, appFieldId = c.AppFieldId, @operator = c.Operator, value = c.Value, valueType = c.ValueType, valueFieldId = c.ValueFieldId, displayOrder = c.DisplayOrder }, tx, cancellationToken: ct));
+                await conn.ExecuteAsync(new CommandDefinition(InsertConditionSql, new { formRuleId = newId, conditionKind = c.ConditionKind, appFieldId = c.AppFieldId, @operator = c.Operator, value = c.Value, valueType = c.ValueType, valueFieldId = c.ValueFieldId, displayOrder = c.DisplayOrder,
+                changeFromOperator = c.ChangeFromOperator, changeFromValue = c.ChangeFromValue, changeFromValueType = c.ChangeFromValueType, changeFromValueFieldId = c.ChangeFromValueFieldId,
+                changeToOperator = c.ChangeToOperator, changeToValue = c.ChangeToValue, changeToValueType = c.ChangeToValueType, changeToValueFieldId = c.ChangeToValueFieldId }, tx, cancellationToken: ct));
             foreach (var a in source.Actions)
                 await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new { formRuleId = newId, actionType = a.ActionType, targetType = a.TargetType, targetElementId = a.TargetElementId, targetSectionId = a.TargetSectionId, targetBlockId = a.TargetBlockId, actionValue = a.ActionValue, runOnceOnActivation = a.RunOnceOnActivation, isExpressionValue = a.IsExpressionValue, displayOrder = a.DisplayOrder }, tx, cancellationToken: ct));
             await tx.CommitAsync(ct);
