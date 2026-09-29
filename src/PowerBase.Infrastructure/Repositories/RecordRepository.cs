@@ -57,7 +57,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (searchableFields.Count == 0) return new Dictionary<long, object?>();
 
         var fieldCols = BuildFieldColumnList(searchableFields);
-        var recordSql = $"SELECT {fieldCols} FROM {PhysicalNaming.TableName((long)tableInfo.Id)} WHERE Id = (SELECT RecordId FROM RecordMetadata WHERE PublicId = @publicId AND TenantId = @tenantId)";
+        var recordSql = $"SELECT {fieldCols} FROM {PhysicalNaming.FullTableName((long)tableInfo.Id)} WHERE Id = (SELECT RecordId FROM RecordMetadata WHERE PublicId = @publicId AND TenantId = @tenantId)";
         var rawRow = (await connection.QueryAsync<dynamic>(recordSql, new { publicId = recordPublicId, tenantId = QueryContext.TenantId })).FirstOrDefault();
         if (rawRow == null) return new Dictionary<long, object?>();
 
@@ -284,13 +284,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
             foreach (var opt in list)
             {
-                if (NeedsDecrypt(enc, f1) && opt.Value1 is not null)
+                if (opt.Value1 is not null && (NeedsDecrypt(enc, f1) || opt.Value1.Length >= 40))
                     opt.Value1 = await enc.DecryptValueAsync(opt.Value1, ct);
-                if (NeedsDecrypt(enc, f2) && opt.Value2 is not null)
+                if (opt.Value2 is not null && (NeedsDecrypt(enc, f2) || opt.Value2.Length >= 40))
                     opt.Value2 = await enc.DecryptValueAsync(opt.Value2, ct);
-                if (NeedsDecrypt(enc, f3) && opt.Value3 is not null)
+                if (opt.Value3 is not null && (NeedsDecrypt(enc, f3) || opt.Value3.Length >= 40))
                     opt.Value3 = await enc.DecryptValueAsync(opt.Value3, ct);
-                if (NeedsDecrypt(enc, fLabel) && opt.Label is not null)
+                if (opt.Label is not null && (NeedsDecrypt(enc, fLabel) || opt.Label.Length >= 40))
                     opt.Label = await enc.DecryptValueAsync(opt.Label, ct);
             }
         }
@@ -433,11 +433,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        var enc = await GetEncryptionContextAsync(connection, childTable.AppId, null, ct);
         foreach (var row in rows)
         {
             var dict = (IDictionary<string, object>)row;
             if (dict.TryGetValue("ParentKey", out var pk) && pk is not null && pk != DBNull.Value)
-                result[pk] = dict.TryGetValue("Value", out var v) && v != DBNull.Value ? v : null;
+            {
+                var val = dict.TryGetValue("Value", out var v) && v != DBNull.Value ? v : null;
+                if (val is string str && enc.IsActive && str.Length >= 40 && !str.Contains(' '))
+                {
+                    try { val = await enc.DecryptValueAsync(str, ct); } catch { }
+                }
+                result[pk] = val;
+            }
         }
         return result;
     }
@@ -455,11 +463,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, new { ids }, cancellationToken: ct));
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         foreach (var row in rows)
         {
             var dict = (IDictionary<string, object>)row;
             if (dict.TryGetValue("Id", out var idVal) && idVal is not null)
-                result[Convert.ToInt64(idVal)] = dict.TryGetValue("KeyColumnValue", out var v) && v != DBNull.Value ? v : null;
+            {
+                var val = dict.TryGetValue("KeyColumnValue", out var v) && v != DBNull.Value ? v : null;
+                if (val is string str && enc.IsActive)
+                {
+                    val = await enc.DecryptValueAsync(str, ct);
+                }
+                result[Convert.ToInt64(idVal)] = val;
+            }
         }
         return result;
     }
@@ -486,6 +502,37 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 && dict.TryGetValue("Id", out var idVal) && idVal is not null)
                 result[kv] = Convert.ToInt64(idVal);
         }
+
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        if (enc.IsActive && result.Count < values.Count)
+        {
+            var valueSet = new HashSet<string>(values.Select(v => v?.ToString()?.Trim()).Where(s => !string.IsNullOrEmpty(s))!, StringComparer.OrdinalIgnoreCase);
+            var scanSql = $"""
+                SELECT Id, {columnName} AS KeyColumnValue
+                FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0 AND {columnName} IS NOT NULL
+                """;
+            var scanRows = await connection.QueryAsync(new CommandDefinition(scanSql, cancellationToken: ct));
+            foreach (var r in scanRows)
+            {
+                var d = (IDictionary<string, object>)r;
+                if (d.TryGetValue("KeyColumnValue", out var cv) && cv is string cipherStr && cipherStr.Length >= 40 && !cipherStr.Contains(' ')
+                    && d.TryGetValue("Id", out var idV) && idV is not null)
+                {
+                    try
+                    {
+                        var decrypted = await enc.DecryptValueAsync(cipherStr, ct);
+                        if (!string.IsNullOrEmpty(decrypted) && valueSet.Contains(decrypted.Trim()))
+                        {
+                            result[decrypted] = Convert.ToInt64(idV);
+                            result[decrypted.Trim()] = Convert.ToInt64(idV);
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+
         return result;
     }
 
@@ -1009,15 +1056,22 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             ? field.PhysicalColumnName!
             : PhysicalNaming.ColumnName(field.Fid!.Value);
 
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        var valueToSet = defaultValue;
+        if (enc.IsActive && NeedsDecrypt(enc, field) && !string.IsNullOrEmpty(defaultValue))
+        {
+            valueToSet = await enc.EncryptValueAsync(field, defaultValue, ct) ?? defaultValue;
+        }
+
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
-            SET {col} = @defaultValue
+            SET {col} = @valueToSet
             WHERE IsDeleted = 0 AND ({col} IS NULL OR {col} = '')
             """;
 
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteAsync(
-            new CommandDefinition(sql, new { defaultValue }, cancellationToken: ct));
+            new CommandDefinition(sql, new { valueToSet }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
@@ -1155,7 +1209,134 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
-        return rows.Select(ToDictionary).ToList();
+        var rawRows = rows.Select(ToDictionary).ToList();
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        if (!enc.IsActive) return rawRows;
+
+        var decryptedRows = new List<IReadOnlyDictionary<string, object?>>(rawRows.Count);
+        foreach (var row in rawRows)
+        {
+            var dict = new Dictionary<string, object?>(row, StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in dict.ToList())
+            {
+                if (v is string s && s.Length >= 40 && !s.Contains(' '))
+                {
+                    try
+                    {
+                        var decrypted = await enc.DecryptValueAsync(s, ct);
+                        if (!string.IsNullOrEmpty(decrypted))
+                        {
+                            dict[k] = decrypted;
+                        }
+                    }
+                    catch
+                    {
+                        // Not ciphertext or decrypt failed, leave as-is
+                    }
+                }
+            }
+            decryptedRows.Add(dict);
+        }
+
+        bool hasEncryptedGroup = groupByFields.Any(g => g.Field.IsEncrypted) || (seriesField?.IsEncrypted ?? false);
+        if (hasEncryptedGroup && decryptedRows.Count > 1)
+        {
+            decryptedRows = ConsolidateSummarizedRows(decryptedRows, groupByFields.Count, seriesField is not null, aggregations, fieldMap);
+        }
+
+        return decryptedRows;
+    }
+
+    private static List<IReadOnlyDictionary<string, object?>> ConsolidateSummarizedRows(
+        List<IReadOnlyDictionary<string, object?>> rows,
+        int groupLevelCount,
+        bool hasSeries,
+        IReadOnlyList<SummaryAggregation> aggregations,
+        IReadOnlyDictionary<long, AppField> fieldMap)
+    {
+        var groups = new Dictionary<string, (Dictionary<string, object?> Row, long TotalCount, Dictionary<string, (decimal WeightedSum, long Count)> AvgTracker)>();
+
+        foreach (var row in rows)
+        {
+            var keyParts = new List<string?>();
+            for (var i = 0; i < groupLevelCount; i++)
+            {
+                keyParts.Add(row.TryGetValue($"GroupValue{i}", out var gv) ? gv?.ToString() : "");
+            }
+            if (hasSeries)
+            {
+                keyParts.Add(row.TryGetValue("SeriesValue", out var sv) ? sv?.ToString() : "");
+            }
+            var groupKey = string.Join("\u001f", keyParts);
+
+            long rowCount = row.TryGetValue("Count", out var cVal) && cVal is not null ? Convert.ToInt64(cVal) : 0;
+
+            if (!groups.TryGetValue(groupKey, out var entry))
+            {
+                var copy = new Dictionary<string, object?>(row, StringComparer.OrdinalIgnoreCase);
+                var avgTracker = new Dictionary<string, (decimal WeightedSum, long Count)>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var agg in aggregations)
+                {
+                    if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
+                    var alias = $"[{agg.Function}_{aggField.Name.Replace(" ", "_")}]";
+                    if (agg.Function == "Avg" && row.TryGetValue(alias, out var avgVal) && avgVal is not null)
+                    {
+                        if (decimal.TryParse(avgVal.ToString(), out var d))
+                            avgTracker[alias] = (d * rowCount, rowCount);
+                    }
+                }
+
+                groups[groupKey] = (copy, rowCount, avgTracker);
+            }
+            else
+            {
+                entry.TotalCount += rowCount;
+                entry.Row["Count"] = entry.TotalCount;
+
+                foreach (var agg in aggregations)
+                {
+                    if (!fieldMap.TryGetValue(agg.FieldId, out var aggField)) continue;
+                    var alias = $"[{agg.Function}_{aggField.Name.Replace(" ", "_")}]";
+                    if (!row.TryGetValue(alias, out var curVal) || curVal is null) continue;
+
+                    if (!entry.Row.TryGetValue(alias, out var existingVal) || existingVal is null)
+                    {
+                        entry.Row[alias] = curVal;
+                        continue;
+                    }
+
+                    switch (agg.Function)
+                    {
+                        case "Sum":
+                        case "DistinctCount":
+                            if (decimal.TryParse(curVal.ToString(), out var curDec) && decimal.TryParse(existingVal.ToString(), out var exDec))
+                                entry.Row[alias] = exDec + curDec;
+                            break;
+                        case "Min":
+                            if (curVal is IComparable compCur && existingVal is IComparable compExist)
+                                entry.Row[alias] = compCur.CompareTo(compExist) < 0 ? curVal : existingVal;
+                            break;
+                        case "Max":
+                            if (curVal is IComparable compCur2 && existingVal is IComparable compExist2)
+                                entry.Row[alias] = compCur2.CompareTo(compExist2) > 0 ? curVal : existingVal;
+                            break;
+                        case "Avg":
+                            if (decimal.TryParse(curVal.ToString(), out var avgDec))
+                            {
+                                var (prevSum, prevCount) = entry.AvgTracker.TryGetValue(alias, out var at) ? at : (0m, 0L);
+                                var newWeightedSum = prevSum + (avgDec * rowCount);
+                                var newCount = prevCount + rowCount;
+                                entry.AvgTracker[alias] = (newWeightedSum, newCount);
+                                entry.Row[alias] = newCount > 0 ? Math.Round(newWeightedSum / newCount, 4) : 0m;
+                            }
+                            break;
+                    }
+                }
+            }
+        }
+
+        return groups.Values.Select(g => (IReadOnlyDictionary<string, object?>)g.Row).ToList();
     }
 
     /// <summary>Number/Currency/Percent/Rating's "Treat blank values as 0 in calculations" Behavior
@@ -1827,6 +2008,32 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<bool> HasDuplicatesAsync(AppTable table, AppField field, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(field.Fid!.Value);
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+
+        if (enc.IsActive && NeedsDecrypt(enc, field))
+        {
+            var sqlEnc = $"""
+                SELECT {col} FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0 AND {col} IS NOT NULL
+                """;
+            var rawCiphers = await connection.QueryAsync<string>(new CommandDefinition(sqlEnc, cancellationToken: ct));
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var cipher in rawCiphers)
+            {
+                if (string.IsNullOrEmpty(cipher)) continue;
+                try
+                {
+                    var decrypted = await enc.DecryptValueAsync(cipher, ct);
+                    var key = decrypted?.Trim() ?? "";
+                    if (!string.IsNullOrEmpty(key) && !seen.Add(key))
+                        return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
         var sql = $"""
             SELECT CAST(CASE WHEN EXISTS (
                 SELECT {col} FROM {PhysicalNaming.FullTableName(table.Id)}
@@ -1834,13 +2041,42 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 GROUP BY {col} HAVING COUNT(*) > 1
             ) THEN 1 ELSE 0 END AS BIT)
             """;
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
     }
 
     public async Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(field.Fid!.Value);
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+
+        if (enc.IsActive && NeedsDecrypt(enc, field))
+        {
+            var targetStr = value?.ToString()?.Trim();
+            if (string.IsNullOrEmpty(targetStr)) return false;
+
+            var sqlEnc = $"""
+                SELECT {col} FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0 AND {col} IS NOT NULL
+                  AND (@excludeRecordId IS NULL OR Id <> @excludeRecordId)
+                """;
+            var rawCiphers = await connection.QueryAsync<string>(
+                new CommandDefinition(sqlEnc, new { excludeRecordId }, cancellationToken: ct));
+
+            foreach (var cipher in rawCiphers)
+            {
+                if (string.IsNullOrEmpty(cipher)) continue;
+                try
+                {
+                    var decrypted = await enc.DecryptValueAsync(cipher, ct);
+                    if (string.Equals(decrypted?.Trim(), targetStr, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
         var sql = $"""
             SELECT CAST(CASE WHEN EXISTS (
                 SELECT 1 FROM {PhysicalNaming.FullTableName(table.Id)}
@@ -1848,7 +2084,6 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                   AND (@excludeRecordId IS NULL OR Id <> @excludeRecordId)
             ) THEN 1 ELSE 0 END AS BIT)
             """;
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(sql, new { value, excludeRecordId }, cancellationToken: ct));
     }

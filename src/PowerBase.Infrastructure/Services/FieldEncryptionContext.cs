@@ -47,6 +47,12 @@ public sealed class FieldEncryptionContext
     // Factory
     // ------------------------------------------------------------------
 
+    private sealed class AppEncryptionInfo
+    {
+        public string? SecurityOptions { get; set; }
+        public bool IsEncrypted { get; set; }
+    }
+
     /// <summary>
     /// Resolves the DEK from the tenant DB using an already-open connection.
     /// Returns a context whose <see cref="IsActive"/> is false when the App
@@ -70,14 +76,14 @@ public sealed class FieldEncryptionContext
         bool isAppEncrypted = false;
         try
         {
-            var row = await tenantConnection.QuerySingleOrDefaultAsync(
+            var row = await tenantConnection.QuerySingleOrDefaultAsync<AppEncryptionInfo>(
                 new CommandDefinition(sql, new { appId }, transaction, cancellationToken: ct));
 
             if (row != null)
             {
                 isAppEncrypted = row.IsEncrypted;
-                string secOpts = row.SecurityOptions;
-                if (!string.IsNullOrEmpty(secOpts) && secOpts.TrimStart().StartsWith("{"))
+                string? secOpts = row.SecurityOptions;
+                if (!string.IsNullOrWhiteSpace(secOpts) && secOpts.TrimStart().StartsWith("{"))
                 {
                     var settings = System.Text.Json.JsonSerializer.Deserialize<
                         PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings>(
@@ -108,7 +114,24 @@ public sealed class FieldEncryptionContext
 
         _wrappedDek = await _encryptionService.GenerateAndWrapDekAsync(_tenantId, _appId, ct);
         
-        var settings = new PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings { WrappedDek = _wrappedDek };
+        const string selectSql = "SELECT SecurityOptions FROM meta.App WHERE Id = @appId";
+        var existingSecOpts = await tenantConnection.QuerySingleOrDefaultAsync<string>(
+            new CommandDefinition(selectSql, new { appId = _appId }, transaction, cancellationToken: ct));
+
+        PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings settings;
+        if (!string.IsNullOrWhiteSpace(existingSecOpts) && existingSecOpts.TrimStart().StartsWith("{"))
+        {
+            settings = System.Text.Json.JsonSerializer.Deserialize<PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings>(
+                existingSecOpts,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? new PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings();
+        }
+        else
+        {
+            settings = new PowerBase.Domain.ValueObjects.AppSecurityOptionsSettings();
+        }
+
+        settings.WrappedDek = _wrappedDek;
         var json = System.Text.Json.JsonSerializer.Serialize(settings);
         
         const string sql = "UPDATE meta.App SET SecurityOptions = @json WHERE Id = @appId";
@@ -191,16 +214,51 @@ public sealed class FieldEncryptionContext
     {
         if (!IsActive) return;
 
+        var decryptedCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var f in FieldsToEncrypt(fields))
         {
-            var col = PhysicalNaming.ColumnName(f.Fid!.Value);
-            if (row.TryGetValue(col, out var val) && val is string cipher && !string.IsNullOrEmpty(cipher))
+            var colsToCheck = new List<string> { PhysicalNaming.ColumnName(f.Fid!.Value) };
+            if (!string.IsNullOrWhiteSpace(f.PhysicalColumnName) && !colsToCheck.Contains(f.PhysicalColumnName, StringComparer.OrdinalIgnoreCase))
+                colsToCheck.Add(f.PhysicalColumnName);
+            if (!colsToCheck.Contains(f.Fid.Value.ToString(), StringComparer.OrdinalIgnoreCase))
+                colsToCheck.Add(f.Fid.Value.ToString());
+
+            foreach (var col in colsToCheck)
             {
-                try { row[col] = await _encryptionService.DecryptDataAsync(cipher, _wrappedDek!, _tenantId, _appId, ct); }
-                catch (Exception ex) 
-                { 
-                    Console.WriteLine($"[DECRYPT ERROR] Col {col}: {ex.Message}");
-                    /* leave value as-is — may be a legacy plaintext row */ 
+                if (row.TryGetValue(col, out var val) && val is string cipher && !string.IsNullOrEmpty(cipher))
+                {
+                    try 
+                    { 
+                        row[col] = await _encryptionService.DecryptDataAsync(cipher, _wrappedDek!, _tenantId, _appId, ct);
+                        decryptedCols.Add(col);
+                    }
+                    catch (Exception ex) 
+                    { 
+                        Console.WriteLine($"[DECRYPT ERROR] Col {col}: {ex.Message}");
+                        /* leave value as-is — may be a legacy plaintext row */ 
+                    }
+                }
+            }
+        }
+
+        // Safety Net: if row has any remaining string values that match ciphertext length/format, attempt to decrypt them
+        foreach (var (key, val) in row.ToList())
+        {
+            if (decryptedCols.Contains(key)) continue;
+            if (val is string str && str.Length >= 40 && !str.Contains(' '))
+            {
+                try
+                {
+                    var decrypted = await _encryptionService.DecryptDataAsync(str, _wrappedDek!, _tenantId, _appId, ct);
+                    if (!string.IsNullOrEmpty(decrypted))
+                    {
+                        row[key] = decrypted;
+                    }
+                }
+                catch
+                {
+                    // Not ciphertext or decrypt failed, leave as-is
                 }
             }
         }
