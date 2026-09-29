@@ -4882,6 +4882,10 @@ public class PipelineEngine : IPipelineEngine
     {
         if (string.IsNullOrWhiteSpace(valueStr)) return null;
 
+        // Pipeline mappings commonly resolve values from tokens. Ignore accidental whitespace
+        // around the resolved value while preserving all spacing inside it.
+        valueStr = valueStr.Trim();
+
         var normalizedCode = typeCode.ToUpperInvariant();
 
         if (normalizedCode == "CHECKBOX" || normalizedCode == "BOOLEAN")
@@ -4939,6 +4943,10 @@ public class PipelineEngine : IPipelineEngine
     private object? ParseBulkUpsertValueType(string? valueStr, string? typeCode)
     {
         if (valueStr == null) return null;
+
+        // Normalize resolved row values before merge-key lookup and persistence.
+        // Trim only the edges; spaces within a value are meaningful.
+        valueStr = valueStr.Trim();
 
         var normalizedCode = (typeCode ?? "TEXT").ToUpperInvariant();
 

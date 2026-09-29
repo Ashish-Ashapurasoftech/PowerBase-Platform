@@ -1921,12 +1921,82 @@ public class PipelineBulkUpsertTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AddBulkUpsertRow_TrimsEdges_UpdatesExistingEmail_AndPreservesInternalSpaces(bool useFieldMappings)
+    {
+        var context = new Dictionary<string, object> { ["_CreatedBy"] = 42L };
+        await RunStepAsync(new PipelineStep
+        {
+            RefId = "prepare", Type = "action", Subtype = "prepare-bulk-upsert",
+            ConfigJson = JsonSerializer.Serialize(new { tableLabel = _tablePublicId, mergeField = "fid_6" })
+        }, context);
+
+        var values = new Dictionary<string, object?>
+        {
+            ["fid_6"] = " \t alice@example.com \r\n",
+            ["fid_7"] = "  Alice  Smith  ",
+            ["fid_9"] = " \t ",
+            ["fid_11"] = null
+        };
+        var config = new Dictionary<string, object?> { ["parentUpsertStepRefId"] = "prepare" };
+        if (useFieldMappings)
+            config["fieldMappings"] = values.Select(pair => new { field = pair.Key, value = pair.Value }).ToArray();
+        else
+            config["rowValues"] = values;
+
+        await RunStepAsync(new PipelineStep
+        {
+            RefId = "add", Type = "action", Subtype = "add-bulk-upsert-row",
+            ConfigJson = JsonSerializer.Serialize(config)
+        }, context);
+
+        var existing = new Dictionary<string, object?>
+        {
+            ["Id"] = 102L, ["id"] = 102L, ["publicId"] = Guid.NewGuid(), ["f_6"] = "alice@example.com"
+        };
+        _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6",
+            Arg.Is<IReadOnlyCollection<object>>(keys => keys.Count == 1 && keys.Contains("alice@example.com")),
+            _dbTx, Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>> { ["alice@example.com"] = existing });
+
+        var sessions = (Dictionary<string, PipelineEngine.BulkUpsertSession>)context["_bulkUpsertSessions"];
+        var row = sessions["prepare"].Rows.Single();
+        row[6].Should().Be("alice@example.com");
+        row[7].Should().Be("Alice  Smith");
+        row[9].Should().Be("");
+        row[11].Should().BeNull();
+
+        var result = await RunStepAsync(new PipelineStep
+        {
+            RefId = "commit", Type = "action", Subtype = "commit-upsert",
+            ConfigJson = JsonSerializer.Serialize(new { parentUpsertStepRefId = "prepare" })
+        }, context);
+        using var output = JsonDocument.Parse(result);
+        output.RootElement.GetProperty("updated_count").GetInt32().Should().Be(1);
+        output.RootElement.GetProperty("inserted_count").GetInt32().Should().Be(0);
+        await _recordRepo.DidNotReceive().CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
     [InlineData("", "TEXT")]
     [InlineData(" ", "TEXT")]
     public void NonBulkParser_PreservesOriginalBlankValueBehavior(string value, string typeCode)
     {
         var method = typeof(PipelineEngine).GetMethod("ParseValueType", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
         method.Invoke(_engine, new object[] { value, typeCode, "Test Field" }).Should().BeNull();
+    }
+
+    [Fact]
+    public void SingleRecordMappingParser_TrimsEdges_AndPreservesInternalSpaces()
+    {
+        var method = typeof(PipelineEngine).GetMethod("ParseValueType", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+
+        method.Invoke(_engine, new object[] { " \t Alice  Smith \r\n", "TEXT", "Test Field" })
+            .Should().Be("Alice  Smith");
+        method.Invoke(_engine, new object[] { "  alice@example.com  ", "EMAIL", "Email" })
+            .Should().Be("alice@example.com");
     }
 
 }
