@@ -77,14 +77,16 @@ public class UpdateRecordCommandHandler
                     await fileWriteService.ApplyFileWriteAsync(
                         table, fields, command.RecordPublicId, command.FieldValues,
                         AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false,
-                        msg => indexMessage = msg);
+                        msg => indexMessage = msg, existingRecord: null, bypassFileReservation: false,
+                        reportId: command.ReportId, isGridEditSave: command.IsGridEditSave);
                 }
                 else
                 {
                     await _writeService.ApplyAsync(
                         table, fields, command.RecordPublicId, command.FieldValues,
                         AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false,
-                        msg => indexMessage = msg);
+                        msg => indexMessage = msg, existingRecord: null, reportId: command.ReportId,
+                        isGridEditSave: command.IsGridEditSave);
                 }
             }
             else
@@ -92,7 +94,8 @@ public class UpdateRecordCommandHandler
                 await _writeService.ApplyAsync(
                     table, fields, command.RecordPublicId, command.FieldValues,
                     AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false,
-                    msg => indexMessage = msg);
+                    msg => indexMessage = msg, existingRecord: null, reportId: command.ReportId,
+                    isGridEditSave: command.IsGridEditSave);
             }
             await _uow.CommitAsync(ct);
         }

@@ -7,6 +7,19 @@ namespace PowerBase.Application.Common.Interfaces;
 public interface IReportRepository
 {
     Task<Report> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
+
+    /// <summary>The report's owning table's internal id, or null if the report doesn't exist.
+    /// Used to validate a client-supplied reportId (e.g. Grid Edit's per-report rule scoping in
+    /// FormRuleServerValidator) actually belongs to the table being written, without throwing on
+    /// a garbage/mismatched id — the caller falls back to the full table-wide rule check instead.</summary>
+    Task<long?> GetAppTableIdByPublicIdAsync(Guid reportPublicId, CancellationToken ct = default);
+
+    /// <summary>The report's currently ACTIVE, APPLIED Grid Edit rules — same resolution as
+    /// GetGridEditRuntimeAsync (selected forms' applicable active rules, minus any explicitly
+    /// excluded, in the report's own priority order), but as full FormRule domain entities
+    /// (Conditions/Actions populated) for FormRuleServerValidator to enforce server-side. Only
+    /// call once the report is confirmed to belong to the table being written.</summary>
+    Task<IReadOnlyList<PowerBase.Domain.Entities.FormRule>> GetAppliedGridEditRulesAsync(Guid reportPublicId, CancellationToken ct = default);
     Task<long> GetAppIdByPublicIdAsync(Guid reportPublicId, CancellationToken ct = default);
     Task<IReadOnlyList<Report>> ListByAppAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Report>> ListAllByAppAsync(long appId, CancellationToken ct = default);

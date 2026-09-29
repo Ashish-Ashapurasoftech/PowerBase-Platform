@@ -46,11 +46,15 @@ public static class FormRuleServerValidator
         IUserRepository userRepo,
         IAppUserRepository appUserRepo,
         FormulaEngine engine,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReportRepository? reportRepo = null,
+        Guid? reportId = null,
+        bool isGridEditSave = false)
     {
         var violations = await CollectViolationsAsync(
             table, fields, effectiveValues, oldValuesByFid, currentUserId,
-            ruleRepo, formRepo, tableRepo, fieldRepo, recordRepo, userRepo, appUserRepo, engine, ct);
+            ruleRepo, formRepo, tableRepo, fieldRepo, recordRepo, userRepo, appUserRepo, engine, ct,
+            reportRepo: reportRepo, reportId: reportId, isGridEditSave: isGridEditSave);
         if (violations.Count > 0)
             // Grouped, not a plain ToDictionary — more than one rule can flag the same field
             // (e.g. two separate Require rules), which a flat ToDictionary can't hold.
@@ -88,11 +92,37 @@ public static class FormRuleServerValidator
         IAppUserRepository appUserRepo,
         FormulaEngine engine,
         CancellationToken ct,
-        Guid recordId = default)
+        Guid recordId = default,
+        IReportRepository? reportRepo = null,
+        Guid? reportId = null,
+        bool isGridEditSave = false)
     {
         var violations = new List<RecordConstraintViolation>();
 
-        var rules = await ruleRepo.ListActiveByTableIdAsync(table.Id, ct);
+        // Grid Edit is the ONLY caller that can ever narrow or skip this check — isGridEditSave is
+        // set exclusively by the report grid's own inline save (see UpdateRecordRequest.IsGridEditSave).
+        // Every other write (the Add/Edit Record form, Quick Peek, child-record grids, Action
+        // Buttons, pipelines, Mass Update, or a direct API call that doesn't set the flag) always
+        // gets today's full table-wide active-rule check, completely unaffected by anything below.
+        //
+        // For a Grid Edit save specifically: a reportId that resolves to a report on THIS table
+        // narrows enforcement to just that report's CONFIGURED Grid Edit rules — so a rule the
+        // report's picker explicitly excluded ("Skipped Rules") is actually skipped server-side
+        // too, not just hidden client-side. No reportId (or one that doesn't resolve to this
+        // table) means Grid Edit has no report context to scope to, so NOTHING is checked at all
+        // — an explicit, intentional trade-off: the server is no longer authoritative for a Grid
+        // Edit save with no report context, matching what was asked for.
+        IReadOnlyList<FormRule> rules;
+        if (!isGridEditSave)
+        {
+            rules = await ruleRepo.ListActiveByTableIdAsync(table.Id, ct);
+        }
+        else
+        {
+            rules = reportId is { } rid && reportRepo != null && await reportRepo.GetAppTableIdByPublicIdAsync(rid, ct) == table.Id
+                ? await reportRepo.GetAppliedGridEditRulesAsync(rid, ct)
+                : Array.Empty<FormRule>();
+        }
         if (rules.Count == 0) return violations;
 
         var fieldsByFid = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);

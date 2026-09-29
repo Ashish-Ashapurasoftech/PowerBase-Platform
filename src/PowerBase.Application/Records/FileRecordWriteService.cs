@@ -25,7 +25,9 @@ public interface IFileRecordWriteService
         bool suppressInterception = false,
         Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
         IReadOnlyDictionary<string, object?>? existingRecord = null,
-        bool bypassFileReservation = false);
+        bool bypassFileReservation = false,
+        Guid? reportId = null,
+        bool isGridEditSave = false);
 }
 
 /// <summary>
@@ -58,9 +60,11 @@ public sealed class FileRecordWriteService : IRecordWriteService, IFileRecordWri
         System.Data.IDbTransaction? transaction = null,
         bool suppressInterception = false,
         Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
-        IReadOnlyDictionary<string, object?>? existingRecord = null)
+        IReadOnlyDictionary<string, object?>? existingRecord = null,
+        Guid? reportId = null,
+        bool isGridEditSave = false)
         => _inner.ApplyAsync(table, fields, recordPublicId, fieldValues, auditAction, entityTitle,
-            ct, transaction, suppressInterception, onIndexMessageCreated, existingRecord);
+            ct, transaction, suppressInterception, onIndexMessageCreated, existingRecord, reportId, isGridEditSave);
 
     public async Task<IReadOnlyDictionary<long, object?>> ApplyFileWriteAsync(
         AppTable table,
@@ -74,7 +78,9 @@ public sealed class FileRecordWriteService : IRecordWriteService, IFileRecordWri
         bool suppressInterception = false,
         Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
         IReadOnlyDictionary<string, object?>? existingRecord = null,
-        bool bypassFileReservation = false)
+        bool bypassFileReservation = false,
+        Guid? reportId = null,
+        bool isGridEditSave = false)
     {
         var oldRecord = existingRecord ??
             await _recordRepository.GetByPublicIdAsync(table, fields, recordPublicId, ct);
@@ -99,7 +105,7 @@ public sealed class FileRecordWriteService : IRecordWriteService, IFileRecordWri
         }
 
         return await _inner.ApplyAsync(table, fields, recordPublicId, effectiveValues, auditAction,
-            entityTitle, ct, transaction, suppressInterception, onIndexMessageCreated, oldRecord);
+            entityTitle, ct, transaction, suppressInterception, onIndexMessageCreated, oldRecord, reportId, isGridEditSave);
     }
 
     private static int GetRevisionLimit(string? settingsJson)

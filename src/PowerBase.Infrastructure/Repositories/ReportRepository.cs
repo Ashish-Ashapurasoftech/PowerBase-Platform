@@ -682,6 +682,69 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         }).ToList();
     }
 
+    private const string GetAppTableIdByPublicIdSql = """
+        SELECT AppTableId FROM meta.Report WHERE PublicId = @reportPublicId AND IsDeleted = 0
+        """;
+
+    public async Task<long?> GetAppTableIdByPublicIdAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleOrDefaultAsync<long?>(
+            new CommandDefinition(GetAppTableIdByPublicIdSql, new { reportPublicId }, cancellationToken: ct));
+    }
+
+    // Same @rules resolution as GetGridEditRuntimeSql (selected forms' applicable active rules,
+    // minus excluded ones, report priority order) but selecting full FormRule-shaped rows instead
+    // of the API-shaped GridEditRuntimeRuleRow — for FormRuleServerValidator's server-side
+    // enforcement rather than the frontend runtime endpoint.
+    private const string GetAppliedGridEditRulesSql = $"""
+        DECLARE @rules TABLE (Seq INT IDENTITY(1,1), RuleId BIGINT);
+        INSERT INTO @rules (RuleId)
+        SELECT r.Id
+        FROM meta.ReportGridEditForm rf
+        JOIN meta.Report rep ON rep.Id = rf.ReportId
+        JOIN meta.Form f ON f.Id = rf.FormId AND f.IsDeleted = 0
+        JOIN meta.FormRule r ON r.FormId = f.Id AND r.IsDeleted = 0 AND r.IsActive = 1
+        LEFT JOIN meta.ReportGridEditRule g ON g.ReportId = rf.ReportId AND g.FormRuleId = r.Id
+        WHERE rep.PublicId = @reportPublicId AND ISNULL(g.IsExcluded, 0) = 0 AND {ApplicableRuleExists}
+        ORDER BY CASE WHEN g.Id IS NULL THEN 1 ELSE 0 END, g.DisplayOrder, rf.DisplayOrder, r.DisplayOrder, r.Id;
+
+        SELECT r.Id, r.PublicId, r.FormId, r.Name, r.Description, r.Tags, r.IsActive,
+               r.IsExpressionMode, r.ExpressionText, r.RunTrigger, r.ConditionLogic, r.DisplayOrder,
+               r.IsDeleted, r.CreatedOn, r.CreatedBy, r.ModifiedOn, r.ModifiedBy, r.RowVersion
+        FROM @rules t JOIN meta.FormRule r ON r.Id = t.RuleId
+        ORDER BY t.Seq;
+
+        SELECT c.Id, c.FormRuleId, c.ConditionKind, c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder,
+               c.ChangeFromOperator, c.ChangeFromValue, c.ChangeFromValueType, c.ChangeFromValueFieldId,
+               c.ChangeToOperator, c.ChangeToValue, c.ChangeToValueType, c.ChangeToValueFieldId
+        FROM meta.FormRuleCondition c JOIN @rules t ON t.RuleId = c.FormRuleId
+        ORDER BY c.FormRuleId, c.DisplayOrder;
+
+        SELECT a.Id, a.FormRuleId, a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId,
+               a.ActionValue, a.RunOnceOnActivation, a.IsExpressionValue, a.DisplayOrder
+        FROM meta.FormRuleAction a JOIN @rules t ON t.RuleId = a.FormRuleId
+        ORDER BY a.FormRuleId, a.DisplayOrder;
+        """;
+
+    public async Task<IReadOnlyList<PowerBase.Domain.Entities.FormRule>> GetAppliedGridEditRulesAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        using var multi = await connection.QueryMultipleAsync(
+            new CommandDefinition(GetAppliedGridEditRulesSql, new { reportPublicId }, cancellationToken: ct));
+
+        var rules      = (await multi.ReadAsync<PowerBase.Domain.Entities.FormRule>()).ToList();
+        var conditions = (await multi.ReadAsync<FormRuleCondition>()).ToList();
+        var actions    = (await multi.ReadAsync<FormRuleAction>()).ToList();
+
+        var ruleMap = rules.ToDictionary(r => r.Id);
+        foreach (var c in conditions)
+            if (ruleMap.TryGetValue(c.FormRuleId, out var rule)) rule.Conditions.Add(c);
+        foreach (var a in actions)
+            if (ruleMap.TryGetValue(a.FormRuleId, out var rule)) rule.Actions.Add(a);
+        return rules;
+    }
+
     private sealed class GridEditRuntimeRuleRow
     {
         public long RuleId { get; set; }
