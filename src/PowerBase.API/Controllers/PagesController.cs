@@ -196,8 +196,8 @@ public class PagesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Render(Guid appId, Guid publicId, [FromBody] RenderPageRequest request, CancellationToken ct)
     {
-        IReadOnlyDictionary<string, IReadOnlyList<string>>? filterValues = request.FilterValues?
-            .ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value);
+        IReadOnlyDictionary<string, Application.Pages.Queries.RenderPage.DashboardFilterValue>? filterValues = request.FilterValues?
+            .ToDictionary(kv => kv.Key, kv => new Application.Pages.Queries.RenderPage.DashboardFilterValue(kv.Value.Operator, kv.Value.Value, kv.Value.ValueMode));
         var result = await _renderHandler.HandleAsync(new RenderPageQuery(publicId, filterValues, request.SearchValues), ct);
         return Ok(new ApiResponse<RenderPageResponse>(MapRender(result)));
     }
@@ -208,8 +208,9 @@ public class PagesController : ControllerBase
         {
             Key = f.Key,
             Label = f.Label,
-            InputType = f.InputType,
-            DefaultValue = f.DefaultValue,
+            FilterType = f.FilterType,
+            UserMode = f.UserMode,
+            SearchType = f.SearchType,
         }).ToList(),
         Tabs = r.Tabs.Select(t => new RenderedTabResponse
         {

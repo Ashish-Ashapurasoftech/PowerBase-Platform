@@ -75,8 +75,14 @@ public class DashboardFilterSlot
 {
     public string Key { get; set; } = string.Empty;
     public string Label { get; set; } = string.Empty;
-    public string InputType { get; set; } = "select";
-    public string? DefaultValue { get; set; }
+    /// <summary>DateRange | Text | User</summary>
+    public string FilterType { get; set; } = "Text";
+    /// <summary>User filters only — Single | List (which of the widget's fields are eligible:
+    /// a User field for Single, a MultiUser field for List).</summary>
+    public string? UserMode { get; set; }
+    /// <summary>Text filters only — Exact | Contains | UserChoice (an exact-match checkbox shown
+    /// next to the input at render time).</summary>
+    public string? SearchType { get; set; }
 }
 
 public static class DashboardWidgetTypes
@@ -110,7 +116,11 @@ public class DashboardWidget
 
     // ── Report widget ───────────────────────────────────────────────────────────
     public Guid ReportPublicId { get; set; }
-    public int PageSize { get; set; } = 10;
+    /// <summary>Nullable so an already-saved widget whose PageSize was cleared client-side to an
+    /// empty/null value (frontend now guards against saving that, but existing saved pages can
+    /// still have it) still deserializes instead of throwing — RenderWidgetAsync defaults a null
+    /// to 10 at the point it's actually used.</summary>
+    public int? PageSize { get; set; } = 10;
     /// <summary>Slot key → field id on this widget's own report/table.</summary>
     public Dictionary<string, DashboardFilterBinding> FilterBindings { get; set; } = [];
 
