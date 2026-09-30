@@ -37,9 +37,12 @@ public class UpdatePageCommandHandler
 
         var page = await _pageRepo.GetByPublicIdAsync(command.PagePublicId, ct);
 
-        if (page.PageType == PageTypes.Code && !_queryContext.IsSuperAdmin
-            && !_queryContext.Permissions.Contains(PermissionCodes.PagesCode))
-            throw new UnauthorizedActionException("Editing a Code page requires the Code Page Builder capability.");
+        if (page.PageType == PageTypes.Code && !_queryContext.IsSuperAdmin)
+        {
+            var appPermissions = await _appUserRepo.GetUserAppPermissionsAsync(page.AppId, _queryContext.UserId, ct);
+            if (!appPermissions.Contains(PermissionCodes.PagesCode))
+                throw new UnauthorizedActionException("Editing a Code page requires the Code Page Builder capability.");
+        }
 
         // Snapshot the PRE-EDIT state at the current version number — version N is always
         // "what the page looked like before edit N", which is what Restore needs and matches
