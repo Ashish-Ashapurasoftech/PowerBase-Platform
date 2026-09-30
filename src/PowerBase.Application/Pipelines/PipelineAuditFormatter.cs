@@ -392,6 +392,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 metadataContext["table_name"] = tableName;
                 metadataContext["table_id"] = tableGuidStr;
                 metadata["context"] = metadataContext;
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TableName"] = tableName;
                 technicalDetails["TableId"] = tableGuidStr;
@@ -583,6 +584,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     });
                 }
                 metadata["struct"] = structList;
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 // Technical Trace Details
                 technicalDetails["MessageId"] = inputDict.TryGetValue("MessageId", out var msgId) ? msgId : null;
@@ -653,6 +655,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyOutput["Records Found"] = recordsCount;
                 friendlyOutput["Records Preview"] = friendlyRecords;
 
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
+
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 logMessage = $"Found {recordsCount} records in {tableName} matching criteria.";
             }
@@ -679,6 +684,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyInput["Compare with app local time"] = compareLocalTime;
 
                 friendlyOutput["Record"] = MapFieldValuesToUserFriendly(fields, outputDict);
+
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 logMessage = $"Looked up record ID {recordId} in {tableName}.";
@@ -720,6 +728,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyOutput["CreatedRecordPublicId"] = createdRecordGuidStr;
                 friendlyOutput["Status"] = "Created";
 
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
+
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["CreatedRecordPublicId"] = createdRecordGuidStr;
 
@@ -759,6 +770,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyOutput["Record"] = recordDisplayName;
                 friendlyOutput["UpdatedRecordPublicId"] = targetRecordGuidStr;
                 friendlyOutput["Status"] = "Updated";
+
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["TargetRecordPublicId"] = targetRecordGuidStr;
@@ -969,6 +983,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 friendlyOutput["Session ID"] = technicalDetails["StepRefId"];
                 friendlyOutput["Status"] = "Prepared";
+
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 logMessage = $"Prepared bulk upsert session for {tableName} merging on {friendlyMergeKey}.";
             }
@@ -1224,6 +1241,17 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             }
         }
         return null;
+    }
+
+    /// <summary>Maps raw keys like "fid_3" to the field's original label so users can decode raw input/output.</summary>
+    private static Dictionary<string, object?> BuildFieldLabelMap(List<AppField> fields)
+    {
+        var map = new Dictionary<string, object?>();
+        foreach (var f in fields)
+        {
+            map[$"fid_{f.Fid ?? f.Id}"] = !string.IsNullOrWhiteSpace(f.Label) ? f.Label : f.Name;
+        }
+        return map;
     }
 
     private Dictionary<string, object?> MapFieldValuesToUserFriendly(

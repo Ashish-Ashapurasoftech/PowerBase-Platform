@@ -1634,7 +1634,8 @@ public partial class PipelineEngine : IPipelineEngine
                 TablePublicId = config.TablePublicId,
                 RecordId = recordId,
                 SubsequentFields = config.SubsequentFields,
-                CompareLocalTime = config.CompareLocalTime
+                CompareLocalTime = config.CompareLocalTime,
+                Metadata = BuildAuditFieldMetadata(table, fields)
             });
 
             var queryFields = fields.ToList();
@@ -1820,7 +1821,8 @@ public partial class PipelineEngine : IPipelineEngine
 
                 stepRun.InputContext = SerializeAndSanitizeAudit(new {
                     TableId = config.TableId, Mode = "Chunked", WorksetId = worksetId,
-                    DiscoveredCount = workset.DiscoveredCount
+                    DiscoveredCount = workset.DiscoveredCount,
+                    Metadata = BuildAuditFieldMetadata(table, fields)
                 });
                 return JsonSerializer.Serialize(new {
                     mode = "chunked-search", worksetId, count = workset.DiscoveredCount
@@ -1837,7 +1839,8 @@ public partial class PipelineEngine : IPipelineEngine
                 FilterGroupsCount = config.FilterGroups?.Count ?? 0,
                 FiltersCount = config.Filters?.Count ?? 0,
                 IsSimpleFilter = config.IsSimpleFilter,
-                MaxResults = limit
+                MaxResults = limit,
+                Metadata = BuildAuditFieldMetadata(table, fields)
             });
 
             // SQL Server accepts at most ~2100 parameters per query, so any Id-list lookup this
@@ -2029,7 +2032,8 @@ public partial class PipelineEngine : IPipelineEngine
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 TableId = config.TableId,
-                FieldMappings = resolvedMappings
+                FieldMappings = resolvedMappings,
+                Metadata = BuildAuditFieldMetadata(table, fields)
             });
 
             // Resolve Reference field values: translate any human key or PublicId Guid to the
@@ -2141,7 +2145,8 @@ public partial class PipelineEngine : IPipelineEngine
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 TableId = config.TableId,
                 TargetRecordId = resolvedRecordIdStr,
-                FieldMappings = resolvedMappings
+                FieldMappings = resolvedMappings,
+                Metadata = BuildAuditFieldMetadata(table, fields)
             });
 
             await uow.BeginAsync(ct);
@@ -2763,7 +2768,8 @@ public partial class PipelineEngine : IPipelineEngine
 
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 TableLabel = table.PublicId.ToString(),
-                MergeKeyFid = mergeField.Fid.HasValue ? $"fid_{mergeField.Fid.Value}" : mergeKeyIdentifier
+                MergeKeyFid = mergeField.Fid.HasValue ? $"fid_{mergeField.Fid.Value}" : mergeKeyIdentifier,
+                Metadata = BuildAuditFieldMetadata(table, fields)
             });
 
             var session = new BulkUpsertSession
@@ -2902,7 +2908,8 @@ public partial class PipelineEngine : IPipelineEngine
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 ParentUpsertStepRefId = parentRefId,
                 BulkRecordSetStepId = parentRefId,
-                FieldMappings = resolvedMappings
+                FieldMappings = resolvedMappings,
+                Metadata = BuildAuditFieldMetadata(table, fields)
             });
 
             if (isParentPrepare)
@@ -6154,6 +6161,23 @@ public partial class PipelineEngine : IPipelineEngine
             throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException(
                 $"Field with name '{fieldReference}' was not found in the target table.");
         }
+    }
+
+    /// <summary>
+    /// Audit metadata that lets the run history decode raw keys such as "fid_3" into the field's
+    /// original label. It is stored with the raw input so it is present even before (or without)
+    /// the end-of-run friendly formatting pass.
+    /// </summary>
+    private static Dictionary<string, object?> BuildAuditFieldMetadata(AppTable table, IEnumerable<AppField> fields)
+    {
+        var labels = new Dictionary<string, object?>();
+        foreach (var f in fields)
+            labels[$"fid_{f.Fid ?? f.Id}"] = !string.IsNullOrWhiteSpace(f.Label) ? f.Label : f.Name;
+        return new Dictionary<string, object?>
+        {
+            ["table"] = new Dictionary<string, object?> { ["name"] = table.Name, ["table_id"] = table.PublicId.ToString() },
+            ["field_labels"] = labels
+        };
     }
 
     public class RawStepAuditSnapshot
