@@ -2156,7 +2156,16 @@ public partial class PipelineEngine : IPipelineEngine
 
                 var persisted = await recordWriteService.ApplyAsync(
                     table, fields, recordPublicId, values, AuditActions.Updated, "Record updated via PowerFlow action step", ct, uow.Transaction);
-                var outputJson = JsonSerializer.Serialize(new { UpdatedRecordPublicId = recordPublicId.ToString(), FieldCount = persisted.Count });
+                var output = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["UpdatedRecordPublicId"] = recordPublicId.ToString(),
+                    ["RecordPublicId"] = recordPublicId.ToString(),
+                    ["PublicId"] = recordPublicId.ToString(),
+                    ["FieldCount"] = persisted.Count
+                };
+                foreach (var fieldValue in persisted)
+                    output[$"fid_{fieldValue.Key}"] = fieldValue.Value;
+                var outputJson = JsonSerializer.Serialize(output);
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
                 {
