@@ -12,12 +12,13 @@ public sealed class CallablePipelineDispatcher(IPipelineRepository repository, I
 {
     public async Task<IReadOnlyList<Guid>> DispatchAsync(long tenantId, long ownerId, long callerPipelineId,
         Guid parentMessageId, Guid callerStepId, string executionPath, string? correlationId, int depth,
-        CallablePipelineDefinition definition, IReadOnlyDictionary<string, object?> arguments, CancellationToken ct, string? pipelineChain = null)
+        CallablePipelineDefinition definition, IReadOnlyDictionary<string, object?> arguments, CancellationToken ct, string? pipelineChain = null,
+        object? callingPipeline = null)
     {
         if (tenantId <= 0 || ownerId <= 0 || parentMessageId == Guid.Empty)
             throw new PipelineNonRetryableException("Callable dispatch requires a tenant, PowerFlow owner and stable run message identity.");
         var targets = await repository.FindCallablePipelinesAsync(ownerId, definition.Definition, ct);
-        if (targets.Count == 0) throw new PipelineNonRetryableException("No active PowerFlow owned by you matches this Call Definition.");
+        if (targets.Count == 0) return Array.Empty<Guid>();
         var messages = new List<Guid>();
         // Older manual queue jobs stored a correlation GUID in PipelineChain instead of a JSON array.
         var chain = string.IsNullOrWhiteSpace(pipelineChain) || Guid.TryParse(pipelineChain, out _)
@@ -46,7 +47,7 @@ public sealed class CallablePipelineDispatcher(IPipelineRepository repository, I
                     TriggerStepId = trigger.Id, TriggerStepRefId = trigger.RefId,
                     CallDefinition = definition.Definition, Arguments = arguments,
                     CallerPipelineId = callerPipelineId, CallerStepId = callerStepId,
-                    ParentMessageId = parentMessageId
+                    ParentMessageId = parentMessageId, CallingPipeline = callingPipeline
                 })
             });
             messages.Add(messageId);

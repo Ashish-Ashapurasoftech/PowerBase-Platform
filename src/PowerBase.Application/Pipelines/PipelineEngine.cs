@@ -195,7 +195,8 @@ public partial class PipelineEngine : IPipelineEngine
                             HeartbeatOn = DateTime.UtcNow,
                             AttemptCount = 1
                         };
-                        var (_, dbRunId) = await _pipelineRepo.CreateRunAsync(run, ct);
+                        var (runPublicId, dbRunId) = await _pipelineRepo.CreateRunAsync(run, ct);
+                        run.PublicId = runPublicId;
                         runId = dbRunId;
                         run.Id = runId;
                     }
@@ -287,7 +288,8 @@ public partial class PipelineEngine : IPipelineEngine
                     StartedOn = DateTime.UtcNow,
                     TriggeredBy = task.TriggeredBy
                 };
-                var (_, dbRunId) = await _pipelineRepo.CreateRunAsync(run, ct);
+                var (runPublicId, dbRunId) = await _pipelineRepo.CreateRunAsync(run, ct);
+                run.PublicId = runPublicId;
                 runId = dbRunId;
                 run.Id = runId;
                 suppressScope.Complete();
@@ -534,6 +536,8 @@ public partial class PipelineEngine : IPipelineEngine
                 contextDict["_Depth"] = task.Depth;
                 contextDict["_CreatedBy"] = pipelineMeta.CreatedBy;
                 contextDict["_MessageId"] = messageGuid ?? Guid.Empty;
+                contextDict["_RunPublicId"] = run.PublicId;
+                contextDict["_RunStartedOn"] = run.StartedOn;
                 contextDict["_ResumeAfterPause"] = resumingPause;
                 contextDict["_RunAttemptId"] = attemptId;
                 contextDict["_StepSequence"] = 0;
@@ -1565,11 +1569,20 @@ public partial class PipelineEngine : IPipelineEngine
                     : ConvertJsonElement(value);
             }
             var dispatcher = new CallablePipelineDispatcher(_pipelineRepo, _serviceProvider.GetRequiredService<IPipelineExecutionQueue>());
+            var callingPipeline = await BuildCallingPipelineAsync(step.PipelineId, parentId, contextDict, ct);
             var messages = await dispatcher.DispatchAsync(_queryContext.TenantId, createdBy, step.PipelineId,
                 parentId, step.PublicId, executionPath, contextDict.GetValueOrDefault("_CorrelationId")?.ToString(),
-                contextDict.GetValueOrDefault("_Depth") is int depth ? depth : 1, definition, values, ct, _queryContext.PipelineChainJson);
+                contextDict.GetValueOrDefault("_Depth") is int depth ? depth : 1, definition, values, ct, _queryContext.PipelineChainJson, callingPipeline);
             stepRun.InputContext = JsonSerializer.Serialize(new { definition.Definition, Arguments = values });
-            var output = JsonSerializer.Serialize(new { Status = "Queued", MessageIds = messages });
+            var result = new Dictionary<string, object?>(values, StringComparer.Ordinal)
+            {
+                ["calling_pipeline"] = callingPipeline,
+                ["_metadata"] = new { call_status = messages.Count > 0 ? "Ok" : "Not Found" }
+            };
+            // Retain the legacy audit fields without overwriting a user argument.
+            result.TryAdd("Status", messages.Count > 0 ? "Ok" : "Not Found");
+            result.TryAdd("MessageIds", messages);
+            var output = JsonSerializer.Serialize(result);
             try
             {
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
@@ -1601,6 +1614,9 @@ public partial class PipelineEngine : IPipelineEngine
                 if (!args.TryGetProperty(name, out var value)) throw new PipelineNonRetryableException($"Missing call argument: {name}.");
                 received[name] = ConvertJsonElement(value.Clone());
             }
+            received["calling_pipeline"] = envelope.TryGetProperty("CallingPipeline", out var callerInfo)
+                && callerInfo.ValueKind == JsonValueKind.Object ? ConvertJsonElement(callerInfo.Clone()) : null;
+            received["_metadata"] = new { call_status = "Ok" };
             stepsDict[step.RefId] = received;
             contextDict["trigger"] = received;
             var output = JsonSerializer.Serialize(received);
@@ -4369,7 +4385,24 @@ public partial class PipelineEngine : IPipelineEngine
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
         if (string.IsNullOrEmpty(payloadJson)) return input;
-        input = Regex.Replace(input, @"(?<=\{\{)\s*(?:steps\.)?([A-Za-z][A-Za-z0-9_]*)\._metadata\.", " request_metadata.$1.");
+        // Callable metadata is part of its durable output; HTTP request metadata is stored separately.
+        if (input.Contains("._metadata.", StringComparison.Ordinal))
+        {
+            using var metadataPayload = JsonDocument.Parse(payloadJson);
+            input = Regex.Replace(input, @"(?<=\{\{)\s*(?:steps\.)?([A-Za-z][A-Za-z0-9_]*)\._metadata\.", match =>
+            {
+                var reference = match.Groups[1].Value;
+                var root = metadataPayload.RootElement;
+                var hasOutputMetadata = root.TryGetProperty("steps", out var outputs) && outputs.ValueKind == JsonValueKind.Object
+                    && outputs.TryGetProperty(reference, out var output) && output.ValueKind == JsonValueKind.Object
+                    && output.TryGetProperty("_metadata", out _);
+                if (reference == "trigger" && root.TryGetProperty("trigger", out var triggerOutput)
+                    && triggerOutput.ValueKind == JsonValueKind.Object && triggerOutput.TryGetProperty("_metadata", out _)) hasOutputMetadata = true;
+                var hasRequestMetadata = root.TryGetProperty("request_metadata", out var requestMetadata)
+                    && requestMetadata.ValueKind == JsonValueKind.Object && requestMetadata.TryGetProperty(reference, out _);
+                return hasOutputMetadata && !hasRequestMetadata ? match.Value : $" request_metadata.{reference}.";
+            });
+        }
 
         var callableTrigger = allSteps?.FirstOrDefault(step => step.Subtype == "pipeline-called" && step.Type == "trigger");
         if (callableTrigger != null)
@@ -4378,6 +4411,7 @@ public partial class PipelineEngine : IPipelineEngine
             foreach (Match reference in Regex.Matches(input, @"\{\{\s*(?:steps\.)?([A-Za-z][A-Za-z0-9_]*)\.([A-Za-z][A-Za-z0-9_]*)"))
             {
                 if ((reference.Groups[1].Value == callableTrigger.RefId || reference.Groups[1].Value == "trigger") &&
+                    reference.Groups[2].Value != "calling_pipeline" &&
                     !definition.Arguments.Contains(reference.Groups[2].Value, StringComparer.Ordinal))
                     throw new PipelineStepException($"Callable argument '{reference.Groups[2].Value}' no longer exists.");
             }

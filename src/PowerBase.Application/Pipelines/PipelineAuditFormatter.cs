@@ -313,7 +313,11 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             {
                 foreach (var entry in inputDict) friendlyInput[entry.Key] = entry.Value;
                 foreach (var entry in outputDict) friendlyOutput[entry.Key] = entry.Value;
-                logMessage = status == "Success"
+                var callNotFound = outputDict.TryGetValue("_metadata", out var callMetadata)
+                    && JsonSerializer.Serialize(callMetadata).Contains("\"call_status\":\"Not Found\"", StringComparison.Ordinal);
+                logMessage = status == "Success" && callNotFound
+                    ? "No active PowerFlow matched the Call Definition."
+                    : status == "Success"
                     ? subtype == "pipeline-called" ? "PowerFlow called; arguments received." : "PowerFlow call queued."
                     : $"Callable PowerFlow step {status.ToLowerInvariant()}.";
             }
