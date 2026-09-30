@@ -8,6 +8,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Options;
+using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
@@ -17,20 +19,25 @@ using PowerBase.Infrastructure.Persistence;
 
 namespace PowerBase.Infrastructure.Services;
 
-public class PipelineRecordSearchService : IPipelineRecordSearchService
+public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeysetPipelineRecordSearchService
 {
+    public bool SupportsKeysetPaging => true;
+
     private readonly ITenantConnectionFactory _connectionFactory;
     private readonly IQueryContext _queryContext;
     private readonly IEncryptionService _encryptionService;
+    private readonly PipelineExecutionOptions _options;
 
     public PipelineRecordSearchService(
         ITenantConnectionFactory connectionFactory,
         IQueryContext queryContext,
-        IEncryptionService encryptionService)
+        IEncryptionService encryptionService,
+        IOptions<PipelineExecutionOptions> options)
     {
         _connectionFactory = connectionFactory;
         _queryContext = queryContext;
         _encryptionService = encryptionService;
+        _options = options.Value;
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SearchAsync(
@@ -54,13 +61,13 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService
 
         var orderBy = "Id";
 
-        string paginationClause = "";
-        if (maxResults.HasValue)
-        {
-            parameters.Add("offset", (Math.Max(1, page) - 1) * maxResults.Value);
-            parameters.Add("pageSize", maxResults.Value);
-            paginationClause = "\nOFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY";
-        }
+        // Null historically meant unlimited. Keep the API contract while bounding the SQL result
+        // to one row beyond the engine ceiling so it can fail cleanly instead of exhausting memory.
+        var materializationProbeSize = checked(_options.MaxMaterializedSearchRecords + 1);
+        var boundedPageSize = Math.Min(maxResults ?? materializationProbeSize, materializationProbeSize);
+        parameters.Add("offset", (Math.Max(1, page) - 1) * boundedPageSize);
+        parameters.Add("pageSize", boundedPageSize);
+        const string paginationClause = "\nOFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY";
 
         var sql = $"""
             SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
@@ -79,6 +86,52 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService
         await enc.DecryptRowsAsync(mutableRows, fields, ct);
 
         return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
+    }
+
+    public async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SearchPagesAsync(
+        AppTable table, IReadOnlyList<AppField> fields, int pageSize, FilterGroup? filterTree = null,
+        long afterId = 0, long maxId = long.MaxValue,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
+        var buildFieldColsMethod = typeof(RecordRepository).GetMethod("BuildFieldColumnList", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var buildFilterTreeMethod = typeof(RecordRepository).GetMethod("BuildFilterTreeWhere", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var buildOwnerMethod = typeof(RecordRepository).GetMethod("BuildOwnerWhere", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var fieldCols = (string)buildFieldColsMethod.Invoke(null, new object[] { fields })!;
+        var parameters = new DynamicParameters();
+        var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+        var filterWhere = (string)buildFilterTreeMethod.Invoke(null, new object[] { filterTree, parameters, fieldLookup })!
+            + (string)buildOwnerMethod.Invoke(null, new object[] { (long?)null, parameters })!;
+        parameters.Add("pageSize", pageSize);
+        parameters.Add("maxId", maxId);
+
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        var enc = await FieldEncryptionContext.ResolveAsync(connection, table.AppId, _queryContext.TenantId, _encryptionService, null, ct);
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            parameters.Add("afterId", afterId);
+            var sql = $"""
+                SELECT TOP (@pageSize) Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+                FROM {PhysicalNaming.FullTableName(table.Id)}
+                WHERE IsDeleted = 0 AND Id > @afterId AND Id <= @maxId{filterWhere}
+                ORDER BY Id
+                """;
+            var rows = (await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)))
+                .Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
+            if (rows.Count == 0) yield break;
+            afterId = Convert.ToInt64(rows[^1]["Id"]);
+            await enc.DecryptRowsAsync(rows, fields, ct);
+            yield return rows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
+        }
+    }
+
+    public async Task<long> GetMaxRecordIdAsync(AppTable table, CancellationToken ct = default)
+    {
+        var sql = $"SELECT ISNULL(MAX(Id), 0) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0";
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        return await connection.QuerySingleAsync<long>(new CommandDefinition(sql, cancellationToken: ct));
     }
 
     private static IReadOnlyDictionary<string, object?> ToDictionary(dynamic row)

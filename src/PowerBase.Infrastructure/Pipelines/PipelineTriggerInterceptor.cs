@@ -6,6 +6,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
 using PowerBase.Domain.Entities;
@@ -23,6 +25,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
     private readonly IControlConnectionFactory _controlConnFactory;
     private readonly IMainPipelineQueueRepository _mainQueueRepo;
     private readonly ILogger<PipelineTriggerInterceptor> _logger;
+    private readonly PipelineExecutionOptions _options;
 
     public PipelineTriggerInterceptor(
         IPipelineRepository pipelineRepo,
@@ -31,7 +34,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         ITenantUnitOfWork _uow,
         IControlConnectionFactory controlConnFactory,
         IMainPipelineQueueRepository mainQueueRepo,
-        ILogger<PipelineTriggerInterceptor> logger)
+        ILogger<PipelineTriggerInterceptor> logger,
+        IOptions<PipelineExecutionOptions>? options = null)
     {
         _pipelineRepo = pipelineRepo;
         _recordRepo = recordRepo;
@@ -40,6 +44,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         _controlConnFactory = controlConnFactory;
         _mainQueueRepo = mainQueueRepo;
         _logger = logger;
+        _options = options?.Value ?? new PipelineExecutionOptions();
     }
 
     [Obsolete("Use the constructor with controlConnFactory and mainQueueRepo instead.")]
@@ -48,8 +53,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         IRecordRepository recordRepo,
         IQueryContext queryContext,
         ITenantUnitOfWork _uow,
-        ILogger<PipelineTriggerInterceptor> logger)
-        : this(pipelineRepo, recordRepo, queryContext, _uow, null!, null!, logger)
+            ILogger<PipelineTriggerInterceptor> logger)
+        : this(pipelineRepo, recordRepo, queryContext, _uow, null!, null!, logger, null)
     {
     }
 
@@ -474,7 +479,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                             LockedBy = null,
                             LockedUntil = null,
                             AttemptCount = 0,
-                            MaxAttempts = 5,
+                            MaxAttempts = _options.DatabaseQueue.MaxAttempts,
                             Status = "Pending"
                         };
 
@@ -598,7 +603,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                                 LockedBy = null,
                                 LockedUntil = null,
                                 AttemptCount = 0,
-                                MaxAttempts = 5,
+                                MaxAttempts = _options.DatabaseQueue.MaxAttempts,
                                 Status = "Pending"
                             };
 

@@ -18,6 +18,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Transactions;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Extensions.Options;
 using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Formulas;
@@ -27,7 +29,7 @@ using Scriban;
 using Scriban.Runtime;
 
 namespace PowerBase.Application.Pipelines;
-public class PipelineEngine : IPipelineEngine
+public partial class PipelineEngine : IPipelineEngine
 {
     /// <summary>Shared empty Computed dict for FormulaFilterSorter pairs built from rows that
     /// have no compute-on-read (formula) fields — only encrypted-field in-memory filtering.</summary>
@@ -155,6 +157,9 @@ public class PipelineEngine : IPipelineEngine
     private async Task RunPipelineAttemptAsync(PipelineExecutionTask task, int attemptCount, CancellationToken ct)
     {
         var workerId = task.WorkerId ?? _workerId;
+        var deliveryMaxAttempts = task.MaxAttempts > 0
+            ? task.MaxAttempts
+            : _options.DatabaseQueue.MaxAttempts;
         _logger.LogInformation("Starting pipeline run attempt. PipelineId: {PipelineId}, TriggerEvent: {TriggerEvent}", task.PipelineId, task.TriggerEvent);
 
         long runId = 0;
@@ -220,7 +225,8 @@ public class PipelineEngine : IPipelineEngine
                             }
 
                             // Lease expired: attempt stale reclaim
-                            var reclaimed = await _pipelineRepo.ReclaimStaleRunAsync(messageGuid.Value, workerId, ct);
+                            var reclaimed = await _pipelineRepo.ReclaimStaleRunAsync(
+                                messageGuid.Value, workerId, ct, deliveryMaxAttempts);
                             if (!reclaimed)
                             {
                                 _logger.LogWarning("Failed to reclaim stale run lease for {MessageId}. Skipping.", messageGuid.Value);
@@ -232,15 +238,17 @@ public class PipelineEngine : IPipelineEngine
                     }
                     else if (run.Status == "Failed")
                     {
-                        if (run.AttemptCount >= 5)
+                        if (run.AttemptCount >= deliveryMaxAttempts)
                         {
-                            _logger.LogError("Retry limit exhausted (5 attempts) for run {MessageId}. Skipping.", messageGuid.Value);
+                            _logger.LogError("Retry limit exhausted ({MaxAttempts} attempts) for run {MessageId}. Skipping.",
+                                deliveryMaxAttempts, messageGuid.Value);
                             suppressScope.Complete();
                             return;
                         }
 
                         // Claim failed run retry
-                        var claimed = await _pipelineRepo.ClaimFailedRunRetryAsync(messageGuid.Value, workerId, ct);
+                        var claimed = await _pipelineRepo.ClaimFailedRunRetryAsync(
+                            messageGuid.Value, workerId, ct, deliveryMaxAttempts);
                         if (!claimed)
                         {
                             _logger.LogWarning("Failed to claim failed run retry for {MessageId}. Skipping.", messageGuid.Value);
@@ -301,7 +309,10 @@ public class PipelineEngine : IPipelineEngine
             suppressScope.Complete();
         }
 
-        // Start lease heartbeat loop if messageGuid is present
+        // Tenant-run ownership is independent from the control-queue lease. Cancel execution
+        // before the 45-second tenant lease can expire if ownership cannot be confirmed.
+        using var executionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        ct = executionCts.Token;
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         Task? heartbeatTask = null;
 
@@ -309,6 +320,7 @@ public class PipelineEngine : IPipelineEngine
         {
             heartbeatTask = Task.Run(async () =>
             {
+                var sinceConfirmedLease = System.Diagnostics.Stopwatch.StartNew();
                 while (!heartbeatCts.Token.IsCancellationRequested)
                 {
                     try
@@ -316,13 +328,29 @@ public class PipelineEngine : IPipelineEngine
                         await Task.Delay(15000, heartbeatCts.Token);
                         using (var suppressScope = new TransactionScope(TransactionScopeOption.Suppress, TransactionScopeAsyncFlowOption.Enabled))
                         {
-                            await _pipelineRepo.ExtendRunLeaseAsync(messageGuid.Value, workerId, heartbeatCts.Token);
+                            var renewed = await _pipelineRepo.ExtendRunLeaseAsync(messageGuid.Value, workerId, heartbeatCts.Token);
+                            if (!renewed)
+                            {
+                                _logger.LogWarning("Tenant pipeline run lease ownership was lost for {MessageId}.", messageGuid.Value);
+                                executionCts.Cancel();
+                                break;
+                            }
                             suppressScope.Complete();
                         }
+                        sinceConfirmedLease.Restart();
                     }
-                    catch
+                    catch (OperationCanceledException) when (heartbeatCts.IsCancellationRequested)
                     {
-                        // Ignore cancellation/extension failures
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Could not confirm tenant pipeline run lease for {MessageId}.", messageGuid.Value);
+                        if (sinceConfirmedLease.Elapsed >= TimeSpan.FromSeconds(30))
+                        {
+                            executionCts.Cancel();
+                            break;
+                        }
                     }
                 }
             });
@@ -898,14 +926,27 @@ public class PipelineEngine : IPipelineEngine
             var messageId = contextDict.TryGetValue("_MessageId", out var messageObj) && messageObj is Guid guid
                 ? guid : Guid.Empty;
             var pathHash = ComputeSha256Hash(currentPath);
-            if (replayable && messageId != Guid.Empty &&
-                contextDict.TryGetValue("_ResumeAfterPause", out var resumeObj) && resumeObj is true)
+            if (replayable && messageId != Guid.Empty)
             {
                 var previousOutput = await _idempotencyRepo.GetByExecutionKeyAsync(messageId, step.PublicId, pathHash, null, ct);
-                if (previousOutput != null)
+                if (!string.IsNullOrWhiteSpace(previousOutput))
                 {
+                    _logger.LogInformation("Replaying completed step {StepPublicId} at path {Path} from its durable receipt.",
+                        step.PublicId, currentPath);
                     if (step.Type != "trigger" && !string.IsNullOrEmpty(step.RefId))
-                        stepsDict[step.RefId] = JsonSerializer.Deserialize<object>(previousOutput)!;
+                    {
+                        try
+                        {
+                            stepsDict[step.RefId] = JsonSerializer.Deserialize<object>(previousOutput) ?? previousOutput;
+                        }
+                        catch (JsonException)
+                        {
+                            // Older/custom steps may have persisted a plain-text result. Preserve the
+                            // same fallback used for freshly executed steps so a valid receipt cannot
+                            // make an otherwise compatible retry fail during deserialization.
+                            stepsDict[step.RefId] = previousOutput;
+                        }
+                    }
                     continue;
                 }
             }
@@ -950,7 +991,8 @@ public class PipelineEngine : IPipelineEngine
                 try
                 {
                     if (replayable && messageId != Guid.Empty && output != null &&
-                        await _idempotencyRepo.GetByExecutionKeyAsync(messageId, step.PublicId, pathHash, null, ct) == null)
+                        string.IsNullOrWhiteSpace(await _idempotencyRepo.GetByExecutionKeyAsync(
+                            messageId, step.PublicId, pathHash, null, ct)))
                     {
                         await _idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
                         {
@@ -1708,6 +1750,83 @@ public class PipelineEngine : IPipelineEngine
             }
 
             int? limit = config.MaxResults;
+            if (limit.HasValue && limit.Value <= 0)
+                throw new PipelineNonRetryableException("Search Records MaxResults must be greater than zero.");
+
+            var loopConsumerCount = allSteps.Count(candidate =>
+            {
+                if (candidate.IsDeleted || candidate.Subtype is not ("loop" or "for-each")) return false;
+                try
+                {
+                    return JsonSerializer.Deserialize<LoopStepConfig>(candidate.ConfigJson ?? "{}",
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true })?.LoopOverStepId == step.RefId;
+                }
+                catch { return false; }
+            });
+            var encryptedFilterFidsForStreaming = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
+                .Select(f => (long)f.Fid!.Value).ToHashSet();
+            var canStreamFilter = encryptedFilterFidsForStreaming.Count == 0 ||
+                !FormulaFilterSorter.TreeContainsFormulaField(filterTree, encryptedFilterFidsForStreaming);
+
+            var requiresChunkedSearch = !limit.HasValue || limit.Value > _options.MaxMaterializedSearchRecords;
+            if (requiresChunkedSearch && loopConsumerCount == 1 && canStreamFilter && recordSearchService.SupportsKeysetPaging &&
+                recordSearchService is IKeysetPipelineRecordSearchService keysetSearch && messageGuid != Guid.Empty)
+            {
+                var worksetId = CreateDeterministicWorksetId(messageGuid, step.RefId);
+                var snapshotMaxRecordId = await keysetSearch.GetMaxRecordIdAsync(table, ct);
+                var workset = await _pipelineRepo.GetOrCreateSearchWorksetAsync(
+                    worksetId, messageGuid, step.RefId, snapshotMaxRecordId, ct);
+                if (workset.Status == "Discovering")
+                {
+                    var ordinal = workset.DiscoveredCount;
+                    if (!limit.HasValue || ordinal < limit.Value)
+                    {
+                        await foreach (var pageRows in keysetSearch.SearchPagesAsync(
+                            table, fields, _options.SearchRecordsPageSize, filterTree, workset.LastRecordId,
+                            workset.SnapshotMaxRecordId, ct))
+                        {
+                            var remaining = limit.HasValue ? limit.Value - ordinal : int.MaxValue;
+                            var recordsToStage = pageRows.Take(remaining).ToList();
+                            if (recordsToStage.Count == 0) break;
+                            var staged = new List<PipelineBulkEventRecord>(recordsToStage.Count);
+                            long lastRecordId = workset.LastRecordId;
+                            foreach (var record in recordsToStage)
+                            {
+                                lastRecordId = Convert.ToInt64(record["Id"], CultureInfo.InvariantCulture);
+                                var normalized = NormalizeSearchRecord(record, fields);
+                                if (!normalized.TryGetValue("RecordPublicId", out var publicIdValue) ||
+                                    !Guid.TryParse(Convert.ToString(publicIdValue, CultureInfo.InvariantCulture), out var recordPublicId))
+                                    throw new PipelineNonRetryableException("Search Records returned a row without a valid PublicId.");
+                                staged.Add(new PipelineBulkEventRecord
+                                {
+                                    BulkEventId = worksetId,
+                                    SearchWorksetId = worksetId,
+                                    Ordinal = ++ordinal,
+                                    RecordPublicId = recordPublicId,
+                                    EventType = "Search",
+                                    AfterValuesJson = JsonSerializer.Serialize(normalized),
+                                    Processed = 0,
+                                    CreatedOn = DateTime.UtcNow
+                                });
+                            }
+                            await _pipelineRepo.AppendSearchWorksetPageAsync(workset, staged, lastRecordId, ct);
+                            workset.LastRecordId = lastRecordId;
+                            workset.DiscoveredCount = ordinal;
+                            if (limit.HasValue && ordinal >= limit.Value) break;
+                        }
+                    }
+                    await _pipelineRepo.CompleteSearchWorksetDiscoveryAsync(worksetId, ct);
+                }
+
+                stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                    TableId = config.TableId, Mode = "Chunked", WorksetId = worksetId,
+                    DiscoveredCount = workset.DiscoveredCount
+                });
+                return JsonSerializer.Serialize(new {
+                    mode = "chunked-search", worksetId, count = workset.DiscoveredCount
+                });
+            }
+
             var limitModeStr = limit.HasValue ? $"MaxResults={limit.Value}" : "LimitMode=Unlimited";
             _logger.LogInformation("Search Records step {StepId} started. {LimitMode}", step.Id, limitModeStr);
 
@@ -1726,26 +1845,27 @@ public class PipelineEngine : IPipelineEngine
             // in chunks this size — never trimmed to it. A trimmed cap would silently drop
             // records past the cutoff; chunking fetches every one of them, just in more queries.
             const int sqlIdChunkSize = 2000;
-            const int pageSize = 5000;
+            int pageSize = _options.SearchRecordsPageSize;
 
-            // Fetches every row matching `tree` — never a fixed cap. Prefers recordSearchService
-            // (it may target a different tenant's connection for cross-tenant pipeline steps) and
-            // asks it for every match in one unbounded query (maxResults: null skips its OFFSET/
-            // FETCH clause entirely — this is its native "no limit" mode, not a page-size choice).
-            // Falls back to recordRepo (always the current tenant) only when it's unavailable —
-            // IRecordRepository.ListAsync always needs a bounded pageSize, so that path paginates.
+            // Materializes only up to the configured compatibility ceiling. The production search
+            // service asks SQL for one extra row so an oversized result fails predictably instead
+            // of consuming unbounded memory. The repository fallback enforces the same ceiling.
             async Task<List<IReadOnlyDictionary<string, object?>>> FetchAllAsync(FilterGroup? tree)
             {
                 if (recordSearchService != null)
                 {
-                    var rows = await recordSearchService.SearchAsync(table, fields, maxResults: null, filterTree: tree, ct: ct);
-                    return rows?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+                    var rows = await recordSearchService.SearchAsync(table, fields, null, tree, ct);
+                    if (rows.Count > _options.MaxMaterializedSearchRecords)
+                        throw new PipelineNonRetryableException($"Search Records matched more than the configured materialization limit ({_options.MaxMaterializedSearchRecords}). Use a bounded MaxResults value or a bulk-event pipeline for large datasets.");
+                    return rows.ToList();
                 }
                 var all = new List<IReadOnlyDictionary<string, object?>>();
                 for (var page = 1; ; page++)
                 {
                     var pageRows = await recordRepo.ListAsync(table, fields, page, pageSize, filterTree: tree, ct: ct);
                     if (pageRows.Count == 0) break;
+                    if (all.Count + pageRows.Count > _options.MaxMaterializedSearchRecords)
+                        throw new PipelineNonRetryableException($"Search Records matched more than the configured materialization limit ({_options.MaxMaterializedSearchRecords}). Use a bounded MaxResults value or a bulk-event pipeline for large datasets.");
                     all.AddRange(pageRows);
                     if (pageRows.Count < pageSize) break;
                 }
@@ -1823,6 +1943,9 @@ public class PipelineEngine : IPipelineEngine
                         ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
                         : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit.Value, filterTree: filterTree, ct: ct);
                     resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
+                    if (limit.Value > _options.MaxMaterializedSearchRecords &&
+                        resultsList.Count > _options.MaxMaterializedSearchRecords)
+                        throw new PipelineNonRetryableException($"Search Records cannot materialize more than {_options.MaxMaterializedSearchRecords} records without exactly one Loop consumer. Connect this Search step to one Loop so the records can be processed in durable pages.");
                 }
                 else
                 {
@@ -1865,8 +1988,10 @@ public class PipelineEngine : IPipelineEngine
                 normalizedResults.Add(norm);
             }
 
-            var stepOutput = new { records = normalizedResults };
-            return JsonSerializer.Serialize(stepOutput);
+            var stepOutput = JsonSerializer.Serialize(new { records = normalizedResults });
+            if (System.Text.Encoding.UTF8.GetByteCount(stepOutput) > _options.MaxStepOutputBytes)
+                throw new PipelineNonRetryableException($"Search Records output exceeds the configured maximum of {_options.MaxStepOutputBytes} bytes. Reduce MaxResults or use a bulk-event pipeline.");
+            return stepOutput;
         }
         else if (subtype == "create-record")
         {
@@ -1877,8 +2002,7 @@ public class PipelineEngine : IPipelineEngine
             _logger.LogInformation("Create Record step {StepId} started for Table {TableId}.", step.Id, config.TableId);
 
             var tableGuid = Guid.Parse(config.TableId);
-            var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
-            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            var (table, fields) = await GetRecordStepMetadataAsync(tableRepo, fieldRepo, tableGuid, ct);
 
             var values = new Dictionary<long, object?>();
             var resolvedMappings = new Dictionary<string, object?>();
@@ -1991,8 +2115,7 @@ public class PipelineEngine : IPipelineEngine
                 throw new InvalidOperationException($"Failed to resolve target record public ID from: '{config.TargetRecordId}'");
 
             var tableGuid = Guid.Parse(config.TableId);
-            var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
-            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            var (table, fields) = await GetRecordStepMetadataAsync(tableRepo, fieldRepo, tableGuid, ct);
 
             var values = new Dictionary<long, object?>();
             var resolvedMappings = new Dictionary<string, object?>();
@@ -2076,8 +2199,7 @@ public class PipelineEngine : IPipelineEngine
             });
 
             var tableGuid = Guid.Parse(config.TableId);
-            var table = await tableRepo.GetByPublicIdAsync(tableGuid, ct);
-            var fields = await fieldRepo.ListByTableAsync(table.Id, ct);
+            var (table, fields) = await GetRecordStepMetadataAsync(tableRepo, fieldRepo, tableGuid, ct);
 
             var oldRecord = await recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct: ct);
             var oldValuesDict = new Dictionary<long, object?>();
@@ -2305,6 +2427,10 @@ public class PipelineEngine : IPipelineEngine
             if (config == null || string.IsNullOrWhiteSpace(config.LoopOverStepId))
                 throw new InvalidOperationException("Loop step configuration is invalid or missing LoopOverStepId.");
 
+            if (_options.EnableLoopBatches)
+                return await ExecuteBatchedLoopAsync(step, config, contextDict, allSteps, stepsDict,
+                    runId, stepRun, snapshots, executionPath, messageGuid, ct);
+
             var loopOverStep = allSteps.FirstOrDefault(s => s.RefId == config.LoopOverStepId && s.Type == "trigger" && s.Subtype == "new-bulk-event");
             if (loopOverStep != null)
             {
@@ -2388,6 +2514,54 @@ public class PipelineEngine : IPipelineEngine
             else
             {
                 stepsDict.TryGetValue(config.LoopOverStepId, out var listObj);
+                if (TryGetChunkedSearchHandle(listObj, out var searchWorksetId, out var searchTotal))
+                {
+                    stepRun.InputContext = SerializeAndSanitizeAudit(new {
+                        LoopOverStepId = config.LoopOverStepId, Mode = "ChunkedSearch",
+                        WorksetId = searchWorksetId, TotalCount = searchTotal
+                    });
+                    var processedCount = 0;
+                    stepsDict.TryGetValue(step.RefId, out var chunkedPreviousLoopScope);
+                    while (true)
+                    {
+                        var pageRows = await _pipelineRepo.GetPendingSearchWorksetPageAsync(
+                            searchWorksetId, _options.SearchRecordsPageSize, ct);
+                        if (pageRows.Count == 0) break;
+                        foreach (var row in pageRows)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            var item = JsonSerializer.Deserialize<Dictionary<string, object?>>(row.AfterValuesJson ?? "{}")
+                                ?? new Dictionary<string, object?>();
+                            stepsDict[step.RefId] = new Dictionary<string, object>
+                            {
+                                ["item"] = item,
+                                ["index"] = row.Ordinal - 1,
+                                ["is_first"] = row.Ordinal == 1,
+                                ["is_last"] = row.Ordinal == searchTotal
+                            };
+                            try
+                            {
+                                await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict,
+                                    stepsDict, snapshots, $"{executionPath}/search_workset_{row.Ordinal}", ct);
+                                await _pipelineRepo.MarkSearchWorksetRecordsProcessedAsync(
+                                    searchWorksetId, [row.Id], 1, ct);
+                                processedCount++;
+                            }
+                            catch
+                            {
+                                await _pipelineRepo.MarkSearchWorksetRecordsProcessedAsync(
+                                    searchWorksetId, [row.Id], 2, ct);
+                                throw;
+                            }
+                        }
+                    }
+                    if (chunkedPreviousLoopScope != null) stepsDict[step.RefId] = chunkedPreviousLoopScope;
+                    else stepsDict.Remove(step.RefId);
+                    return JsonSerializer.Serialize(new {
+                        LoopCompleted = true, IterationCount = searchTotal,
+                        ProcessedThisAttempt = processedCount, TotalCount = searchTotal, ChunkedSearch = true
+                    });
+                }
                 var items = GetLoopCollection(listObj);
                 var itemsList = items?.ToList() ?? new List<object>();
 
@@ -3625,6 +3799,34 @@ public class PipelineEngine : IPipelineEngine
         return sessions;
     }
 
+    private static Guid CreateDeterministicWorksetId(Guid messageId, string stepRefId)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{messageId:N}:{stepRefId}"));
+        return new Guid(bytes.AsSpan(0, 16));
+    }
+
+    private static Dictionary<string, object?> NormalizeSearchRecord(
+        IReadOnlyDictionary<string, object?> record, IReadOnlyList<AppField> fields)
+    {
+        var normalized = new Dictionary<string, object?>();
+        if (record.TryGetValue("Id", out var id)) normalized["Id"] = id;
+        if (record.TryGetValue("PublicId", out var publicId))
+        {
+            normalized["PublicId"] = publicId;
+            normalized["RecordPublicId"] = publicId;
+        }
+        foreach (var name in new[] { "CreatedOn", "CreatedBy", "ModifiedOn", "ModifiedBy" })
+            if (record.TryGetValue(name, out var value)) normalized[name] = value;
+        foreach (var field in fields.Where(f => f.Fid.HasValue))
+        {
+            var key = $"fid_{field.Fid!.Value}";
+            var column = PhysicalNaming.GetPhysicalColumnName(field);
+            if (record.TryGetValue(column, out var value)) normalized[key] = value;
+            else if (record.TryGetValue(field.Name, out var namedValue)) normalized[key] = namedValue;
+        }
+        return normalized;
+    }
+
     private IEnumerable<object>? GetLoopCollection(object? sourceVal)
     {
         if (sourceVal == null) return null;
@@ -3676,6 +3878,26 @@ public class PipelineEngine : IPipelineEngine
         }
 
         return null;
+    }
+
+    private static bool TryGetChunkedSearchHandle(object? source, out Guid worksetId, out int count)
+    {
+        worksetId = Guid.Empty;
+        count = 0;
+        JsonElement element;
+        if (source is JsonElement json) element = json;
+        else if (source is string text)
+        {
+            try { element = JsonDocument.Parse(text).RootElement.Clone(); }
+            catch { return false; }
+        }
+        else return false;
+        if (element.ValueKind != JsonValueKind.Object ||
+            !element.TryGetProperty("mode", out var mode) || mode.GetString() != "chunked-search" ||
+            !element.TryGetProperty("worksetId", out var id) || !Guid.TryParse(id.GetString(), out worksetId))
+            return false;
+        if (element.TryGetProperty("count", out var countElement) && countElement.TryGetInt32(out var parsed)) count = parsed;
+        return true;
     }
 
     private static bool TryGetLoopArray(JsonElement value, out JsonElement array)
@@ -5049,6 +5271,7 @@ public class PipelineEngine : IPipelineEngine
     private class LoopStepConfig
     {
         public string? LoopOverStepId { get; set; }
+        public int? MaxConcurrency { get; set; }
     }
 
     private class HandleErrorsStepConfig

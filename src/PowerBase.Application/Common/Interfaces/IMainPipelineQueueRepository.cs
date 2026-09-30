@@ -11,6 +11,8 @@ public interface IMainPipelineQueueRepository
 {
     Task<long> EnqueueAsync(PipelineQueue job, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineQueue>> ClaimPendingJobsAsync(string workerId, int batchSize, int leaseSeconds, List<long> eligibleTenantIds, CancellationToken ct = default);
+    Task<IReadOnlyList<PipelineQueue>> ClaimPendingJobsWithGlobalLimitsAsync(string workerId, int batchSize, int leaseSeconds,
+        int globalLimit, int tenantLimit, int pipelineLimit, List<long> eligibleTenantIds, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineQueue>> ReclaimExpiredJobsAsync(string workerId, int batchSize, int leaseSeconds, List<long> eligibleTenantIds, CancellationToken ct = default);
     Task<bool> RenewLeaseAsync(long id, string workerId, Guid claimToken, int leaseSeconds, CancellationToken ct = default);
     Task<bool> MarkSucceededAsync(long id, string workerId, Guid claimToken, CancellationToken ct = default);

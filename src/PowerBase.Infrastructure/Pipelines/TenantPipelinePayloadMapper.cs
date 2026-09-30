@@ -6,7 +6,8 @@ namespace PowerBase.Infrastructure.Pipelines;
 
 public static class TenantPipelinePayloadMapper
 {
-    public static PipelineQueue MapFromOutbox(PipelineOutboxItem outbox, long tenantId, Guid tenantPublicId, Guid pipelinePublicId)
+    public static PipelineQueue MapFromOutbox(PipelineOutboxItem outbox, long tenantId, Guid tenantPublicId,
+        Guid pipelinePublicId, int maxAttempts = 5)
     {
         var hash = PayloadHashHelper.ComputeHash(outbox.TriggerPayloadJson);
 
@@ -55,7 +56,7 @@ public static class TenantPipelinePayloadMapper
             EventTimestamp = outbox.CreatedOn,
             Status = "Pending",
             AttemptCount = 0,
-            MaxAttempts = 5,
+            MaxAttempts = maxAttempts,
             CreatedOn = DateTime.UtcNow,
             LastModifiedOn = DateTime.UtcNow
         };

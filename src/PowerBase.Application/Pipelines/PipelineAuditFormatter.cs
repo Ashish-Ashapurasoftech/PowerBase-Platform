@@ -851,6 +851,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 var iterationCount = outputDict.TryGetValue("IterationCount", out var itcObj) ? itcObj?.ToString() : itemCount;
                 friendlyOutput["Iterations"] = int.TryParse(iterationCount, out var itc) ? itc : 0;
+                if (outputDict.TryGetValue("BatchCount", out var batches)) friendlyOutput["Batches"] = batches;
+                if (outputDict.TryGetValue("BatchSize", out var batchSize)) friendlyOutput["Records Per Batch"] = batchSize;
+                if (outputDict.TryGetValue("FailedIterationCount", out var failedIterations)) friendlyOutput["Failed Iterations"] = failedIterations;
                 friendlyOutput["Status"] = "Completed";
 
                 logMessage = $"Loop completed successfully for {iterationCount} items.";

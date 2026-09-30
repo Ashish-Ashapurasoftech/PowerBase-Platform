@@ -16,11 +16,8 @@ public class PipelineWorkerCapacityTests
 {
     private static long _tenantId = 900000;
 
-    [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    [InlineData(2)]
-    public async Task ClaimsOnlyFreeSlotsAcrossReclaimedAndPendingJobs(int reclaimedCount)
+    [Fact]
+    public async Task CoordinatedClaimFillsOnlyFreeSlots()
     {
         var tenantId = Interlocked.Increment(ref _tenantId);
         var queue = Substitute.For<IMainPipelineQueueRepository>();
@@ -32,10 +29,9 @@ public class PipelineWorkerCapacityTests
             Id = id, PublicId = Guid.NewGuid(), TenantId = tenantId, PipelineId = id,
             ClaimToken = Guid.NewGuid(), Status = "Processing", CreatedOn = DateTime.UtcNow
         }).ToArray();
-        queue.ReclaimExpiredJobsAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<List<long>>(), Arg.Any<CancellationToken>())
-            .Returns(jobs.Take(reclaimedCount).ToArray());
-        queue.ClaimPendingJobsAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<List<long>>(), Arg.Any<CancellationToken>())
-            .Returns(jobs.Skip(reclaimedCount).ToArray());
+        queue.ClaimPendingJobsWithGlobalLimitsAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(),
+                Arg.Any<int>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<List<long>>(), Arg.Any<CancellationToken>())
+            .Returns(jobs);
         using var provider = new ServiceCollection()
             .AddSingleton(queue).AddSingleton(pipelines).AddSingleton(Substitute.For<IQueryContext>()).BuildServiceProvider();
         using var worker = new DatabasePipelineExecutionWorker(provider, Substitute.For<IControlConnectionFactory>(),
@@ -48,12 +44,10 @@ public class PipelineWorkerCapacityTests
         {
             await (Task)dispatch.Invoke(worker, [new List<long> { tenantId }, CancellationToken.None])!;
             Assert.Equal(2, active.Count);
-            await queue.Received(1).ReclaimExpiredJobsAsync(Arg.Any<string>(), 2, Arg.Any<int>(),
-                Arg.Is<List<long>>(ids => ids.SequenceEqual(new[] { tenantId })), Arg.Any<CancellationToken>());
-            if (reclaimedCount < 2)
-                await queue.Received(1).ClaimPendingJobsAsync(Arg.Any<string>(), 2 - reclaimedCount, Arg.Any<int>(), Arg.Any<List<long>>(), Arg.Any<CancellationToken>());
-            else
-                await queue.DidNotReceive().ClaimPendingJobsAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<List<long>>(), Arg.Any<CancellationToken>());
+            await queue.DidNotReceive().ReclaimExpiredJobsAsync(Arg.Any<string>(), Arg.Any<int>(), Arg.Any<int>(),
+                Arg.Any<List<long>>(), Arg.Any<CancellationToken>());
+            await queue.Received(1).ClaimPendingJobsWithGlobalLimitsAsync(Arg.Any<string>(), 2, Arg.Any<int>(),
+                50, 10, 3, Arg.Is<List<long>>(ids => ids.SequenceEqual(new[] { tenantId })), Arg.Any<CancellationToken>());
 
             queue.ClearReceivedCalls();
             await (Task)dispatch.Invoke(worker, [new List<long> { tenantId }, CancellationToken.None])!;

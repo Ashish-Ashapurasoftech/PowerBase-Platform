@@ -3,6 +3,8 @@ using System.Data;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Entities;
 using PowerBase.Infrastructure.Persistence;
@@ -16,17 +18,20 @@ public class DatabasePipelineExecutionQueue : IPipelineExecutionQueue
     private readonly IControlConnectionFactory _controlConnFactory;
     private readonly ITenantConnectionResolver _tenantResolver;
     private readonly ILogger<DatabasePipelineExecutionQueue> _logger;
+    private readonly PipelineExecutionOptions _options;
 
     public DatabasePipelineExecutionQueue(
         IMainPipelineQueueRepository queueRepo,
         IControlConnectionFactory controlConnFactory,
         ITenantConnectionResolver tenantResolver,
-        ILogger<DatabasePipelineExecutionQueue> logger)
+        ILogger<DatabasePipelineExecutionQueue> logger,
+        IOptions<PipelineExecutionOptions> options)
     {
         _queueRepo = queueRepo;
         _controlConnFactory = controlConnFactory;
         _tenantResolver = tenantResolver;
         _logger = logger;
+        _options = options.Value;
     }
 
     public void QueueTask(PipelineExecutionTask task)
@@ -130,7 +135,7 @@ public class DatabasePipelineExecutionQueue : IPipelineExecutionQueue
                 EventTimestamp = DateTime.UtcNow,
                 Status = "Pending",
                 AttemptCount = 0,
-                MaxAttempts = 5
+                MaxAttempts = _options.DatabaseQueue.MaxAttempts
             };
 
             try

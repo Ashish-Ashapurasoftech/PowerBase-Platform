@@ -28,6 +28,7 @@ public class DatabasePipelineExecutionWorker : BackgroundService
     private readonly string _workerId;
 
     private readonly ConcurrentDictionary<string, Task> _activeTasks = new();
+    private int _tenantDispatchCursor = Random.Shared.Next(0, 10000);
     private static readonly ConcurrentDictionary<long, SemaphoreSlim> TenantSemaphores = new();
 
     public DatabasePipelineExecutionWorker(
@@ -92,7 +93,9 @@ public class DatabasePipelineExecutionWorker : BackgroundService
 
     private async Task DispatchAvailableJobsAsync(List<long> eligibleTenantIds, CancellationToken ct)
     {
-        foreach (var tenantId in eligibleTenantIds)
+        if (eligibleTenantIds.Count == 0) return;
+        var start = (int)((uint)Interlocked.Increment(ref _tenantDispatchCursor) % (uint)eligibleTenantIds.Count);
+        foreach (var tenantId in eligibleTenantIds.Skip(start).Concat(eligibleTenantIds.Take(start)))
         {
             ct.ThrowIfCancellationRequested();
             try
@@ -106,14 +109,14 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                 var queueRepo = scope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
                 // Claim only jobs that can start now. Waiting behind a semaphore after
                 // claiming lets leases expire before their heartbeat has even started.
-                var reclaimed = await queueRepo.ReclaimExpiredJobsAsync(
-                    _workerId, capacity, _options.DatabaseQueue.LeaseSeconds, [tenantId], ct);
-                foreach (var job in reclaimed.Where(j => j.Status != "Failed")) DispatchJob(job, ct);
-
-                capacity = Math.Min(semaphore.CurrentCount, _options.DatabaseQueue.ExecutionBatchSize);
-                if (capacity <= 0) continue;
-                var pending = await queueRepo.ClaimPendingJobsAsync(
-                    _workerId, capacity, _options.DatabaseQueue.LeaseSeconds, [tenantId], ct);
+                // This coordinated claim also reclaims expired leases. A separate reclaim
+                // would allow that work to bypass the shared concurrency limits.
+                var pending = await queueRepo.ClaimPendingJobsWithGlobalLimitsAsync(
+                    _workerId, capacity, _options.DatabaseQueue.LeaseSeconds,
+                    _options.DatabaseQueue.GlobalConcurrencyLimit,
+                    _options.DatabaseQueue.TenantConcurrencyLimit,
+                    _options.DatabaseQueue.PipelineConcurrencyLimit,
+                    [tenantId], ct);
                 foreach (var job in pending) DispatchJob(job, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -156,7 +159,15 @@ public class DatabasePipelineExecutionWorker : BackgroundService
             await conn.OpenAsync(ct);
             var query = await conn.QueryAsync<long>(
                 new CommandDefinition(
-                    "SELECT Id FROM meta.Tenant WHERE IsDeleted = 0 AND ProvisioningState = 'Ready'",
+                    """
+                    SELECT DISTINCT t.Id
+                    FROM meta.Tenant t
+                    INNER JOIN meta.PipelineQueue q ON q.TenantId = t.Id
+                    WHERE t.IsDeleted = 0 AND t.ProvisioningState = 'Ready'
+                      AND ((q.Status = 'Pending' AND (q.NextAttemptOn IS NULL OR q.NextAttemptOn <= SYSUTCDATETIME()))
+                        OR (q.Status = 'Processing' AND q.LockedUntil <= SYSUTCDATETIME()))
+                    ORDER BY t.Id
+                    """,
                     cancellationToken: ct));
 
             return query
@@ -193,6 +204,8 @@ public class DatabasePipelineExecutionWorker : BackgroundService
             job.Id, job.TenantId, (DateTime.UtcNow - job.CreatedOn).TotalMilliseconds, job.AttemptCount);
 
         CancellationTokenSource heartbeatCts = new();
+        using var executionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var timeSinceConfirmedLease = System.Diagnostics.Stopwatch.StartNew();
         Task? heartbeatTask = null;
 
         try
@@ -220,13 +233,23 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                         if (!renewed)
                         {
                             _logger.LogWarning("Worker lease renewal failed for Job {Id} (MessageId: {MessageId}). Ownership may have been lost.", job.Id, job.MessageId);
+                            executionCts.Cancel();
                             break;
                         }
+                        timeSinceConfirmedLease.Restart();
                     }
                     catch (OperationCanceledException) { break; }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "Error in lease heartbeat loop for Job {Id}.", job.Id);
+                        var safeLeaseWindow = TimeSpan.FromSeconds(
+                            _options.DatabaseQueue.LeaseSeconds - _options.DatabaseQueue.HeartbeatSeconds);
+                        if (timeSinceConfirmedLease.Elapsed >= safeLeaseWindow)
+                        {
+                            _logger.LogWarning("Stopping pipeline job {Id} because its lease could not be confirmed within the safe window.", job.Id);
+                            executionCts.Cancel();
+                            break;
+                        }
                     }
                 }
             }, heartbeatCts.Token);
@@ -308,7 +331,8 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                         }
                         
                         // Lease expired: Reclaim stale run
-                        var reclaimed = await pipelineRepo.ReclaimStaleRunAsync(job.MessageId, _workerId, ct);
+                        var reclaimed = await pipelineRepo.ReclaimStaleRunAsync(
+                            job.MessageId, _workerId, ct, job.MaxAttempts);
                         if (!reclaimed)
                         {
                             await queueRepo.ScheduleRetryAsync(job.Id, _workerId, claimToken, 10, "Failed to reclaim stale Tenant run lease.", ct);
@@ -338,7 +362,8 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                         }
 
                         // Reclaim for retry execution
-                        var reclaimed = await pipelineRepo.ClaimFailedRunRetryAsync(job.MessageId, _workerId, ct);
+                        var reclaimed = await pipelineRepo.ClaimFailedRunRetryAsync(
+                            job.MessageId, _workerId, ct, job.MaxAttempts);
                         if (!reclaimed)
                         {
                             await queueRepo.ScheduleRetryAsync(job.Id, _workerId, claimToken, 10, "Failed to reclaim failed Tenant run lease.", ct);
@@ -360,14 +385,15 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                     CorrelationId = job.CorrelationId?.ToString(),
                     Depth = job.Depth,
                     MessageId = job.MessageId.ToString(),
-                    WorkerId = _workerId
+                    WorkerId = _workerId,
+                    MaxAttempts = job.MaxAttempts
                 };
 
                 var engine = scope.ServiceProvider.GetRequiredService<IPipelineEngine>();
                 
                 try
                 {
-                    await engine.ExecuteAsync(task, ct);
+                    await engine.ExecuteAsync(task, executionCts.Token);
 
                     // Verification of execution status post run
                     var finalRun = await pipelineRepo.GetRunByMessageIdAsync(job.MessageId, ct);
@@ -390,8 +416,18 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                             await HandleJobFailureAsync(queueRepo, job, claimToken, finalRun.LastError ?? "Execution failed.", ct);
                         }
                     }
+                    else if (finalRun != null)
+                    {
+                        var observedStatus = finalRun.Status;
+                        _logger.LogWarning("Pipeline job {Id} returned without a terminal tenant run status. Observed: {Status}. Scheduling retry.",
+                            job.Id, observedStatus);
+                        await HandleJobFailureAsync(queueRepo, job, claimToken,
+                            $"Tenant pipeline run did not reach a terminal status (observed: {observedStatus}).", ct);
+                    }
                     else
                     {
+                        // Compatibility for engine implementations that do not persist a tenant run.
+                        // The production PipelineEngine always creates one for queued messages.
                         await queueRepo.MarkSucceededAsync(job.Id, _workerId, claimToken, ct);
                     }
                 }
@@ -399,6 +435,10 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                 {
                     _logger.LogInformation("Pipeline execution paused for Job {Id} until {ResumeDate}.", job.Id, waitEx.ResumeDate);
                     await queueRepo.ScheduleWaitAsync(job.Id, _workerId, claimToken, waitEx.ResumeDate, ct);
+                }
+                catch (OperationCanceledException) when (executionCts.IsCancellationRequested && !ct.IsCancellationRequested)
+                {
+                    _logger.LogWarning("Stopped pipeline job {Id} because its queue lease was lost.", job.Id);
                 }
                 catch (Exception ex) when (ex is PowerBase.Domain.Exceptions.PipelineNonRetryableException or PowerBase.Application.Pipelines.PipelineMappingException ||
                     ex.InnerException is PowerBase.Domain.Exceptions.PipelineNonRetryableException or PowerBase.Application.Pipelines.PipelineMappingException)
@@ -553,7 +593,9 @@ public class DatabasePipelineExecutionWorker : BackgroundService
         }
         else
         {
-            var backoff = _options.DatabaseQueue.BaseRetryDelaySeconds * (int)Math.Pow(2, job.AttemptCount);
+            var exponent = Math.Min(job.AttemptCount, 20);
+            var backoff = (int)Math.Min(3600L,
+                (long)_options.DatabaseQueue.BaseRetryDelaySeconds * (1L << exponent));
             _logger.LogInformation("Scheduling backoff retry in {Seconds}s for Job {Id} (MessageId: {MessageId}).", backoff, job.Id, job.MessageId);
             await queueRepo.ScheduleRetryAsync(job.Id, _workerId, claimToken, backoff, error, ct);
         }

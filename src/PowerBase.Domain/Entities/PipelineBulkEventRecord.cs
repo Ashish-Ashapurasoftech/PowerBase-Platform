@@ -6,6 +6,7 @@ public class PipelineBulkEventRecord
 {
     public long Id { get; set; }
     public Guid BulkEventId { get; set; }
+    public Guid? SearchWorksetId { get; set; }
     public int Ordinal { get; set; }
     public Guid RecordPublicId { get; set; }
     public string EventType { get; set; } = string.Empty;
