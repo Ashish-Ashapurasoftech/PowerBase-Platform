@@ -498,6 +498,17 @@ public partial class PipelineEngine : IPipelineEngine
                 }
             }
 
+            if (!isSkipped && eventName == "pipeline-called" && rootStep?.Subtype == "pipeline-called")
+            {
+                using var callPayload = JsonDocument.Parse(task.TriggerPayloadJson ?? "{}");
+                if (!CallablePipelineFilter.Matches(rootStep.ConfigJson, callPayload.RootElement, rootStep.RefId))
+                {
+                    isSkipped = true;
+                    skipReason = "PowerFlow Called trigger conditions did not match. " +
+                        CallablePipelineFilter.DescribeMismatch(rootStep.ConfigJson, callPayload.RootElement, rootStep.RefId);
+                }
+            }
+
             if (isSkipped)
             {
                 _logger.LogWarning("Pipeline run {PipelineId} attempt skipped. Reason: {SkipReason}", task.PipelineId, skipReason);

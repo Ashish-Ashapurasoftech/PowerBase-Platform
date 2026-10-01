@@ -35,11 +35,16 @@ public sealed record CallablePipelineDefinition(string Definition, string Name, 
                 foreach (var name in definition.Arguments)
                     if (!args.TryGetProperty(name, out _)) throw new PipelineNonRetryableException($"Set a value for {name}.");
             }
+            if (!caller) CallablePipelineFilter.Read(configJson, definition);
             return definition;
         }
         catch (JsonException)
         {
             throw new PipelineNonRetryableException("Callable PowerFlow configuration must be valid JSON.");
+        }
+        catch (ArgumentException ex)
+        {
+            throw new PipelineNonRetryableException(ex.Message);
         }
     }
 }

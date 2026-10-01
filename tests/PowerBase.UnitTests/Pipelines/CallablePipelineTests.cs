@@ -140,6 +140,25 @@ public class CallablePipelineTests
     }
 
     [Fact]
+    public async Task NonMatchingCallableFilterSkipsRunBeforeExecutingSteps()
+    {
+        var repository = Substitute.For<IPipelineRepository>();
+        repository.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 123L));
+        repository.GetByIdAsync(10, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 10, CreatedBy = 7, IsActive = true });
+        repository.GetStepsByPipelineIdAsync(10, Arg.Any<CancellationToken>()).Returns(new[] {
+            new PipelineStep { Id = 1, PipelineId = 10, RefId = "ref_1", Type = "trigger", Subtype = "pipeline-called", IsValidated = true,
+                ConfigJson = """{"callDefinition":"f(name)","filterGroups":[{"rules":[{"field":"name","operator":"is","value":"Alice"}]}]}""" },
+            new PipelineStep { Id = 2, PipelineId = 10, RefId = "ref_2", Type = "action", Subtype = "send-email", DisplayOrder = 1 }
+        });
+        await CreateEngine(repository, Substitute.For<IPipelineExecutionQueue>()).ExecuteAsync(new PipelineExecutionTask {
+            PipelineId = 10, TenantId = 3, TriggeredBy = 7, TriggerEvent = "pipeline-called",
+            TriggerPayloadJson = """{"CallDefinition":"f(name)","Arguments":{"name":"Bob"},"TriggerStepId":1}"""
+        }, default);
+        await repository.Received().UpdateRunAsync(Arg.Is<PipelineRun>(run => run.Status == "Skipped" && run.ErrorMessage!.Contains("conditions did not match")), Arg.Any<CancellationToken>());
+        repository.ReceivedCalls().Should().NotContain(call => call.GetMethodInfo().Name == "CreateStepRunAsync");
+    }
+
+    [Fact]
     public void HttpMetadataIsNotShadowedByAResponseBodyMetadataProperty()
     {
         var engine = CreateEngine(Substitute.For<IPipelineRepository>(), Substitute.For<IPipelineExecutionQueue>());
