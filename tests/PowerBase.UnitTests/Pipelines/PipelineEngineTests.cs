@@ -2369,6 +2369,41 @@ public class PipelineEngineTests
     }
 
     [Fact]
+    public async Task CreateRecord_PublishesPersistedDefaultsAndBlankFieldsToTrigger()
+    {
+        var table = new AppTable { Id = 10, PublicId = Guid.NewGuid() };
+        var fields = new List<AppField> {
+            new() { Id = 60, Fid = 6, Name = "Default", TypeCode = "text", PhysicalColumnName = "f_6" },
+            new() { Id = 70, Fid = 7, Name = "Blank", TypeCode = "text", PhysicalColumnName = "f_7" }
+        };
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(fields);
+        var publicId = Guid.NewGuid();
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var transaction = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(transaction);
+        _recordRepo.CreateAsync(table, fields, Arg.Any<IReadOnlyDictionary<long, object?>>(), transaction, Arg.Any<CancellationToken>()).Returns(publicId);
+        _recordRepo.GetActiveRecordIdByPublicIdAsync(table, publicId, transaction, Arg.Any<CancellationToken>()).Returns(19L);
+        _recordRepo.GetBulkUpsertRowsByIdsAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), transaction, Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> {
+                [19] = new Dictionary<string, object?> { ["f_6"] = "Saved default", ["f_7"] = null }
+            });
+        var interceptor = Substitute.For<IPipelineTriggerInterceptor>();
+        var step = new PipelineStep { Type = "action", Subtype = "create-record",
+            ConfigJson = JsonSerializer.Serialize(new { tableId = table.PublicId.ToString() }) };
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        await (Task<string>)method.Invoke(_engine, new object[] {
+            step, "{}", new Dictionary<string, object>(), new List<PipelineStep>(), new Dictionary<string, object>(), 1L,
+            new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "root/create",
+            _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, interceptor, uow, _idempotencyRepo,
+            Substitute.For<IFileStorageService>(), _pipelineRecordSearchService, CancellationToken.None
+        })!;
+        await interceptor.Received(1).InterceptAsync(table, fields, publicId,
+            Arg.Is<IReadOnlyDictionary<long, object?>>(values => Equals(values[6], "Saved default") && values.ContainsKey(7) && values[7] == null),
+            "record-added", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task CreateRecord_CrossTenant_TargetField_UsesStableFid()
     {
         // Arrange

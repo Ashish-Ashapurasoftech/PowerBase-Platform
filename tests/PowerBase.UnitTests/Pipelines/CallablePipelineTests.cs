@@ -17,6 +17,38 @@ namespace PowerBase.UnitTests.Pipelines;
 
 public class CallablePipelineTests
 {
+    [Theory]
+    [InlineData("{{steps.ref_2.fid_6}}", "{\"steps\":{\"ref_2\":{}}}")]
+    [InlineData("{{steps.ref_2.fid_6}}", "{\"steps\":{}}")]
+    [InlineData("Value: {{steps.ref_2.fid_6}}", "{\"steps\":{}}")]
+    public async Task MissingCallReferenceIsTerminalAndDoesNotDispatch(string mapping, string payload)
+    {
+        var queue = Substitute.For<IPipelineExecutionQueue>();
+        var engine = CreateEngine(Substitute.For<IPipelineRepository>(), queue);
+        var step = new PipelineStep { Type = "action", Subtype = "call-another-pipeline",
+            ConfigJson = JsonSerializer.Serialize(new { callDefinition = "f(value)", arguments = new { value = mapping } }) };
+        using var document = JsonDocument.Parse(payload);
+        var outputs = JsonSerializer.Deserialize<Dictionary<string, object>>(document.RootElement.GetProperty("steps").GetRawText())!;
+        var failure = await FluentActions.Awaiting(() => ExecuteStep(engine, step, new(), outputs))
+            .Should().ThrowAsync<PipelineMappingException>().WithMessage("*ref_2*");
+        PipelineEngine.IsCatchablePipelineStepError(failure.Which).Should().BeTrue();
+        queue.DidNotReceive().QueueTask(Arg.Any<PipelineExecutionTask>());
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("false")]
+    [InlineData("0")]
+    [InlineData("\"\"")]
+    public void PresentBlankOrFalsyCallArgumentRetainsItsValue(string json)
+    {
+        var engine = CreateEngine(Substitute.For<IPipelineRepository>(), Substitute.For<IPipelineExecutionQueue>());
+        var method = typeof(PipelineEngine).GetMethod("ResolveCallableValue", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var result = method.Invoke(engine, new object?[] { "{{steps.ref_2.fid_6}}",
+            "{\"steps\":{\"ref_2\":{\"fid_6\":" + json + "}}}", null, null });
+        JsonSerializer.Serialize(result).Should().Be(json);
+    }
+
     private static PipelineEngine CreateEngine(IPipelineRepository repository, IPipelineExecutionQueue queue)
     {
         var services = Substitute.For<IServiceProvider>();

@@ -2096,8 +2096,6 @@ public partial class PipelineEngine : IPipelineEngine
                 var createdByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
                 if (createdByField != null) values[createdByField.Fid!.Value] = _queryContext.UserId;
 
-                await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, values, "record-added", ct);
-
                 IReadOnlyDictionary<string, object?>? persistedRecord = null;
                 if (uow.Transaction is not null)
                 {
@@ -2106,6 +2104,12 @@ public partial class PipelineEngine : IPipelineEngine
                     persistedRows?.TryGetValue(recordId, out persistedRecord);
                 }
                 var output = BuildCreatedRecordOutput(recordPublicId, recordId, fields, values, persistedRecord);
+                // Publish the same complete snapshot exposed by this step, including persisted
+                // defaults and explicit nulls. Submitted mappings alone omit valid fields and
+                // make a downstream callable reference fail depending on the created record.
+                var triggerValues = fields.Where(field => field.Fid.HasValue)
+                    .ToDictionary(field => (long)field.Fid!.Value, field => output[$"fid_{field.Fid!.Value}"]);
+                await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, triggerValues, "record-added", ct);
                 var outputJson = JsonSerializer.Serialize(output);
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
@@ -4703,7 +4707,15 @@ public partial class PipelineEngine : IPipelineEngine
     {
         // A complete field reference retains its JSON type; interpolated text remains text.
         var match = Regex.Match(input ?? "", @"^\{\{\s*((?:steps\.|trigger\.|variables\.)?[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)\s*\}\}$");
-        if (!match.Success) return EvaluateTokens(input, payloadJson, executionPath, allSteps);
+        if (!match.Success)
+        {
+            try { return EvaluateTokens(input, payloadJson, executionPath, allSteps); }
+            catch (PipelineStepException ex)
+            {
+                // Replaying this immutable execution context cannot repair an invalid mapping.
+                throw new PipelineMappingException($"Call argument could not be resolved: {ex.Message}", ex);
+            }
+        }
         var path = match.Groups[1].Value;
         if (allSteps?.Any(step => step.RefId == path.Split('.')[0]) == true) path = "steps." + path;
         using var document = JsonDocument.Parse(payloadJson);
@@ -4711,7 +4723,7 @@ public partial class PipelineEngine : IPipelineEngine
         foreach (var segment in path.Split('.'))
         {
             if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(segment, out value))
-                throw new PipelineStepException($"Call argument reference '{input}' is missing from the execution context.");
+                throw new PipelineMappingException($"Call argument reference '{input}' is missing from the execution context at '{segment}'. Check that the referenced step ran in this branch and its output contains the field. Automatic retry cannot repair this reference.", new KeyNotFoundException(segment));
         }
         return ConvertJsonElement(value.Clone());
     }
