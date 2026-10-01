@@ -63,7 +63,93 @@ public class RelationalProjectorTests
         result[1][11].Should().BeNull();           // unlinked → null
     }
 
-    private static readonly List<AppField> PlainChildFields = [Field(10, "Item", "Reference"), Field(30, "Qty", "Number")];
+    // ── Lookups of computed fields (Formula / Lookup) ─────────────────────────────────────────
+
+    private static IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> RowsById(params (long Id, Dictionary<string, object?> Row)[] rows) =>
+        rows.ToDictionary(r => r.Id, r => (IReadOnlyDictionary<string, object?>)r.Row);
+
+    private void ParentRowsFor(long tableId, IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> rows) =>
+        _recordRepo.GetRowsByIdsAsync(Arg.Is<AppTable>(t => t.Id == tableId), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(rows);
+
+    /// <summary>The formula projector as the real one treats the seed: merged into the output.</summary>
+    private void FormulaProjectorReturnsSeed() =>
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(2)
+                ?? ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(1).Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+
+    private static readonly IReadOnlyList<IReadOnlyDictionary<string, object?>> ChildRowLinkedTo42 = Rows(
+        new Dictionary<string, object?> { ["Id"] = 1L, [PhysicalNaming.ColumnName(10)] = 42L });
+
+    [Fact]
+    public async Task Lookup_of_a_formula_field_pulls_the_computed_value()
+    {
+        var childFields = new List<AppField>
+        {
+            Field(10, "Employee", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}"),
+            Field(11, "Employee - Code", "Lookup", "{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":99,\"sourceFid\":5,\"sourceTypeCode\":\"Formula\"}"),
+        };
+        var parentFields = new List<AppField> { Field(5, "Code", "Formula") };
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 99 });
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>()).Returns(parentFields);
+        ParentRowsFor(99, RowsById((42L, new Dictionary<string, object?> { ["Id"] = 42L })));
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?> { [5] = "E-001" } });
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 7 }, childFields, ChildRowLinkedTo42);
+
+        result[0][11].Should().Be("E-001");
+    }
+
+    [Fact]
+    public async Task Lookup_of_a_lookup_follows_the_chain_to_the_underlying_value()
+    {
+        // Salary(child) → Payroll(99) → Employee(88): Salary's lookup pulls Payroll's lookup of Employee's Code.
+        var salaryFields = new List<AppField>
+        {
+            Field(10, "Payroll", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}"),
+            Field(11, "Payroll - Employee Code", "Lookup", "{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":99,\"sourceFid\":6,\"sourceTypeCode\":\"Text\"}"),
+        };
+        var payrollFields = new List<AppField>
+        {
+            Field(20, "Employee", "Reference", "{\"relationshipId\":2,\"parentTableId\":88}"),
+            Field(6, "Employee - Code", "Lookup", "{\"relationshipId\":2,\"referenceFid\":20,\"sourceTableId\":88,\"sourceFid\":5,\"sourceTypeCode\":\"Text\"}"),
+        };
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 99 });
+        _tableRepo.GetByIdAsync(88, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 88 });
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>()).Returns(payrollFields);
+        _fieldRepo.ListByTableAsync(88, Arg.Any<CancellationToken>()).Returns(new List<AppField> { Field(5, "Code", "Text") });
+        ParentRowsFor(99, RowsById((42L, new Dictionary<string, object?> { ["Id"] = 42L, [PhysicalNaming.ColumnName(20)] = 7L })));
+        ParentRowsFor(88, RowsById((7L, new Dictionary<string, object?> { ["Id"] = 7L, [PhysicalNaming.ColumnName(5)] = "E-001" })));
+        FormulaProjectorReturnsSeed();
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 7 }, salaryFields, ChildRowLinkedTo42);
+
+        result[0][11].Should().Be("E-001");
+    }
+
+    [Fact]
+    public async Task Lookup_cycle_stops_at_the_chain_cap_and_stays_blank()
+    {
+        // A table whose lookup reads its own lookup through a self-reference: would recurse forever uncapped.
+        var fields = new List<AppField>
+        {
+            Field(10, "Self", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}"),
+            Field(11, "Self - Loop", "Lookup", "{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":99,\"sourceFid\":11,\"sourceTypeCode\":\"Text\"}"),
+        };
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 99 });
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>()).Returns(fields);
+        ParentRowsFor(99, RowsById((42L, new Dictionary<string, object?> { ["Id"] = 42L, [PhysicalNaming.ColumnName(10)] = 42L })));
+        FormulaProjectorReturnsSeed();
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 99 }, fields, ChildRowLinkedTo42);
+
+        result[0][11].Should().BeNull();
+    }
+
+    private static readonly List<AppField> PlainChildFields =[Field(10, "Item", "Reference"), Field(30, "Qty", "Number")];
 
     private void CountReturns(Dictionary<object, object?> result) =>
         _recordRepo.AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, Arg.Any<string>(), Arg.Any<int?>(),

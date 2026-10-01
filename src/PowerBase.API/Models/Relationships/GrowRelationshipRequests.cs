@@ -45,3 +45,20 @@ public class UpdateDisplayKeyRequest
     /// <summary>Parent field Fid to use as the picker/grid/filter label; 3 or null reverts to Standard key.</summary>
     public int? DisplayKeyFieldFid { get; set; }
 }
+
+/// <summary>Replace the dependent-dropdown conditions of a relationship's Reference field.</summary>
+public class UpdateReferenceFilterRequest
+{
+    public List<ReferenceFilterConditionRequest> Conditions { get; set; } = new();
+}
+
+/// <summary>Junction mode when <see cref="JunctionTableId"/> is set; otherwise direct (<see cref="ParentFid"/>).</summary>
+public class ReferenceFilterConditionRequest
+{
+    /// <summary>Fid of the field on this (child) table whose form value drives the filter.</summary>
+    public int FormFid { get; set; }
+    public int? ParentFid { get; set; }
+    public Guid? JunctionTableId { get; set; }
+    public int? JunctionParentFid { get; set; }
+    public int? JunctionValueFid { get; set; }
+}

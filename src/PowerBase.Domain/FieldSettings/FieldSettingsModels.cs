@@ -524,6 +524,36 @@ public sealed class ReferenceSettings
     public long? RelationshipId { get; set; }
     /// <summary>The parent table's <see cref="Entities.AppTable.Id"/>.</summary>
     public long? ParentTableId { get; set; }
+
+    /// <summary>Dependent-dropdown conditions ("the values in this field depend on a selection in
+    /// another field"). All conditions must hold (AND). Null/empty = every parent record is offered.</summary>
+    public List<ReferenceFilterCondition>? FilterConditions { get; set; }
+}
+
+/// <summary>
+/// One dependent-dropdown condition on a Reference field. The current value of the child form
+/// field <see cref="FormFid"/> (e.g. TaskType on a Task) narrows the parent records offered, either:
+/// <list type="bullet">
+/// <item><b>direct</b> — parent field <see cref="ParentFid"/> equals the form value; or</item>
+/// <item><b>via a junction table</b> — a non-deleted row exists in <see cref="JunctionTableId"/> whose
+/// <see cref="JunctionParentFid"/> holds the parent row Id and whose <see cref="JunctionValueFid"/>
+/// equals the form value (e.g. StatusTaskTypes.TaskTypeId = Tasks.TaskTypeId).</item>
+/// </list>
+/// </summary>
+public sealed class ReferenceFilterCondition
+{
+    /// <summary>Fid of the field on the same (child) table whose form value drives the filter.</summary>
+    public int? FormFid { get; set; }
+    /// <summary>Direct mode: Fid of the parent-table field compared to the form value.</summary>
+    public int? ParentFid { get; set; }
+    /// <summary>Junction mode: the junction table's <see cref="Entities.AppTable.Id"/>.</summary>
+    public long? JunctionTableId { get; set; }
+    /// <summary>Junction mode: the same table's PublicId, kept so the admin UI can preselect it.</summary>
+    public Guid? JunctionTablePublicId { get; set; }
+    /// <summary>Junction mode: junction field (Reference/Number) holding the parent row Id.</summary>
+    public int? JunctionParentFid { get; set; }
+    /// <summary>Junction mode: junction field compared to the form value.</summary>
+    public int? JunctionValueFid { get; set; }
 }
 
 /// <summary>

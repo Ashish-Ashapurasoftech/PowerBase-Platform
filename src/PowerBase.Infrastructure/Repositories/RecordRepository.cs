@@ -224,20 +224,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     public async Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
-        AppField? primaryLabelField = null, CancellationToken ct = default)
+        AppField? primaryLabelField = null, CancellationToken ct = default,
+        IReadOnlyList<ReferenceFilterClause>? filters = null)
     {
         take = Math.Clamp(take, 1, 200);
 
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
+        if (filters is { Count: > 0 })
+            where += $" AND {BuildReferenceFilterSql(filters, parameters)}";
 
-        var searchColExpr = labelFields.Count > 0 ? LabelColumnExpr(labelFields[0]) : "CAST(Id AS NVARCHAR(400))";
+        // Computed label fields (Formula/Lookup/Summary) have no SQL column: they are selected as NULL
+        // placeholders and filled in by the caller after projection (see GetParentOptionsQueryHandler).
+        // They can't be searched or ordered by in SQL, so those fall to the first physical label
+        // field, or the row Id when there is none.
+        var physicalLabelFields = labelFields.Where(f => !IsComputedLabel(f)).ToList();
+        var searchColExpr = physicalLabelFields.Count > 0 ? LabelColumnExpr(physicalLabelFields[0]) : "CAST(Id AS NVARCHAR(400))";
         if (!string.IsNullOrWhiteSpace(search))
         {
             parameters.Add("search", $"%{search}%");
-            if (labelFields.Count > 0)
+            if (physicalLabelFields.Count > 0)
             {
-                var searchConditions = labelFields.Select(f => $"{LabelColumnExpr(f)} LIKE @search");
+                var searchConditions = physicalLabelFields.Select(f => $"{LabelColumnExpr(f)} LIKE @search");
                 where += $" AND ({string.Join(" OR ", searchConditions)})";
             }
             else
@@ -253,18 +261,18 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // dropdown's own "selection changed" moment) can hit GetById directly — it plays no part
         // in what gets submitted/stored.
         var selectCols = new List<string> { "CAST(Id AS NVARCHAR(400)) AS Id", "PublicId" };
-        if (labelFields.Count > 0) selectCols.Add($"{LabelColumnExpr(labelFields[0])} AS Value1");
-        if (labelFields.Count > 1) selectCols.Add($"{LabelColumnExpr(labelFields[1])} AS Value2");
-        if (labelFields.Count > 2) selectCols.Add($"{LabelColumnExpr(labelFields[2])} AS Value3");
+        if (labelFields.Count > 0) selectCols.Add($"{SelectLabelExpr(labelFields[0])} AS Value1");
+        if (labelFields.Count > 1) selectCols.Add($"{SelectLabelExpr(labelFields[1])} AS Value2");
+        if (labelFields.Count > 2) selectCols.Add($"{SelectLabelExpr(labelFields[2])} AS Value3");
         
         if (labelFields.Count == 0) selectCols.Add($"{searchColExpr} AS Value1");
 
-        var labelExpr = primaryLabelField is not null ? LabelColumnExpr(primaryLabelField) : searchColExpr;
+        var labelExpr = primaryLabelField is not null ? SelectLabelExpr(primaryLabelField) : searchColExpr;
         selectCols.Add($"{labelExpr} AS Label");
 
         var sql = $"""
             SELECT TOP (@take) {string.Join(", ", selectCols)}
-            FROM {PhysicalNaming.FullTableName(parentTable.Id)}
+            FROM {PhysicalNaming.FullTableName(parentTable.Id)} AS p
             WHERE {where}
             ORDER BY {searchColExpr}
             """;
@@ -296,6 +304,47 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
 
         return list;
+    }
+
+    public async Task<bool> MatchesReferenceFilterAsync(
+        AppTable parentTable, long parentRowId, IReadOnlyList<ReferenceFilterClause> filters, CancellationToken ct = default)
+    {
+        if (filters.Count == 0) return true;
+        var parameters = new DynamicParameters();
+        parameters.Add("parentRowId", parentRowId);
+        var sql = $"""
+            SELECT COUNT(1)
+            FROM {PhysicalNaming.FullTableName(parentTable.Id)} AS p
+            WHERE p.IsDeleted = 0 AND p.Id = @parentRowId AND {BuildReferenceFilterSql(filters, parameters)}
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct)) > 0;
+    }
+
+    /// <summary>Dependent-dropdown predicate over the parent table aliased <c>p</c>. Values are always
+    /// bound as parameters; column names come from field metadata (integers), never user text.</summary>
+    private static string BuildReferenceFilterSql(IReadOnlyList<ReferenceFilterClause> filters, DynamicParameters parameters)
+    {
+        static string Col(AppField f) => f.IsSystem && !string.IsNullOrEmpty(f.PhysicalColumnName)
+            ? f.PhysicalColumnName!
+            : PhysicalNaming.ColumnName(f.Fid!.Value);
+
+        var parts = new List<string>();
+        for (var i = 0; i < filters.Count; i++)
+        {
+            var f = filters[i];
+            if (string.IsNullOrWhiteSpace(f.Value)) { parts.Add("1 = 0"); continue; }
+            var name = $"fv{i}";
+            parameters.Add(name, f.Value);
+
+            if (f.ParentField is not null)
+                parts.Add($"CAST(p.{Col(f.ParentField)} AS NVARCHAR(400)) = @{name}");
+            else if (f.JunctionTable is not null && f.JunctionParentField is not null && f.JunctionValueField is not null)
+                parts.Add($"EXISTS (SELECT 1 FROM {PhysicalNaming.FullTableName(f.JunctionTable.Id)} AS j " +
+                          $"WHERE j.IsDeleted = 0 AND j.{Col(f.JunctionParentField)} = p.Id " +
+                          $"AND CAST(j.{Col(f.JunctionValueField)} AS NVARCHAR(400)) = @{name})");
+        }
+        return parts.Count == 0 ? "1 = 1" : string.Join(" AND ", parts);
     }
 
     public async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(
@@ -566,6 +615,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         return result;
     }
+
+    private static bool IsComputedLabel(AppField field)
+        => field.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(field.TypeCode);
+
+    /// <summary>SELECT-list expression for a picker label: the field's column, or a NULL
+    /// placeholder for a computed field the caller fills in after projection.</summary>
+    private static string SelectLabelExpr(AppField field)
+        => IsComputedLabel(field) ? "CAST(NULL AS NVARCHAR(400))" : LabelColumnExpr(field);
 
     private static string LabelColumnExpr(AppField? labelField)
     {

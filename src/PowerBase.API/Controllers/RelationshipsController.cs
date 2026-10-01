@@ -10,6 +10,7 @@ using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Relationships.Commands.DeleteRelationship;
 using PowerBase.Application.Relationships.Commands.RemoveRelationshipField;
 using PowerBase.Application.Relationships.Commands.UpdateDisplayKey;
+using PowerBase.Application.Relationships.Commands.UpdateReferenceFilter;
 using PowerBase.Application.Relationships.Commands.UpdateSummaryField;
 using PowerBase.Application.Relationships.Queries;
 using PowerBase.Application.Records.Queries.ListRecords;
@@ -31,6 +32,7 @@ public class RelationshipsController : ControllerBase
     private readonly UpdateSummaryFieldCommandHandler _updateSummary;
     private readonly RemoveRelationshipFieldCommandHandler _removeField;
     private readonly UpdateDisplayKeyCommandHandler _updateDisplayKey;
+    private readonly UpdateReferenceFilterCommandHandler _updateReferenceFilter;
 
     public RelationshipsController(
         CreateRelationshipCommandHandler createHandler,
@@ -42,7 +44,8 @@ public class RelationshipsController : ControllerBase
         AddSummaryFieldCommandHandler addSummary,
         UpdateSummaryFieldCommandHandler updateSummary,
         RemoveRelationshipFieldCommandHandler removeField,
-        UpdateDisplayKeyCommandHandler updateDisplayKey)
+        UpdateDisplayKeyCommandHandler updateDisplayKey,
+        UpdateReferenceFilterCommandHandler updateReferenceFilter)
     {
         _createHandler = createHandler;
         _deleteHandler = deleteHandler;
@@ -54,6 +57,7 @@ public class RelationshipsController : ControllerBase
         _updateSummary = updateSummary;
         _removeField = removeField;
         _updateDisplayKey = updateDisplayKey;
+        _updateReferenceFilter = updateReferenceFilter;
     }
 
     /// <summary>Create a one-to-many relationship (provisions the reference, lookup and summary fields).</summary>
@@ -184,6 +188,21 @@ public class RelationshipsController : ControllerBase
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
 
+    /// <summary>Set the dependent-dropdown conditions of the relationship's Reference field (empty clears them).</summary>
+    [HttpPut("apps/{appId:guid}/relationships/{id:guid}/reference-filter")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateReferenceFilter(Guid appId, Guid id, [FromBody] UpdateReferenceFilterRequest request, CancellationToken ct)
+    {
+        var conditions = request.Conditions
+            .Select(c => new ReferenceFilterConditionInput(c.FormFid, c.ParentFid, c.JunctionTableId, c.JunctionParentFid, c.JunctionValueFid))
+            .ToList();
+        var result = await _updateReferenceFilter.HandleAsync(new UpdateReferenceFilterCommand(id, conditions), ct);
+        return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
     /// <summary>Remove a single lookup or summary field from a relationship.</summary>
     [HttpDelete("apps/{appId:guid}/relationships/{id:guid}/fields/{fieldId:guid}")]
     [RequireAppPermission(PermissionCodes.FieldsDelete, AppAccessResolver.ByAppId)]
@@ -213,9 +232,25 @@ public class RelationshipsController : ControllerBase
     [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<ParentOptionsResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ParentOptions(
-        Guid tableId, Guid relId, [FromQuery] string? search, [FromQuery] int take, CancellationToken ct)
+        Guid tableId, Guid relId, [FromQuery] string? search, [FromQuery] int take,
+        [FromQuery] string? filterValues, CancellationToken ct)
     {
-        var result = await _parentOptions.HandleAsync(relId, search, take, ct);
+        // filterValues: JSON object {"<fid>": "<current form value>"} for a dependent dropdown.
+        Dictionary<int, string?>? values = null;
+        if (!string.IsNullOrWhiteSpace(filterValues))
+        {
+            try
+            {
+                values = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string?>>(filterValues)?
+                    .Where(kv => int.TryParse(kv.Key, out _))
+                    .ToDictionary(kv => int.Parse(kv.Key), kv => kv.Value);
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return BadRequest(new { error = new { code = "INVALID_FILTER_VALUES", message = "filterValues must be a JSON object of fid → value." } });
+            }
+        }
+        var result = await _parentOptions.HandleAsync(relId, search, take, values, ct);
         return Ok(new ApiResponse<ParentOptionsResponse>(new ParentOptionsResponse(result.Headers, result.Options)));
     }
 

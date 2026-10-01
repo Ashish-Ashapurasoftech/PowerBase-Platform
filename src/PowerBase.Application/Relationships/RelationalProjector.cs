@@ -45,6 +45,9 @@ public sealed class RelationalProjector : IRelationalProjector
     private int _formulaSummaryDepth;
     private const int MaxFormulaSummaryDepth = 2;
 
+    /// <summary>How many parent tables deep lookups of computed fields are being projected right now.</summary>
+    private int _lookupDepth;
+
     public RelationalProjector(
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
         IRelationshipRepository relRepo, IAppRepository appRepo, IUserRepository userRepo,
@@ -153,6 +156,12 @@ public sealed class RelationalProjector : IRelationalProjector
             }
             var parentRows = await _recordRepo.GetRowsByIdsAsync(parentTable, parentFields, parentIds, ct);
 
+            // A lookup of a Formula / Lookup / Summary has no column on the parent row, so the parent
+            // rows are projected first (relational, then formulas — like a normal record read) and
+            // those computed values are what the lookup pulls down. Nested lookups recurse here, capped
+            // at LookupChain.MaxLength so a cycle of relationships can't loop forever.
+            var parentComputed = await ProjectComputedSourcesAsync(parentTable, parentFields, parentFieldsByFid, tableLookups.Select(l => l.Settings!.SourceFid!.Value), parentRows, ct);
+
             // Now map the values.
             for (var i = 0; i < rows.Count; i++)
             {
@@ -163,11 +172,21 @@ public sealed class RelationalProjector : IRelationalProjector
                     if (resolvedParentId.TryGetValue((i, settings!.ReferenceFid!.Value), out var pid) && pid is long parentId
                         && parentRows.TryGetValue(parentId, out var prow))
                     {
-                        var srcCol = parentFieldsByFid.TryGetValue(settings.SourceFid!.Value, out var srcField)
-                            ? (srcField.PhysicalColumnName ?? PhysicalNaming.ColumnName(settings.SourceFid.Value))
-                            : PhysicalNaming.ColumnName(settings.SourceFid.Value);
-                        if (prow.TryGetValue(srcCol, out var v))
-                            value = string.IsNullOrWhiteSpace(settings.SourceSubField) ? v : ExtractJsonSubField(v, settings.SourceSubField);
+                        if (parentFieldsByFid.TryGetValue(settings.SourceFid!.Value, out var srcField)
+                            && PhysicalNaming.IsComputedTypeCode(srcField.TypeCode))
+                        {
+                            if (parentComputed.TryGetValue(parentId, out var computedRow)
+                                && computedRow.TryGetValue(settings.SourceFid.Value, out var cv))
+                                value = cv;
+                        }
+                        else
+                        {
+                            var srcCol = srcField is not null
+                                ? (srcField.PhysicalColumnName ?? PhysicalNaming.ColumnName(settings.SourceFid.Value))
+                                : PhysicalNaming.ColumnName(settings.SourceFid.Value);
+                            if (prow.TryGetValue(srcCol, out var v))
+                                value = string.IsNullOrWhiteSpace(settings.SourceSubField) ? v : ExtractJsonSubField(v, settings.SourceSubField);
+                        }
                     }
                     maps[i][field.Fid!.Value] = value;
                 }
@@ -189,6 +208,30 @@ public sealed class RelationalProjector : IRelationalProjector
                 }
             }
         }
+    }
+
+    /// <summary>Computed values (by parent row Id → field Fid) of the parent rows a lookup reads a
+    /// Formula / Lookup / Summary from. Empty when no lookup reads a computed field, or the chain is
+    /// already <see cref="LookupChain.MaxLength"/> deep (those lookups stay blank).</summary>
+    private async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<long, object?>>> ProjectComputedSourcesAsync(
+        AppTable parentTable, IReadOnlyList<AppField> parentFields, IReadOnlyDictionary<int, AppField> parentFieldsByFid,
+        IEnumerable<int> sourceFids, IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> parentRows, CancellationToken ct)
+    {
+        var result = new Dictionary<long, IReadOnlyDictionary<long, object?>>();
+        var readsComputed = sourceFids.Any(fid => parentFieldsByFid.TryGetValue(fid, out var f) && PhysicalNaming.IsComputedTypeCode(f.TypeCode));
+        if (!readsComputed || parentRows.Count == 0 || _lookupDepth >= LookupChain.MaxLength) return result;
+
+        var ids = parentRows.Keys.ToList();
+        var rowList = ids.Select(id => parentRows[id]).ToList();
+        _lookupDepth++;
+        try
+        {
+            var seed = await ProjectAsync(parentTable, parentFields, rowList, ct);
+            var computed = _formulaProjector.Project(parentFields, rowList, seed, parentTable);
+            for (var i = 0; i < ids.Count; i++) result[ids[i]] = computed[i];
+        }
+        finally { _lookupDepth--; }
+        return result;
     }
 
     private async Task ProjectSummariesAsync(

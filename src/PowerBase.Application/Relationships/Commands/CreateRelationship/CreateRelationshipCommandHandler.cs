@@ -170,18 +170,19 @@ public class CreateRelationshipCommandHandler
             var src = parentFields.FirstOrDefault(f => f.Fid == spec.SourceFid)
                 ?? throw new NotFoundException("Field", spec.SourceFid);
             ValidateSubField(spec.SourceSubField, src.TypeCode, "sourceSubField");
-            var lookup = await _fieldFactory.CreateAsync(child, FieldTypeCodeNames.Lookup, spec.Label.Trim(), false,
+            var sourceTypeCode = await LookupChain.ResolveForNewLookupAsync(src, _fieldRepo, ct);
+            var lookup =await _fieldFactory.CreateAsync(child, FieldTypeCodeNames.Lookup, spec.Label.Trim(), false,
                 new LookupSettings
                 {
                     RelationshipId = relId,
                     ReferenceFid = refField.Fid!.Value,
                     SourceTableId = parent.Id,
                     SourceFid = spec.SourceFid,
-                    SourceTypeCode = src.TypeCode,
+                    SourceTypeCode = sourceTypeCode,
                     SourceSubField = spec.SourceSubField,
                 }, ct);
             firstLookup ??= lookup;
-            createdFields.Add(new(lookup.PublicId, lookup.Fid!.Value, lookup.Label ?? lookup.Name, "lookup", src.TypeCode));
+            createdFields.Add(new(lookup.PublicId, lookup.Fid!.Value, lookup.Label ?? lookup.Name, "lookup", sourceTypeCode));
             childAddFids.Add(lookup.Fid!.Value);
         }
 

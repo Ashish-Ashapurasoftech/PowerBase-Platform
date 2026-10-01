@@ -40,7 +40,13 @@ public interface IRecordRepository
     /// <paramref name="labelFields"/>[0] (the standard-key case, where they're the same field).</summary>
     Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
-        AppField? primaryLabelField = null, CancellationToken ct = default);
+        AppField? primaryLabelField = null, CancellationToken ct = default,
+        IReadOnlyList<ReferenceFilterClause>? filters = null);
+
+    /// <summary>True when the parent row satisfies every dependent-dropdown clause (used to reject a
+    /// Reference value the picker would not have offered).</summary>
+    Task<bool> MatchesReferenceFilterAsync(
+        AppTable parentTable, long parentRowId, IReadOnlyList<ReferenceFilterClause> filters, CancellationToken ct = default);
 
     /// <summary>Fetch a label value for each of the given parent row Ids (drives Lookup/Reference label resolution).</summary>
     Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(
