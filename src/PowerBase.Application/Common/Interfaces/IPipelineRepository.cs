@@ -27,6 +27,7 @@ public class SchedulerMetadataDto
 
 public interface IPipelineRepository
 {
+    Task<PipelineStatistics> GetStatisticsAsync(long pipelineId, DateTime asOfUtc, CancellationToken ct = default);
     Task<IReadOnlyList<AppField>> GetTableFieldsAsync(long tableId, CancellationToken ct = default);
     Task<SchedulerMetadataDto> GetSchedulerMetadataAsync(CancellationToken ct = default);
     Task<IReadOnlyList<long>> GetDeletedPipelineIdsAsync(CancellationToken ct = default);
@@ -109,5 +110,13 @@ public interface IPipelineRepository
     Task UpdateOutboxItemStatusAsync(long id, string workerId, byte status, DateTime? publishedOn = null, DateTime? failedOn = null, string? error = null, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task PruneOutboxItemsAsync(DateTime olderThan, CancellationToken ct = default);
     Task SyncTriggerSubscriptionsAsync(long pipelineId, IDbTransaction? tenantTransaction = null, CancellationToken ct = default);
+}
+
+public class PipelineStatistics
+{
+    public DateTime? LastTriggeredOn { get; set; }
+    public long BillableStepRuns { get; set; }
+    public long TotalStepRuns { get; set; }
+    public DateTime UpdatedOn { get; set; }
 }
 

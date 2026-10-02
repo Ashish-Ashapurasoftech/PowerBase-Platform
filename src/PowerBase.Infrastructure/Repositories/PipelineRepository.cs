@@ -1167,6 +1167,60 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             new CommandDefinition(sql, new { runId }, cancellationToken: ct));
     }
 
+    public async Task<PipelineStatistics> GetStatisticsAsync(long pipelineId, DateTime asOfUtc, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await DetectStepHistorySchemaAsync(connection, ct);
+        var type = _hasStepSnapshotColumns == true ? "COALESCE(NULLIF(sr.StepTypeSnapshot, ''), s.Type)" : "s.Type";
+        var subtype = _hasStepSnapshotColumns == true ? "COALESCE(NULLIF(sr.StepSubtypeSnapshot, ''), s.Subtype)" : "s.Subtype";
+        var sql = $$"""
+            SELECT (SELECT MAX(StartedOn) FROM audit.PipelineRun WHERE PipelineId = @pipelineId AND StartedOn <= @asOfUtc) AS LastTriggeredOn,
+                   COUNT_BIG(*) AS TotalStepRuns,
+                   COALESCE(SUM(CONVERT(bigint, CASE WHEN sr.Status = 'Success'
+                     AND {{subtype}} IN ('send-email', 'send-email-outlook')
+                     THEN 1 ELSE 0 END)), 0) AS BillableStepRuns,
+                   @asOfUtc AS UpdatedOn
+            FROM audit.PipelineStepRun sr
+            JOIN audit.PipelineRun r ON r.Id = sr.PipelineRunId
+            LEFT JOIN meta.PipelineStep s ON s.Id = sr.StepId
+            WHERE r.PipelineId = @pipelineId
+              AND sr.StartedOn >= @fromUtc AND sr.StartedOn <= @asOfUtc
+              AND sr.Status IN ('Success', 'Failed')
+              AND {{type}} NOT IN ('condition', 'loop')
+              AND {{subtype}} NOT IN ('stop', 'handle-errors')
+            ;
+            SELECT JSON_VALUE(CASE WHEN ISJSON(sr.InputContext) = 1 THEN sr.InputContext ELSE '{}' END, '$.RequestMode') AS RequestMode,
+                   JSON_VALUE(CASE WHEN ISJSON(sr.InputContext) = 1 THEN sr.InputContext ELSE '{}' END, '$.Url') AS Url,
+                   COUNT_BIG(*) AS Runs
+            FROM audit.PipelineStepRun sr
+            JOIN audit.PipelineRun r ON r.Id = sr.PipelineRunId
+            LEFT JOIN meta.PipelineStep s ON s.Id = sr.StepId
+            WHERE r.PipelineId = @pipelineId AND sr.StartedOn >= @fromUtc AND sr.StartedOn <= @asOfUtc
+              AND sr.Status = 'Success' AND {{subtype}} = 'make-request'
+            GROUP BY JSON_VALUE(CASE WHEN ISJSON(sr.InputContext) = 1 THEN sr.InputContext ELSE '{}' END, '$.RequestMode'),
+                     JSON_VALUE(CASE WHEN ISJSON(sr.InputContext) = 1 THEN sr.InputContext ELSE '{}' END, '$.Url')
+            """;
+        using var results = await connection.QueryMultipleAsync(new CommandDefinition(
+            sql, new { pipelineId, asOfUtc, fromUtc = asOfUtc.AddDays(-30) }, cancellationToken: ct));
+        var statistics = await results.ReadSingleAsync<PipelineStatistics>();
+        var requests = await results.ReadAsync<StatisticsRequestGroup>();
+        foreach (var request in requests)
+        {
+            // Use the recorded, resolved destination, never today's editable config.
+            var config = System.Text.Json.JsonSerializer.Serialize(new { requestMode = request.RequestMode, url = request.Url });
+            if (PowerBase.Application.Pipelines.PipelineStepUsage.IsBillable(new PipelineStep { Subtype = "make-request", ConfigJson = config }))
+                statistics.BillableStepRuns += request.Runs;
+        }
+        return statistics;
+    }
+
+    private sealed class StatisticsRequestGroup
+    {
+        public string? RequestMode { get; set; }
+        public string? Url { get; set; }
+        public long Runs { get; set; }
+    }
+
     public async Task<PipelineRun?> GetRunByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);

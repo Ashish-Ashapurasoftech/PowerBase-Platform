@@ -567,6 +567,18 @@ public class PipelinesController : ControllerBase
     }
 
     /// <summary>List pipeline execution runs with pagination.</summary>
+    [HttpGet("pipelines/{publicId:guid}/statistics")]
+    [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByPipelinePublicId)]
+    public async Task<IActionResult> GetStatistics(Guid publicId,
+        [FromServices] IPipelineRepository pipelineRepo, CancellationToken ct = default)
+    {
+        var pipeline = await pipelineRepo.GetByPublicIdAsync(publicId, ct);
+        if (pipeline == null) throw new PowerBase.Domain.Exceptions.NotFoundException("PowerFlow", publicId);
+        var statistics = await pipelineRepo.GetStatisticsAsync(pipeline.Id, DateTime.UtcNow, ct);
+        return Ok(new ApiResponse<PipelineStatistics>(statistics));
+    }
+
+    /// <summary>List pipeline execution runs with pagination.</summary>
     [HttpGet("pipelines/{publicId:guid}/runs")]
     [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByPipelinePublicId)]
     [ProducesResponseType(typeof(ApiListResponse<PipelineRunDto>), StatusCodes.Status200OK)]
