@@ -170,8 +170,8 @@ public sealed class RecordWriteService : IRecordWriteService
             .ToDictionary(f => (long)f.Fid!.Value,
                 f => oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var ov) ? ov : null);
         await FormRuleServerValidator.ValidateAsync(
-            table, fields, effectiveValues, oldValuesByFid, _queryContext.TenantRole, _queryContext.UserId,
-            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _engine, ct);
+            table, fields, effectiveValues, oldValuesByFid, _queryContext.UserId,
+            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _appUserRepo, _engine, ct);
 
         await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct, onIndexMessageCreated);
 

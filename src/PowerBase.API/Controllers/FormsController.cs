@@ -206,6 +206,17 @@ public class FormsController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>Make a form the table's default Quick Peek form (flagging it if needed). The
+    /// previous default stays a Quick Peek form.</summary>
+    [HttpPut("forms/{publicId:guid}/quick-peek/default")]
+    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByFormPublicId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> SetQuickPeekDefault(Guid publicId, CancellationToken ct)
+    {
+        await _setQuickPeekFormHandler.HandleAsync(new SetQuickPeekDefaultCommand(publicId), ct);
+        return NoContent();
+    }
+
     /// <summary>Create a new form for a table.</summary>
     [HttpPost("tables/{tableId:guid}/forms")]
     [RequireAppPermission(PermissionCodes.FormsCreate, AppAccessResolver.ByTableId)]
@@ -244,7 +255,7 @@ public class FormsController : ControllerBase
         var rowVersion = Convert.FromBase64String(request.RowVersion);
         await _updateSettingsHandler.HandleAsync(new UpdateFormSettingsCommand(
             publicId, request.Name, request.AutoAddNewFields, request.ShowBuiltInFields,
-            request.SaveOptions, rowVersion, request.IsQuickPeekForm), ct);
+            request.SaveOptions, rowVersion, request.IsQuickPeekForm, request.IsQuickPeekDefault), ct);
         return NoContent();
     }
 
@@ -355,6 +366,20 @@ public class FormsController : ControllerBase
         return Ok(new ApiResponse<IReadOnlyList<FormRuleListItemResponse>>(items));
     }
 
+    /// <summary>List all rules for a form WITH their conditions and actions, in one request
+    /// (the designer's rule-health analysis needs every rule's body).</summary>
+    [HttpGet("forms/{publicId:guid}/rules/details")]
+    [RequireAppPermission(PermissionCodes.FormsRead, AppAccessResolver.ByFormPublicId)]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<FormRuleDetailResponse>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListRuleDetails(Guid publicId, CancellationToken ct)
+    {
+        var results = await _listRulesHandler.HandleAsync(new ListFormRulesQuery(publicId), ct);
+        var items = results.Select(MapToRuleDetail).ToList();
+        return Ok(new ApiResponse<IReadOnlyList<FormRuleDetailResponse>>(items));
+    }
+
     /// <summary>Create a new (empty) form rule.</summary>
     [HttpPost("forms/{publicId:guid}/rules")]
     [RequireAppPermission(PermissionCodes.FormsRulesManage, AppAccessResolver.ByFormPublicId)]
@@ -393,7 +418,9 @@ public class FormsController : ControllerBase
     {
         var rowVersion = Convert.FromBase64String(request.RowVersion);
         var conditions = request.Conditions.Select(c =>
-            new FormRuleConditionSpec(c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder, c.ConditionKind)).ToList();
+            new FormRuleConditionSpec(c.AppFieldId, c.Operator, c.Value, c.ValueType, c.ValueFieldId, c.DisplayOrder, c.ConditionKind,
+                c.ChangeFromOperator, c.ChangeFromValue, c.ChangeFromValueType, c.ChangeFromValueFieldId,
+                c.ChangeToOperator, c.ChangeToValue, c.ChangeToValueType, c.ChangeToValueFieldId)).ToList();
         var actions = request.Actions.Select(a =>
             new FormRuleActionSpec(a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder, a.RunOnceOnActivation, a.IsExpressionValue)).ToList();
 
@@ -461,6 +488,7 @@ public class FormsController : ControllerBase
         Name            = f.Name,
         IsDefault       = f.IsDefault,
         IsQuickPeekForm = f.IsQuickPeekForm,
+        IsQuickPeekDefault = f.IsQuickPeekDefault,
         DisplayOrder    = f.DisplayOrder,
         CreatedOn       = f.CreatedOn,
     };
@@ -471,6 +499,7 @@ public class FormsController : ControllerBase
         Name              = f.Name,
         IsDefault         = f.IsDefault,
         IsQuickPeekForm   = f.IsQuickPeekForm,
+        IsQuickPeekDefault = f.IsQuickPeekDefault,
         AutoAddNewFields  = f.AutoAddNewFields,
         ShowBuiltInFields = f.ShowBuiltInFields,
         SaveOptions       = f.SaveOptions.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList(),
@@ -600,6 +629,14 @@ public class FormsController : ControllerBase
             ValueType    = c.ValueType,
             ValueFieldId = c.ValueFieldId,
             DisplayOrder = c.DisplayOrder,
+            ChangeFromOperator = c.ChangeFromOperator,
+            ChangeFromValue = c.ChangeFromValue,
+            ChangeFromValueType = c.ChangeFromValueType,
+            ChangeFromValueFieldId = c.ChangeFromValueFieldId,
+            ChangeToOperator = c.ChangeToOperator,
+            ChangeToValue = c.ChangeToValue,
+            ChangeToValueType = c.ChangeToValueType,
+            ChangeToValueFieldId = c.ChangeToValueFieldId,
         }).ToList(),
         Actions = r.Actions.Select(a => new FormRuleActionResponse
         {

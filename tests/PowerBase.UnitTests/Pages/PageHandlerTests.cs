@@ -88,7 +88,8 @@ public class PageHandlerTests
     [Fact]
     public async Task CreatePage_CodeType_WithCodePermission_Succeeds()
     {
-        _queryContext.Permissions.Returns(new HashSet<string> { PermissionCodes.PagesCode });
+        _appUserRepo.GetUserAppPermissionsAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string> { PermissionCodes.PagesCode });
         _pageRepo.CreateAsync(Arg.Any<Page>(), Arg.Any<CancellationToken>())
             .Returns((11L, Guid.NewGuid(), 1));
 

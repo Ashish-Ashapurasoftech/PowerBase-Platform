@@ -37,13 +37,17 @@ public class CreatePageCommandHandler
                 validation.Errors.GroupBy(e => e.PropertyName)
                     .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()));
 
+        var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
+
         // pages:code is a stricter capability than pages:create — required specifically to
         // author a Code-type page (custom HTML/CSS/JS running in the user's session).
-        if (command.PageType == PageTypes.Code && !_queryContext.IsSuperAdmin
-            && !_queryContext.Permissions.Contains(PermissionCodes.PagesCode))
-            throw new UnauthorizedActionException("Creating a Code page requires the Code Page Builder capability.");
-
-        var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
+        // It is an APP-role permission (like pages:create), not a tenant-role one.
+        if (command.PageType == PageTypes.Code && !_queryContext.IsSuperAdmin)
+        {
+            var appPermissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
+            if (!appPermissions.Contains(PermissionCodes.PagesCode))
+                throw new UnauthorizedActionException("Creating a Code page requires the Code Page Builder capability.");
+        }
 
         var page = new Page
         {

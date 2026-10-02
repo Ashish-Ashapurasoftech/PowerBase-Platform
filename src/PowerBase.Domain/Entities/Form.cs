@@ -7,9 +7,13 @@ public class Form
     public long AppTableId { get; set; }
     public string Name { get; set; } = string.Empty;
     public bool IsDefault { get; set; }
-    /// <summary>At most one form per table has this set. Null table-wide = no Quick Peek form
-    /// configured; the frontend then hides the Quick Peek action icon for that table's reports.</summary>
+    /// <summary>Flagged as a Quick Peek form - several per table are allowed. A table with none
+    /// flagged has no Quick Peek; the frontend hides the Quick Peek action icon.</summary>
     public bool IsQuickPeekForm { get; set; }
+    /// <summary>The table's default Quick Peek form (used by reports set to "Use table default").
+    /// Exactly one flagged form per table holds this; it cannot be un-flagged or deleted - another
+    /// form must be made the default first.</summary>
+    public bool IsQuickPeekDefault { get; set; }
     public bool AutoAddNewFields { get; set; } = true;
     public bool ShowBuiltInFields { get; set; }
     public string SaveOptions { get; set; } = "SaveKeepWorking,SaveNew,SaveNext,SaveView";

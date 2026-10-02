@@ -37,7 +37,6 @@ public static class FormRuleServerValidator
         IReadOnlyList<AppField> fields,
         IReadOnlyDictionary<long, object?> effectiveValues,
         IReadOnlyDictionary<long, object?>? oldValuesByFid,
-        string? currentUserRole,
         long currentUserId,
         IFormRuleRepository ruleRepo,
         IFormRepository formRepo,
@@ -45,12 +44,13 @@ public static class FormRuleServerValidator
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IUserRepository userRepo,
+        IAppUserRepository appUserRepo,
         FormulaEngine engine,
         CancellationToken ct)
     {
         var violations = await CollectViolationsAsync(
-            table, fields, effectiveValues, oldValuesByFid, currentUserRole, currentUserId,
-            ruleRepo, formRepo, tableRepo, fieldRepo, recordRepo, userRepo, engine, ct);
+            table, fields, effectiveValues, oldValuesByFid, currentUserId,
+            ruleRepo, formRepo, tableRepo, fieldRepo, recordRepo, userRepo, appUserRepo, engine, ct);
         if (violations.Count > 0)
             // Grouped, not a plain ToDictionary — more than one rule can flag the same field
             // (e.g. two separate Require rules), which a flat ToDictionary can't hold.
@@ -64,9 +64,6 @@ public static class FormRuleServerValidator
     /// RecordConstraintValidator.CollectViolationsAsync.</summary>
     /// <param name="oldValuesByFid">The record's values before this write, keyed by Fid — null on
     /// create (there is no "before"). 'changed'/'notChanged' conditions never match when null.</param>
-    /// <param name="currentUserRole">The evaluating user's role name (IQueryContext.TenantRole),
-    /// compared directly against a role condition's Value — same convention the frontend's
-    /// AppPermissionService.roleName comparison uses.</param>
     /// <param name="currentUserId">The evaluating user's numeric id (IQueryContext.UserId) —
     /// resolves a User/MultiUser field condition's "the current user" option
     /// (FormRuleCondition.Value containing the '__current_user__' sentinel). This is the numeric
@@ -81,7 +78,6 @@ public static class FormRuleServerValidator
         IReadOnlyList<AppField> fields,
         IReadOnlyDictionary<long, object?> effectiveValues,
         IReadOnlyDictionary<long, object?>? oldValuesByFid,
-        string? currentUserRole,
         long currentUserId,
         IFormRuleRepository ruleRepo,
         IFormRepository formRepo,
@@ -89,6 +85,7 @@ public static class FormRuleServerValidator
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         IUserRepository userRepo,
+        IAppUserRepository appUserRepo,
         FormulaEngine engine,
         CancellationToken ct,
         Guid recordId = default)
@@ -105,6 +102,14 @@ public static class FormRuleServerValidator
         // is resolved to a display name once, up front, rather than per-condition (mirrors the
         // frontend's resolveUserDisplayNames, called from form-renderer.component.ts's conditionsMet).
         var userNames = await ResolveContainsUserNamesAsync(rules, fieldsByFid, effectiveValues, userRepo, ct);
+        // The current user's app roles — a user can hold several (direct + group-derived), so a role
+        // condition compares against the whole set. Fetched only when some rule actually has a role
+        // condition, so writes to tables without one pay nothing. (This used to compare against the
+        // TENANT-level role name, which isn't what the rule builder's role picker lists.)
+        var needsRoles = rules.Any(r => !r.IsExpressionMode && r.Conditions.Any(c => c.ConditionKind == "role"));
+        IReadOnlyList<string> userRoles = needsRoles
+            ? await appUserRepo.GetUserAppRoleNamesAsync(table.AppId, currentUserId, ct)
+            : Array.Empty<string>();
 
         // A rule's Require/PreventSave actions target a form-layout element (TargetElementId),
         // not an AppField directly — resolved to AppFieldId via that rule's own form layout,
@@ -120,7 +125,7 @@ public static class FormRuleServerValidator
             }
             else
             {
-                met = ConditionsMet(rule, effectiveValues, oldValuesByFid, currentUserRole, currentUserId, fieldsByFid, userNames);
+                met = ConditionsMet(rule, effectiveValues, oldValuesByFid, userRoles, currentUserId, fieldsByFid, userNames);
             }
             if (!met) continue;
 
@@ -152,6 +157,12 @@ public static class FormRuleServerValidator
                 if (action.TargetElementId is not { } elementId) continue;
                 if (!elementFieldMap.TryGetValue(elementId, out var fid) || fid is not { } fidVal) continue;
                 if (!fieldsByFid.TryGetValue(fidVal, out var field)) continue;
+                // A computed field (Formula/Lookup/Summary/…) is never supplied by the user or present in
+                // the write payload — it only exists as a live value the client computes for display —
+                // so "required" would ALWAYS fail for it here even though the form shows a value.
+                // Requiring one is meaningless (nothing to type into); skip it, same fail-open posture
+                // as a rule aimed at a since-deleted field.
+                if (PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
 
                 var hasValue = effectiveValues.TryGetValue(fidVal, out var value);
                 // Update: a field this write never touched isn't checked (mirrors
@@ -173,7 +184,7 @@ public static class FormRuleServerValidator
         FormRule rule,
         IReadOnlyDictionary<long, object?> effectiveValues,
         IReadOnlyDictionary<long, object?>? oldValuesByFid,
-        string? currentUserRole,
+        IReadOnlyList<string> userRoles,
         long currentUserId,
         IReadOnlyDictionary<long, AppField> fieldsByFid,
         IReadOnlyDictionary<long, string> userNames)
@@ -190,11 +201,28 @@ public static class FormRuleServerValidator
                 // No "before" at all (create) — a field can't have "changed" from nothing it was
                 // ever loaded with, so 'changed' never matches and 'notChanged' always does.
                 var changed = oldValuesByFid != null && !ValuesEqual(oldVal, newVal);
-                return c.Operator == "changed" ? changed : !changed;
+                var baseResult = c.Operator == "changed" ? changed : !changed;
+                if (!baseResult) return false;
+
+                // Optional refinement — "changed FROM x TO y": does the OLD value additionally match
+                // ChangeFrom*, and/or does the NEW value match ChangeTo*? Both use the SAME
+                // operator/value vocabulary as a normal field condition (eq/ne/gt/lt/during/isEmpty/
+                // …), just evaluated against a specific snapshot instead of "the current value".
+                // Either half absent (null operator) is simply not checked. Mirrors the frontend's
+                // identical refinement in form-renderer.component.ts/grid-rule-evaluator.ts.
+                if (!string.IsNullOrEmpty(c.ChangeFromOperator) && !EvaluateSnapshotCondition(
+                        c.ChangeFromOperator, c.ChangeFromValue, c.ChangeFromValueType, c.ChangeFromValueFieldId,
+                        fid, oldVal, effectiveValues, currentUserId, fieldsByFid, userNames))
+                    return false;
+                if (!string.IsNullOrEmpty(c.ChangeToOperator) && !EvaluateSnapshotCondition(
+                        c.ChangeToOperator, c.ChangeToValue, c.ChangeToValueType, c.ChangeToValueFieldId,
+                        fid, newVal, effectiveValues, currentUserId, fieldsByFid, userNames))
+                    return false;
+                return true;
             }
 
             if (c.ConditionKind == "role")
-                return EvalOp(c.Operator, currentUserRole, c.Value);
+                return EvalRoleOp(c.Operator, userRoles, c.Value);
 
             // during/notDuring check range CONTAINMENT (is this date inside a computed
             // {start,end} window), not a single-value comparison — doesn't fit EvalOp's
@@ -256,6 +284,61 @@ public static class FormRuleServerValidator
         }).ToList();
 
         return rule.ConditionLogic == "all" ? results.All(r => r) : results.Any(r => r);
+    }
+
+    /// <summary>Evaluates ONE operator/value/valueType/valueFieldId spec (the same shape a normal
+    /// field condition has) against an explicit snapshot value (the field's OLD or NEW value for a
+    /// 'changed'/'notChanged' refinement) rather than always pulling the field's CURRENT value —
+    /// otherwise identical to the tail of ConditionsMet's main per-condition switch (during/
+    /// notDuring range-containment, DateRange/NumericRange whole-range or point-in-range, then the
+    /// generic NormalizeForCompare+ResolveConditionValue+EvalOp path). A field reference
+    /// (valueType 'field') still resolves against the CURRENT effectiveValues, same as everywhere
+    /// else — only the compared field's OWN value is the snapshot.</summary>
+    private static bool EvaluateSnapshotCondition(
+        string op, string? value, string? valueType, long? valueFieldId,
+        long fid, object? snapshotVal,
+        IReadOnlyDictionary<long, object?> effectiveValues, long currentUserId,
+        IReadOnlyDictionary<long, AppField> fieldsByFid, IReadOnlyDictionary<long, string> userNames)
+    {
+        var typeCode = fieldsByFid.TryGetValue(fid, out var fld) ? fld.TypeCode : null;
+
+        if (op is "during" or "notDuring")
+        {
+            if (snapshotVal is null) return false;
+            var dateStr = snapshotVal switch
+            {
+                DateTime dt => dt.ToString("yyyy-MM-dd"),
+                DateOnly d => d.ToString("yyyy-MM-dd"),
+                _ => Convert.ToString(snapshotVal, System.Globalization.CultureInfo.InvariantCulture)?.Split('T')[0] ?? "",
+            };
+            var (count, unit) = ParseDuringValue(value);
+            var direction = valueType ?? "duringCurrent";
+            var (start, end) = ComputeDuringRange(direction, count, unit);
+            var inRange = string.CompareOrdinal(dateStr, start) >= 0 && string.CompareOrdinal(dateStr, end) <= 0;
+            return op == "during" ? inRange : !inRange;
+        }
+
+        if (typeCode is "DateRange" or "NumericRange")
+        {
+            var range = ParseRangeValue(snapshotVal);
+            if (op == "isEmpty") return range is null || (range.Value.Start is null && range.Value.End is null);
+            if (op == "isNotEmpty") return range is not null && (range.Value.Start is not null || range.Value.End is not null);
+            if (op is "eq" or "ne")
+            {
+                var ruleRange = ParseRangeValue(value);
+                var equal = RangesEqual(range, ruleRange, typeCode);
+                return op == "eq" ? equal : !equal;
+            }
+            var within = PointWithinRange(range, value, typeCode);
+            return op == "contains" ? within : !within;
+        }
+
+        var normalizedVal = NormalizeForCompare(typeCode, snapshotVal);
+        if ((typeCode == "User" || typeCode == "MultiUser") && op == "contains")
+            normalizedVal = ResolveUserDisplayNames(snapshotVal, userNames);
+        var synthetic = new FormRuleCondition { AppFieldId = fid, Operator = op, Value = value, ValueType = valueType, ValueFieldId = valueFieldId };
+        var ruleVal = ResolveConditionValue(synthetic, effectiveValues, currentUserId, fieldsByFid);
+        return EvalOp(op, normalizedVal, ruleVal);
     }
 
     /// <summary>A DateRange/NumericRange field's raw value is a JSON "{start,end}" blob (or,
@@ -564,6 +647,26 @@ public static class FormRuleServerValidator
         return (Fmt(curStart), Fmt(curEnd));
     }
 
+    /// <summary>Role-condition comparison against the user's WHOLE role set (a user can hold several
+    /// roles). "selected" is the condition's comma-joined role names. includes = has any of them,
+    /// notIncludes = has none of them, eq = the user's roles are EXACTLY that set (nothing more,
+    /// nothing less), ne = anything else. Mirrors the frontend's evalRoleOp (form-renderer).</summary>
+    private static bool EvalRoleOp(string op, IReadOnlyList<string> userRoles, string? selected)
+    {
+        var user = new HashSet<string>(userRoles, StringComparer.OrdinalIgnoreCase);
+        var sel = new HashSet<string>(
+            (selected ?? "").Split(',').Select(x => x.Trim()).Where(x => x.Length > 0),
+            StringComparer.OrdinalIgnoreCase);
+        return op switch
+        {
+            "includes" => sel.Any(user.Contains),
+            "notIncludes" => !sel.Any(user.Contains),
+            "eq" => user.SetEquals(sel),
+            "ne" => !user.SetEquals(sel),
+            _ => false,
+        };
+    }
+
     private static bool EvalOp(string op, object? formVal, string? ruleVal)
     {
         var r = ruleVal ?? "";
@@ -602,8 +705,20 @@ public static class FormRuleServerValidator
             // (form-renderer.component.ts) once that grew the same string fallback.
             case "gt": case "lt": case "gte": case "lte":
             {
-                double? vd = DateTime.TryParse(v, out var vdt) ? vdt.Ticks : (double.TryParse(v, out var vn) ? vn : null);
-                double? rd = DateTime.TryParse(r, out var rdt) ? rdt.Ticks : (double.TryParse(r, out var rn) ? rn : null);
+                // Number first, date second — mirrors the client's compareOrdered. Date-first meant a
+                // numeric-looking value could be misread as a date (and both sides must be the SAME
+                // kind, else Ticks vs a plain number compared nonsensically).
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                double? vd, rd;
+                if (double.TryParse(v, System.Globalization.NumberStyles.Float, inv, out var vn) && double.TryParse(r, System.Globalization.NumberStyles.Float, inv, out var rn))
+                {
+                    vd = vn; rd = rn;
+                }
+                else
+                {
+                    vd = DateTime.TryParse(v, inv, System.Globalization.DateTimeStyles.None, out var vdt) ? vdt.Ticks : null;
+                    rd = DateTime.TryParse(r, inv, System.Globalization.DateTimeStyles.None, out var rdt) ? rdt.Ticks : null;
+                }
                 if (vd is not null && rd is not null)
                 {
                     return op switch

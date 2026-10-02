@@ -6,6 +6,7 @@ public class FormListItemResponse
     public string Name { get; init; } = string.Empty;
     public bool IsDefault { get; init; }
     public bool IsQuickPeekForm { get; init; }
+    public bool IsQuickPeekDefault { get; init; }
     public int DisplayOrder { get; init; }
     public DateTime CreatedOn { get; init; }
 }

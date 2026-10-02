@@ -30,6 +30,7 @@ public class AppsController : ControllerBase
     private readonly GetAppQueryHandler _getHandler;
     private readonly ListAppsQueryHandler _listHandler;
     private readonly PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler _getPermissionsHandler;
+    private readonly PowerBase.Application.Apps.Queries.GetMyAppRoles.GetMyAppRolesQueryHandler _getMyRolesHandler;
     private readonly GetRolesReportsMatrixQueryHandler _getRolesReportsMatrixHandler;
     private readonly UpdateReportVisibilityMatrixCommandHandler _updateReportVisibilityMatrixHandler;
     private readonly GetAppStorageUsageQueryHandler _getStorageUsageHandler;
@@ -44,6 +45,7 @@ public class AppsController : ControllerBase
         GetAppQueryHandler getHandler,
         ListAppsQueryHandler listHandler,
         PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler getPermissionsHandler,
+        PowerBase.Application.Apps.Queries.GetMyAppRoles.GetMyAppRolesQueryHandler getMyRolesHandler,
         GetRolesReportsMatrixQueryHandler getRolesReportsMatrixHandler,
         UpdateReportVisibilityMatrixCommandHandler updateReportVisibilityMatrixHandler,
         GetAppStorageUsageQueryHandler getStorageUsageHandler,
@@ -57,6 +59,7 @@ public class AppsController : ControllerBase
         _getHandler = getHandler;
         _listHandler = listHandler;
         _getPermissionsHandler = getPermissionsHandler;
+        _getMyRolesHandler = getMyRolesHandler;
         _getRolesReportsMatrixHandler = getRolesReportsMatrixHandler;
         _updateReportVisibilityMatrixHandler = updateReportVisibilityMatrixHandler;
         _getStorageUsageHandler = getStorageUsageHandler;
@@ -254,6 +257,18 @@ public class AppsController : ControllerBase
     {
         var result = await _getPermissionsHandler.HandleAsync(new PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQuery(publicId), ct);
         return Ok(new ApiResponse<PowerBase.Application.Apps.Queries.GetAppPermissions.AppPermissionsResult>(result));
+    }
+
+    /// <summary>Every role name the current user holds in this app (direct + group-derived). Separate
+    /// from /permissions, whose single RoleName is read all over the frontend and stays unchanged.</summary>
+    [HttpGet("{publicId:guid}/my-roles")]
+    [RequirePermission(PermissionCodes.AppsRead)]
+    [ProducesResponseType(typeof(ApiResponse<PowerBase.Application.Apps.Queries.GetMyAppRoles.MyAppRolesResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> GetMyRoles(Guid publicId, CancellationToken ct)
+    {
+        var result = await _getMyRolesHandler.HandleAsync(new PowerBase.Application.Apps.Queries.GetMyAppRoles.GetMyAppRolesQuery(publicId), ct);
+        return Ok(new ApiResponse<PowerBase.Application.Apps.Queries.GetMyAppRoles.MyAppRolesResult>(result));
     }
 
     /// <summary>Update an app's name, description, icon, or color.</summary>
