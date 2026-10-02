@@ -655,6 +655,13 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                         friendlyRecords.Add(MapFieldValuesToUserFriendly(fields, AsDictionary(recsList[i])));
                     }
                 }
+                else if (outputDict.TryGetValue("count", out var chunkedCountObj) && chunkedCountObj != null
+                    && int.TryParse(Convert.ToString(chunkedCountObj, System.Globalization.CultureInfo.InvariantCulture), out var chunkedCount))
+                {
+                    // Chunked (loop-paged) search stages matches in a workset and returns only
+                    // the discovered count, not the record payloads.
+                    recordsCount = chunkedCount;
+                }
 
                 friendlyOutput["Records Found"] = recordsCount;
                 friendlyOutput["Records Preview"] = friendlyRecords;
@@ -856,7 +863,8 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             else if (subtype == "loop")
             {
                 var loopOverStepId = inputDict.TryGetValue("LoopOverStepId", out var losId) ? losId?.ToString() : string.Empty;
-                var itemCount = inputDict.TryGetValue("ItemCount", out var icObj) ? icObj?.ToString() : "0";
+                var itemCount = inputDict.TryGetValue("ItemCount", out var icObj) ? icObj?.ToString()
+                    : inputDict.TryGetValue("TotalCount", out var tcObj) ? tcObj?.ToString() : "0";
 
                 string sourceStepLabel = loopOverStepId;
                 if (long.TryParse(loopOverStepId, out var sId) && _stepLabelCache.TryGetValue(sId, out var sLabel))
@@ -1040,8 +1048,10 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 }
                 else
                 {
-                    var inserted = outputDict.TryGetValue("InsertedCount", out var insObj) ? insObj?.ToString() : "0";
-                    var updated = outputDict.TryGetValue("UpdatedCount", out var updObj) ? updObj?.ToString() : "0";
+                    var inserted = outputDict.TryGetValue("InsertedCount", out var insObj) ? insObj?.ToString()
+                        : outputDict.TryGetValue("inserted_count", out var insSnakeObj) ? insSnakeObj?.ToString() : "0";
+                    var updated = outputDict.TryGetValue("UpdatedCount", out var updObj) ? updObj?.ToString()
+                        : outputDict.TryGetValue("updated_count", out var updSnakeObj) ? updSnakeObj?.ToString() : "0";
 
                     friendlyOutput["Inserted Record Count"] = int.TryParse(inserted, out var ins) ? ins : 0;
                     friendlyOutput["Updated Record Count"] = int.TryParse(updated, out var upd) ? upd : 0;
