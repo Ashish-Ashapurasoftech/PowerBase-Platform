@@ -23,12 +23,13 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
                    ISNULL(t.ProvisioningState, 'Ready') AS ProvisioningState,
                    t.DatabaseName, ISNULL(t.SchemaVersion, 0) AS SchemaVersion,
                    COUNT(tu.Id) AS MemberCount,
+                   t.CodePagesEnabled,
                    t.CreatedOn
             FROM meta.Tenant t
             LEFT JOIN meta.TenantUser tu ON tu.TenantId = t.Id AND tu.IsDeleted = 0
             {where}
             GROUP BY t.Id, t.PublicId, t.Name, t.Slug, t.Status,
-                     t.ProvisioningState, t.DatabaseName, t.SchemaVersion, t.CreatedOn
+                     t.ProvisioningState, t.DatabaseName, t.SchemaVersion, t.CodePagesEnabled, t.CreatedOn
             ORDER BY t.CreatedOn DESC
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
             """;
@@ -62,6 +63,13 @@ public class AdminRepository : ControlRepositoryBase, IAdminRepository
         const string sql = "UPDATE meta.Tenant SET Status = @status, ModifiedOn = SYSUTCDATETIME() WHERE Id = @tenantId";
         await using var conn = await OpenNewConnectionAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(sql, new { tenantId, status }, cancellationToken: ct));
+    }
+
+    public async Task UpdateTenantCodePagesEnabledAsync(long tenantId, bool enabled, CancellationToken ct = default)
+    {
+        const string sql = "UPDATE meta.Tenant SET CodePagesEnabled = @enabled, ModifiedOn = SYSUTCDATETIME() WHERE Id = @tenantId";
+        await using var conn = await OpenNewConnectionAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(sql, new { tenantId, enabled }, cancellationToken: ct));
     }
 
     // ── Users ─────────────────────────────────────────────────────────────────

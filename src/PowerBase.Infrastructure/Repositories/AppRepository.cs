@@ -45,7 +45,7 @@ public class AppRepository : TenantRepositoryBase, IAppRepository
 
     private const string ListByUserSqlTemplate = """
         SELECT DISTINCT a.Id, a.PublicId, a.OwnerId, a.OwnerName, a.Name, a.Description, a.Icon, a.Color,
-               a.Status, a.Formatting, a.SecurityOptions, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
+               a.Status, a.IsEncrypted, a.IsDeleted, a.CreatedOn, a.CreatedBy, a.ModifiedOn, a.ModifiedBy,
                a.DeletedOn, a.DeletedBy, a.RowVersion
         FROM meta.App a
         WHERE a.IsDeleted  = 0

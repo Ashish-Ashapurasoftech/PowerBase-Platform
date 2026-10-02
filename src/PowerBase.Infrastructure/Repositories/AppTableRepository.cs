@@ -132,6 +132,20 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
+    private const string SelectShowInBarChangesSql = """
+        SELECT PublicId, Name
+        FROM meta.AppTable
+        WHERE AppId = @appId AND PublicId IN @publicIds AND IsDeleted = 0 AND IsShowInBar <> @isShowInBar
+        """;
+
+    private const string SetShowInBarSql = """
+        UPDATE meta.AppTable
+        SET IsShowInBar = @isShowInBar,
+            ModifiedOn  = SYSUTCDATETIME(),
+            ModifiedBy  = @modifiedBy
+        WHERE AppId = @appId AND PublicId IN @publicIds AND IsDeleted = 0 AND IsShowInBar <> @isShowInBar
+        """;
+
     private const string SetKeyFieldSql = """
         UPDATE meta.AppTable
         SET KeyFieldId = @keyFieldId,
@@ -346,6 +360,17 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
                 isShowInBar,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<(Guid PublicId, string Name)>> SetShowInBarAsync(long appId, IReadOnlyList<Guid> publicIds, bool isShowInBar, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var parameters = new { appId, publicIds, isShowInBar, modifiedBy = QueryContext.UserId };
+        var changed = (await connection.QueryAsync<(Guid PublicId, string Name)>(
+            new CommandDefinition(SelectShowInBarChangesSql, parameters, cancellationToken: ct))).AsList();
+        if (changed.Count == 0) return changed;
+        await connection.ExecuteAsync(new CommandDefinition(SetShowInBarSql, parameters, cancellationToken: ct));
+        return changed;
     }
 
     public async Task SetKeyFieldAsync(long tableId, long? keyFieldId, CancellationToken ct = default)

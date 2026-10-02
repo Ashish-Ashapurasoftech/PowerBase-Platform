@@ -10,6 +10,7 @@ public record AdminTenantDto(
     string? DatabaseName,
     int SchemaVersion,
     int MemberCount,
+    bool CodePagesEnabled,
     DateTime CreatedOn);
 
 public record AdminUserDto(

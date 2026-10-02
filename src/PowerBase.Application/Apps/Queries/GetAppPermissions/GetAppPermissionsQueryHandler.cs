@@ -28,7 +28,13 @@ public record AppPermissionsResult(
     // to its physical numeric id). The client needs THIS one to resolve a rule condition's
     // "<the current user>" option (FormRuleCondition.value === '__current_user__') against a
     // User field's own live value.
-    Guid CurrentUserPublicId = default);
+    Guid CurrentUserPublicId = default,
+    // Tenant-level Code Pages switch (Super Admin per-tenant toggle, Tenant.CodePagesEnabled) —
+    // piggybacked on this already-fetched-once-per-app-entry call rather than a new bootstrap
+    // endpoint. The New Page dialog uses this to hide the "Code" page-type option outright,
+    // distinct from the existing app-ROLE `pages:code` permission (which only gates whether a
+    // member of this specific app can author Code pages once the tenant has them at all).
+    bool CodePagesEnabled = false);
 
 public class GetAppPermissionsQueryHandler
 {
@@ -36,6 +42,7 @@ public class GetAppPermissionsQueryHandler
     private readonly IAppUserRepository _appUserRepo;
     private readonly IAppRolePermissionRepository _permRepo;
     private readonly IUserRepository _userRepo;
+    private readonly ITenantRepository _tenantRepo;
     private readonly IQueryContext _queryContext;
 
     public GetAppPermissionsQueryHandler(
@@ -43,12 +50,14 @@ public class GetAppPermissionsQueryHandler
         IAppUserRepository appUserRepo,
         IAppRolePermissionRepository permRepo,
         IUserRepository userRepo,
+        ITenantRepository tenantRepo,
         IQueryContext queryContext)
     {
         _appRepo = appRepo;
         _appUserRepo = appUserRepo;
         _permRepo = permRepo;
         _userRepo = userRepo;
+        _tenantRepo = tenantRepo;
         _queryContext = queryContext;
     }
 
@@ -59,6 +68,7 @@ public class GetAppPermissionsQueryHandler
         var roleName = await _appUserRepo.GetUserRoleNameAsync(appId, _queryContext.UserId, ct);
         var currentUserPublicIds = await _userRepo.GetPublicIdsByIdsAsync([_queryContext.UserId], ct);
         var currentUserPublicId = currentUserPublicIds.GetValueOrDefault(_queryContext.UserId);
+        var tenant = await _tenantRepo.GetByIdAsync(_queryContext.TenantId, ct);
 
         // Fetch all role IDs for this user in this app — includes both direct assignments
         // (multi-role supported) and group-based role assignments via UNION.
@@ -67,7 +77,7 @@ public class GetAppPermissionsQueryHandler
         // If the user has no roles at all (not directly assigned and not in any group
         // that has access to this app), return flat permissions only (no granular perms).
         if (roleIds.Count == 0)
-            return new AppPermissionsResult(roleName, permissions, [], [], [], _queryContext.UserId, currentUserPublicId);
+            return new AppPermissionsResult(roleName, permissions, [], [], [], _queryContext.UserId, currentUserPublicId, tenant.CodePagesEnabled);
 
         var roleTablePerms = new Dictionary<long, IReadOnlyList<TablePermissionRow>>();
         var roleFieldPerms = new Dictionary<long, IReadOnlyList<FieldPermissionScopedRow>>();
@@ -167,7 +177,7 @@ public class GetAppPermissionsQueryHandler
             }
         }
 
-        return new AppPermissionsResult(roleName, permissions, mergedTablePerms, mergedFieldPerms, mergedFilters, _queryContext.UserId, currentUserPublicId);
+        return new AppPermissionsResult(roleName, permissions, mergedTablePerms, mergedFieldPerms, mergedFilters, _queryContext.UserId, currentUserPublicId, tenant.CodePagesEnabled);
     }
 
     private static string ResolveScope(IEnumerable<string> scopes)

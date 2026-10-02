@@ -56,6 +56,10 @@ internal class AppMemberFilter : IAsyncActionFilter
                     var pageId = Guid.Parse(route["publicId"]!.ToString()!);
                     await _accessService.RequireMembershipByPagePublicIdAsync(pageId, context.HttpContext.RequestAborted);
                     break;
+                case AppAccessResolver.ByAppId:
+                    var appId = Guid.Parse(route["appId"]!.ToString()!);
+                    await _accessService.RequireMembershipByAppPublicIdAsync(appId, context.HttpContext.RequestAborted);
+                    break;
                 default:
                     throw new InvalidOperationException($"RequireAppMember does not support resolver {_resolver}");
             }

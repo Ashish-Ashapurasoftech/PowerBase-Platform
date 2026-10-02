@@ -8,6 +8,7 @@ using PowerBase.Application.Common.Models;
 using PowerBase.Application.Tables.Commands.BulkDeleteTables;
 using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
+using PowerBase.Application.Tables.Commands.SetTablesShowInBar;
 using PowerBase.Application.Tables.Commands.UpdateTable;
 using PowerBase.Application.Tables.Queries.GetTable;
 using PowerBase.Application.Tables.Queries.ListTables;
@@ -24,6 +25,7 @@ public class TablesController : ControllerBase
     private readonly UpdateTableCommandHandler _updateHandler;
     private readonly DeleteTableCommandHandler _deleteHandler;
     private readonly BulkDeleteTablesCommandHandler _bulkDeleteHandler;
+    private readonly SetTablesShowInBarCommandHandler _setShowInBarHandler;
     private readonly GetTableQueryHandler _getHandler;
     private readonly ListTablesQueryHandler _listHandler;
     private readonly ListTableNavItemsQueryHandler _listNavHandler;
@@ -33,6 +35,7 @@ public class TablesController : ControllerBase
         UpdateTableCommandHandler updateHandler,
         DeleteTableCommandHandler deleteHandler,
         BulkDeleteTablesCommandHandler bulkDeleteHandler,
+        SetTablesShowInBarCommandHandler setShowInBarHandler,
         GetTableQueryHandler getHandler,
         ListTablesQueryHandler listHandler,
         ListTableNavItemsQueryHandler listNavHandler)
@@ -41,6 +44,7 @@ public class TablesController : ControllerBase
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _bulkDeleteHandler = bulkDeleteHandler;
+        _setShowInBarHandler = setShowInBarHandler;
         _getHandler = getHandler;
         _listHandler = listHandler;
         _listNavHandler = listNavHandler;
@@ -171,6 +175,20 @@ public class TablesController : ControllerBase
     {
         var deletedCount = await _bulkDeleteHandler.HandleAsync(new BulkDeleteTablesCommand(appId, request.PublicIds), ct);
         return Ok(new { success = true, deletedCount });
+    }
+
+    /// <summary>Show or hide one or more tables in the sidebar/nav bar in a single request. Touches only
+    /// the IsShowInBar flag (unlike PATCH /tables/{id}, which rewrites name/labels/description/icon too).</summary>
+    [HttpPatch("apps/{appId:guid}/tables/show-in-bar")]
+    [RequireAppPermission(PermissionCodes.TablesUpdate, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SetShowInBar(Guid appId, [FromBody] SetTablesShowInBarRequest request, CancellationToken ct)
+    {
+        var updatedCount = await _setShowInBarHandler.HandleAsync(new SetTablesShowInBarCommand(appId, request.PublicIds, request.IsShowInBar), ct);
+        return Ok(new { success = true, updatedCount });
     }
 
     private static TableResponse MapToResponse(CreateTableResult r) => new()

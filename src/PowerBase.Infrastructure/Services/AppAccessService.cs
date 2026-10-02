@@ -157,6 +157,14 @@ public class AppAccessService : IAppAccessService
         await RequireMembershipByAppIdAsync(appId, ct);
     }
 
+    public async Task RequireMembershipByAppPublicIdAsync(Guid appPublicId, CancellationToken ct = default)
+    {
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        EnsureTokenAppAccess(appId);
+        if (_queryContext.IsSuperAdmin) return;
+        await RequireMembershipByAppIdAsync(appId, ct);
+    }
+
     private async Task RequireMembershipByAppIdAsync(long appId, CancellationToken ct)
     {
         EnsureTokenAppAccess(appId);

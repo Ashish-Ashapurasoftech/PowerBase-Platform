@@ -80,6 +80,7 @@ using PowerBase.Application.Roles.Queries.GetRolePermissions;
 using PowerBase.Application.Roles.Queries.ListPermissions;
 using PowerBase.Application.Roles.Queries.ListRoles;
 using PowerBase.Application.Tables.Commands.BulkDeleteTables;
+using PowerBase.Application.Tables.Commands.SetTablesShowInBar;
 using PowerBase.Application.Tables.Commands.CreateTable;
 using PowerBase.Application.Tables.Commands.DeleteTable;
 using PowerBase.Application.Tables.Commands.UpdateTable;
@@ -325,6 +326,8 @@ builder.Services.AddScoped<PowerBase.Application.Pages.Queries.GetPage.GetPageQu
 builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListPageVersions.ListPageVersionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pages.Queries.RenderPage.RenderPageQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pages.Commands.SetDefaultHome.SetDefaultHomeCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.GetPageCode.GetPageCodeQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListNavPages.ListNavPagesQueryHandler>();
 
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
@@ -457,6 +460,7 @@ builder.Services.AddScoped<CreateTableCommandHandler>();
 builder.Services.AddScoped<UpdateTableCommandHandler>();
 builder.Services.AddScoped<DeleteTableCommandHandler>();
 builder.Services.AddScoped<BulkDeleteTablesCommandHandler>();
+builder.Services.AddScoped<SetTablesShowInBarCommandHandler>();
 builder.Services.AddScoped<GetTableQueryHandler>();
 builder.Services.AddScoped<ListTablesQueryHandler>();
 builder.Services.AddScoped<ListTableNavItemsQueryHandler>();

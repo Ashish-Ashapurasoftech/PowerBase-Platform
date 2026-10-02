@@ -65,6 +65,7 @@ public class TenantRepository : ControlRepositoryBase, ITenantRepository
 
     private const string GetByIdSql = """
         SELECT t.Id, t.PublicId, t.Name, t.Slug, t.PlanCode, t.Status, t.IsDeleted,
+               t.CodePagesEnabled,
                t.CreatedOn, t.CreatedBy, t.ModifiedOn, t.ModifiedBy, t.DeletedOn, t.DeletedBy
         FROM meta.Tenant t
         WHERE t.Id = @id AND t.IsDeleted = 0

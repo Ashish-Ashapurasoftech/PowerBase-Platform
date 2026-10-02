@@ -98,13 +98,13 @@ public class AppsController : ControllerBase
     /// <summary>List all apps for the current tenant.</summary>
     [HttpGet]
     [RequirePermission(PermissionCodes.AppsRead)]
-    [ProducesResponseType(typeof(ApiListResponse<AppResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiListResponse<AppListItemResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> List([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? sortField = null, [FromQuery] string sortOrder = "asc", CancellationToken ct = default)
     {
         var result = await _listHandler.HandleAsync(new ListAppsQuery(page, pageSize, null, sortField, IsDescending(sortOrder)), ct);
-        var items = result.Items.Select(MapToAppResponse).ToList();
-        return Ok(new ApiListResponse<AppResponse>(items, result.Total, result.Page, result.PageSize));
+        var items = result.Items.Select(MapToAppListItem).ToList();
+        return Ok(new ApiListResponse<AppListItemResponse>(items, result.Total, result.Page, result.PageSize));
     }
 
     private static bool IsDescending(string? sortOrder) =>
@@ -113,14 +113,14 @@ public class AppsController : ControllerBase
     /// <summary>Search apps by name for the current tenant.</summary>
     [HttpGet("search")]
     [RequirePermission(PermissionCodes.AppsRead)]
-    [ProducesResponseType(typeof(ApiListResponse<AppResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiListResponse<AppListItemResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Search([FromQuery] string name = "", [FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? sortField = null, [FromQuery] string sortOrder = "asc", CancellationToken ct = default)
     {
         // GAP #11: Delegate the name filter directly to the database query handler
         var result = await _listHandler.HandleAsync(new ListAppsQuery(page, pageSize, name, sortField, IsDescending(sortOrder)), ct);
-        var items = result.Items.Select(MapToAppResponse).ToList();
-        return Ok(new ApiListResponse<AppResponse>(items, result.Total, result.Page, result.PageSize));
+        var items = result.Items.Select(MapToAppListItem).ToList();
+        return Ok(new ApiListResponse<AppListItemResponse>(items, result.Total, result.Page, result.PageSize));
     }
 
     private static readonly string[] ExportColumns =
@@ -371,25 +371,15 @@ public class AppsController : ControllerBase
         };
     }
 
-    private static AppResponse MapToAppResponse(AppListItemDto app)
+    private static AppListItemResponse MapToAppListItem(AppListItemDto app)
     {
-        var formatting = string.IsNullOrEmpty(app.Formatting)
-            ? null
-            : JsonSerializer.Deserialize<AppFormattingSettings>(app.Formatting, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppFormattingSettings();
-
-        var security = string.IsNullOrEmpty(app.SecurityOptions)
-            ? null
-            : JsonSerializer.Deserialize<AppSecurityOptionsSettings>(app.SecurityOptions, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AppSecurityOptionsSettings();
-
-        return new AppResponse
+        return new AppListItemResponse
         {
             PublicId = app.PublicId,
             Name = app.Name,
             Description = app.Description,
             Icon = app.Icon,
             Color = app.Color,
-            Formatting = formatting,
-            SecurityOptions = security,
             Status = app.Status,
             CreatedOn = app.CreatedOn,
             OwnerName = app.OwnerName,

@@ -14,11 +14,12 @@ public class CreatePageCommandHandler
     private readonly IPageRepository _pageRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly ITenantRepository _tenantRepo;
     private readonly CreatePageCommandValidator _validator;
 
     public CreatePageCommandHandler(
         IAppRepository appRepo, IAppRoleRepository appRoleRepo, IAppUserRepository appUserRepo, IPageRepository pageRepo,
-        IQueryContext queryContext, IAuditRepository auditRepo)
+        IQueryContext queryContext, IAuditRepository auditRepo, ITenantRepository tenantRepo)
     {
         _appRepo = appRepo;
         _appRoleRepo = appRoleRepo;
@@ -26,6 +27,7 @@ public class CreatePageCommandHandler
         _pageRepo = pageRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
+        _tenantRepo = tenantRepo;
         _validator = new CreatePageCommandValidator();
     }
 
@@ -39,14 +41,25 @@ public class CreatePageCommandHandler
 
         var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
 
-        // pages:code is a stricter capability than pages:create — required specifically to
-        // author a Code-type page (custom HTML/CSS/JS running in the user's session).
-        // It is an APP-role permission (like pages:create), not a tenant-role one.
-        if (command.PageType == PageTypes.Code && !_queryContext.IsSuperAdmin)
+        if (command.PageType == PageTypes.Code)
         {
-            var appPermissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
-            if (!appPermissions.Contains(PermissionCodes.PagesCode))
-                throw new UnauthorizedActionException("Creating a Code page requires the Code Page Builder capability.");
+            // Outer, tenant-level gate — a Super Admin per-tenant switch (Tenant.CodePagesEnabled,
+            // default off). Checked before the app-role permission below: even a Super Admin
+            // acting as themselves can't create one until the feature is turned on for this
+            // tenant, since the flag exists precisely to let Super Admin opt tenants in.
+            var tenant = await _tenantRepo.GetByIdAsync(_queryContext.TenantId, ct);
+            if (!tenant.CodePagesEnabled)
+                throw new UnauthorizedActionException("Code Pages are not enabled for this tenant.");
+
+            // pages:code is a stricter capability than pages:create — required specifically to
+            // author a Code-type page (custom HTML/CSS/JS running in the user's session).
+            // It is an APP-role permission (like pages:create), not a tenant-role one.
+            if (!_queryContext.IsSuperAdmin)
+            {
+                var appPermissions = await _appUserRepo.GetUserAppPermissionsAsync(appId, _queryContext.UserId, ct);
+                if (!appPermissions.Contains(PermissionCodes.PagesCode))
+                    throw new UnauthorizedActionException("Creating a Code page requires the Code Page Builder capability.");
+            }
         }
 
         var page = new Page

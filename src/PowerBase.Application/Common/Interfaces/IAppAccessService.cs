@@ -22,4 +22,10 @@ public interface IAppAccessService
     /// <summary>Ensures the user is a member of the app that owns the specified page. Does NOT require any specific permission code.
     /// Used for the render endpoint, which is data-access governed by the page's own role visibility, not a flat permission code.</summary>
     Task RequireMembershipByPagePublicIdAsync(Guid pagePublicId, CancellationToken ct = default);
+    /// <summary>Ensures the user is a member of the given app directly (the route already gives
+    /// the app's own public id — no owning-entity lookup needed, unlike the ByTable/ByReport/
+    /// ByPage variants above). Does NOT require any specific permission code — used by
+    /// viewer-facing endpoints scoped to the whole app rather than one entity in it (e.g. the
+    /// nav-pages list, which every app member should see regardless of their Pages permission).</summary>
+    Task RequireMembershipByAppPublicIdAsync(Guid appPublicId, CancellationToken ct = default);
 }

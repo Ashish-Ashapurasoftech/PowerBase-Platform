@@ -21,8 +21,15 @@ public class JwtMiddleware
         IUserRepository userRepository,
         ITenantRepository tenantRepository)
     {
+        // Falls back to a `?token=` query param when there's no Authorization header — needed for
+        // Code Pages: the served page is a plain document navigation/new-tab open, not an
+        // XHR/fetch the SPA's interceptor can attach a header to. The launcher route that opens a
+        // Code Page builds this query param from the SPA's own stored token immediately before
+        // opening it (see PagesController's code-serving endpoint) — this is the simplified,
+        // non-cookie MVP path; not intended as this app's general auth story.
         var token = context.Request.Headers["Authorization"]
-            .FirstOrDefault()?.Split(" ").Last();
+            .FirstOrDefault()?.Split(" ").Last()
+            ?? context.Request.Query["token"].FirstOrDefault();
 
         if (token is not null)
         {

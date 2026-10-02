@@ -31,6 +31,10 @@ public interface IAppTableRepository
     Task<(long Id, Guid PublicId)> CreateAsync(AppTable table, CancellationToken ct = default);
     Task UpdatePhysicalNameAsync(long id, string physicalTableName, CancellationToken ct = default);
     Task<int> UpdateAsync(Guid publicId, string name, string? singularLabel, string? pluralLabel, string? description, string? icon, long? defaultRecordPickerField1Id = null, long? defaultRecordPickerField2Id = null, long? defaultRecordPickerField3Id = null, bool? isShowInBar = null, CancellationToken ct = default);
+    /// <summary>Sets IsShowInBar on every given table (scoped to <paramref name="appId"/>) in one
+    /// statement and returns the (PublicId, Name) of the tables whose value actually changed - tables
+    /// already at the requested value, outside the app, or deleted are left out. Touches no other column.</summary>
+    Task<IReadOnlyList<(Guid PublicId, string Name)>> SetShowInBarAsync(long appId, IReadOnlyList<Guid> publicIds, bool isShowInBar, CancellationToken ct = default);
     Task UpdateDefaultReportSettingsAsync(Guid publicId, string defaultReportSettings, CancellationToken ct = default);
     /// <summary>Sets (or clears, when null) the table's Custom Data Rule formula and its
     /// "Turn custom data rules on?" enabled flag together. Kept separate from
