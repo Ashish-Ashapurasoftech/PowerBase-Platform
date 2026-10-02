@@ -155,7 +155,7 @@ public class PipelinesController : ControllerBase
         var command = new UpdatePipelineCommand(publicId, request.Name, request.Description, request.IsActive, rowVersion);
         await _updateHandler.HandleAsync(command, ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { rowVersion = Convert.ToBase64String(pipeline.RowVersion) });
+        return Ok(new { modifiedOn = pipeline.ModifiedOn.HasValue ? DateTime.SpecifyKind(pipeline.ModifiedOn.Value, DateTimeKind.Utc) : (DateTime?)null, rowVersion = Convert.ToBase64String(pipeline.RowVersion) });
     }
 
     /// <summary>Save or overwrite the hierarchical steps layout for a pipeline.</summary>
@@ -173,7 +173,7 @@ public class PipelinesController : ControllerBase
         var command = new SavePipelineStepsCommand(publicId, request.Steps, rowVersion);
         await _saveStepsHandler.HandleAsync(command, ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
+        return Ok(new { modifiedOn = pipeline.ModifiedOn.HasValue ? DateTime.SpecifyKind(pipeline.ModifiedOn.Value, DateTimeKind.Utc) : (DateTime?)null, rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Soft-delete a pipeline workflow.</summary>
@@ -360,6 +360,8 @@ public class PipelinesController : ControllerBase
         Name = result.Name,
         Description = result.Description,
         VariablesJson = result.VariablesJson,
+        CreatedOn = result.CreatedOn,
+        ModifiedOn = result.ModifiedOn,
         IsActive = result.IsActive,
         RowVersion = Convert.ToBase64String(result.RowVersion),
         Steps = result.Steps.Select(MapStepResponse).ToList()
@@ -388,6 +390,8 @@ public class PipelinesController : ControllerBase
         Name = result.Name,
         Description = result.Description,
         VariablesJson = result.VariablesJson,
+        CreatedOn = result.CreatedOn,
+        ModifiedOn = result.ModifiedOn,
         IsActive = result.IsActive,
         DateFormatString = result.DateFormatString,
         RowVersion = Convert.ToBase64String(result.RowVersion),
@@ -496,7 +500,7 @@ public class PipelinesController : ControllerBase
 
         await handler.HandleAsync(command, ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { message = "Schedule updated successfully.", rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
+        return Ok(new { message = "Schedule updated successfully.", modifiedOn = pipeline.ModifiedOn.HasValue ? DateTime.SpecifyKind(pipeline.ModifiedOn.Value, DateTimeKind.Utc) : (DateTime?)null, rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Delete a pipeline's schedule.</summary>
@@ -510,7 +514,7 @@ public class PipelinesController : ControllerBase
     {
         await handler.HandleAsync(new DeletePipelineScheduleCommand(publicId), ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { message = "Schedule deleted successfully.", rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
+        return Ok(new { message = "Schedule deleted successfully.", modifiedOn = pipeline.ModifiedOn.HasValue ? DateTime.SpecifyKind(pipeline.ModifiedOn.Value, DateTimeKind.Utc) : (DateTime?)null, rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Run a pipeline manually on demand.</summary>
