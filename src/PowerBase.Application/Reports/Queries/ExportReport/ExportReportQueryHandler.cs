@@ -165,7 +165,7 @@ public class ExportReportQueryHandler
         if (hasFormulaSorts)
             pairs = FormulaFilterSorter.ApplySort(pairs, sortFields, allFields);
 
-        var userNames = await RunReport.RunReportQueryHandler.ResolveUserNamesAsync(pairs.Select(p => p.Row), allFields, _userRepo, ct);
+        var userNames = await RunReport.RunReportQueryHandler.ResolveUserNamesAsync(pairs.Select(p => p.Row), allFields, _userRepo, ct, pairs.Select(p => p.Computed));
         var items = pairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
 
         var columns = selectedFields.Select(f => new ColumnInfo((f.Fid ?? f.Id).ToString(), string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, f.TypeCode)).ToList();

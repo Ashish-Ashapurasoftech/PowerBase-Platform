@@ -506,7 +506,7 @@ public class RunReportQueryHandler
 
             // Paginate in memory.
             var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
-            var userNames = await ResolveUserNamesAsync(pagePairs.Select(p => p.Row), allFields, _userRepo, ct);
+            var userNames = await ResolveUserNamesAsync(pagePairs.Select(p => p.Row), allFields, _userRepo, ct, pagePairs.Select(p => p.Computed));
             items = pagePairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, userNames, p.Computed)).ToList();
         }
         else
@@ -517,9 +517,9 @@ public class RunReportQueryHandler
             total = await _recordRepo.CountAsync(table, allFields, filterTree,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
-            var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct);
             var relational = await _relationalProjector.ProjectAsync(table, allFields, rows, ct);
             var computed = _formulaProjector.Project(allFields, rows, relational, table);
+            var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
         }
 
@@ -1286,19 +1286,32 @@ public class RunReportQueryHandler
         return long.TryParse(raw, out var id) && names.TryGetValue(id, out var name) ? $"{raw}|{name}" : rawValue;
     }
 
+    /// <param name="computed">The rows' projected formula values. When supplied, the user ids a
+    /// Formula_User field evaluated to join the same single batched lookup as the stored User
+    /// columns, so a formula result (e.g. [Record Owner]) resolves to a name for free.</param>
     internal static async Task<IReadOnlyDictionary<long, string>> ResolveUserNamesAsync(
         IEnumerable<IReadOnlyDictionary<string, object?>> rows,
         IReadOnlyList<AppField> fields,
         IUserRepository userRepo,
-        CancellationToken ct)
+        CancellationToken ct,
+        IEnumerable<IReadOnlyDictionary<long, object?>>? computed = null)
     {
         var hasUserFields = fields.Any(f =>
-            f.TypeCode is "User" or "MultiUser" or "File" ||
+            f.TypeCode is "User" or "MultiUser" or "File" or "Formula_User" ||
             (f.IsSystem && f.PhysicalColumnName is "CreatedBy" or "ModifiedBy"));
 
         if (!hasUserFields) return new Dictionary<long, string>();
 
         var ids = new HashSet<long>();
+        if (computed is not null)
+        {
+            var formulaUserFids = fields.Where(f => f.TypeCode == "Formula_User" && f.Fid.HasValue)
+                .Select(f => (long)f.Fid!.Value).ToList();
+            foreach (var values in computed)
+                foreach (var fid in formulaUserFids)
+                    if (values.TryGetValue(fid, out var v) && v is not null && long.TryParse(v.ToString(), out var uid))
+                        ids.Add(uid);
+        }
         foreach (var row in rows)
         {
             // System user columns (stored as long)
@@ -1337,8 +1350,8 @@ public class RunReportQueryHandler
     /// (see AppUserPickerResponse / UserFieldValueResolver, which resolves the picker's submitted
     /// Guid back to this same long id on save) — handing it a display name instead of a Guid left
     /// the picker unable to match any option, showing empty ("Select User") no matter what was
-    /// actually saved. Deliberately does NOT cover CreatedBy/ModifiedBy — those are read-only
-    /// system columns never rendered through a picker, so they stay resolved to names via
+    /// actually saved. The system User fields (Record Owner / Last Modified By) are covered via
+    /// their own physical column; the CreatedByName/ModifiedBy name properties still come from
     /// ResolveUserNamesAsync regardless.</summary>
     internal static async Task<IReadOnlyDictionary<long, Guid>> ResolveUserPublicIdsAsync(
         IEnumerable<IReadOnlyDictionary<string, object?>> rows,
@@ -1354,7 +1367,12 @@ public class RunReportQueryHandler
         {
             foreach (var f in fields.Where(f => f.TypeCode is "User" or "MultiUser" && f.Fid.HasValue))
             {
-                var col = PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value);
+                // Record Owner / Last Modified By are User-typed but store under their own system
+                // column; RecordResult.FromRow routes them through this map too, so without their
+                // ids here they fell back to the raw numeric id.
+                var col = f.IsSystem && !string.IsNullOrEmpty(f.PhysicalColumnName)
+                    ? f.PhysicalColumnName!
+                    : PowerBase.Domain.Constants.PhysicalNaming.ColumnName(f.Fid!.Value);
                 if (!row.TryGetValue(col, out var val) || val is null) continue;
                 var str = val.ToString()!;
                 if (str.TrimStart().StartsWith('['))

@@ -164,6 +164,11 @@ public sealed class DurationSettings
     /// <summary>One of <see cref="DurationDisplays"/>.</summary>
     public string? Display { get; set; }
     public int? Decimals { get; set; }
+    /// <summary>Count a blank value as 0 in totals/averages (defaults to true when unset). Read by
+    /// RecordRepository.TreatBlankAsZero for Summary/Chart aggregations, same as the numeric family.</summary>
+    public bool? TreatBlankAsZero { get; set; }
+    public bool? ShowTotalInReports { get; set; }
+    public bool? ShowAverageInReports { get; set; }
     public bool? DisplayBold { get; set; }
     public bool? NoWrap { get; set; }
     public int? ColumnWidth { get; set; }
