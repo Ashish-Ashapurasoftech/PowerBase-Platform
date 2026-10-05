@@ -5722,6 +5722,31 @@ public partial class PipelineEngine : IPipelineEngine
                     }
 
                     var evaluatedValue = EvaluateTokens(rawValue, payloadJson, executionPath, allSteps);
+                    if (fieldCategory == "DATE" && RelativeFilterDate.IsRelative(evaluatedValue))
+                    {
+                        var window = RelativeFilterDate.Window(evaluatedValue);
+                        FilterNode Boundary(string op, DateTime value) => new FilterNode
+                        {
+                            Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = op, Value = value.ToString("O") }
+                        };
+                        if (dbOp == "date_eq" || dbOp == "date_ne")
+                        {
+                            var equal = dbOp == "date_eq";
+                            dbGroup.Nodes.Add(new FilterNode { Group = new FilterGroup
+                            {
+                                Logic = equal ? "and" : "or",
+                                Nodes = new List<FilterNode> { Boundary(equal ? "gte" : "lt", window.Start), Boundary(equal ? "lt" : "gte", window.End) }
+                            }});
+                            continue;
+                        }
+                        if (dbOp is "date_gt" or "date_gte" or "date_lt" or "date_lte")
+                        {
+                            dbGroup.Nodes.Add(Boundary(dbOp is "date_gt" or "date_gte" ? "gte" : "lt",
+                                dbOp is "date_gt" or "date_lte" ? window.End : window.Start));
+                            continue;
+                        }
+                    }
+
 
                     dbGroup.Nodes.Add(new FilterNode
                     {

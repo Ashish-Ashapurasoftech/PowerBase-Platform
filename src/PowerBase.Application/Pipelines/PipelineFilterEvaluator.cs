@@ -83,6 +83,15 @@ public static class PipelineFilterEvaluator
         var left = leftVal ?? string.Empty;
         var right = rightVal ?? string.Empty;
         var normalizedOp = NormalizeOperator(op);
+        DateTime? relativeDayEnd = null;
+        if (RelativeFilterDate.IsRelative(right) && (typeCategory == "DATE" || string.IsNullOrEmpty(typeCategory) || typeCategory == "INFER"))
+        {
+            var window = RelativeFilterDate.Window(right);
+            right = window.Start.ToString("O");
+            relativeDayEnd = window.End;
+            typeCategory = "DATE";
+        }
+
 
         // 1. If typeCategory is null/empty/INFER, execute the exact original fallback logic
         if (string.IsNullOrEmpty(typeCategory) || typeCategory.Equals("INFER", StringComparison.OrdinalIgnoreCase))
@@ -312,7 +321,7 @@ public static class PipelineFilterEvaluator
                     // that local-midnight instant instead matches the calendar day the user actually
                     // picked, regardless of which UTC day each record's timestamp happens to fall on.
                     var dayStart = rDate;
-                    var dayEnd = rDate.AddDays(1);
+                    var dayEnd = relativeDayEnd ?? rDate.AddDays(1);
 
                     switch (normalizedOp)
                     {

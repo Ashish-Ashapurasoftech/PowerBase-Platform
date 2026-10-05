@@ -2335,6 +2335,25 @@ public class PipelineEngineTests
         node.Condition!.Value.Should().Be("14");
     }
 
+    [Theory]
+    [InlineData("is", "and", "gte", "lt")]
+    [InlineData("is-not", "or", "lt", "gte")]
+    public void SearchRecords_RelativeDate_MapsCalendarWindow(string op, string logic, string startOp, string endOp)
+    {
+        var fields = new List<AppField> { new() { Id = 22, Fid = 1, Name = "CreatedOn", TypeCode = "DATETIME" } };
+        var rule = new TriggerFilterGroup { Rules = new List<TriggerFilterRule> { new() { Field = "fid_1", Operator = op, Value = "@relative-date|today|0|Asia/Kolkata" } } };
+        var method = typeof(PipelineEngine).GetMethod("MapTriggerFilterGroupToDbFilterGroup", BindingFlags.NonPublic | BindingFlags.Instance);
+        var result = (FilterGroup)method!.Invoke(_engine, new object?[] { rule, fields, "{}", "path", new List<PipelineStep>(), null })!;
+        var window = result.Nodes.Single().Group!;
+        window.Logic.Should().Be(logic);
+        window.Nodes[0].Condition!.Operator.Should().Be(startOp);
+        window.Nodes[1].Condition!.Operator.Should().Be(endOp);
+        window.Nodes[0].Condition!.Value.Should().NotContain("@relative-date");
+        var start = DateTime.Parse(window.Nodes[0].Condition!.Value!);
+        var end = DateTime.Parse(window.Nodes[1].Condition!.Value!);
+        (end - start).TotalHours.Should().Be(24);
+    }
+
     [Fact]
     public void SearchRecords_AdvancedFilter_UsesStableFid()
     {
