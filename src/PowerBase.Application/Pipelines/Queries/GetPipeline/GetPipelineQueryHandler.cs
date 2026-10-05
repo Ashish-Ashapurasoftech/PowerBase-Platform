@@ -96,6 +96,8 @@ public class GetPipelineQueryHandler
             Description = pipeline.Description,
             VariablesJson = pipeline.VariablesJson,
             IsActive = pipeline.IsActive,
+            CreatedOn = DateTime.SpecifyKind(pipeline.CreatedOn, DateTimeKind.Utc),
+            ModifiedOn = pipeline.ModifiedOn.HasValue ? DateTime.SpecifyKind(pipeline.ModifiedOn.Value, DateTimeKind.Utc) : null,
             RowVersion = pipeline.RowVersion ?? Array.Empty<byte>(),
             Steps = rootSteps
         };

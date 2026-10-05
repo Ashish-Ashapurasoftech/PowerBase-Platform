@@ -182,6 +182,7 @@ public class IncomingWebhookRule
 {
     public string Field { get; set; } = "";
     public string Operator { get; set; } = "";
+    [System.Text.Json.Serialization.JsonConverter(typeof(FilterScalarStringJsonConverter))]
     public string Value { get; set; } = "";
     public string? Path { get; set; }
     public bool IsBlank => string.IsNullOrWhiteSpace(Field) && string.IsNullOrWhiteSpace(Operator) && string.IsNullOrWhiteSpace(Value) && string.IsNullOrWhiteSpace(Path);

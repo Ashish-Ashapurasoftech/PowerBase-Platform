@@ -22,6 +22,27 @@ namespace PowerBase.UnitTests.Pipelines;
 
 public class PipelineEngineTests
 {
+    private sealed class KeysetSearchStub : IPipelineRecordSearchService, IKeysetPipelineRecordSearchService
+    {
+        private readonly IReadOnlyList<IReadOnlyList<IReadOnlyDictionary<string, object?>>> _pages;
+        public KeysetSearchStub(params IReadOnlyList<IReadOnlyDictionary<string, object?>>[] pages) => _pages = pages;
+        public bool SupportsKeysetPaging => true;
+        public Task<long> GetMaxRecordIdAsync(AppTable table, CancellationToken ct = default) => Task.FromResult(999L);
+        public async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SearchPagesAsync(
+            AppTable table, IReadOnlyList<AppField> fields, int pageSize, FilterGroup? filterTree = null,
+            long afterId = 0, long maxId = long.MaxValue, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            foreach (var page in _pages) { ct.ThrowIfCancellationRequested(); yield return page; await Task.Yield(); }
+        }
+        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SearchAsync(AppTable table,
+            IReadOnlyList<AppField> fields, int? maxResults = null, FilterGroup? filterTree = null,
+            CancellationToken ct = default, int page = 1) =>
+            Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(Array.Empty<IReadOnlyDictionary<string, object?>>());
+        public async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadCopySnapshotAsync(
+            AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default) { await Task.CompletedTask; yield break; }
+    }
+
     private readonly PipelineEngine _engine;
     private readonly IPipelineRepository _pipelineRepo;
     private readonly IRecordRepository _recordRepo;
@@ -577,6 +598,33 @@ public class PipelineEngineTests
             .Should().Be("First: Rec_1, Second: Rec_2");
     }
 
+    [Fact]
+    public void EvaluateTokens_PropertyOfArrayOfObjects_JoinsEachItemsValue()
+    {
+        // Mapping a Create Record field straight to the webhook trigger's "Headers > Name" picker
+        // entry produces a token like {{steps.trigger.headers.name}} with no index — since Headers
+        // is an array (one {name, value} pair per request header), that must join every item's
+        // name rather than leave the whole mapping unresolved.
+        var payload = JsonSerializer.Serialize(new
+        {
+            steps = new
+            {
+                trigger = new
+                {
+                    headers = new[]
+                    {
+                        new { name = "Content-Type", value = "application/json" },
+                        new { name = "Authorization", value = "Bearer abc" }
+                    }
+                }
+            }
+        });
+
+        InvokeEvaluateTokens("{{steps.trigger.headers.name}}", payload).Should().Be("Content-Type, Authorization");
+        InvokeEvaluateTokens("{{steps.trigger.headers.value}}", payload).Should().Be("application/json, Bearer abc");
+        InvokeEvaluateTokens("{{steps.trigger.headers[1].name}}", payload).Should().Be("Authorization");
+    }
+
     private bool InvokeEvaluateConditionOperator(string leftVal, string op, string rightVal)
     {
         var method = typeof(PipelineEngine).GetMethod("EvaluateConditionOperator", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -1059,6 +1107,76 @@ public class PipelineEngineTests
         await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value3"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExecuteAsync_LargeSearchLoop_StagesAndCheckpointsBoundedWorkset(bool hasExplicitLargeLimit)
+    {
+        if (hasExplicitLargeLimit) _execOptions.MaxMaterializedSearchRecords = 2;
+        var messageId = Guid.NewGuid();
+        var tableId = Guid.NewGuid();
+        var publicIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+        var pages = new[]
+        {
+            (IReadOnlyList<IReadOnlyDictionary<string, object?>>)new[]
+            {
+                (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["Id"] = 1L, ["PublicId"] = publicIds[0], ["f_1"] = "one" },
+                new Dictionary<string, object?> { ["Id"] = 2L, ["PublicId"] = publicIds[1], ["f_1"] = "two" }
+            },
+            (IReadOnlyList<IReadOnlyDictionary<string, object?>>)new[]
+            {
+                (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["Id"] = 3L, ["PublicId"] = publicIds[2], ["f_1"] = "three" }
+            }
+        };
+        var search = new KeysetSearchStub(pages);
+        typeof(PipelineEngine).GetField("_pipelineRecordSearchService", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(_engine, search);
+
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "manual",
+            TriggerPayloadJson = "{}", MessageId = messageId.ToString() };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true });
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>
+        {
+            new() { Id = 11, RefId = "search", Type = "query", Subtype = "search-records",
+                ConfigJson = hasExplicitLargeLimit
+                    ? JsonSerializer.Serialize(new { TableId = tableId, MaxResults = 3 })
+                    : JsonSerializer.Serialize(new { TableId = tableId }) },
+            new() { Id = 12, RefId = "loop", Type = "loop", Subtype = "for-each",
+                ConfigJson = JsonSerializer.Serialize(new { LoopOverStepId = "search" }) }
+        });
+        var table = new AppTable { Id = 100, PublicId = tableId };
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(100, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+            { new() { Id = 1, Fid = 1, Name = "Name", TypeCode = "text" } });
+
+        var staged = new List<PipelineBulkEventRecord>();
+        _pipelineRepo.GetOrCreateSearchWorksetAsync(Arg.Any<Guid>(), messageId, "search", 999, Arg.Any<CancellationToken>())
+            .Returns(call => new PipelineSearchWorkset { WorksetId = call.ArgAt<Guid>(0), RunMessageId = messageId,
+                StepRefId = "search", SnapshotMaxRecordId = 999 });
+        _pipelineRepo.When(repo => repo.AppendSearchWorksetPageAsync(Arg.Any<PipelineSearchWorkset>(),
+                Arg.Any<List<PipelineBulkEventRecord>>(), Arg.Any<long>(), Arg.Any<CancellationToken>()))
+            .Do(call => staged.AddRange(call.ArgAt<List<PipelineBulkEventRecord>>(1)));
+        _pipelineRepo.GetPendingSearchWorksetPageAsync(Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(_ => staged.Where(row => row.Processed == 0).Take(500).ToList());
+        _pipelineRepo.When(repo => repo.MarkSearchWorksetRecordsProcessedAsync(Arg.Any<Guid>(),
+                Arg.Any<List<long>>(), 1, Arg.Any<CancellationToken>()))
+            .Do(call => { foreach (var id in call.ArgAt<List<long>>(1)) staged.Single(row => row.Id == id).Processed = 1; });
+        var nextId = 0L;
+        _pipelineRepo.When(repo => repo.AppendSearchWorksetPageAsync(Arg.Any<PipelineSearchWorkset>(),
+                Arg.Any<List<PipelineBulkEventRecord>>(), Arg.Any<long>(), Arg.Any<CancellationToken>()))
+            .Do(call => { foreach (var row in call.ArgAt<List<PipelineBulkEventRecord>>(1)) row.Id = ++nextId; });
+
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        staged.Should().HaveCount(3);
+        staged.Should().OnlyContain(row => row.Processed == 1 && row.AfterValuesJson!.Contains("fid_1"));
+        await _pipelineRepo.Received(2).AppendSearchWorksetPageAsync(Arg.Any<PipelineSearchWorkset>(),
+            Arg.Any<List<PipelineBulkEventRecord>>(), Arg.Any<long>(), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(3).MarkSearchWorksetRecordsProcessedAsync(Arg.Any<Guid>(),
+            Arg.Any<List<long>>(), 1, Arg.Any<CancellationToken>());
+    }
+
     [Fact]
     public async Task ExecuteAsync_LegacyDirectSourceExpressionInsideLoop_ResolvesCurrentIterationValuesViaFallback()
     {
@@ -1363,6 +1481,58 @@ public class PipelineEngineTests
         // 6. Finite with numeric string
         var config6 = JsonSerializer.Deserialize("{\"maxResults\": \"3\"}", configType!, options);
         configType!.GetProperty("MaxResults")!.GetValue(config6).Should().Be(3);
+    }
+
+    [Theory]
+    [InlineData("0", "0")]
+    [InlineData("15", "15")]
+    [InlineData("-12.50", "-12.50")]
+    [InlineData("true", "true")]
+    [InlineData("false", "false")]
+    public void TriggerFilterRule_ScalarJsonValues_DeserializeWithoutLosingTheirValue(string jsonValue, string expected)
+    {
+        var json = $"{{\"field\":\"fid_10\",\"operator\":\"is\",\"value\":{jsonValue}}}";
+
+        var rule = JsonSerializer.Deserialize<TriggerFilterRule>(json, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+
+        rule.Should().NotBeNull();
+        rule!.Value.Should().Be(expected);
+    }
+
+    [Fact]
+    public void TriggerFilterRule_StringDateValue_DeserializesUnchanged()
+    {
+        const string date = "2026-09-24T00:00:00.000Z";
+        var rule = JsonSerializer.Deserialize<TriggerFilterRule>(
+            $"{{\"field\":\"fid_11\",\"operator\":\"is\",\"value\":\"{date}\"}}",
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        rule!.Value.Should().Be(date);
+    }
+
+    [Theory]
+    [InlineData("DateTime", "is", "date_eq")]
+    [InlineData("Date", "is-not", "date_ne")]
+    [InlineData("Text", "ends-with", "endsWith")]
+    public void SearchRecords_FilterOperators_MapWithFieldTypeSemantics(string typeCode, string uiOperator, string expectedDbOperator)
+    {
+        var fields = new List<AppField>
+        {
+            new() { Id = 10, Fid = 20, Name = "Value", TypeCode = typeCode }
+        };
+        var group = new TriggerFilterGroup
+        {
+            LogicalOp = "AND",
+            Rules = [new TriggerFilterRule { Field = "fid_20", Operator = uiOperator, Value = "2026-09-24" }]
+        };
+        var method = typeof(PipelineEngine).GetMethod("MapTriggerFilterGroupToDbFilterGroup", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        var result = (FilterGroup)method!.Invoke(_engine, [group, fields, "{}", "path", new List<PipelineStep>(), null])!;
+
+        result.Nodes.Should().ContainSingle().Which.Condition!.Operator.Should().Be(expectedDbOperator);
     }
 
     [Fact]
@@ -2165,6 +2335,25 @@ public class PipelineEngineTests
         node.Condition!.Value.Should().Be("14");
     }
 
+    [Theory]
+    [InlineData("is", "and", "gte", "lt")]
+    [InlineData("is-not", "or", "lt", "gte")]
+    public void SearchRecords_RelativeDate_MapsCalendarWindow(string op, string logic, string startOp, string endOp)
+    {
+        var fields = new List<AppField> { new() { Id = 22, Fid = 1, Name = "CreatedOn", TypeCode = "DATETIME" } };
+        var rule = new TriggerFilterGroup { Rules = new List<TriggerFilterRule> { new() { Field = "fid_1", Operator = op, Value = "@relative-date|today|0|Asia/Kolkata" } } };
+        var method = typeof(PipelineEngine).GetMethod("MapTriggerFilterGroupToDbFilterGroup", BindingFlags.NonPublic | BindingFlags.Instance);
+        var result = (FilterGroup)method!.Invoke(_engine, new object?[] { rule, fields, "{}", "path", new List<PipelineStep>(), null })!;
+        var window = result.Nodes.Single().Group!;
+        window.Logic.Should().Be(logic);
+        window.Nodes[0].Condition!.Operator.Should().Be(startOp);
+        window.Nodes[1].Condition!.Operator.Should().Be(endOp);
+        window.Nodes[0].Condition!.Value.Should().NotContain("@relative-date");
+        var start = DateTime.Parse(window.Nodes[0].Condition!.Value!);
+        var end = DateTime.Parse(window.Nodes[1].Condition!.Value!);
+        (end - start).TotalHours.Should().Be(24);
+    }
+
     [Fact]
     public void SearchRecords_AdvancedFilter_UsesStableFid()
     {
@@ -2187,7 +2376,7 @@ public class PipelineEngineTests
         var method = typeof(PipelineEngine).GetMethod("MapTriggerFilterGroupToDbFilterGroup", BindingFlags.NonPublic | BindingFlags.Instance);
         
         // Act
-        var result = (FilterGroup)method!.Invoke(_engine, new object[] { triggerFilterGroup, fields, "{}", "path", new List<PipelineStep>() })!;
+        var result = (FilterGroup)method!.Invoke(_engine, new object?[] { triggerFilterGroup, fields, "{}", "path", new List<PipelineStep>(), null })!;
 
         // Assert
         result.Should().NotBeNull();
@@ -2196,6 +2385,41 @@ public class PipelineEngineTests
         node.Condition!.FieldId.Should().Be(3); // Stable Fid
         node.Condition!.Operator.Should().Be("gt");
         node.Condition!.Value.Should().Be("14");
+    }
+
+    [Fact]
+    public async Task CreateRecord_PublishesPersistedDefaultsAndBlankFieldsToTrigger()
+    {
+        var table = new AppTable { Id = 10, PublicId = Guid.NewGuid() };
+        var fields = new List<AppField> {
+            new() { Id = 60, Fid = 6, Name = "Default", TypeCode = "text", PhysicalColumnName = "f_6" },
+            new() { Id = 70, Fid = 7, Name = "Blank", TypeCode = "text", PhysicalColumnName = "f_7" }
+        };
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(fields);
+        var publicId = Guid.NewGuid();
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var transaction = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(transaction);
+        _recordRepo.CreateAsync(table, fields, Arg.Any<IReadOnlyDictionary<long, object?>>(), transaction, Arg.Any<CancellationToken>()).Returns(publicId);
+        _recordRepo.GetActiveRecordIdByPublicIdAsync(table, publicId, transaction, Arg.Any<CancellationToken>()).Returns(19L);
+        _recordRepo.GetBulkUpsertRowsByIdsAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), transaction, Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> {
+                [19] = new Dictionary<string, object?> { ["f_6"] = "Saved default", ["f_7"] = null }
+            });
+        var interceptor = Substitute.For<IPipelineTriggerInterceptor>();
+        var step = new PipelineStep { Type = "action", Subtype = "create-record",
+            ConfigJson = JsonSerializer.Serialize(new { tableId = table.PublicId.ToString() }) };
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        await (Task<string>)method.Invoke(_engine, new object[] {
+            step, "{}", new Dictionary<string, object>(), new List<PipelineStep>(), new Dictionary<string, object>(), 1L,
+            new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "root/create",
+            _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, interceptor, uow, _idempotencyRepo,
+            Substitute.For<IFileStorageService>(), _pipelineRecordSearchService, CancellationToken.None
+        })!;
+        await interceptor.Received(1).InterceptAsync(table, fields, publicId,
+            Arg.Is<IReadOnlyDictionary<long, object?>>(values => Equals(values[6], "Saved default") && values.ContainsKey(7) && values[7] == null),
+            "record-added", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -2654,6 +2878,28 @@ public class PipelineEngineTests
         format.Message.Should().Contain("Field 'Number'").And.Contain("steps.ref_request.number");
         format.Message.Should().NotContain("c_number").And.NotContain("private-invalid-text");
         PipelineEngine.IsCatchablePipelineStepError(format).Should().BeTrue();
+    }
+
+    [Fact]
+    public void RecordAction_DateMapping_UsesTheSuppliedAppDateFormat()
+    {
+        var field = new AppField { Fid = 6, Name = "event_date", Label = "Event date", TypeCode = "DATE" };
+        var method = typeof(PipelineEngine).GetMethod("ParseRecordMappingValueWithFormat", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        var parsed = method.Invoke(_engine, new object?[] { "05-04-2026", field, "05-04-2026", "DD-MM-YYYY" });
+
+        parsed.Should().Be(new DateTime(2026, 4, 5));
+    }
+
+    [Fact]
+    public void RecordAction_DateTimeMapping_AcceptsCanonicalPickerValue()
+    {
+        var field = new AppField { Fid = 6, Name = "starts_at", Label = "Starts at", TypeCode = "DATE_TIME" };
+        var method = typeof(PipelineEngine).GetMethod("ParseRecordMappingValueWithFormat", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        var parsed = method.Invoke(_engine, new object?[] { "2026-04-05T15:45:12", field, "2026-04-05T15:45:12", "DD-MM-YYYY" });
+
+        parsed.Should().Be(new DateTime(2026, 4, 5, 15, 45, 12));
     }
 
     [Fact]

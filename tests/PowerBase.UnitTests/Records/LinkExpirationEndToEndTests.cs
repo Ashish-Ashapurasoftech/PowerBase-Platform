@@ -42,7 +42,7 @@ public class LinkExpirationEndToEndTests
         _table = new AppTable { Id = 1, PublicId = Guid.NewGuid(), Name = "T", AppId = 1 };
         _tableRepo.GetByPublicIdAsync(_table.PublicId, Arg.Any<CancellationToken>()).Returns(_table);
         _appRepo.GetPublicIdByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(Guid.NewGuid());
-        _recordRepo.GetByPublicIdAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), _recordId, Arg.Any<CancellationToken>())
+        _recordRepo.GetByPublicIdAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), _recordId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?>());
 
         _enforcer.EnsureButtonWriteAllowedAsync(

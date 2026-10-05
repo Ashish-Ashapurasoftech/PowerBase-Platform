@@ -162,7 +162,7 @@ public class PipelineStepValidator
 
         if (!Guid.TryParse(connectionPublicId, out var connectionGuid))
         {
-            throw new ValidationException(new Dictionary<string, string[]> { { "ConnectionPublicId", new[] { "Connection must be a valid Guid." } } });
+            throw new ValidationException(new Dictionary<string, string[]> { { "ConnectionPublicId", new[] { "Connection is required." } } });
         }
 
         if (SystemConnectionIds.Contains(connectionGuid))
@@ -240,6 +240,148 @@ public class PipelineStepValidator
         await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService));
     }
 
+    /// <summary>
+    /// Validates a Search Records step's Advanced Query syntax against the selected table's fields at
+    /// save time, so a typo surfaces immediately rather than the first time the PowerFlow runs. Simple
+    /// Filter mode needs no equivalent check here — its rule/operator shape is already enforced by the
+    /// UI and by <see cref="PipelineFilterEvaluator.ValidateRule"/> when it runs.
+    /// </summary>
+    public async Task ValidateSearchRecordsStepAsync(string configJson, CancellationToken ct)
+    {
+        SearchRecordsValidationConfig config;
+        try
+        {
+            config = JsonSerializer.Deserialize<SearchRecordsValidationConfig>(configJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? throw new InvalidOperationException();
+        }
+        catch
+        {
+            throw new ValidationException(new Dictionary<string, string[]> { ["ConfigJson"] = new[] { "Configuration is malformed." } });
+        }
+
+        if (config.IsSimpleFilter || string.IsNullOrWhiteSpace(config.AdvancedQuery)) return;
+
+        var tableRef = config.TableId ?? config.TableLabel;
+        if (string.IsNullOrEmpty(tableRef) || !Guid.TryParse(tableRef, out var tableGuid)) return;
+
+        async Task Validate(TargetTenantRepos repos)
+        {
+            var table = await repos.TableRepo.GetByPublicIdAsync(tableGuid, ct);
+            var fields = await repos.FieldRepo.ListByTableAsync(table.Id, ct);
+            try
+            {
+                CopyRecordsDefinition.ParseQuery(config.AdvancedQuery, fields);
+            }
+            catch (ValidationException vex)
+            {
+                throw new ValidationException(new Dictionary<string, string[]> { ["AdvancedQuery"] = new[] { vex.Message } });
+            }
+        }
+
+        if (!string.IsNullOrEmpty(config.ConnectionPublicId) && Guid.TryParse(config.ConnectionPublicId, out var connectionId) && !SystemConnectionIds.Contains(connectionId))
+        {
+            var account = await TryResolveSavedAccountAsync(connectionId, ct);
+            if (account != null)
+            {
+                await using var repos = await OpenAccountReposAsync(account, ct);
+                await Validate(repos);
+                return;
+            }
+            var tenant = await _tenantRepo.GetTenantForUserAsync(connectionId, _queryContext.UserId, ct);
+            if (tenant != null && tenant.Id != _queryContext.TenantId)
+            {
+                if (_targetScopeFactory == null)
+                    throw new ValidationException(new Dictionary<string, string[]> { ["ConnectionPublicId"] = new[] { "Target connection validation is unavailable." } });
+                await using var repos = await _targetScopeFactory(tenant.Id);
+                await Validate(repos);
+                return;
+            }
+        }
+        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService));
+    }
+
+    /// <summary>
+    /// Validates Create Record required fields against authoritative table metadata. Client-provided
+    /// required flags are deliberately ignored, so API callers cannot bypass the rule.
+    /// </summary>
+    public async Task ValidateCreateRecordRequiredFieldsAsync(string configJson, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(configJson)) return;
+
+        JsonElement root;
+        try
+        {
+            using var doc = JsonDocument.Parse(configJson);
+            root = doc.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            throw new ValidationException(new Dictionary<string, string[]> { ["ConfigJson"] = ["Configuration is malformed."] });
+        }
+
+        static string? StringProperty(JsonElement element, params string[] names)
+        {
+            foreach (var property in element.EnumerateObject())
+                if (names.Any(name => string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase)) && property.Value.ValueKind == JsonValueKind.String)
+                    return property.Value.GetString();
+            return null;
+        }
+
+        var tableText = StringProperty(root, "tablePublicId", "tableId", "tableLabel");
+        if (!Guid.TryParse(tableText, out var tablePublicId)) return;
+        var connectionText = StringProperty(root, "connectionPublicId", "connection");
+
+        async Task Validate(TargetTenantRepos repos)
+        {
+            await repos.AppAccessService.RequirePermissionByTablePublicIdAsync(tablePublicId, PermissionCodes.RecordsCreate, ct);
+            var table = await repos.TableRepo.GetByPublicIdAsync(tablePublicId, ct);
+            var fields = await repos.FieldRepo.ListByTableAsync(table.Id, ct);
+            var values = new Dictionary<int, JsonElement>();
+            if (root.TryGetProperty("fieldMappings", out var mappings) && mappings.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var mapping in mappings.EnumerateArray())
+                {
+                    var fieldText = StringProperty(mapping, "field");
+                    var fid = fieldText is null ? null : ParseFid(fieldText);
+                    if (fid.HasValue && mapping.TryGetProperty("value", out var value)) values[fid.Value] = value;
+                }
+            }
+
+            static bool IsBlank(JsonElement value) => value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined ||
+                (value.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(value.GetString())) ||
+                (value.ValueKind == JsonValueKind.Array && value.GetArrayLength() == 0);
+
+            var missing = fields
+                .Where(field => field.IsRequired && !field.IsSystem && field.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(field.TypeCode))
+                .Where(field => !values.TryGetValue(field.Fid!.Value, out var value) || IsBlank(value))
+                .Select(field => $"'{(string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label)}' is required.")
+                .ToArray();
+            if (missing.Length > 0)
+                throw new ValidationException(new Dictionary<string, string[]> { ["FieldMappings"] = missing });
+        }
+
+        if (Guid.TryParse(connectionText, out var connectionId) && !SystemConnectionIds.Contains(connectionId))
+        {
+            var account = await TryResolveSavedAccountAsync(connectionId, ct);
+            if (account != null)
+            {
+                await using var repos = await OpenAccountReposAsync(account, ct);
+                await Validate(repos);
+                return;
+            }
+            var tenant = await _tenantRepo.GetTenantForUserAsync(connectionId, _queryContext.UserId, ct);
+            if (tenant != null && tenant.Id != _queryContext.TenantId)
+            {
+                if (_targetScopeFactory == null)
+                    throw new ValidationException(new Dictionary<string, string[]> { ["ConnectionPublicId"] = ["Target connection validation is unavailable."] });
+                await using var repos = await _targetScopeFactory(tenant.Id);
+                await Validate(repos);
+                return;
+            }
+        }
+        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService));
+    }
+
     public async Task ValidateNewEventStepAsync(string configJson, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(configJson))
@@ -267,7 +409,7 @@ public class PipelineStepValidator
         ConnectionScope? accountScope = null;         // set only for saved PowerFlows accounts
         if (string.IsNullOrEmpty(config.ConnectionPublicId) || !Guid.TryParse(config.ConnectionPublicId, out var connectionGuid))
         {
-            AddError(errors, "ConnectionPublicId", "Connection is required and must be a valid Guid.");
+            AddError(errors, "ConnectionPublicId", "Connection is required.");
         }
         else if (!SystemConnectionIds.Contains(connectionGuid))
         {
@@ -360,7 +502,7 @@ public class PipelineStepValidator
         long appId = 0;
         if (string.IsNullOrEmpty(config.AppPublicId) || !Guid.TryParse(config.AppPublicId, out var appGuid))
         {
-            AddError(errors, "AppPublicId", "App is required and must be a valid Guid.");
+            AddError(errors, "AppPublicId", "App is required.");
         }
         else
         {
@@ -383,7 +525,7 @@ public class PipelineStepValidator
         long tableId = 0;
         if (string.IsNullOrEmpty(config.TablePublicId) || !Guid.TryParse(config.TablePublicId, out var tableGuid))
         {
-            AddError(errors, "TablePublicId", "Table is required and must be a valid Guid.");
+            AddError(errors, "TablePublicId", "Table is required.");
         }
         else
         {
@@ -432,21 +574,38 @@ public class PipelineStepValidator
             }
 
             // 4b. Filters Validation
-            if (config.Filters != null)
+            if (!config.IsSimpleFilter)
             {
-                var mockGroup = new TriggerFilterGroup { LogicalOp = "AND", Rules = config.Filters };
-                if (!PipelineFilterEvaluator.IsGroupCompletelyBlank(mockGroup))
+                if (!string.IsNullOrWhiteSpace(config.AdvancedQuery))
                 {
-                    PipelineFilterEvaluator.ValidateGroup(mockGroup, fields, errors, "Filters");
+                    try
+                    {
+                        CopyRecordsDefinition.ParseQuery(config.AdvancedQuery, fields);
+                    }
+                    catch (ValidationException vex)
+                    {
+                        AddError(errors, "AdvancedQuery", vex.Message);
+                    }
                 }
             }
-            if (config.FilterGroups != null)
+            else
             {
-                for (int i = 0; i < config.FilterGroups.Count; i++)
+                if (config.Filters != null)
                 {
-                    if (!PipelineFilterEvaluator.IsGroupCompletelyBlank(config.FilterGroups[i]))
+                    var mockGroup = new TriggerFilterGroup { LogicalOp = "AND", Rules = config.Filters };
+                    if (!PipelineFilterEvaluator.IsGroupCompletelyBlank(mockGroup))
                     {
-                        PipelineFilterEvaluator.ValidateGroup(config.FilterGroups[i], fields, errors, $"FilterGroups[{i}]");
+                        PipelineFilterEvaluator.ValidateGroup(mockGroup, fields, errors, "Filters");
+                    }
+                }
+                if (config.FilterGroups != null)
+                {
+                    for (int i = 0; i < config.FilterGroups.Count; i++)
+                    {
+                        if (!PipelineFilterEvaluator.IsGroupCompletelyBlank(config.FilterGroups[i]))
+                        {
+                            PipelineFilterEvaluator.ValidateGroup(config.FilterGroups[i], fields, errors, $"FilterGroups[{i}]");
+                        }
                     }
                 }
             }
@@ -509,5 +668,16 @@ public class PipelineStepValidator
         public int? MaxRecords { get; set; }
         public List<TriggerFilterRule>? Filters { get; set; }
         public List<TriggerFilterGroup>? FilterGroups { get; set; }
+        public bool IsSimpleFilter { get; set; } = true;
+        public string? AdvancedQuery { get; set; }
+    }
+
+    private class SearchRecordsValidationConfig
+    {
+        public string? ConnectionPublicId { get; set; }
+        public string? TableId { get; set; }
+        public string? TableLabel { get; set; }
+        public bool IsSimpleFilter { get; set; } = true;
+        public string? AdvancedQuery { get; set; }
     }
 }

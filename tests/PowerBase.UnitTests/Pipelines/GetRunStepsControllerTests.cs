@@ -98,4 +98,52 @@ public class GetRunStepsControllerTests
         var objectResult = (ObjectResult)result;
         objectResult.StatusCode.Should().Be(StatusCodes.Status403Forbidden);
     }
+
+    [Fact]
+    public async Task Handler_UsesExecutionTimeStepSnapshot_AndReturnsDiagnostics()
+    {
+        var runPubId = Guid.NewGuid();
+        var originalStepPublicId = Guid.NewGuid();
+        _pipelineRepo.GetRunByPublicIdAsync(runPubId, Arg.Any<CancellationToken>())
+            .Returns(new PipelineRun { Id = 10, PipelineId = 20, PublicId = runPubId });
+        _pipelineRepo.GetStepsByPipelineIdAsync(20, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>
+        {
+            new() { Id = 30, PublicId = Guid.NewGuid(), RefId = "renamed", Label = "New name", Type = "action", Subtype = "update-record" }
+        });
+        _pipelineRepo.CountStepRunsByRunIdAsync(10, Arg.Any<CancellationToken>()).Returns(1);
+        _pipelineRepo.GetStepRunsByRunIdAsync(10, 1, 50, Arg.Any<CancellationToken>()).Returns(new List<PipelineStepRun>
+        {
+            new()
+            {
+                Id = 40,
+                PipelineRunId = 10,
+                StepId = 30,
+                Status = "Success",
+                StartedOn = new DateTime(2026, 9, 24, 10, 0, 0, DateTimeKind.Utc),
+                CompletedOn = new DateTime(2026, 9, 24, 10, 0, 0, 125, DateTimeKind.Utc),
+                StepPublicIdSnapshot = originalStepPublicId,
+                StepRefIdSnapshot = "a",
+                StepLabelSnapshot = "Create customer",
+                StepTypeSnapshot = "action",
+                StepSubtypeSnapshot = "create-record",
+                PipelineRunAttemptId = 7,
+                ExecutionPath = "root/a",
+                SequenceNumber = 1,
+                TransactionOutcome = "Committed"
+            }
+        });
+
+        var result = await _queryHandler.HandleAsync(new GetPipelineRunStepsQuery(runPubId));
+
+        var item = result.Items.Should().ContainSingle().Subject;
+        item.StepPublicId.Should().Be(originalStepPublicId);
+        item.StepRefId.Should().Be("a");
+        item.StepLabel.Should().Be("Create customer");
+        item.StepSubtype.Should().Be("create-record");
+        item.PipelineRunAttemptId.Should().Be(7);
+        item.ExecutionPath.Should().Be("root/a");
+        item.SequenceNumber.Should().Be(1);
+        item.TransactionOutcome.Should().Be("Committed");
+        item.DurationMs.Should().Be(125);
+    }
 }

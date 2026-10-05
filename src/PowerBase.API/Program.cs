@@ -189,6 +189,7 @@ PowerBase.Application.Common.Configurations.PipelineExecutionOptionsValidator.Va
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IMainPipelineQueueRepository, PowerBase.Infrastructure.Repositories.MainPipelineQueueRepository>();
 
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineEngine, PowerBase.Application.Pipelines.PipelineEngine>();
+builder.Services.AddSingleton<PowerBase.Application.Pipelines.PipelineLoopWorkerPool>();
 builder.Services.AddHostedService<PowerBase.API.Pipelines.PipelineSchedulerWorker>();
 
 // Unconditional Database Queue Registrations
@@ -371,7 +372,10 @@ builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipeline.G
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineEditor.GetPipelineEditorQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelines.ListPipelinesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelineRuns.ListPipelineRunsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelineRuns.ListAppPipelineRunsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineRunSteps.GetPipelineRunStepsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineActivity.GetPipelineActivityQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelinesForPicker.ListPipelinesForPickerQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineSchedule.GetPipelineScheduleQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.UpdatePipelineSchedule.UpdatePipelineScheduleCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.DeletePipelineSchedule.DeletePipelineScheduleCommandHandler>();
@@ -443,6 +447,7 @@ builder.Services.AddScoped<GetAppQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetAppStorageUsage.GetAppStorageUsageQueryHandler>();
 builder.Services.AddScoped<ListAppsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetAppPermissions.GetAppPermissionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Apps.Queries.GetMyAppRoles.GetMyAppRolesQueryHandler>();
 builder.Services.AddScoped<ListAppVariablesQueryHandler>();
 builder.Services.AddScoped<CreateAppVariableCommandHandler>();
 builder.Services.AddScoped<UpdateAppVariableCommandHandler>();
@@ -502,6 +507,10 @@ builder.Services.AddScoped<UpdateReportCommandHandler>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();
 builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetReportGridEditRules.GetReportGridEditRulesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportGridEditRules.UpdateReportGridEditRulesCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetGridEditFormRules.GetGridEditFormRulesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetReportGridEditRuntime.GetReportGridEditRuntimeQueryHandler>();
 builder.Services.AddScoped<UpdateDefaultReportSettingsCommandHandler>();
 builder.Services.AddScoped<GetReportQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Queries.GetOrCreateDefaultReportSettings.GetOrCreateDefaultReportSettingsQueryHandler>();

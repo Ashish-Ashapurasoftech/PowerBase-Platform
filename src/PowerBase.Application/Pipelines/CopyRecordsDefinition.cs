@@ -115,7 +115,7 @@ public sealed class CopyRecordsDefinition
             if (value is string text && decimal.TryParse(text, out var parsed)) return parsed;
             throw Error($"Destination field '{DisplayName(destination)}' needs a valid number from source field '{DisplayName(source)}'.");
         }
-        if (to == "text") return Convert.ToString(value, CultureInfo.InvariantCulture);
+        if (to == "text") return Convert.ToString(value, CultureInfo.InvariantCulture)?.Trim();
         return value;
     }
 

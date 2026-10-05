@@ -85,7 +85,7 @@ public class BulkDeleteRecordsCommandHandler
             {
                 try
                 {
-                    var valuesDict = await _recordRepo.GetByPublicIdAsync(table, fields, id, ct);
+                    var valuesDict = await _recordRepo.GetByPublicIdAsync(table, fields, id, ct: ct);
                     // Convert string keys to long field IDs
                     var beforeValues = new Dictionary<long, object?>();
                     foreach (var f in fields)

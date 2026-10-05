@@ -677,7 +677,7 @@ public class PipelineScheduleTests
         var handler = new DeletePipelineCommandHandler(pipelineRepo, auditRepo, queueRepo, queryContext);
         await handler.HandleAsync(new DeletePipelineCommand(pipeline.PublicId), CancellationToken.None);
 
-        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), "Pipeline deleted", Arg.Any<CancellationToken>());
+        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), "PowerFlow deleted", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -695,10 +695,10 @@ public class PipelineScheduleTests
         appRepo.GetIdByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(5L);
         pipelineRepo.GetByPublicIdAsync(publicId, Arg.Any<CancellationToken>()).Returns(pipeline);
 
-        var handler = new DeletePipelinesCommandHandler(appRepo, pipelineRepo, auditRepo, queueRepo, queryContext);
+        var handler = new DeletePipelinesCommandHandler(pipelineRepo, auditRepo, queueRepo, queryContext, Substitute.For<IAppAccessService>());
         await handler.HandleAsync(new DeletePipelinesCommand(Guid.NewGuid(), new List<Guid> { publicId }), CancellationToken.None);
 
-        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), "Pipeline deleted", Arg.Any<CancellationToken>());
+        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), "PowerFlow deleted", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -707,11 +707,11 @@ public class PipelineScheduleTests
         var queueRepo = Substitute.For<IMainPipelineQueueRepository>();
         var pipelineId = 96L;
         
-        await queueRepo.CancelPendingJobsForPipelinesAsync(1L, new[] { pipelineId }, "Pipeline deleted", CancellationToken.None);
-        await queueRepo.CancelPendingJobsForPipelinesAsync(2L, new[] { pipelineId }, "Pipeline deleted", CancellationToken.None);
+        await queueRepo.CancelPendingJobsForPipelinesAsync(1L, new[] { pipelineId }, "PowerFlow deleted", CancellationToken.None);
+        await queueRepo.CancelPendingJobsForPipelinesAsync(2L, new[] { pipelineId }, "PowerFlow deleted", CancellationToken.None);
 
-        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(96L)), "Pipeline deleted", Arg.Any<CancellationToken>());
-        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(2L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(96L)), "Pipeline deleted", Arg.Any<CancellationToken>());
+        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(1L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(96L)), "PowerFlow deleted", Arg.Any<CancellationToken>());
+        await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(2L, Arg.Is<IEnumerable<long>>(ids => ids.Contains(96L)), "PowerFlow deleted", Arg.Any<CancellationToken>());
     }
 
     [Fact]

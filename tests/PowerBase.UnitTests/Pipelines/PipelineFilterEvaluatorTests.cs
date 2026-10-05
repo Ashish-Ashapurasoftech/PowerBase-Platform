@@ -308,5 +308,129 @@ public class PipelineFilterEvaluatorTests
         PipelineFilterEvaluator.EvaluateConditionOperator(left, "is", right, typeCategory: "DATE")
             .Should().BeTrue();
     }
+
+    // ── "On New Event" trigger filter on an encrypted field ─────────────────────────────────
+    // PipelineTriggerInterceptor builds valuesSource straight from the plaintext field-id→value
+    // dict the write path is about to persist (before SQL-side encryption ever runs), so this
+    // evaluator never sees ciphertext — it isn't part of the SQL LIKE/= ciphertext bug that
+    // affects Search Records / Copy Records. These confirm that holds even when the matched
+    // field is marked IsEncrypted, and that behavior is identical to an unencrypted field.
+
+    [Fact]
+    public void EvaluateRule_EncryptedField_Contains_MatchesPlaintextValueFromTriggerPayload()
+    {
+        var fields = new List<AppField> { new() { Id = 6, Fid = 6, Name = "Name", TypeCode = "TEXT", IsEncrypted = true } };
+        var rule = new TriggerFilterRule { Field = "Name", Operator = "contains", Value = "ronak" };
+
+        PipelineFilterEvaluator.EvaluateRule(rule, new Dictionary<long, object?> { [6] = "Ronak Dhamsaniya" }, fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateRule(rule, new Dictionary<long, object?> { [6] = "ronak dhamsaniya" }, fields).Should().BeTrue(); // case-insensitive
+        PipelineFilterEvaluator.EvaluateRule(rule, new Dictionary<long, object?> { [6] = "Someone Else" }, fields).Should().BeFalse();
+    }
+
+    [Fact]
+    public void EvaluateGroup_EncryptedAndNormalField_And_BehavesIdenticallyToUnencrypted()
+    {
+        var encryptedField = new AppField { Id = 6, Fid = 6, Name = "Name", TypeCode = "TEXT", IsEncrypted = true };
+        var normalField = new AppField { Id = 7, Fid = 7, Name = "Status", TypeCode = "TEXT", IsEncrypted = false };
+        var fields = new List<AppField> { encryptedField, normalField };
+        var group = new TriggerFilterGroup
+        {
+            LogicalOp = "AND",
+            Rules = new List<TriggerFilterRule>
+            {
+                new() { Field = "Name", Operator = "contains", Value = "ronak" },
+                new() { Field = "Status", Operator = "equals", Value = "Active" }
+            }
+        };
+
+        PipelineFilterEvaluator.EvaluateGroup(group, new Dictionary<long, object?> { [6] = "Ronak Dhamsaniya", [7] = "Active" }, fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateGroup(group, new Dictionary<long, object?> { [6] = "Ronak Dhamsaniya", [7] = "Inactive" }, fields).Should().BeFalse();
+        PipelineFilterEvaluator.EvaluateGroup(group, new Dictionary<long, object?> { [6] = "Someone Else", [7] = "Active" }, fields).Should().BeFalse();
+    }
+
+    // ── EvaluateFilterGroup: the Quickbase advanced-query grammar's in-memory evaluator ──────────
+    // Same FilterGroup/FilterCondition tree CopyRecordsDefinition.ParseQuery produces for Copy Records
+    // and Search Records' SQL filterTree — On New Event evaluates it here instead, against the changed
+    // record's in-memory values, since a trigger has no SQL round-trip.
+
+    [Fact]
+    public void EvaluateFilterGroup_NullOrEmpty_MatchesEverything()
+    {
+        PipelineFilterEvaluator.EvaluateFilterGroup(null, new Dictionary<long, object?>(), _fields).Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("{1.EX.'Ronak'}", "Ronak", true)]
+    [InlineData("{1.EX.'Ronak'}", "Someone Else", false)]
+    [InlineData("{1.XEX.'Ronak'}", "Someone Else", true)]
+    [InlineData("{1.CT.'Rona'}", "Ronak", true)]
+    [InlineData("{1.XCT.'zzz'}", "Ronak", true)]
+    [InlineData("{1.SW.'Ron'}", "Ronak", true)]
+    [InlineData("{1.XSW.'zzz'}", "Ronak", true)]
+    public void EvaluateFilterGroup_TextOperators_MatchQuickbaseSemantics(string query, string nameValue, bool expected)
+    {
+        var tree = CopyRecordsDefinition.ParseQuery(query, _fields);
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [1] = nameValue }, _fields).Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData("{2.GT.'5'}", 10, true)]
+    [InlineData("{2.GT.'5'}", 3, false)]
+    [InlineData("{2.GTE.'5'}", 5, true)]
+    [InlineData("{2.LT.'5'}", 3, true)]
+    [InlineData("{2.LTE.'5'}", 5, true)]
+    public void EvaluateFilterGroup_NumberOperators_MatchQuickbaseSemantics(string query, int priceValue, bool expected)
+    {
+        var tree = CopyRecordsDefinition.ParseQuery(query, _fields);
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [2] = priceValue }, _fields).Should().Be(expected);
+    }
+
+    [Fact]
+    public void EvaluateFilterGroup_And_RequiresAllConditions()
+    {
+        var tree = CopyRecordsDefinition.ParseQuery("{3.EX.'Mumbai'}AND{2.GT.'1000'}", _fields);
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Mumbai", [2] = 2000 }, _fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Mumbai", [2] = 500 }, _fields).Should().BeFalse();
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Delhi", [2] = 2000 }, _fields).Should().BeFalse();
+    }
+
+    [Fact]
+    public void EvaluateFilterGroup_Or_RequiresAnyCondition()
+    {
+        var tree = CopyRecordsDefinition.ParseQuery("{3.EX.'Mumbai'}OR{3.EX.'Delhi'}", _fields);
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Mumbai" }, _fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Delhi" }, _fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Pune" }, _fields).Should().BeFalse();
+    }
+
+    [Fact]
+    public void EvaluateFilterGroup_NestedAndOr_EvaluatesInPrecedenceOrder()
+    {
+        // City is Mumbai AND (Price > 1000 OR Active is true)
+        var tree = CopyRecordsDefinition.ParseQuery("{3.EX.'Mumbai'}AND({2.GT.'1000'}OR{4.EX.'true'})", _fields);
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Mumbai", [2] = 2000, [4] = false }, _fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Mumbai", [2] = 100, [4] = true }, _fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Mumbai", [2] = 100, [4] = false }, _fields).Should().BeFalse();
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [3] = "Delhi", [2] = 2000, [4] = true }, _fields).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("{1.WC.'Ron*'}", "Ronak", true)]
+    [InlineData("{1.WC.'Ron*'}", "Someone", false)]
+    [InlineData("{1.WC.'R?nak'}", "Ronak", true)]
+    [InlineData("{1.XWC.'Ron*'}", "Someone", true)]
+    public void EvaluateFilterGroup_Wildcard_MatchesQuickbaseWcSemantics(string query, string nameValue, bool expected)
+    {
+        var tree = CopyRecordsDefinition.ParseQuery(query, _fields);
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [1] = nameValue }, _fields).Should().Be(expected);
+    }
+
+    [Fact]
+    public void EvaluateFilterGroup_FieldToFieldComparison_ComparesTwoFieldsOnSameRecord()
+    {
+        var tree = CopyRecordsDefinition.ParseQuery("{2.EX.'_FID_3'}", _fields); // Price == Category (both numeric-ish text compare)
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [2] = "10", [3] = "10" }, _fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [2] = "10", [3] = "20" }, _fields).Should().BeFalse();
+    }
 }
 

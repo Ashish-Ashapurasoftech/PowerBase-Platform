@@ -45,6 +45,9 @@ public sealed class RecordWriteService : IRecordWriteService
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly FormulaEngine _engine;
     private readonly IAppRepository _appRepo;
+    private readonly IFormRuleRepository _formRuleRepo;
+    private readonly IFormRepository _formRepo;
+    private readonly IQueryContext _queryContext;
 
     public RecordWriteService(
         IAppTableRepository tableRepo,
@@ -56,7 +59,10 @@ public sealed class RecordWriteService : IRecordWriteService
         IAuditRepository auditRepo,
         IPipelineTriggerInterceptor triggerInterceptor,
         FormulaEngine engine,
-        IAppRepository appRepo)
+        IAppRepository appRepo,
+        IFormRuleRepository formRuleRepo,
+        IFormRepository formRepo,
+        IQueryContext queryContext)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -68,6 +74,9 @@ public sealed class RecordWriteService : IRecordWriteService
         _triggerInterceptor = triggerInterceptor;
         _engine = engine;
         _appRepo = appRepo;
+        _formRuleRepo = formRuleRepo;
+        _formRepo = formRepo;
+        _queryContext = queryContext;
     }
 
     private static bool AreValuesEqual(object? val1, object? val2, string? typeCode)
@@ -120,7 +129,7 @@ public sealed class RecordWriteService : IRecordWriteService
     {
         // Bulk upsert already loaded the row on its transaction. Reusing that snapshot avoids a
         // second connection waiting on locks held by the bulk commit itself.
-        var oldRecord = existingRecord ?? await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+        var oldRecord = existingRecord ?? await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, transaction, ct);
 
         // Current stored values by Fid, so a dependent-dropdown Reference is only re-validated when
         // it (or its controlling field) actually changes — see ReferenceWriteValidator.
@@ -152,14 +161,42 @@ public sealed class RecordWriteService : IRecordWriteService
         var recordId = Convert.ToInt64(oldRecord["Id"]);
         var app = await _appRepo.GetByIdAsync(table.AppId, ct);
         var dateFormat = AppFormattingSettings.GetDateFormatString(app.Formatting);
-        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct, appDateFormat: dateFormat);
+        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct, appDateFormat: dateFormat, transaction: transaction);
 
         // Custom Data Rule — same formula-based save gate as record creation (see
         // CreateRecordCommandHandler), covering both plain record edits and Action Button writes
         // that go through this shared service.
         await CustomDataRuleValidator.ValidateAsync(table, fields, effectiveValues, _tableRepo, _fieldRepo, _recordRepo, _engine, ct);
 
+        // Form Rules — server-side mirror of the form's client-side rule evaluation, covering
+        // both plain record edits and Action Button writes that go through this shared service.
+        // oldValuesByFid (for 'changed'/'notChanged' conditions) is a cheap in-memory re-keying of
+        // the oldRecord snapshot already fetched above — separate from the beforeValues dict the
+        // audit/pipeline-diff block below builds for its own purpose, since that one isn't built
+        // yet at this point and (unlike this one) also needs afterValues/pipelineChangedFields
+        // computed alongside it.
+        var oldValuesByFid = fields
+            .Where(f => f.Fid.HasValue)
+            .ToDictionary(f => (long)f.Fid!.Value,
+                f => oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var ov) ? ov : null);
+        await FormRuleServerValidator.ValidateAsync(
+            table, fields, effectiveValues, oldValuesByFid, _queryContext.UserId,
+            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _appUserRepo, _engine, ct);
+
         await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct, onIndexMessageCreated);
+
+        // Date Modified / Last Modified By are system-managed — never submitted, so
+        // effectiveValues never carries them — even though UpdateAsync's own SQL just set
+        // them for real (ModifiedOn = SYSUTCDATETIME(), ModifiedBy = QueryContext.UserId).
+        // Without this, the afterValues loop below falls through to oldVal (the pre-update,
+        // often-still-null value) for these two fields, so a pipeline trigger firing off this
+        // update could never resolve {{steps.<trigger>.fid_N}} for them. Looked up by
+        // PhysicalColumnName rather than a hardcoded fid, same as CreateRecordCommandHandler's
+        // analogous backfill for Date Created / Record Owner on record-added.
+        var modifiedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedOn" && f.Fid.HasValue);
+        if (modifiedOnField != null) effectiveValues[modifiedOnField.Fid!.Value] = DateTime.UtcNow;
+        var modifiedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedBy" && f.Fid.HasValue);
+        if (modifiedByField != null) effectiveValues[modifiedByField.Fid!.Value] = _queryContext.UserId;
 
         // Build before/after values and genuinely changed field IDs for pipeline triggering
         var beforeValues = new Dictionary<long, object?>();

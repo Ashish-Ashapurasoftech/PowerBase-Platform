@@ -7,6 +7,10 @@ public interface IFormRuleRepository
     Task<FormRule> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<long> GetAppIdByPublicIdAsync(Guid rulePublicId, CancellationToken ct = default);
     Task<IReadOnlyList<FormRule>> ListByFormAsync(long formId, CancellationToken ct = default);
+    /// <summary>Every active, non-deleted rule across every form attached to this table — used by
+    /// server-side write-path enforcement, which has no "which form" context (a direct API write
+    /// isn't tied to any one form), so it must enforce the full set for the table being written.</summary>
+    Task<IReadOnlyList<FormRule>> ListActiveByTableIdAsync(long appTableId, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> CreateAsync(FormRule rule, CancellationToken ct = default);
     Task SaveRuleBodyAsync(Guid publicId, string name, string? description, string? tags,
         bool isActive, string runTrigger, string conditionLogic, bool isExpressionMode,

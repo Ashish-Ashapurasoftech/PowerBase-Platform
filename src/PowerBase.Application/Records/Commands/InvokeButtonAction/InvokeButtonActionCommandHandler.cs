@@ -65,7 +65,7 @@ public sealed class InvokeButtonActionCommandHandler
             ?? throw new BadRequestException("BUTTON_NOT_CONFIGURED", "This button has not been configured.");
 
         // Current record row — drives gates, field-kind ValueSources, and confirms the record exists.
-        var row = await _recordRepo.GetByPublicIdAsync(table, fields, command.RecordPublicId, ct);
+        var row = await _recordRepo.GetByPublicIdAsync(table, fields, command.RecordPublicId, ct: ct);
 
         await RunGatesAsync(settings, table, fields, row, command, ct);
 

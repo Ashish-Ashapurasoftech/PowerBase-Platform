@@ -156,6 +156,13 @@ public class RecordsController : ControllerBase
         [FromServices] FileReservationService fileReservationService, CancellationToken ct)
         => Ok(new ApiResponse<string?>(await fileReservationService.DeleteRevisionsAsync(tableId, id, fid, request.Paths, ct)));
 
+    [HttpPost("tables/{tableId:guid}/records/{id:guid}/files/{fid:long}/revisions/restore")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    public async Task<IActionResult> RestoreFileRevision(Guid tableId, Guid id, long fid,
+        [FromBody] RestoreFileRevisionRequest request,
+        [FromServices] FileReservationService fileReservationService, CancellationToken ct)
+        => Ok(new ApiResponse<string>(await fileReservationService.RestoreRevisionAsync(tableId, id, fid, request.Path, ct)));
+
     /// <summary>Invoke an Action Button field on a record: resolves its configured gates and
     /// writes, applies them under the Rule-1 privileged-write exception (works without normal
     /// field-edit permission for exactly the button's configured targets), and returns the
@@ -234,6 +241,7 @@ public class RecordsController : ControllerBase
     public record BulkDeleteRequest(List<Guid> Ids);
     public record FileReservationRequest(string? Comment);
     public record DeleteFileRevisionsRequest(List<string> Paths);
+    public record RestoreFileRevisionRequest(string Path);
 
     private static IReadOnlyDictionary<long, object?> ParseFieldValues(Dictionary<string, JsonElement> fields)
     {

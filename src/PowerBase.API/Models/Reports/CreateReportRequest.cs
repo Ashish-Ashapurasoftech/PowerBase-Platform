@@ -119,6 +119,7 @@ public class ChartConfigRequest
     public decimal? YMax2 { get; set; }
     public bool LogScale2 { get; set; }
     public long? GaugeFieldId { get; set; }
+    public string? GaugeFunction { get; set; }
     public decimal GaugeLowMaxPercent { get; set; } = 30;
     public decimal GaugeMediumMaxPercent { get; set; } = 70;
     public string DataLabelDisplayAs { get; set; } = "Value";

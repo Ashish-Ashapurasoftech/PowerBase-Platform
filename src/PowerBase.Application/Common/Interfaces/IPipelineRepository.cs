@@ -27,6 +27,7 @@ public class SchedulerMetadataDto
 
 public interface IPipelineRepository
 {
+    Task<PipelineStatistics> GetStatisticsAsync(long pipelineId, DateTime asOfUtc, CancellationToken ct = default);
     Task<IReadOnlyList<AppField>> GetTableFieldsAsync(long tableId, CancellationToken ct = default);
     Task<SchedulerMetadataDto> GetSchedulerMetadataAsync(CancellationToken ct = default);
     Task<IReadOnlyList<long>> GetDeletedPipelineIdsAsync(CancellationToken ct = default);
@@ -36,6 +37,8 @@ public interface IPipelineRepository
     Task<long> GetIdByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineListItemDetail>> ListByUserPagedAsync(long userId, int page, int pageSize, string? search, string sortBy, bool sortDesc, bool? isActive, CancellationToken ct = default);
     Task<int> CountByUserAsync(long userId, string? search, bool? isActive, CancellationToken ct = default);
+    /// <summary>Every non-deleted pipeline's id/name for this app, unpaged — for filter dropdowns only.</summary>
+    Task<IReadOnlyList<(Guid PublicId, string Name)>> ListNamesByAppIdAsync(long appId, CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> ListAllActiveAsync(CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> FindCallablePipelinesAsync(long ownerId, string callDefinition, CancellationToken ct = default);
     Task<(Guid PublicId, long Id)> CreateAsync(Pipeline pipeline, IDbTransaction? transaction = null, CancellationToken ct = default);
@@ -57,10 +60,10 @@ public interface IPipelineRepository
     Task<PipelineRun?> GetRunByMessageIdAsync(Guid messageId, CancellationToken ct = default);
     Task<long> CreateRunAttemptAsync(PipelineRunAttempt attempt, CancellationToken ct = default);
     Task UpdateRunAttemptAsync(PipelineRunAttempt attempt, CancellationToken ct = default);
-    Task<bool> ReclaimStaleRunAsync(Guid messageId, string workerId, CancellationToken ct = default);
-    Task<bool> ClaimFailedRunRetryAsync(Guid messageId, string workerId, CancellationToken ct = default);
+    Task<bool> ReclaimStaleRunAsync(Guid messageId, string workerId, CancellationToken ct = default, int maxAttempts = 5);
+    Task<bool> ClaimFailedRunRetryAsync(Guid messageId, string workerId, CancellationToken ct = default, int maxAttempts = 5);
     Task<bool> ClaimWaitingRunAsync(Guid messageId, string workerId, CancellationToken ct = default);
-    Task ExtendRunLeaseAsync(Guid messageId, string workerId, CancellationToken ct = default);
+    Task<bool> ExtendRunLeaseAsync(Guid messageId, string workerId, CancellationToken ct = default);
     Task<long> CreateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default);
     Task UpdateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, CancellationToken ct = default);
@@ -69,6 +72,8 @@ public interface IPipelineRepository
     Task<PipelineRun?> GetRunByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineRun>> GetRunsByPipelineIdAsync(long pipelineId, int page, int pageSize, CancellationToken ct = default);
     Task<int> CountRunsByPipelineIdAsync(long pipelineId, CancellationToken ct = default);
+    Task<IReadOnlyList<(PipelineRun Run, string PipelineName, Guid PipelinePublicId)>> GetRunsByAppIdAsync(long appId, long? pipelineId, DateTime? fromDate, DateTime? toDate, int page, int pageSize, CancellationToken ct = default);
+    Task<int> CountRunsByAppIdAsync(long appId, long? pipelineId, DateTime? fromDate, DateTime? toDate, CancellationToken ct = default);
 
     // Staging table operations for On New Bulk Event
     Task InsertBulkEventRecordsAsync(List<PipelineBulkEventRecord> records, IDbTransaction? transaction = null, CancellationToken ct = default);
@@ -76,6 +81,11 @@ public interface IPipelineRepository
     Task<IReadOnlyList<PipelineBulkEventRecord>> GetPendingBulkEventRecordsPageAsync(Guid bulkEventId, int page, int pageSize, CancellationToken ct = default);
     Task MarkBulkEventRecordsProcessedAsync(List<long> ids, byte processedStatus, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task DeleteExpiredBulkEventRecordsAsync(DateTime createdBefore, CancellationToken ct = default);
+    Task<PipelineSearchWorkset> GetOrCreateSearchWorksetAsync(Guid worksetId, Guid runMessageId, string stepRefId, long snapshotMaxRecordId, CancellationToken ct = default);
+    Task AppendSearchWorksetPageAsync(PipelineSearchWorkset workset, List<PipelineBulkEventRecord> records, long lastRecordId, CancellationToken ct = default);
+    Task CompleteSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default);
+    Task<IReadOnlyList<PipelineBulkEventRecord>> GetPendingSearchWorksetPageAsync(Guid worksetId, int pageSize, CancellationToken ct = default);
+    Task MarkSearchWorksetRecordsProcessedAsync(Guid worksetId, List<long> ids, byte processedStatus, CancellationToken ct = default);
     Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineReferencesForFieldAsync(int fid, CancellationToken ct = default);
     Task<IReadOnlyList<Pipeline>> GetActivePipelinesReferencingFieldAsync(int fid, CancellationToken ct = default);
     Task<IReadOnlyList<string>> GetPipelineNamesForUserAsync(long userId, CancellationToken ct = default);
@@ -84,6 +94,7 @@ public interface IPipelineRepository
     Task InvalidateStepsReferencingFieldAsync(int fid, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<PipelineStep?> GetStepByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<bool> UpdateStepLastTriggeredOnAsync(long stepId, DateTime? oldTime, DateTime newTime, byte[] rowVersion, CancellationToken ct = default);
+    Task<bool> UpdateStepConfigJsonAsync(long stepId, string configJson, byte[] rowVersion, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineStep>> GetActiveScheduleStepsAsync(CancellationToken ct = default);
 
     Task<PipelineSchedule?> GetScheduleByPipelineIdAsync(long pipelineId, CancellationToken ct = default);
@@ -95,9 +106,17 @@ public interface IPipelineRepository
     Task<bool> UpdateScheduleLastAndNextRunOnAsync(long scheduleId, DateTime? oldLastRun, DateTime newLastRun, DateTime? newNextRun, byte[] rowVersion, CancellationToken ct = default);
     
     Task<long> CreateOutboxItemAsync(PipelineOutboxItem item, IDbTransaction? transaction = null, CancellationToken ct = default);
-    Task<IReadOnlyList<PipelineOutboxItem>> ClaimOutboxItemsAsync(string workerId, CancellationToken ct = default);
+    Task<IReadOnlyList<PipelineOutboxItem>> ClaimOutboxItemsAsync(string workerId, CancellationToken ct = default, int batchSize = 50);
     Task UpdateOutboxItemStatusAsync(long id, string workerId, byte status, DateTime? publishedOn = null, DateTime? failedOn = null, string? error = null, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task PruneOutboxItemsAsync(DateTime olderThan, CancellationToken ct = default);
     Task SyncTriggerSubscriptionsAsync(long pipelineId, IDbTransaction? tenantTransaction = null, CancellationToken ct = default);
+}
+
+public class PipelineStatistics
+{
+    public DateTime? LastTriggeredOn { get; set; }
+    public long BillableStepRuns { get; set; }
+    public long TotalStepRuns { get; set; }
+    public DateTime UpdatedOn { get; set; }
 }
 

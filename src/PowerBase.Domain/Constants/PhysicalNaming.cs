@@ -58,4 +58,22 @@ public static class PhysicalNaming
     public static bool IsTextStoringTypeCode(string typeCode) =>
         typeCode is "Text" or "TextMultiLine" or "RichText" or "Email" or "Phone" or "Url"
             or "SingleSelect" or "MultiSelect" or "File" or "Address";
+
+    /// <summary>True when <paramref name="value"/> counts as "no value" for a Required check —
+    /// null or blank/whitespace text for every ordinary field, but for a Boolean field
+    /// specifically, also unchecked (false). A checkbox always holds a real, non-null boolean
+    /// (false when unchecked), so a plain null check alone would never flag a required-but-
+    /// unchecked checkbox as missing; "required" for a checkbox means "must be checked". Shared by
+    /// RecordConstraintValidator (a field's own static IsRequired setting) and
+    /// FormRuleServerValidator (a Form Rule's Require action) so both server-side required checks
+    /// agree with each other — and with the frontend's mirrored Validators.requiredTrue for
+    /// Boolean fields, see form-renderer.component.ts's requiredValidatorFor.</summary>
+    public static bool IsRequiredMissing(string typeCode, object? value)
+    {
+        if (value is null) return true;
+        if (value is string s)
+            return typeCode == "Boolean" ? !bool.TryParse(s, out var parsed) || !parsed : string.IsNullOrWhiteSpace(s);
+        if (typeCode == "Boolean") return value is bool b && !b;
+        return false;
+    }
 }

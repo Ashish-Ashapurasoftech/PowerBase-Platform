@@ -246,6 +246,24 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
           AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
         """;
 
+    private const string GetUserAppRoleNamesSql = """
+        SELECT DISTINCT ar.Name
+        FROM meta.AppUser au
+        JOIN meta.AppRole ar ON ar.Id = au.AppRoleId
+        WHERE au.AppId = @appId AND au.UserId = @userId AND au.IsDeleted = 0
+
+        UNION
+
+        SELECT DISTINCT ar.Name
+        FROM meta.GroupMember gm
+        JOIN meta.[Group] g ON g.Id = gm.GroupId
+        JOIN meta.GroupApp ga ON ga.GroupId = g.Id
+        JOIN meta.AppRole ar ON ar.Id = ga.AppRoleId
+        WHERE ga.AppId = @appId
+          AND gm.UserId = @userId
+          AND gm.IsDeleted = 0 AND g.IsDeleted = 0 AND ga.IsDeleted = 0
+        """;
+
     private const string RemoveSql = """
         UPDATE meta.AppUser
         SET IsDeleted = 1, Status = 'InActive', UpdatedOn = SYSUTCDATETIME()
@@ -549,6 +567,14 @@ public class AppUserRepository : TenantRepositoryBase, IAppUserRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var result = await connection.QueryAsync<long>(
             new CommandDefinition(GetUserAppRoleIdsSql, new { appId, userId }, cancellationToken: ct));
+        return result.ToList();
+    }
+
+    public async Task<IReadOnlyList<string>> GetUserAppRoleNamesAsync(long appId, long userId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var result = await connection.QueryAsync<string>(
+            new CommandDefinition(GetUserAppRoleNamesSql, new { appId, userId }, cancellationToken: ct));
         return result.ToList();
     }
 

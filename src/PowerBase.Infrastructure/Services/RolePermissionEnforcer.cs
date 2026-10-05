@@ -119,7 +119,7 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
 
     public async Task EnsureRecordOwnedAsync(AppTable table, Guid recordPublicId, CancellationToken ct = default)
     {
-        var row = await _recordRepo.GetByPublicIdAsync(table, Array.Empty<AppField>(), recordPublicId, ct);
+        var row = await _recordRepo.GetByPublicIdAsync(table, Array.Empty<AppField>(), recordPublicId, ct: ct);
         if (!row.TryGetValue("CreatedBy", out var createdBy) || Convert.ToInt64(createdBy) != _queryContext.UserId)
             throw new UnauthorizedActionException("You can only modify records you created.");
     }

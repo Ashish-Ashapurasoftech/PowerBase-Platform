@@ -129,6 +129,109 @@ public class MainPipelineQueueRepository : ControlRepositoryBase, IMainPipelineQ
         return results.ToList();
     }
 
+    public async Task<IReadOnlyList<PipelineQueue>> ClaimPendingJobsWithGlobalLimitsAsync(
+        string workerId, int batchSize, int leaseSeconds, int globalLimit, int tenantLimit,
+        int pipelineLimit, List<long> eligibleTenantIds, CancellationToken ct = default)
+    {
+        if (eligibleTenantIds == null || eligibleTenantIds.Count == 0 || batchSize <= 0)
+            return Array.Empty<PipelineQueue>();
+
+        const string sql = """
+            SET XACT_ABORT ON;
+            BEGIN TRANSACTION;
+            DECLARE @lockResult int;
+            EXEC @lockResult = sys.sp_getapplock
+                @Resource = 'PowerBase.PipelineQueue.Claim',
+                @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 5000;
+            IF @lockResult < 0
+            BEGIN
+                ROLLBACK TRANSACTION;
+                THROW 51000, 'Timed out acquiring the pipeline queue claim lock.', 1;
+            END;
+
+            DECLARE @now datetime2(3) = SYSUTCDATETIME();
+
+            UPDATE meta.PipelineQueue
+            SET Status = 'Failed', FailedOn = @now,
+                LastError = 'Max delivery attempts exceeded before claim processing completed.',
+                LockedBy = NULL, LockedUntil = NULL, ClaimToken = NULL, LastModifiedOn = @now
+            WHERE ((Status = 'Processing' AND LockedUntil <= @now) OR Status = 'Pending')
+              AND AttemptCount >= MaxAttempts;
+
+            DECLARE @globalAvailable int = @globalLimit -
+                (SELECT COUNT_BIG(1) FROM meta.PipelineQueue
+                 WHERE Status = 'Processing' AND LockedUntil > @now);
+
+            IF @globalAvailable <= 0
+            BEGIN
+                COMMIT TRANSACTION;
+                RETURN;
+            END;
+            IF @effectiveBatchSize > @globalAvailable SET @effectiveBatchSize = @globalAvailable;
+
+            ;WITH ActiveTenant AS (
+                SELECT TenantId, COUNT_BIG(1) ActiveCount
+                FROM meta.PipelineQueue
+                WHERE Status = 'Processing' AND LockedUntil > @now
+                GROUP BY TenantId
+            ), ActivePipeline AS (
+                SELECT TenantId, PipelineId, COUNT_BIG(1) ActiveCount
+                FROM meta.PipelineQueue
+                WHERE Status = 'Processing' AND LockedUntil > @now
+                GROUP BY TenantId, PipelineId
+            ), PipelineRanked AS (
+                SELECT pq.Id,
+                    pq.TenantId, pq.CreatedOn,
+                    ROW_NUMBER() OVER (PARTITION BY pq.TenantId, pq.PipelineId ORDER BY pq.CreatedOn, pq.Id) PipelineRank,
+                    ISNULL(at.ActiveCount, 0) TenantActive,
+                    ISNULL(ap.ActiveCount, 0) PipelineActive
+                FROM meta.PipelineQueue pq WITH (UPDLOCK, READPAST, ROWLOCK)
+                LEFT JOIN ActiveTenant at ON at.TenantId = pq.TenantId
+                LEFT JOIN ActivePipeline ap ON ap.TenantId = pq.TenantId AND ap.PipelineId = pq.PipelineId
+                WHERE ((pq.Status = 'Pending' AND (pq.NextAttemptOn IS NULL OR pq.NextAttemptOn <= @now))
+                    OR (pq.Status = 'Processing' AND pq.LockedUntil <= @now))
+                  AND pq.AttemptCount < pq.MaxAttempts
+                  AND pq.TenantId IN @eligibleTenantIds
+            ), TenantRanked AS (
+                SELECT Id, CreatedOn, TenantActive,
+                    ROW_NUMBER() OVER (PARTITION BY TenantId ORDER BY CreatedOn, Id) TenantRank
+                FROM PipelineRanked
+                WHERE PipelineRank <= @pipelineLimit - PipelineActive
+            ), CandidateJobs AS (
+                SELECT TOP (@effectiveBatchSize) Id FROM TenantRanked
+                WHERE TenantRank <= @tenantLimit - TenantActive
+                ORDER BY CreatedOn, Id
+            )
+            UPDATE pq
+            SET Status = 'Processing', LockedBy = @workerId,
+                LockedUntil = DATEADD(second, @leaseSeconds, @now), ClaimToken = NEWID(),
+                StartedOn = COALESCE(pq.StartedOn, @now), AttemptCount = pq.AttemptCount + 1,
+                LastModifiedOn = @now
+            OUTPUT inserted.Id, inserted.PublicId, inserted.MessageId, inserted.TenantId,
+                inserted.TenantPublicId, inserted.PipelineId, inserted.PipelinePublicId,
+                inserted.QueueSource, inserted.TriggerStepId, inserted.TriggerStepRefId,
+                inserted.TriggerEvent, inserted.TriggerPayloadJson, inserted.PayloadHash,
+                inserted.TriggeredBy, inserted.TriggerTablePublicId, inserted.CorrelationId,
+                inserted.Depth, inserted.PipelineChain, inserted.BatchId, inserted.VariablesJson,
+                inserted.PayloadVersion, inserted.EventTimestamp, inserted.Status,
+                inserted.AttemptCount, inserted.MaxAttempts, inserted.NextAttemptOn,
+                inserted.PausedNextAttemptOn, inserted.LockedBy, inserted.LockedUntil,
+                inserted.ClaimToken, inserted.CreatedOn, inserted.StartedOn, inserted.CompletedOn,
+                inserted.FailedOn, inserted.SkippedOn, inserted.LastModifiedOn,
+                inserted.LastError, inserted.SkipReason
+            FROM meta.PipelineQueue pq
+            INNER JOIN CandidateJobs c ON c.Id = pq.Id;
+            COMMIT TRANSACTION;
+            """;
+
+        var effectiveBatchSize = Math.Min(batchSize, globalLimit);
+        await using var conn = await OpenNewConnectionAsync(ct);
+        var results = await conn.QueryAsync<PipelineQueue>(new CommandDefinition(sql,
+            new { workerId, effectiveBatchSize, leaseSeconds, globalLimit, tenantLimit, pipelineLimit, eligibleTenantIds },
+            cancellationToken: ct));
+        return results.ToList();
+    }
+
     public async Task<IReadOnlyList<PipelineQueue>> ReclaimExpiredJobsAsync(
         string workerId, int batchSize, int leaseSeconds, List<long> eligibleTenantIds, CancellationToken ct = default)
     {
@@ -418,6 +521,7 @@ public class MainPipelineQueueRepository : ControlRepositoryBase, IMainPipelineQ
             SET Status = 'Pending',
                 PausedNextAttemptOn = NULL,
                 NextAttemptOn = @sentinelDate,
+                AttemptCount = CASE WHEN AttemptCount > 0 THEN AttemptCount - 1 ELSE 0 END,
                 LockedBy = NULL,
                 LockedUntil = NULL,
                 ClaimToken = NULL,

@@ -184,7 +184,7 @@ public class PipelineEngineHandleErrorsTests
         _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
         _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 10 });
         _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
-        _recordRepo.GetByPublicIdAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+        _recordRepo.GetByPublicIdAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?> { { "id", 100 } });
         _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { { 100, new Dictionary<string, object?> { { "id", 100 } } }, { 200, new Dictionary<string, object?> { { "id", 200 } } } });
@@ -197,6 +197,82 @@ public class PipelineEngineHandleErrorsTests
         await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 2), Arg.Any<CancellationToken>());
         await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 3), Arg.Any<CancellationToken>());
         await _pipelineRepo.DidNotReceive().CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 4), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleErrors_OnSuccessUpdate_ResolvesTextAndMultipleFieldsFromMonitoredUpdate()
+    {
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "RecordAdded", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+
+        var tablePublicId = Guid.NewGuid();
+        var monitoredRecordId = Guid.NewGuid();
+        var successRecordId = Guid.NewGuid();
+        var fields = new List<AppField>
+        {
+            new() { Id = 6, Fid = 6, Name = "FirstValue", TypeCode = "Text" },
+            new() { Id = 7, Fid = 7, Name = "SecondValue", TypeCode = "Text" },
+            new() { Id = 8, Fid = 8, Name = "CombinedValue", TypeCode = "Text" }
+        };
+        var steps = new List<PipelineStep>
+        {
+            new() { Id = 999, Type = "trigger", Subtype = "new-event", IsDeleted = false },
+            new()
+            {
+                Id = 1, PublicId = Guid.NewGuid(), RefId = "handle_1", Type = "control", Subtype = "handle-errors",
+                ConfigJson = JsonSerializer.Serialize(new { FallbackAction = "handle" })
+            },
+            new()
+            {
+                Id = 2, ParentStepId = 1, ParentBranch = "children", DisplayOrder = 1,
+                PublicId = Guid.NewGuid(), RefId = "monitored_update", Type = "action", Subtype = "update-record",
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    TableId = tablePublicId,
+                    TargetRecordId = monitoredRecordId,
+                    FieldMappings = new[]
+                    {
+                        new { Field = "fid_6", Value = "Alpha" },
+                        new { Field = "fid_7", Value = "Beta" }
+                    }
+                })
+            },
+            new()
+            {
+                Id = 3, ParentStepId = 1, ParentBranch = "successchildren", DisplayOrder = 1,
+                PublicId = Guid.NewGuid(), RefId = "success_update", Type = "action", Subtype = "update-record",
+                ConfigJson = JsonSerializer.Serialize(new
+                {
+                    TableId = tablePublicId,
+                    TargetRecordId = successRecordId,
+                    FieldMappings = new[]
+                    {
+                        new { Field = "fid_8", Value = "Result: {{steps.monitored_update.fid_6}} {{steps.monitored_update.fid_7}}" }
+                    }
+                })
+            }
+        };
+
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
+        _tableRepo.GetByPublicIdAsync(tablePublicId, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 10, PublicId = tablePublicId });
+        _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(fields);
+        _recordWriteService.ApplyAsync(
+                Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
+                Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(),
+                Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<bool>(),
+                Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
+            .Returns(call => Task.FromResult(call.ArgAt<IReadOnlyDictionary<long, object?>>(3)));
+
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        await _recordWriteService.Received(1).ApplyAsync(
+            Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), successRecordId,
+            Arg.Is<IReadOnlyDictionary<long, object?>>(values =>
+                values.ContainsKey(8) && Equals(values[8], "Result: Alpha Beta")),
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(),
+            Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<bool>(),
+            Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Theory]

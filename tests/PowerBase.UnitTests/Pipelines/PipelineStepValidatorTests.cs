@@ -45,6 +45,46 @@ public class PipelineStepValidatorTests
         );
     }
 
+    [Fact]
+    public async Task ValidateCreateRecord_MissingRequiredField_ReturnsFieldMappingError()
+    {
+        var tableId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 20, PublicId = tableId });
+        _fieldRepo.ListByTableAsync(20, Arg.Any<CancellationToken>()).Returns([
+            new AppField { Fid = 6, Name = "C_name", Label = "Customer Name", TypeCode = "Text", IsRequired = true },
+            new AppField { Fid = 7, Name = "C_notes", Label = "Notes", TypeCode = "Text", IsRequired = false }
+        ]);
+        var config = JsonSerializer.Serialize(new {
+            connectionPublicId = PipelineStepValidator.SystemConnectionIds.First(),
+            tablePublicId = tableId,
+            fieldMappings = new[] { new { field = "fid_7", value = "optional" } }
+        });
+
+        var act = () => _validator.ValidateCreateRecordRequiredFieldsAsync(config, CancellationToken.None);
+
+        var error = await act.Should().ThrowAsync<ValidationException>();
+        error.Which.Errors.Should().ContainKey("FieldMappings");
+        error.Which.Errors["FieldMappings"].Should().Contain("'Customer Name' is required.");
+    }
+
+    [Fact]
+    public async Task ValidateCreateRecord_RequiredDynamicValue_Passes()
+    {
+        var tableId = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 20, PublicId = tableId });
+        _fieldRepo.ListByTableAsync(20, Arg.Any<CancellationToken>()).Returns([
+            new AppField { Fid = 6, Name = "C_name", Label = "Customer Name", TypeCode = "Text", IsRequired = true }
+        ]);
+        var config = JsonSerializer.Serialize(new {
+            connectionPublicId = PipelineStepValidator.SystemConnectionIds.First(),
+            tablePublicId = tableId,
+            fieldMappings = new[] { new { field = "fid_6", value = "{{steps.ref_1.fid_6}}" } }
+        });
+
+        await _validator.Invoking(validator => validator.ValidateCreateRecordRequiredFieldsAsync(config, CancellationToken.None))
+            .Should().NotThrowAsync();
+    }
+
 
     [Theory]
     [InlineData("10", true, true)]
@@ -154,6 +194,116 @@ public class PipelineStepValidatorTests
 
         await _appAccessService.Received(1).RequirePermissionByAppPublicIdAsync(appGuid, PermissionCodes.PowerFlowsRead, Arg.Any<CancellationToken>());
         await _appAccessService.DidNotReceive().RequirePermissionByAppPublicIdAsync(appGuid, PermissionCodes.PowerFlowsUpdate, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Validate_OnNewEvent_AdvancedFilter_InvalidQuery_ThrowsValidationException()
+    {
+        var appGuid = Guid.NewGuid();
+        var tableGuid = Guid.NewGuid();
+        _appRepo.GetByPublicIdAsync(appGuid, Arg.Any<CancellationToken>()).Returns(new App { Id = 1 });
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 2, AppId = 1 });
+        _fieldRepo.ListByTableAsync(2, Arg.Any<CancellationToken>()).Returns([
+            new AppField { Fid = 3, Name = "City", Label = "City", TypeCode = "Text" }
+        ]);
+
+        var config = new
+        {
+            ConnectionPublicId = PipelineStepValidator.SystemConnectionIds.First().ToString(),
+            AppPublicId = appGuid.ToString(),
+            TablePublicId = tableGuid.ToString(),
+            TriggerOnAdded = true,
+            IsSimpleFilter = false,
+            AdvancedQuery = "not a valid query"
+        };
+
+        var act = () => _validator.ValidateNewEventStepAsync(JsonSerializer.Serialize(config), CancellationToken.None);
+        await act.Should().ThrowAsync<ValidationException>()
+            .Where(e => e.Errors.ContainsKey("AdvancedQuery"));
+    }
+
+    [Fact]
+    public async Task Validate_OnNewEvent_AdvancedFilter_ValidQuery_Passes()
+    {
+        var appGuid = Guid.NewGuid();
+        var tableGuid = Guid.NewGuid();
+        _appRepo.GetByPublicIdAsync(appGuid, Arg.Any<CancellationToken>()).Returns(new App { Id = 1 });
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 2, AppId = 1 });
+        _fieldRepo.ListByTableAsync(2, Arg.Any<CancellationToken>()).Returns([
+            new AppField { Fid = 3, Name = "City", Label = "City", TypeCode = "Text" }
+        ]);
+
+        var config = new
+        {
+            ConnectionPublicId = PipelineStepValidator.SystemConnectionIds.First().ToString(),
+            AppPublicId = appGuid.ToString(),
+            TablePublicId = tableGuid.ToString(),
+            TriggerOnAdded = true,
+            IsSimpleFilter = false,
+            AdvancedQuery = "{3.EX.'Mumbai'}"
+        };
+
+        var act = () => _validator.ValidateNewEventStepAsync(JsonSerializer.Serialize(config), CancellationToken.None);
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task ValidateSearchRecordsStep_SimpleFilterMode_SkipsAdvancedQueryCheck()
+    {
+        var tableGuid = Guid.NewGuid();
+        var config = JsonSerializer.Serialize(new
+        {
+            connectionPublicId = PipelineStepValidator.SystemConnectionIds.First().ToString(),
+            tableId = tableGuid.ToString(),
+            isSimpleFilter = true,
+            advancedQuery = "not a valid query" // ignored while Simple Filter mode is active
+        });
+
+        await _validator.Invoking(v => v.ValidateSearchRecordsStepAsync(config, CancellationToken.None))
+            .Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task ValidateSearchRecordsStep_AdvancedFilter_InvalidQuery_ThrowsValidationException()
+    {
+        var tableGuid = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 5, PublicId = tableGuid });
+        _fieldRepo.ListByTableAsync(5, Arg.Any<CancellationToken>()).Returns([
+            new AppField { Fid = 1, Name = "Name", Label = "Name", TypeCode = "Text" }
+        ]);
+
+        var config = JsonSerializer.Serialize(new
+        {
+            connectionPublicId = PipelineStepValidator.SystemConnectionIds.First().ToString(),
+            tableId = tableGuid.ToString(),
+            isSimpleFilter = false,
+            advancedQuery = "not a valid query"
+        });
+
+        var act = () => _validator.ValidateSearchRecordsStepAsync(config, CancellationToken.None);
+        await act.Should().ThrowAsync<ValidationException>()
+            .Where(e => e.Errors.ContainsKey("AdvancedQuery"));
+    }
+
+    [Fact]
+    public async Task ValidateSearchRecordsStep_AdvancedFilter_ValidQuery_Passes()
+    {
+        var tableGuid = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 5, PublicId = tableGuid });
+        _fieldRepo.ListByTableAsync(5, Arg.Any<CancellationToken>()).Returns([
+            new AppField { Fid = 1, Name = "Name", Label = "Name", TypeCode = "Text" }
+        ]);
+
+        var config = JsonSerializer.Serialize(new
+        {
+            connectionPublicId = PipelineStepValidator.SystemConnectionIds.First().ToString(),
+            tableId = tableGuid.ToString(),
+            isSimpleFilter = false,
+            advancedQuery = "{1.EX.'John'}"
+        });
+
+        await _validator.Invoking(v => v.ValidateSearchRecordsStepAsync(config, CancellationToken.None))
+            .Should().NotThrowAsync();
     }
 
     [Fact]

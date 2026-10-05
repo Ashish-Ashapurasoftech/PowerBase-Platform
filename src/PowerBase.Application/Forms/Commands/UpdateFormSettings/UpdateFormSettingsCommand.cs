@@ -7,4 +7,5 @@ public record UpdateFormSettingsCommand(
     bool ShowBuiltInFields,
     string SaveOptions,
     byte[] RowVersion,
-    bool? IsQuickPeekForm = null);
+    bool? IsQuickPeekForm = null,
+    bool? IsQuickPeekDefault = null);

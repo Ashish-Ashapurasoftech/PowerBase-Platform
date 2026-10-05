@@ -50,6 +50,64 @@ public class DatabaseQueueTests
         act.Should().NotThrow();
     }
 
+    [Theory]
+    [InlineData(0, 10, 3)]
+    [InlineData(50, 0, 3)]
+    [InlineData(50, 10, 0)]
+    public void OptionsValidator_InvalidGlobalConcurrency_Throws(int global, int tenant, int pipeline)
+    {
+        var options = new PipelineExecutionOptions();
+        options.DatabaseQueue.GlobalConcurrencyLimit = global;
+        options.DatabaseQueue.TenantConcurrencyLimit = tenant;
+        options.DatabaseQueue.PipelineConcurrencyLimit = pipeline;
+
+        Action act = () => PipelineExecutionOptionsValidator.Validate(options);
+
+        act.Should().Throw<InvalidOperationException>();
+    }
+
+    [Theory]
+    [InlineData(0, 120)]
+    [InlineData(120, 120)]
+    [InlineData(121, 120)]
+    public void OptionsValidator_HeartbeatMustBeShorterThanLease(int heartbeat, int lease)
+    {
+        var options = new PipelineExecutionOptions();
+        options.DatabaseQueue.HeartbeatSeconds = heartbeat;
+        options.DatabaseQueue.LeaseSeconds = lease;
+
+        Action act = () => PipelineExecutionOptionsValidator.Validate(options);
+
+        act.Should().Throw<InvalidOperationException>();
+    }
+
+    [Fact]
+    public void OptionsValidator_ZeroBulkEventPageSize_Throws()
+    {
+        var options = new PipelineExecutionOptions { BulkEventPageSize = 0 };
+
+        Action act = () => PipelineExecutionOptionsValidator.Validate(options);
+
+        act.Should().Throw<InvalidOperationException>();
+    }
+
+    [Theory]
+    [InlineData(0, 3)]
+    [InlineData(10, -1)]
+    public void OptionsValidator_InvalidRuntimeControlValues_Throws(
+        int workerShutdownWaitSeconds, int sqlDeadlockMaxRetries)
+    {
+        var options = new PipelineExecutionOptions
+        {
+            WorkerShutdownWaitSeconds = workerShutdownWaitSeconds,
+            SqlDeadlockMaxRetries = sqlDeadlockMaxRetries
+        };
+
+        Action act = () => PipelineExecutionOptionsValidator.Validate(options);
+
+        act.Should().Throw<InvalidOperationException>();
+    }
+
     [Fact]
     public void PayloadHashHelper_ComputesSha256()
     {
@@ -88,5 +146,24 @@ public class DatabaseQueueTests
         job.TriggerStepId.Should().Be(456L);
         job.TriggerStepRefId.Should().Be("step_abc");
         job.QueueSource.Should().Be("Event");
+    }
+
+    [Fact]
+    public void TenantPipelinePayloadMapper_UsesConfiguredMaxAttempts()
+    {
+        var outbox = new PipelineOutboxItem
+        {
+            MessageId = Guid.NewGuid(),
+            PipelineId = 1,
+            TriggerPayloadJson = "{}",
+            PipelineChain = "[]",
+            PayloadVersion = "1.0",
+            CreatedOn = DateTime.UtcNow
+        };
+
+        var job = TenantPipelinePayloadMapper.MapFromOutbox(
+            outbox, 10, Guid.NewGuid(), Guid.NewGuid(), maxAttempts: 9);
+
+        job.MaxAttempts.Should().Be(9);
     }
 }

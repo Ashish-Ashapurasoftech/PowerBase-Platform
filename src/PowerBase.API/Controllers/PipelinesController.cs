@@ -22,6 +22,8 @@ using System;
 using System.Text.Json;
 using PowerBase.Application.Pipelines.Queries.ListPipelineRuns;
 using PowerBase.Application.Pipelines.Queries.GetPipelineRunSteps;
+using PowerBase.Application.Pipelines.Queries.GetPipelineActivity;
+using PowerBase.Application.Pipelines.Queries.ListPipelinesForPicker;
 
 namespace PowerBase.API.Controllers;
 
@@ -153,7 +155,7 @@ public class PipelinesController : ControllerBase
         var command = new UpdatePipelineCommand(publicId, request.Name, request.Description, request.IsActive, rowVersion);
         await _updateHandler.HandleAsync(command, ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { rowVersion = Convert.ToBase64String(pipeline.RowVersion) });
+        return Ok(new { modifiedOn = pipeline.ModifiedOn.HasValue ? DateTime.SpecifyKind(pipeline.ModifiedOn.Value, DateTimeKind.Utc) : (DateTime?)null, rowVersion = Convert.ToBase64String(pipeline.RowVersion) });
     }
 
     /// <summary>Save or overwrite the hierarchical steps layout for a pipeline.</summary>
@@ -171,7 +173,7 @@ public class PipelinesController : ControllerBase
         var command = new SavePipelineStepsCommand(publicId, request.Steps, rowVersion);
         await _saveStepsHandler.HandleAsync(command, ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
+        return Ok(new { modifiedOn = pipeline.ModifiedOn.HasValue ? DateTime.SpecifyKind(pipeline.ModifiedOn.Value, DateTimeKind.Utc) : (DateTime?)null, rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Soft-delete a pipeline workflow.</summary>
@@ -358,6 +360,8 @@ public class PipelinesController : ControllerBase
         Name = result.Name,
         Description = result.Description,
         VariablesJson = result.VariablesJson,
+        CreatedOn = result.CreatedOn,
+        ModifiedOn = result.ModifiedOn,
         IsActive = result.IsActive,
         RowVersion = Convert.ToBase64String(result.RowVersion),
         Steps = result.Steps.Select(MapStepResponse).ToList()
@@ -386,7 +390,10 @@ public class PipelinesController : ControllerBase
         Name = result.Name,
         Description = result.Description,
         VariablesJson = result.VariablesJson,
+        CreatedOn = result.CreatedOn,
+        ModifiedOn = result.ModifiedOn,
         IsActive = result.IsActive,
+        DateFormatString = result.DateFormatString,
         RowVersion = Convert.ToBase64String(result.RowVersion),
         Steps = result.Steps.Select(MapEditorStepResponse).ToList(),
         EditorTables = result.EditorTables.Select(t => new PipelineEditorTableDto
@@ -493,7 +500,7 @@ public class PipelinesController : ControllerBase
 
         await handler.HandleAsync(command, ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { message = "Schedule updated successfully.", rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
+        return Ok(new { message = "Schedule updated successfully.", modifiedOn = pipeline.ModifiedOn.HasValue ? DateTime.SpecifyKind(pipeline.ModifiedOn.Value, DateTimeKind.Utc) : (DateTime?)null, rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Delete a pipeline's schedule.</summary>
@@ -507,7 +514,7 @@ public class PipelinesController : ControllerBase
     {
         await handler.HandleAsync(new DeletePipelineScheduleCommand(publicId), ct);
         var pipeline = await _getHandler.HandleAsync(new GetPipelineQuery(publicId), ct);
-        return Ok(new { message = "Schedule deleted successfully.", rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
+        return Ok(new { message = "Schedule deleted successfully.", modifiedOn = pipeline.ModifiedOn.HasValue ? DateTime.SpecifyKind(pipeline.ModifiedOn.Value, DateTimeKind.Utc) : (DateTime?)null, rowVersion = Convert.ToBase64String(pipeline.RowVersion), isActive = pipeline.IsActive });
     }
 
     /// <summary>Run a pipeline manually on demand.</summary>
@@ -560,7 +567,19 @@ public class PipelinesController : ControllerBase
         };
 
         queue.QueueTask(task);
-        return Ok(new { message = "Pipeline run requested and enqueued.", messageId = messageId.ToString(), correlationId });
+        return Ok(new { message = "PowerFlow run requested and enqueued.", messageId = messageId.ToString(), correlationId });
+    }
+
+    /// <summary>List pipeline execution runs with pagination.</summary>
+    [HttpGet("pipelines/{publicId:guid}/statistics")]
+    [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByPipelinePublicId)]
+    public async Task<IActionResult> GetStatistics(Guid publicId,
+        [FromServices] IPipelineRepository pipelineRepo, CancellationToken ct = default)
+    {
+        var pipeline = await pipelineRepo.GetByPublicIdAsync(publicId, ct);
+        if (pipeline == null) throw new PowerBase.Domain.Exceptions.NotFoundException("PowerFlow", publicId);
+        var statistics = await pipelineRepo.GetStatisticsAsync(pipeline.Id, DateTime.UtcNow, ct);
+        return Ok(new ApiResponse<PipelineStatistics>(statistics));
     }
 
     /// <summary>List pipeline execution runs with pagination.</summary>
@@ -582,6 +601,70 @@ public class PipelinesController : ControllerBase
         return Ok(new ApiListResponse<PipelineRunDto>(result.Items, result.TotalCount, result.Page, result.PageSize));
     }
 
+    /// <summary>Activity view: execution runs across every pipeline in an app, with pagination and
+    /// optional pipeline/date-range filters, all applied server-side.</summary>
+    [HttpGet("apps/{appId:guid}/pipelines/runs")]
+    [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiListResponse<AppPipelineRunDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListAppRuns(
+        Guid appId,
+        [FromServices] ListAppPipelineRunsQueryHandler handler,
+        [FromQuery] Guid? pipelinePublicId = null,
+        [FromQuery] DateTime? fromDate = null,
+        [FromQuery] DateTime? toDate = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 10,
+        CancellationToken ct = default)
+    {
+        var query = new ListAppPipelineRunsQuery(appId, pipelinePublicId, fromDate, toDate, page, pageSize);
+        var result = await handler.HandleAsync(query, ct);
+        return Ok(new ApiListResponse<AppPipelineRunDto>(result.Items, result.TotalCount, result.Page, result.PageSize));
+    }
+
+    /// <summary>Dedicated Activity feed: execution runs across every pipeline in an app, with
+    /// pagination and optional pipeline/date-range filters. Its own endpoint, separate from
+    /// <see cref="ListAppRuns"/>, so the Activity tab's server contract is free to evolve on its own.</summary>
+    [HttpGet("apps/{appId:guid}/pipelines/activity")]
+    [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiListResponse<AppPipelineRunDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetActivity(
+        Guid appId,
+        [FromServices] GetPipelineActivityQueryHandler handler,
+        [FromQuery] Guid? pipelinePublicId = null,
+        [FromQuery] DateTime? fromDate = null,
+        [FromQuery] DateTime? toDate = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 10,
+        CancellationToken ct = default)
+    {
+        var query = new GetPipelineActivityQuery(appId, pipelinePublicId, fromDate, toDate, page, pageSize);
+        var result = await handler.HandleAsync(query, ct);
+        return Ok(new ApiListResponse<AppPipelineRunDto>(result.Items, result.TotalCount, result.Page, result.PageSize));
+    }
+
+    /// <summary>Lightweight, unpaged id/name list of this app's PowerFlows for filter dropdowns —
+    /// not the full paginated pipelines list, which is scoped by creator and sized for a data grid.</summary>
+    [HttpGet("apps/{appId:guid}/pipelines/picker")]
+    [RequireAppPermission(PermissionCodes.PowerFlowsRead, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<PipelinePickerItemResponse>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> ListPipelinesForPicker(
+        Guid appId,
+        [FromServices] ListPipelinesForPickerQueryHandler handler,
+        CancellationToken ct = default)
+    {
+        var result = await handler.HandleAsync(new ListPipelinesForPickerQuery(appId), ct);
+        var items = result.Select(p => new PipelinePickerItemResponse(p.PublicId, p.Name)).ToList();
+        return Ok(new ApiResponse<IReadOnlyList<PipelinePickerItemResponse>>(items));
+    }
+
     [HttpGet("pipelines/runs/{runPublicId:guid}/steps")]
     [ProducesResponseType(typeof(ApiListResponse<PipelineStepRunDto>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -598,11 +681,11 @@ public class PipelinesController : ControllerBase
     {
         var run = await pipelineRepo.GetRunByPublicIdAsync(runPublicId, ct);
         if (run == null)
-            return NotFound(new { error = new { code = "NOT_FOUND", message = $"PipelineRun {runPublicId} not found." } });
+            return NotFound(new { error = new { code = "NOT_FOUND", message = $"PowerFlow run {runPublicId} not found." } });
 
         var pipeline = await pipelineRepo.GetByIdAsync(run.PipelineId, ct);
         if (pipeline == null)
-            return NotFound(new { error = new { code = "NOT_FOUND", message = "Parent Pipeline not found." } });
+            return NotFound(new { error = new { code = "NOT_FOUND", message = "Parent PowerFlow not found." } });
 
         try
         {

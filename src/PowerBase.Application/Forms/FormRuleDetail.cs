@@ -21,12 +21,21 @@ public class FormRuleDetail
 public class FormRuleConditionDetail
 {
     public long Id { get; init; }
-    public long AppFieldId { get; init; }
+    public string ConditionKind { get; init; } = "field";
+    public long? AppFieldId { get; init; }
     public string Operator { get; init; } = string.Empty;
     public string? Value { get; init; }
     public string? ValueType { get; init; }
     public long? ValueFieldId { get; init; }
     public int DisplayOrder { get; init; }
+    public string? ChangeFromOperator { get; init; }
+    public string? ChangeFromValue { get; init; }
+    public string? ChangeFromValueType { get; init; }
+    public long? ChangeFromValueFieldId { get; init; }
+    public string? ChangeToOperator { get; init; }
+    public string? ChangeToValue { get; init; }
+    public string? ChangeToValueType { get; init; }
+    public long? ChangeToValueFieldId { get; init; }
 }
 
 public class FormRuleActionDetail
@@ -38,5 +47,7 @@ public class FormRuleActionDetail
     public long? TargetSectionId { get; init; }
     public long? TargetBlockId { get; init; }
     public string? ActionValue { get; init; }
+    public bool RunOnceOnActivation { get; init; }
+    public bool IsExpressionValue { get; init; }
     public int DisplayOrder { get; init; }
 }

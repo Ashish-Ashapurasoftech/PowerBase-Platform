@@ -73,4 +73,5 @@ public record ChartConfigCommand(
     string DataLabelDisplayAs = "Value",
     string GaugeGoalType = "Fixed",
     long? GaugeGoalFieldId = null,
-    string? GaugeGoalFunction = null);
+    string? GaugeGoalFunction = null,
+    string? GaugeFunction = null);
