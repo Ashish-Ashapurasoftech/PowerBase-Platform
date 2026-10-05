@@ -12,8 +12,8 @@ namespace PowerBase.Application.Relationships;
 /// of groups), over the child table's fields that have a column to filter on — so no calculated
 /// (Formula/Summary) fields; a Lookup is filtered on the parent column it pulls down (see
 /// <see cref="SummaryLookupSources"/>), except a range, whose end has no single value. Two report features have no meaning for a summary and are
-/// refused: "is the current user" (a summary shows everyone the same value) and "&lt;ask the
-/// user&gt;" (there is no one to ask). One thing only a summary has: comparing a child field to a
+/// refused: "&lt;ask the user&gt;" (there is no one to ask). "is the current user" is allowed and
+/// resolves to whoever is reading the summary. One thing only a summary has: comparing a child field to a
 /// field on the child's own parent record ("parentField", see <see cref="ParentFieldScope"/>) —
 /// again only fields with a column, so no calculated parent fields.
 /// </summary>
@@ -63,8 +63,6 @@ public static class SummaryCriteriaValidator
                     && cond.ValueFieldId is long otherFid && fieldsByFid.TryGetValue(otherFid, out var other)
                     && !IsFilterable(other, lookupSources))
                     return $"'{DisplayName(other)}' is calculated, so matching criteria can't compare to it.";
-                if (string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase))
-                    return "Matching criteria can't use \"is the current user\": a summary shows everyone the same value.";
                 if (string.Equals(cond.ValueMode, "ask", StringComparison.OrdinalIgnoreCase))
                     return "Matching criteria can't ask the user for a value.";
                 if (ParentFieldScope.IsParentFieldMode(cond.ValueMode)

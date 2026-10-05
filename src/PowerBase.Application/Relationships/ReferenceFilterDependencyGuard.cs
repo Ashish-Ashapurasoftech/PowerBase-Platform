@@ -20,10 +20,10 @@ public static class ReferenceFilterDependencyGuard
         var deletingIds = deleting.Select(f => f.Id).ToHashSet();
         foreach (var reference in tableFields.Where(f => f.TypeCode == "Reference" && !deletingIds.Contains(f.Id)))
         {
-            var conditions = FormulaTypeMap.ParseReferenceSettings(reference.Settings)?.FilterConditions;
-            if (conditions is not { Count: > 0 }) continue;
+            var controlling = ReferenceFilterResolver.ControllingFids(FormulaTypeMap.ParseReferenceSettings(reference.Settings));
+            if (controlling.Count == 0) continue;
 
-            var blocker = deleting.FirstOrDefault(d => conditions.Any(c => c.FormFid == d.Fid));
+            var blocker = deleting.FirstOrDefault(d => controlling.Any(fid => fid == d.Fid));
             if (blocker is not null)
                 throw new ConflictException(
                     $"Cannot delete field '{blocker.Label ?? blocker.Name}': it controls the dropdown values of " +

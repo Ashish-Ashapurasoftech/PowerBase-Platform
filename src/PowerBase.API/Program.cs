@@ -494,6 +494,7 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipField
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipKeyCarryOverService>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentOptionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.IsParentAllowedQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetChildRecordsForParentQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler>();
 builder.Services.AddScoped<CreateReportCommandHandler>();

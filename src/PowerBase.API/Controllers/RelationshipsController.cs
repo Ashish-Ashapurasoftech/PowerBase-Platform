@@ -26,6 +26,7 @@ public class RelationshipsController : ControllerBase
     private readonly DeleteRelationshipCommandHandler _deleteHandler;
     private readonly RelationshipQueriesHandler _queries;
     private readonly GetParentOptionsQueryHandler _parentOptions;
+    private readonly IsParentAllowedQueryHandler _parentAllowed;
     private readonly GetChildRecordsForParentQueryHandler _childRecords;
     private readonly AddLookupFieldsCommandHandler _addLookups;
     private readonly AddSummaryFieldCommandHandler _addSummary;
@@ -39,6 +40,7 @@ public class RelationshipsController : ControllerBase
         DeleteRelationshipCommandHandler deleteHandler,
         RelationshipQueriesHandler queries,
         GetParentOptionsQueryHandler parentOptions,
+        IsParentAllowedQueryHandler parentAllowed,
         GetChildRecordsForParentQueryHandler childRecords,
         AddLookupFieldsCommandHandler addLookups,
         AddSummaryFieldCommandHandler addSummary,
@@ -51,6 +53,7 @@ public class RelationshipsController : ControllerBase
         _deleteHandler = deleteHandler;
         _queries = queries;
         _parentOptions = parentOptions;
+        _parentAllowed = parentAllowed;
         _childRecords = childRecords;
         _addLookups = addLookups;
         _addSummary = addSummary;
@@ -199,7 +202,7 @@ public class RelationshipsController : ControllerBase
         var conditions = request.Conditions
             .Select(c => new ReferenceFilterConditionInput(c.FormFid, c.ParentFid, c.JunctionTableId, c.JunctionParentFid, c.JunctionValueFid))
             .ToList();
-        var result = await _updateReferenceFilter.HandleAsync(new UpdateReferenceFilterCommand(id, conditions), ct);
+        var result = await _updateReferenceFilter.HandleAsync(new UpdateReferenceFilterCommand(id, conditions, request.FilterTree), ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
 
@@ -235,24 +238,47 @@ public class RelationshipsController : ControllerBase
         Guid tableId, Guid relId, [FromQuery] string? search, [FromQuery] int take,
         [FromQuery] string? filterValues, CancellationToken ct)
     {
-        // filterValues: JSON object {"<fid>": "<current form value>"} for a dependent dropdown.
-        Dictionary<int, string?>? values = null;
-        if (!string.IsNullOrWhiteSpace(filterValues))
-        {
-            try
-            {
-                values = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string?>>(filterValues)?
-                    .Where(kv => int.TryParse(kv.Key, out _))
-                    .ToDictionary(kv => int.Parse(kv.Key), kv => kv.Value);
-            }
-            catch (System.Text.Json.JsonException)
-            {
-                return BadRequest(new { error = new { code = "INVALID_FILTER_VALUES", message = "filterValues must be a JSON object of fid → value." } });
-            }
-        }
+        if (!TryParseFilterValues(filterValues, out var values))
+            return InvalidFilterValues();
         var result = await _parentOptions.HandleAsync(relId, search, take, values, ct);
         return Ok(new ApiResponse<ParentOptionsResponse>(new ParentOptionsResponse(result.Headers, result.Options)));
     }
+
+    /// <summary>Whether one parent record passes the Reference field's dropdown filter (i.e. the picker
+    /// would offer it). A single exists-check, for callers that only need yes/no — e.g. deciding whether
+    /// an "Add child" action may link a new child to this parent — instead of loading picker options.</summary>
+    [HttpGet("tables/{tableId:guid}/relationships/{relId:guid}/parent-allowed/{recordId}")]
+    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<ParentAllowedResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ParentAllowed(
+        Guid tableId, Guid relId, string recordId, [FromQuery] string? filterValues, CancellationToken ct)
+    {
+        if (!TryParseFilterValues(filterValues, out var values))
+            return InvalidFilterValues();
+        var allowed = await _parentAllowed.HandleAsync(relId, recordId, values, ct);
+        return Ok(new ApiResponse<ParentAllowedResponse>(new ParentAllowedResponse(allowed)));
+    }
+
+    /// <summary>filterValues: JSON object {"&lt;fid&gt;": "&lt;current form value&gt;"} for a dependent dropdown.</summary>
+    private static bool TryParseFilterValues(string? filterValues, out Dictionary<int, string?>? values)
+    {
+        values = null;
+        if (string.IsNullOrWhiteSpace(filterValues)) return true;
+        try
+        {
+            values = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string?>>(filterValues)?
+                .Where(kv => int.TryParse(kv.Key, out _))
+                .ToDictionary(kv => int.Parse(kv.Key), kv => kv.Value);
+            return true;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    private IActionResult InvalidFilterValues() =>
+        BadRequest(new { error = new { code = "INVALID_FILTER_VALUES", message = "filterValues must be a JSON object of fid → value." } });
 
     /// <summary>
     /// Fetch child records already linked to a specific parent record, for rendering the

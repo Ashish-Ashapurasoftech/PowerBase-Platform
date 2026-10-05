@@ -18,6 +18,7 @@ public class GetParentOptionsQueryHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IRelationalProjector _relationalProjector;
     private readonly IFormulaProjector _formulaProjector;
+    private readonly IQueryContext _queryContext;
 
     public GetParentOptionsQueryHandler(
         IAppTableRepository tableRepo,
@@ -25,8 +26,10 @@ public class GetParentOptionsQueryHandler
         IRelationshipRepository relRepo,
         IRecordRepository recordRepo,
         IRelationalProjector relationalProjector,
-        IFormulaProjector formulaProjector)
+        IFormulaProjector formulaProjector,
+        IQueryContext queryContext)
     {
+        _queryContext = queryContext;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _relRepo = relRepo;
@@ -97,7 +100,7 @@ public class GetParentOptionsQueryHandler
         var referenceField = childFields.FirstOrDefault(f => f.Id == rel.ReferenceFieldId);
         var filters = await ReferenceFilterResolver.BuildAsync(
             FormulaTypeMap.ParseReferenceSettings(referenceField?.Settings), childFields, parentFields,
-            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct);
+            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId);
         var hasComputed = labelFields.Any(IsComputedLabel) || (primaryLabelField is not null && IsComputedLabel(primaryLabelField));
         if (!hasComputed)
         {

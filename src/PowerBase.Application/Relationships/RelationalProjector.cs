@@ -26,6 +26,7 @@ public sealed class RelationalProjector : IRelationalProjector
     private readonly IRelationshipRepository _relRepo;
     private readonly IAppRepository _appRepo;
     private readonly IUserRepository _userRepo;
+    private readonly IQueryContext _queryContext;
 
     /// <summary>Picked users' long ids by public id, looked up once per projector for every
     /// summary's matching criteria (see ResolveCriteriaValuesAsync).</summary>
@@ -51,8 +52,9 @@ public sealed class RelationalProjector : IRelationalProjector
     public RelationalProjector(
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
         IRelationshipRepository relRepo, IAppRepository appRepo, IUserRepository userRepo,
-        IFormulaProjector formulaProjector)
+        IFormulaProjector formulaProjector, IQueryContext queryContext)
     {
+        _queryContext = queryContext;
         _formulaProjector = formulaProjector;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -513,15 +515,15 @@ public sealed class RelationalProjector : IRelationalProjector
     /// <summary>Turns saved matching criteria into what the SQL compares, exactly as a report run
     /// does: a picked user's public id becomes the long id the column stores, and relative dates
     /// (today, N days ago, "is during the current week") become real dates — worked out on every
-    /// read, so "this week" keeps moving. A summary refuses "is the current user" when saved (it
-    /// shows everyone the same value); one saved before that rule matches nobody.</summary>
+    /// read, so "this week" keeps moving. "is the current user" resolves to whoever is reading
+    /// the summary (so two users can see different values); with no known user it matches nobody.</summary>
     private async Task<FilterGroup?> ResolveCriteriaValuesAsync(
         FilterGroup? filter, IReadOnlyDictionary<long, AppField> childFieldsByFid, CancellationToken ct)
     {
         if (filter is null) return null;
-        const long noCurrentUser = -1;
+        var currentUserId = _queryContext.UserId > 0 ? _queryContext.UserId : -1;
         var resolved = await RunReportQueryHandler.ResolveUserFieldValuesAsync(
-            filter, childFieldsByFid, noCurrentUser, _userIdsByPublicId, _userRepo, ct);
+            filter, childFieldsByFid, currentUserId, _userIdsByPublicId, _userRepo, ct);
         return RunReportQueryHandler.ResolveDateValueModeConditions(resolved);
     }
 

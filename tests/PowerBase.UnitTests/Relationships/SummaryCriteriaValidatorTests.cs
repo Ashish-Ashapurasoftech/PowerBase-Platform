@@ -64,9 +64,9 @@ public class SummaryCriteriaValidatorTests
         SummaryCriteriaValidator.FindProblem(Group("and", Cond(8, "gt", "3")), ChildFields, ParentFields).Should().Contain("'Days Left' is calculated");
 
     [Fact]
-    public void FindProblem_CurrentUser_IsRefusedAtAnyDepth() =>
+    public void FindProblem_CurrentUser_IsFineAtAnyDepth() =>
         SummaryCriteriaValidator.FindProblem(Group("and", Nested("or", Cond(7, "isCurrentUser", null))), ChildFields, ParentFields)
-            .Should().Contain("is the current user");
+            .Should().BeNull();
 
     [Fact]
     public void FindProblem_AskTheUser_IsRefused() =>

@@ -528,6 +528,13 @@ public sealed class ReferenceSettings
     /// <summary>Dependent-dropdown conditions ("the values in this field depend on a selection in
     /// another field"). All conditions must hold (AND). Null/empty = every parent record is offered.</summary>
     public List<ReferenceFilterCondition>? FilterConditions { get; set; }
+
+    /// <summary>Serialized filter tree (the same group/condition shape a report's Advanced filter and a
+    /// summary's matching criteria use) over the PARENT table's fields: only parent records matching it
+    /// are offered. A condition with valueMode "parentField" compares to the current value of the form
+    /// field whose Fid is its valueFieldId (the dependent-dropdown case) instead of a literal. Applied
+    /// together with <see cref="FilterConditions"/>. Null = no tree filter.</summary>
+    public string? FilterTree { get; set; }
 }
 
 /// <summary>

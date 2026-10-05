@@ -19,7 +19,9 @@ public class RelationalProjectorTests
 
     private readonly IFormulaProjector _formulaProjector = Substitute.For<IFormulaProjector>();
 
-    private RelationalProjector NewProjector() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appRepo, _userRepo, _formulaProjector);
+    private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+
+    private RelationalProjector NewProjector() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _appRepo, _userRepo, _formulaProjector, _queryContext);
 
     public RelationalProjectorTests()
     {

@@ -40,7 +40,7 @@ public static class ReferenceWriteValidator
         //    value predates the rule would start failing.
         async Task EnforceFilterAsync(AppField field, ReferenceSettings settings, AppTable parent, long parentRowId)
         {
-            if (settings.FilterConditions is not { Count: > 0 } allConditions) return;
+            if (!ReferenceFilterResolver.HasFilter(settings)) return;
             // The controlling value is the submitted one, or — on an update that doesn't resend it —
             // the record's current stored one (a partial update of just the Reference must still be
             // judged against the record's own controlling value).
@@ -52,25 +52,26 @@ public static class ReferenceWriteValidator
                 return false;
             }
 
-            var conditions = allConditions
-                .Where(c => c.FormFid is int fid && fields.Any(f => f.Fid == fid) && TryControlling(fid, out _))
+            // A filter on literal values alone (no controlling field) is judged on every write.
+            var controllingFids = ReferenceFilterResolver.ControllingFids(settings)
+                .Where(fid => fields.Any(f => f.Fid == fid) && TryControlling(fid, out _))
                 .ToList();
-            if (conditions.Count == 0) return;
 
             if (existingValues is not null)
             {
                 var referenceChanged = !SameValue(existingValues.GetValueOrDefault(field.Fid!.Value), parentRowId);
-                var controllingChanged = conditions.Any(c =>
-                    values.TryGetValue(c.FormFid!.Value, out var submitted)
-                    && !SameValue(existingValues.GetValueOrDefault(c.FormFid!.Value), submitted));
+                var controllingChanged = controllingFids.Any(fid =>
+                    values.TryGetValue(fid, out var submitted)
+                    && !SameValue(existingValues.GetValueOrDefault(fid), submitted));
                 if (!referenceChanged && !controllingChanged) return;
             }
 
-            var formValues = conditions.ToDictionary(
-                c => c.FormFid!.Value,
-                c => { TryControlling(c.FormFid!.Value, out var v); return v?.ToString(); });
+            var formValues = controllingFids.ToDictionary(
+                fid => fid,
+                fid => { TryControlling(fid, out var v); return InvariantText(v); });
             var parentFields = await fieldRepo.ListByTableAsync(parent.Id, ct);
             var clauses = await ReferenceFilterResolver.BuildAsync(settings, fields, parentFields, formValues, tableRepo, fieldRepo, ct);
+            if (clauses.Count == 0) return;   // nothing applicable to this submission
             if (!await recordRepo.MatchesReferenceFilterAsync(parent, parentRowId, clauses, ct))
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
@@ -136,6 +137,22 @@ public static class ReferenceWriteValidator
         }
 
         return overrides;
+    }
+
+    /// <summary>A submitted or stored value as the culture-independent text the filter resolver reads: a date as
+    /// ISO (stored values arrive as DateTime), a number with a '.' decimal point — plain ToString() would follow
+    /// the server's culture and a date or decimal could then be misread.</summary>
+    private static string? InvariantText(object? value)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        return value switch
+        {
+            null => null,
+            DateTime d => d.TimeOfDay == TimeSpan.Zero ? d.ToString("yyyy-MM-dd", inv) : d.ToString("yyyy-MM-ddTHH:mm:ss", inv),
+            DateOnly d => d.ToString("yyyy-MM-dd", inv),
+            IFormattable f => f.ToString(null, inv),
+            _ => value.ToString(),
+        };
     }
 
     /// <summary>Loose equality between a stored value and a submitted one: null and blank are the same,

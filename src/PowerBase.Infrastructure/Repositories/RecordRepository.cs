@@ -333,6 +333,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         for (var i = 0; i < filters.Count; i++)
         {
             var f = filters[i];
+            if (f.Tree is not null)
+            {
+                // Its own parameter range, clear of the fv{i} names the other clauses use.
+                var treeIdx = 1000 * (i + 1);
+                var fragment = BuildTreeFragment(f.Tree, parameters, ref treeIdx, BuildFieldLookup(f.TreeFields ?? []), lookupAlias: "p");
+                if (!string.IsNullOrEmpty(fragment)) parts.Add($"({fragment})");
+                continue;
+            }
             if (string.IsNullOrWhiteSpace(f.Value)) { parts.Add("1 = 0"); continue; }
             var name = $"fv{i}";
             parameters.Add(name, f.Value);
@@ -551,7 +559,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     /// read with a correlated subquery through the child's reference column (the child is aliased
     /// <see cref="ChildAlias"/>) — the same value the record read projects, a deleted parent giving
     /// NULL. Null when the lookup's settings are incomplete.</summary>
-    private static string? LookupColumnExpr(AppField lookup)
+    private static string? LookupColumnExpr(AppField lookup, string rowAlias = ChildAlias)
     {
         var s = SummaryLookupSources.Settings(lookup);
         if (s is not { SourceTableId: long sourceTableId, ReferenceFid: int refFid, SourceFid: int sourceFid }) return null;
@@ -564,7 +572,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             ? $"lk.{sourceCol}"
             : $"JSON_VALUE(lk.{sourceCol}, '$.{SafeJsonKey(s.SourceSubField)}')";
         return $"(SELECT {value} FROM {PhysicalNaming.FullTableName(sourceTableId)} lk "
-             + $"WHERE lk.Id = {ChildAlias}.{PhysicalNaming.ColumnName(refFid)} AND lk.IsDeleted = 0)";
+             + $"WHERE lk.Id = {rowAlias}.{PhysicalNaming.ColumnName(refFid)} AND lk.IsDeleted = 0)";
     }
 
     private static string SafeJsonKey(string key) => System.Text.RegularExpressions.Regex.Replace(key, "[^a-zA-Z0-9_]", "");
@@ -1464,20 +1472,23 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return string.IsNullOrEmpty(fragment) ? string.Empty : $" AND ({fragment})";
     }
 
+    /// <param name="lookupAlias">For a query that isn't a summary (no <paramref name="parentScope"/>) but filters a
+    /// table's own Lookup fields — the reference dropdown filters the parent table aliased <c>p</c>: the alias
+    /// of the row that holds the lookup's reference column.</param>
     private static string BuildTreeFragment(FilterGroup group, DynamicParameters parameters, ref int paramIdx,
-        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null)
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null, string? lookupAlias = null)
     {
         var parts = new List<string>();
         foreach (var node in group.Nodes)
         {
             if (node.Condition is { } cond)
             {
-                var clause = BuildConditionClause(cond, parameters, ref paramIdx, fieldLookup, parentScope);
+                var clause = BuildConditionClause(cond, parameters, ref paramIdx, fieldLookup, parentScope, lookupAlias);
                 if (clause is not null) parts.Add(clause);
             }
             else if (node.Group is { } sub && sub.Nodes.Count > 0)
             {
-                var subSql = BuildTreeFragment(sub, parameters, ref paramIdx, fieldLookup, parentScope);
+                var subSql = BuildTreeFragment(sub, parameters, ref paramIdx, fieldLookup, parentScope, lookupAlias);
                 if (!string.IsNullOrEmpty(subSql)) parts.Add($"({subSql})");
             }
         }
@@ -1599,7 +1610,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         || (field is not null && field.TypeCode.Equals("DateTime", StringComparison.OrdinalIgnoreCase));
 
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
-        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null)
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null, string? lookupAlias = null)
     {
         // "the value in the field" / "the value in the parent's field" conditions legitimately
         // carry no Value at all (ValueFieldId is the comparison target instead) — don't let the
@@ -1618,8 +1629,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // down, typed as that field — see LookupColumnExpr.
         AppField? lookupAsSource = null;
         string? lookupCol = null;
-        if (parentScope is not null && fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var lookupField)
-            && SummaryLookupSources.IsLookup(lookupField) && LookupColumnExpr(lookupField) is { } lookupExpr)
+        var rowAlias = lookupAlias ?? ChildAlias;
+        if ((parentScope is not null || lookupAlias is not null) && fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var lookupField)
+            && SummaryLookupSources.IsLookup(lookupField) && LookupColumnExpr(lookupField, rowAlias) is { } lookupExpr)
         {
             lookupCol = lookupExpr;
             lookupAsSource = new AppField
@@ -1718,7 +1730,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             {
                 if (fieldLookup == null || !fieldLookup.TryGetValue(cond.ValueFieldId!.Value, out var targetField))
                     return null;
-                if (parentScope is not null && SummaryLookupSources.IsLookup(targetField) && LookupColumnExpr(targetField) is { } otherLookup)
+                if ((parentScope is not null || lookupAlias is not null) && SummaryLookupSources.IsLookup(targetField) && LookupColumnExpr(targetField, rowAlias) is { } otherLookup)
                     colExpr2 = otherLookup;
                 else if (PhysicalNaming.IsComputedTypeCode(targetField.TypeCode))
                     return null;

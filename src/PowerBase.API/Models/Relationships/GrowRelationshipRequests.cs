@@ -50,6 +50,11 @@ public class UpdateDisplayKeyRequest
 public class UpdateReferenceFilterRequest
 {
     public List<ReferenceFilterConditionRequest> Conditions { get; set; } = new();
+
+    /// <summary>Filter over the PARENT table's fields (same shape as a report's advanced filter). A condition
+    /// with valueMode "parentField" compares to the current value of the form field whose Fid is its
+    /// valueFieldId. Null/empty clears the tree filter.</summary>
+    public FilterGroup? FilterTree { get; set; }
 }
 
 /// <summary>Junction mode when <see cref="JunctionTableId"/> is set; otherwise direct (<see cref="ParentFid"/>).</summary>

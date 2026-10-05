@@ -169,14 +169,6 @@ public class UpdateSummaryFieldCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_CriteriaWithCurrentUser_ThrowsValidation()
-    {
-        var criteria = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 5, Operator = "isCurrentUser" } }] };
-
-        await ShouldNotSave(() => _handler.HandleAsync(Command("Count", null, criteria)), typeof(ValidationException));
-    }
-
-    [Fact]
     public async Task Handle_CriteriaOnUnknownField_ThrowsValidation() =>
         await ShouldNotSave(() => _handler.HandleAsync(Command("Count", null, Where(999, "eq", "x"))), typeof(ValidationException));
 

@@ -235,14 +235,4 @@ public class AddSummaryFieldCommandHandlerTests
         group.Logic.Should().Be("or");
         group.Nodes[1].Condition!.ValueMode.Should().Be("duringCurrent");
     }
-
-    [Fact]
-    public async Task Handle_MatchingCriteriaWithCurrentUser_ThrowsValidation_AndCreatesNothing()
-    {
-        var criteria = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 5, Operator = "isCurrentUser" } }] };
-
-        (await FluentActions.Invoking(() => _handler.HandleAsync(Command("Count", null, criteria)))
-            .Should().ThrowAsync<ValidationException>()).Which.Errors.Should().ContainKey("matchingCriteria");
-        _created.Should().BeNull();
-    }
 }
