@@ -40,7 +40,13 @@ public interface IRecordRepository
     /// <paramref name="labelFields"/>[0] (the standard-key case, where they're the same field).</summary>
     Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
-        AppField? primaryLabelField = null, CancellationToken ct = default);
+        AppField? primaryLabelField = null, CancellationToken ct = default,
+        IReadOnlyList<ReferenceFilterClause>? filters = null);
+
+    /// <summary>True when the parent row satisfies every dependent-dropdown clause (used to reject a
+    /// Reference value the picker would not have offered).</summary>
+    Task<bool> MatchesReferenceFilterAsync(
+        AppTable parentTable, long parentRowId, IReadOnlyList<ReferenceFilterClause> filters, CancellationToken ct = default);
 
     /// <summary>Fetch a label value for each of the given parent row Ids (drives Lookup/Reference label resolution).</summary>
     Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(
@@ -72,10 +78,39 @@ public interface IRecordRepository
     /// aggregate value.</summary>
     /// <param name="targetSubField">When the target field is a composite Address field, the JSON
     /// sub-key (see <see cref="PowerBase.Domain.FieldSettings.AddressSubFields"/>) to aggregate
-    /// instead of the whole value. Only meaningful with Count/Exists/Min/Max.</param>
+    /// instead of the whole value. Only meaningful with Count/Exists/DistinctCount.</param>
+    /// <param name="fieldLookup">The child table's fields by Fid, so <paramref name="filterTree"/>
+    /// is built with each field's type — the same way a report's filter is.</param>
+    /// <param name="parentScope">The parent table, so "parentField" conditions in
+    /// <paramref name="filterTree"/> can compare each child with its own parent's field. Without
+    /// it those conditions are no-ops.</param>
     Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
         IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null,
+        CancellationToken ct = default);
+
+    /// <summary>The target field's raw non-NULL values for every child of the given parents, in
+    /// display order — grouped by parent, then by <paramref name="sortFid"/> (or record creation
+    /// order when null), then Id. Feeds the Combined Text summary, which formats each value with its
+    /// field's display format before joining (hence raw rows, not a SQL STRING_AGG).
+    /// <paramref name="fieldLookup"/> and <paramref name="parentScope"/> are as for
+    /// <see cref="AggregateByReferenceAsync"/>.</summary>
+    Task<IReadOnlyList<(object ParentKey, object Value)>> ListValuesByReferenceAsync(
+        AppTable childTable, int referenceFid, int targetFid, string? targetSubField,
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree,
+        int? sortFid, bool sortDescending, IReadOnlyDictionary<long, AppField>? fieldLookup = null,
+        ParentFieldScope? parentScope = null, CancellationToken ct = default);
+
+    /// <summary>Every child row (stored columns of <paramref name="fields"/>, plus Id) of the given
+    /// parents that matches <paramref name="filterTree"/>, ordered by Id. Feeds a summary over a
+    /// Formula field, whose value has no column to aggregate in SQL and is computed per row instead.
+    /// <paramref name="fieldLookup"/> and <paramref name="parentScope"/> are as for
+    /// <see cref="AggregateByReferenceAsync"/>.</summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListRowsByReferenceAsync(
+        AppTable childTable, IReadOnlyList<AppField> fields, int referenceFid,
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree,
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null,
         CancellationToken ct = default);
 
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(

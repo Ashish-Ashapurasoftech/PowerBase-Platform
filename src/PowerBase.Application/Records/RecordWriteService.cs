@@ -127,13 +127,23 @@ public sealed class RecordWriteService : IRecordWriteService
         Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
         IReadOnlyDictionary<string, object?>? existingRecord = null)
     {
-        // Reference fields must point at an existing parent record; a value submitted as a
-        // human key is resolved to the parent row Id here.
-        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
-
         // Bulk upsert already loaded the row on its transaction. Reusing that snapshot avoids a
         // second connection waiting on locks held by the bulk commit itself.
         var oldRecord = existingRecord ?? await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, transaction, ct);
+
+        // Current stored values by Fid, so a dependent-dropdown Reference is only re-validated when
+        // it (or its controlling field) actually changes — see ReferenceWriteValidator.
+        var existingByFid = new Dictionary<long, object?>();
+        foreach (var f in fields.Where(f => f.Fid.HasValue && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode)))
+        {
+            if (oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var stored))
+                existingByFid[f.Fid!.Value] = stored;
+        }
+
+        // Reference fields must point at an existing parent record; a value submitted as a
+        // human key is resolved to the parent row Id here.
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(
+            fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct, existingByFid);
 
         var effectiveValues = new Dictionary<long, object?>(fieldValues);
         foreach (var kvp in refOverrides)

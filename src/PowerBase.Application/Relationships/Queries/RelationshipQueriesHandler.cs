@@ -109,7 +109,7 @@ public class RelationshipQueriesHandler
                 && FormulaTypeMap.ParseSummarySettings(f.Settings)?.RelationshipId == rel.Id))
             {
                 var ss = FormulaTypeMap.ParseSummarySettings(f.Settings);
-                var fn = ss?.Function ?? "Count";
+                var fn = Domain.FieldSettings.SummaryFunctions.Normalize(ss?.Function) ?? ss?.Function ?? "Count";
                 var tField = ss?.TargetFid is int tfid ? childFields.FirstOrDefault(cf => cf.Fid == tfid) : null;
                 var tLabel = tField is not null ? (tField.Label ?? tField.Name) : null;
                 fields.Add(new(f.PublicId, f.Fid ?? 0, f.Label ?? f.Name, "summary", fn)

@@ -13,11 +13,13 @@ using PowerBase.Application.Forms.Queries.GetFormLayout;
 using PowerBase.Application.Import.FormulaTranslation;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
+using PowerBase.Application.Relationships;
 using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.FieldSettings;
 using YamlDotNet.Core;
 
 namespace PowerBase.Application.Import.Commands.ImportAppFromPbl;
@@ -517,7 +519,26 @@ public class ImportAppFromPblCommandHandler
                     }
                     targetFid = fid;
                 }
-                summarySpecs.Add(new CreateSummarySpec(summary.Label ?? summary.Name, summary.Function, targetFid, summary.TargetSubField));
+                // PBL accepts function names case-insensitively; store the canonical spelling.
+                var function = SummaryFunctions.Normalize(summary.Function);
+                if (function is null)
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = summary.LogicalRef, Name = summary.Name, Reason = $"Unknown summary function '{summary.Function}'." });
+                    continue;
+                }
+                // Same function-vs-type rule as the relationship endpoints; skip just this summary
+                // (reported) rather than letting CreateRelationship reject the whole relationship.
+                try
+                {
+                    var target = targetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == targetFid) : null;
+                    SummaryTargetValidator.Validate(function, targetFid, target, summary.TargetSubField);
+                }
+                catch (ValidationException ex)
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = summary.LogicalRef, Name = summary.Name, Reason = string.Join(" ", ex.Errors.SelectMany(e => e.Value)) });
+                    continue;
+                }
+                summarySpecs.Add(new CreateSummarySpec(summary.Label ?? summary.Name, function, targetFid, summary.TargetSubField));
             }
 
             await _createRelationshipHandler.HandleAsync(new CreateRelationshipCommand(

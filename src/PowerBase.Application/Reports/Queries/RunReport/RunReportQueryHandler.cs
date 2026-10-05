@@ -160,7 +160,7 @@ public class RunReportQueryHandler
         // the plain long core.[User].Id the column actually stores before this tree reaches the
         // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
         var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
-        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), ct);
+        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct);
 
         // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
         // future) must resolve to an actual date freshly EVERY time the report runs, not once at
@@ -226,7 +226,7 @@ public class RunReportQueryHandler
         // against the same now-correct data — saved matches, ask doesn't, until this runs).
         if (query.RuntimeFilterTree is { Nodes.Count: > 0 })
         {
-            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), ct);
+            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct);
             resolvedRuntimeTree = ResolveDateValueModeConditions(resolvedRuntimeTree);
             filterTree = filterTree == null
                 ? resolvedRuntimeTree
@@ -809,9 +809,11 @@ public class RunReportQueryHandler
     /// an arbitrary date).</summary>
     private static DateTime EndOfDuringPeriod(DateTime periodStart, string unit) => AddDuringUnits(periodStart, unit, 1).AddDays(-1);
 
-    internal async Task<FilterGroup?> ResolveUserFieldValuesAsync(
+    // Static (the user repository passed in) so a summary field's matching criteria resolve exactly
+    // like a report's filter — see RelationalProjector.ResolveCriteriaValuesAsync.
+    internal static async Task<FilterGroup?> ResolveUserFieldValuesAsync(
         FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
-        Dictionary<Guid, long> guidCache, CancellationToken ct)
+        Dictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct)
     {
         if (group is null) return null;
         var nodes = new List<FilterNode>();
@@ -839,7 +841,7 @@ public class RunReportQueryHandler
                             {
                                 try
                                 {
-                                    var user = await _userRepo.GetByPublicIdAsync(guid, ct);
+                                    var user = await userRepo.GetByPublicIdAsync(guid, ct);
                                     longId = user.Id;
                                 }
                                 catch (Exception)
@@ -868,7 +870,7 @@ public class RunReportQueryHandler
             nodes.Add(new FilterNode
             {
                 Condition = newCondition,
-                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, ct),
+                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, userRepo, ct),
             });
         }
         return new FilterGroup { Logic = group.Logic, Nodes = nodes };

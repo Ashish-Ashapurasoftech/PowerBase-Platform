@@ -491,12 +491,15 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.CreateRe
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.DeleteRelationship.DeleteRelationshipCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.AddLookupFields.AddLookupFieldsCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.AddSummaryField.AddSummaryFieldCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateSummaryField.UpdateSummaryFieldCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.RemoveRelationshipField.RemoveRelationshipFieldCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateDisplayKey.UpdateDisplayKeyCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateReferenceFilter.UpdateReferenceFilterCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipFieldFactory>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipKeyCarryOverService>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentOptionsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.IsParentAllowedQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetChildRecordsForParentQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler>();
 builder.Services.AddScoped<CreateReportCommandHandler>();
