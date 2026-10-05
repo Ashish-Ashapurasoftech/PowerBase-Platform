@@ -59,7 +59,7 @@ public class CreatePipelineCommandHandler
             AuditActions.Created,
             AuditEntityTypes.Pipeline,
             publicId.ToString(),
-            $"Pipeline workflow added: {command.Name}",
+            $"PowerFlow workflow added: {command.Name}",
             appId: appId,
             ct: ct);
 

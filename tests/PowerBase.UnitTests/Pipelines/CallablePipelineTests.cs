@@ -11,15 +11,53 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.DependencyInjection;
 using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Records;
+using Microsoft.Extensions.Configuration;
 
 namespace PowerBase.UnitTests.Pipelines;
 
 public class CallablePipelineTests
 {
+    [Theory]
+    [InlineData("{{steps.ref_2.fid_6}}", "{\"steps\":{\"ref_2\":{}}}")]
+    [InlineData("{{steps.ref_2.fid_6}}", "{\"steps\":{}}")]
+    [InlineData("Value: {{steps.ref_2.fid_6}}", "{\"steps\":{}}")]
+    public async Task MissingCallReferenceIsTerminalAndDoesNotDispatch(string mapping, string payload)
+    {
+        var queue = Substitute.For<IPipelineExecutionQueue>();
+        var engine = CreateEngine(Substitute.For<IPipelineRepository>(), queue);
+        var step = new PipelineStep { Type = "action", Subtype = "call-another-pipeline",
+            ConfigJson = JsonSerializer.Serialize(new { callDefinition = "f(value)", arguments = new { value = mapping } }) };
+        using var document = JsonDocument.Parse(payload);
+        var outputs = JsonSerializer.Deserialize<Dictionary<string, object>>(document.RootElement.GetProperty("steps").GetRawText())!;
+        var failure = await FluentActions.Awaiting(() => ExecuteStep(engine, step, new(), outputs))
+            .Should().ThrowAsync<PipelineMappingException>().WithMessage("*ref_2*");
+        PipelineEngine.IsCatchablePipelineStepError(failure.Which).Should().BeTrue();
+        queue.DidNotReceive().QueueTask(Arg.Any<PipelineExecutionTask>());
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("false")]
+    [InlineData("0")]
+    [InlineData("\"\"")]
+    public void PresentBlankOrFalsyCallArgumentRetainsItsValue(string json)
+    {
+        var engine = CreateEngine(Substitute.For<IPipelineRepository>(), Substitute.For<IPipelineExecutionQueue>());
+        var method = typeof(PipelineEngine).GetMethod("ResolveCallableValue", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var result = method.Invoke(engine, new object?[] { "{{steps.ref_2.fid_6}}",
+            "{\"steps\":{\"ref_2\":{\"fid_6\":" + json + "}}}", null, null });
+        JsonSerializer.Serialize(result).Should().Be(json);
+    }
+
     private static PipelineEngine CreateEngine(IPipelineRepository repository, IPipelineExecutionQueue queue)
     {
         var services = Substitute.For<IServiceProvider>();
         services.GetService(typeof(IPipelineExecutionQueue)).Returns(queue);
+        var apps = Substitute.For<IAppRepository>();
+        apps.GetByIdAsync(5, Arg.Any<CancellationToken>()).Returns(new App { PublicId = Guid.Parse("11111111-1111-1111-1111-111111111111") });
+        services.GetService(typeof(IAppRepository)).Returns(apps);
+        services.GetService(typeof(IConfiguration)).Returns(new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?> { ["Frontend:BaseUrl"] = "https://powerbase.example" }).Build());
         var context = Substitute.For<IQueryContext>();
         context.TenantId.Returns(3L);
         return new PipelineEngine(repository, Substitute.For<IRecordRepository>(), Substitute.For<IRecordWriteService>(),
@@ -43,6 +81,8 @@ public class CallablePipelineTests
     {
         var repository = Substitute.For<IPipelineRepository>();
         var queue = Substitute.For<IPipelineExecutionQueue>();
+        repository.GetByIdAsync(10, Arg.Any<CancellationToken>()).Returns(new Pipeline {
+            Id = 10, AppId = 5, Name = "Customer sync", PublicId = Guid.Parse("22222222-2222-2222-2222-222222222222") });
         var target = new Pipeline { Id = 20, PublicId = Guid.NewGuid(), CreatedBy = 7, IsActive = true };
         var trigger = new PipelineStep { Id = 21, PipelineId = 20, RefId = "child", Type = "trigger", Subtype = "pipeline-called", IsValidated = true, ConfigJson = """{"callDefinition":"f(value)"}""" };
         repository.FindCallablePipelinesAsync(7, "f(value)", Arg.Any<CancellationToken>()).Returns(new[] { target });
@@ -52,9 +92,23 @@ public class CallablePipelineTests
         var engine = CreateEngine(repository, queue);
         var caller = new PipelineStep { Id = 11, PublicId = Guid.NewGuid(), PipelineId = 10, RefId = "caller", Type = "action", Subtype = "call-another-pipeline",
             ConfigJson = """{"callDefinition":"f(value)","arguments":{"value":"{{steps.source.data}}"}}""" };
-        var context = new Dictionary<string, object> { ["_CreatedBy"] = 7L, ["_Depth"] = 1, ["_MessageId"] = Guid.NewGuid() };
+        var runId = Guid.NewGuid();
+        var started = new DateTime(2026, 9, 30, 8, 0, 0, DateTimeKind.Utc);
+        var context = new Dictionary<string, object> { ["_CreatedBy"] = 7L, ["_Depth"] = 1, ["_MessageId"] = Guid.NewGuid(),
+            ["_RunPublicId"] = runId, ["_RunStartedOn"] = started };
         var outputs = new Dictionary<string, object> { ["source"] = new { data = new { flag = false, count = 0 } } };
-        (await ExecuteStep(engine, caller, context, outputs)).Should().Contain("Queued");
+        var callerOutput = await ExecuteStep(engine, caller, context, outputs);
+        outputs[caller.RefId] = JsonSerializer.Deserialize<JsonElement>(callerOutput);
+        using var callerDocument = JsonDocument.Parse(callerOutput);
+        callerDocument.RootElement.GetProperty("Status").GetString().Should().Be("Ok");
+        var calling = callerDocument.RootElement.GetProperty("calling_pipeline");
+        calling.GetProperty("id").GetInt64().Should().Be(10);
+        calling.GetProperty("name").GetString().Should().Be("Customer sync");
+        calling.GetProperty("url").GetString().Should().Be("https://powerbase.example/app/11111111-1111-1111-1111-111111111111/pipelines/22222222-2222-2222-2222-222222222222");
+        calling.GetProperty("run").GetString().Should().Be(runId.ToString());
+        calling.GetProperty("activity_url").GetString().Should().EndWith($"?runId={runId}");
+        calling.GetProperty("triggered_at").GetDateTime().Should().Be(started);
+        callerDocument.RootElement.GetProperty("value").GetProperty("flag").GetBoolean().Should().BeFalse();
         child.Should().NotBeNull();
         var childOutputs = new Dictionary<string, object>();
         var childContext = new Dictionary<string, object> { ["trigger"] = JsonSerializer.Deserialize<JsonElement>(child!.TriggerPayloadJson) };
@@ -62,6 +116,14 @@ public class CallablePipelineTests
         // Serializing after trigger execution also catches JsonElements referencing disposed documents.
         var downstreamPayload = JsonSerializer.Serialize(childContext);
         var evaluate = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        foreach (var (reference, payload, steps) in new[] {
+            ("caller", JsonSerializer.Serialize(context), new List<PipelineStep> { caller }),
+            ("child", downstreamPayload, new List<PipelineStep> { trigger }) })
+        {
+            evaluate.Invoke(engine, new object?[] { $"{{{{steps.{reference}.calling_pipeline.name}}}}", payload, null, steps }).Should().Be("Customer sync");
+            evaluate.Invoke(engine, new object?[] { $"{{{{steps.{reference}._metadata.call_status}}}}", payload, null, steps }).Should().Be("Ok");
+            evaluate.Invoke(engine, new object?[] { $"{{{{steps.{reference}.value.count}}}}", payload, null, steps }).Should().Be("0");
+        }
         evaluate.Invoke(engine, new object?[] { "{{steps.child.value.count}}", downstreamPayload, null, null }).Should().Be("0");
         childOutputs.Should().ContainKey("child");
         trigger.ConfigJson = """{"callDefinition":"f(renamed)"}""";
@@ -86,6 +148,63 @@ public class CallablePipelineTests
     [InlineData("call({{trigger.x}})")]
     public void RejectsInvalidSignatures(string input) =>
         FluentActions.Invoking(() => CallablePipelineDefinition.Parse(input)).Should().Throw<PipelineNonRetryableException>();
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NewRunRetainsDatabaseGeneratedPublicId(bool queued)
+    {
+        var repository = Substitute.For<IPipelineRepository>();
+        var publicId = Guid.NewGuid();
+        PipelineRun? created = null;
+        repository.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns(call => {
+            created = call.Arg<PipelineRun>();
+            return (publicId, 123L);
+        });
+        repository.GetByIdAsync(10, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 10, IsActive = true });
+        repository.GetStepsByPipelineIdAsync(10, Arg.Any<CancellationToken>()).Returns(Array.Empty<PipelineStep>());
+        await CreateEngine(repository, Substitute.For<IPipelineExecutionQueue>()).ExecuteAsync(
+            new PipelineExecutionTask { PipelineId = 10, TenantId = 3, TriggerEvent = "manual", TriggerPayloadJson = "{}",
+                MessageId = queued ? Guid.NewGuid().ToString() : null }, default);
+        created.Should().NotBeNull();
+        created!.PublicId.Should().Be(publicId);
+        created.Id.Should().Be(123);
+    }
+
+    [Fact]
+    public async Task NonMatchingCallableFilterSkipsRunBeforeExecutingSteps()
+    {
+        var repository = Substitute.For<IPipelineRepository>();
+        repository.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 123L));
+        repository.GetByIdAsync(10, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 10, CreatedBy = 7, IsActive = true });
+        repository.GetStepsByPipelineIdAsync(10, Arg.Any<CancellationToken>()).Returns(new[] {
+            new PipelineStep { Id = 1, PipelineId = 10, RefId = "ref_1", Type = "trigger", Subtype = "pipeline-called", IsValidated = true,
+                ConfigJson = """{"callDefinition":"f(name)","filterGroups":[{"rules":[{"field":"name","operator":"is","value":"Alice"}]}]}""" },
+            new PipelineStep { Id = 2, PipelineId = 10, RefId = "ref_2", Type = "action", Subtype = "send-email", DisplayOrder = 1 }
+        });
+        await CreateEngine(repository, Substitute.For<IPipelineExecutionQueue>()).ExecuteAsync(new PipelineExecutionTask {
+            PipelineId = 10, TenantId = 3, TriggeredBy = 7, TriggerEvent = "pipeline-called",
+            TriggerPayloadJson = """{"CallDefinition":"f(name)","Arguments":{"name":"Bob"},"TriggerStepId":1}"""
+        }, default);
+        await repository.Received().UpdateRunAsync(Arg.Is<PipelineRun>(run => run.Status == "Skipped" && run.ErrorMessage!.Contains("conditions did not match")), Arg.Any<CancellationToken>());
+        repository.ReceivedCalls().Should().NotContain(call => call.GetMethodInfo().Name == "CreateStepRunAsync");
+    }
+
+    [Fact]
+    public void HttpMetadataIsNotShadowedByAResponseBodyMetadataProperty()
+    {
+        var engine = CreateEngine(Substitute.For<IPipelineRepository>(), Substitute.For<IPipelineExecutionQueue>());
+        var evaluate = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var payload = """{"steps":{"http":{"_metadata":{"status_code":999}}},"request_metadata":{"http":{"status_code":200}}}""";
+        evaluate.Invoke(engine, new object?[] { "{{steps.http._metadata.status_code}}", payload, null, null }).Should().Be("200");
+    }
+
+    [Fact]
+    public void RejectsArgumentsThatWouldOverwriteCallerDetails()
+    {
+        FluentActions.Invoking(() => CallablePipelineDefinition.ValidateConfig("""{"callDefinition":"f(calling_pipeline)"}""", false))
+            .Should().Throw<PipelineNonRetryableException>().WithMessage("*reserved*");
+    }
 
     [Fact]
     public void ExplicitFalsyAndNullValuesAreDifferentFromMissingArguments()
@@ -126,7 +245,7 @@ public class CallablePipelineTests
     }
 
     [Fact]
-    public async Task RefusesMissingOrWrongOwnerTargetWithoutEnqueueing()
+    public async Task MissingTargetReturnsNoDispatchAndWrongOwnerIsStillRejected()
     {
         var repository = Substitute.For<IPipelineRepository>();
         var queue = Substitute.For<IPipelineExecutionQueue>();
@@ -134,10 +253,38 @@ public class CallablePipelineTests
         async Task Call() => await dispatcher.DispatchAsync(3, 7, 10, Guid.NewGuid(), Guid.NewGuid(), "root/call", null, 1,
             CallablePipelineDefinition.Parse("ping()"), new Dictionary<string, object?>(), default);
         repository.FindCallablePipelinesAsync(7, "ping()", Arg.Any<CancellationToken>()).Returns(Array.Empty<Pipeline>());
-        await FluentActions.Awaiting(Call).Should().ThrowAsync<PipelineNonRetryableException>();
+        var missing = await dispatcher.DispatchAsync(3, 7, 10, Guid.NewGuid(), Guid.NewGuid(), "root/call", null, 1,
+            CallablePipelineDefinition.Parse("ping()"), new Dictionary<string, object?>(), default);
+        missing.Should().BeEmpty();
         repository.FindCallablePipelinesAsync(7, "ping()", Arg.Any<CancellationToken>())
             .Returns(new[] { new Pipeline { Id = 20, CreatedBy = 8, IsActive = true } });
         await FluentActions.Awaiting(Call).Should().ThrowAsync<PipelineNonRetryableException>();
+        queue.DidNotReceive().QueueTask(Arg.Any<PipelineExecutionTask>());
+    }
+
+    [Theory]
+    [InlineData("f(id)", """{"id":5}""")]
+    [InlineData("Test(id)", """{"id":1}""")]
+    [InlineData("test(id)", """{"id":1}""")]
+    [InlineData("missing()", "{}")]
+    public async Task UnmatchedDefinitionExposesNotFoundWithoutCallingAChild(string definition, string arguments)
+    {
+        var repository = Substitute.For<IPipelineRepository>();
+        var queue = Substitute.For<IPipelineExecutionQueue>();
+        repository.FindCallablePipelinesAsync(7, definition, Arg.Any<CancellationToken>()).Returns(Array.Empty<Pipeline>());
+        var step = new PipelineStep { Id = 11, PipelineId = 10, PublicId = Guid.NewGuid(), RefId = "caller",
+            Type = "action", Subtype = "call-another-pipeline",
+            ConfigJson = "{\"callDefinition\":\"" + definition + "\",\"arguments\":" + arguments + "}" };
+        var context = new Dictionary<string, object> { ["_CreatedBy"] = 7L, ["_MessageId"] = Guid.NewGuid() };
+        var engine = CreateEngine(repository, queue);
+        var outputs = new Dictionary<string, object>();
+        var output = await ExecuteStep(engine, step, context, outputs);
+        using var result = JsonDocument.Parse(output);
+        result.RootElement.GetProperty("Status").GetString().Should().Be("Not Found");
+        outputs[step.RefId] = JsonSerializer.Deserialize<JsonElement>(output);
+        var evaluate = typeof(PipelineEngine).GetMethod("EvaluateTokens", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        evaluate.Invoke(engine, new object?[] { "{{steps.caller._metadata.call_status}}", JsonSerializer.Serialize(context), null, new List<PipelineStep> { step } })
+            .Should().Be("Not Found");
         queue.DidNotReceive().QueueTask(Arg.Any<PipelineExecutionTask>());
     }
 }

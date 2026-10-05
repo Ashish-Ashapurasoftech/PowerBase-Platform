@@ -189,6 +189,7 @@ PowerBase.Application.Common.Configurations.PipelineExecutionOptionsValidator.Va
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IMainPipelineQueueRepository, PowerBase.Infrastructure.Repositories.MainPipelineQueueRepository>();
 
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineEngine, PowerBase.Application.Pipelines.PipelineEngine>();
+builder.Services.AddSingleton<PowerBase.Application.Pipelines.PipelineLoopWorkerPool>();
 builder.Services.AddHostedService<PowerBase.API.Pipelines.PipelineSchedulerWorker>();
 
 // Unconditional Database Queue Registrations

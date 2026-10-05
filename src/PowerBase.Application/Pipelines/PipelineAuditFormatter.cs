@@ -213,7 +213,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
         {
             using (var suppressScope = new System.Transactions.TransactionScope(System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled))
             {
-                var record = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+                var record = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct: ct);
                 if (record != null)
                 {
                     var valuesDict = new Dictionary<string, object?>();
@@ -313,9 +313,13 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             {
                 foreach (var entry in inputDict) friendlyInput[entry.Key] = entry.Value;
                 foreach (var entry in outputDict) friendlyOutput[entry.Key] = entry.Value;
-                logMessage = status == "Success"
-                    ? subtype == "pipeline-called" ? "Pipeline called; arguments received." : "Pipeline call queued."
-                    : $"Callable pipeline step {status.ToLowerInvariant()}.";
+                var callNotFound = outputDict.TryGetValue("_metadata", out var callMetadata)
+                    && JsonSerializer.Serialize(callMetadata).Contains("\"call_status\":\"Not Found\"", StringComparison.Ordinal);
+                logMessage = status == "Success" && callNotFound
+                    ? "No active PowerFlow matched the Call Definition."
+                    : status == "Success"
+                    ? subtype == "pipeline-called" ? "PowerFlow called; arguments received." : "PowerFlow call queued."
+                    : $"Callable PowerFlow step {status.ToLowerInvariant()}.";
             }
             else if (type == "trigger" && subtype == "new-bulk-event")
             {
@@ -392,6 +396,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 metadataContext["table_name"] = tableName;
                 metadataContext["table_id"] = tableGuidStr;
                 metadata["context"] = metadataContext;
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TableName"] = tableName;
                 technicalDetails["TableId"] = tableGuidStr;
@@ -583,6 +588,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     });
                 }
                 metadata["struct"] = structList;
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 // Technical Trace Details
                 technicalDetails["MessageId"] = inputDict.TryGetValue("MessageId", out var msgId) ? msgId : null;
@@ -594,7 +600,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["RecordPublicId"] = recordGuidStr;
 
-                logMessage = $@"Record ""{recordDisplayName}"" was {eventTypeStr?.ToLowerInvariant() ?? "added"} to {tableName} and triggered this pipeline.";
+                logMessage = $@"Record ""{recordDisplayName}"" was {eventTypeStr?.ToLowerInvariant() ?? "added"} to {tableName} and triggered this PowerFlow.";
             }
             else if (subtype == "search-records")
             {
@@ -649,9 +655,19 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                         friendlyRecords.Add(MapFieldValuesToUserFriendly(fields, AsDictionary(recsList[i])));
                     }
                 }
+                else if (outputDict.TryGetValue("count", out var chunkedCountObj) && chunkedCountObj != null
+                    && int.TryParse(Convert.ToString(chunkedCountObj, System.Globalization.CultureInfo.InvariantCulture), out var chunkedCount))
+                {
+                    // Chunked (loop-paged) search stages matches in a workset and returns only
+                    // the discovered count, not the record payloads.
+                    recordsCount = chunkedCount;
+                }
 
                 friendlyOutput["Records Found"] = recordsCount;
                 friendlyOutput["Records Preview"] = friendlyRecords;
+
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 logMessage = $"Found {recordsCount} records in {tableName} matching criteria.";
@@ -679,6 +695,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyInput["Compare with app local time"] = compareLocalTime;
 
                 friendlyOutput["Record"] = MapFieldValuesToUserFriendly(fields, outputDict);
+
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 logMessage = $"Looked up record ID {recordId} in {tableName}.";
@@ -720,6 +739,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyOutput["CreatedRecordPublicId"] = createdRecordGuidStr;
                 friendlyOutput["Status"] = "Created";
 
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
+
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["CreatedRecordPublicId"] = createdRecordGuidStr;
 
@@ -759,6 +781,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyOutput["Record"] = recordDisplayName;
                 friendlyOutput["UpdatedRecordPublicId"] = targetRecordGuidStr;
                 friendlyOutput["Status"] = "Updated";
+
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["TargetRecordPublicId"] = targetRecordGuidStr;
@@ -838,7 +863,8 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             else if (subtype == "loop")
             {
                 var loopOverStepId = inputDict.TryGetValue("LoopOverStepId", out var losId) ? losId?.ToString() : string.Empty;
-                var itemCount = inputDict.TryGetValue("ItemCount", out var icObj) ? icObj?.ToString() : "0";
+                var itemCount = inputDict.TryGetValue("ItemCount", out var icObj) ? icObj?.ToString()
+                    : inputDict.TryGetValue("TotalCount", out var tcObj) ? tcObj?.ToString() : "0";
 
                 string sourceStepLabel = loopOverStepId;
                 if (long.TryParse(loopOverStepId, out var sId) && _stepLabelCache.TryGetValue(sId, out var sLabel))
@@ -851,13 +877,16 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 var iterationCount = outputDict.TryGetValue("IterationCount", out var itcObj) ? itcObj?.ToString() : itemCount;
                 friendlyOutput["Iterations"] = int.TryParse(iterationCount, out var itc) ? itc : 0;
+                if (outputDict.TryGetValue("BatchCount", out var batches)) friendlyOutput["Batches"] = batches;
+                if (outputDict.TryGetValue("BatchSize", out var batchSize)) friendlyOutput["Records Per Batch"] = batchSize;
+                if (outputDict.TryGetValue("FailedIterationCount", out var failedIterations)) friendlyOutput["Failed Iterations"] = failedIterations;
                 friendlyOutput["Status"] = "Completed";
 
                 logMessage = $"Loop completed successfully for {iterationCount} items.";
             }
             else if (subtype == "stop")
             {
-                var reason = inputDict.TryGetValue("Reason", out var rObj) ? rObj?.ToString() : "Execution halted by pipeline stop action.";
+                var reason = inputDict.TryGetValue("Reason", out var rObj) ? rObj?.ToString() : "Execution halted by PowerFlow stop action.";
                 friendlyInput["Reason"] = reason;
                 friendlyOutput["Status"] = "Stopped";
                 friendlyOutput["Reason"] = reason;
@@ -967,6 +996,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyOutput["Session ID"] = technicalDetails["StepRefId"];
                 friendlyOutput["Status"] = "Prepared";
 
+                metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
+                metadata["field_labels"] = BuildFieldLabelMap(fields);
+
                 logMessage = $"Prepared bulk upsert session for {tableName} merging on {friendlyMergeKey}.";
             }
             else if (subtype == "add-bulk-upsert-row")
@@ -1016,8 +1048,10 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 }
                 else
                 {
-                    var inserted = outputDict.TryGetValue("InsertedCount", out var insObj) ? insObj?.ToString() : "0";
-                    var updated = outputDict.TryGetValue("UpdatedCount", out var updObj) ? updObj?.ToString() : "0";
+                    var inserted = outputDict.TryGetValue("InsertedCount", out var insObj) ? insObj?.ToString()
+                        : outputDict.TryGetValue("inserted_count", out var insSnakeObj) ? insSnakeObj?.ToString() : "0";
+                    var updated = outputDict.TryGetValue("UpdatedCount", out var updObj) ? updObj?.ToString()
+                        : outputDict.TryGetValue("updated_count", out var updSnakeObj) ? updSnakeObj?.ToString() : "0";
 
                     friendlyOutput["Inserted Record Count"] = int.TryParse(inserted, out var ins) ? ins : 0;
                     friendlyOutput["Updated Record Count"] = int.TryParse(updated, out var upd) ? upd : 0;
@@ -1221,6 +1255,17 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             }
         }
         return null;
+    }
+
+    /// <summary>Maps raw keys like "fid_3" to the field's original label so users can decode raw input/output.</summary>
+    private static Dictionary<string, object?> BuildFieldLabelMap(List<AppField> fields)
+    {
+        var map = new Dictionary<string, object?>();
+        foreach (var f in fields)
+        {
+            map[$"fid_{f.Fid ?? f.Id}"] = !string.IsNullOrWhiteSpace(f.Label) ? f.Label : f.Name;
+        }
+        return map;
     }
 
     private Dictionary<string, object?> MapFieldValuesToUserFriendly(

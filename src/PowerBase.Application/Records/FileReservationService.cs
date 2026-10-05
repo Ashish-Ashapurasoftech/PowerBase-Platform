@@ -157,7 +157,7 @@ public sealed class FileReservationService
             if ((access.ViewScope == RecordScopes.OwnRecords || requireModify && access.ModifyScope == RecordScopes.OwnRecords))
                 await _permissionEnforcer.EnsureRecordOwnedAsync(table, recordPublicId, ct);
         }
-        var row = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+        var row = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct: ct);
         row.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var value);
         if (value == null || string.IsNullOrWhiteSpace(value.ToString()))
             throw new InvalidOperationException("A file must be attached before it can be reserved.");

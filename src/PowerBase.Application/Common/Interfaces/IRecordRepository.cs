@@ -93,7 +93,7 @@ public interface IRecordRepository
     Task<bool> HasAnyRecordsAsync(AppTable table, CancellationToken ct = default);
 
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
-        AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default);
+        AppTable table, IReadOnlyList<AppField> fields, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
     Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default);
     Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
@@ -129,7 +129,7 @@ public interface IRecordRepository
     /// <summary>Returns true if any other non-deleted row already has <paramref name="value"/> in the
     /// field's column — the per-write check behind the Unique constraint. <paramref name="excludeRecordId"/>
     /// (the record's internal row Id, not PublicId) excludes the record being updated from the check.</summary>
-    Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, CancellationToken ct = default);
+    Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
     /// <summary>Returns true if any non-deleted row has a NULL or empty-string value in the field's
     /// column (a candidate key field must be populated on every row).</summary>

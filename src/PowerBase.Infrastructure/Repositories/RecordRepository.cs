@@ -553,7 +553,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
            && (enc.IsAppEncrypted || field.IsEncrypted);
 
     public async Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
-        AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default)
+        AppTable table, IReadOnlyList<AppField> fields, Guid publicId, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var fieldCols = BuildFieldColumnList(fields);
         var sql = $"""
@@ -561,6 +561,22 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             FROM {PhysicalNaming.FullTableName(table.Id)}
             WHERE PublicId = @publicId AND IsDeleted = 0
             """;
+
+        // Same self-deadlock risk as HasValueDuplicateAsync: a pipeline action step running mid-
+        // transaction (e.g. Update Record / File Upload steps in PipelineEngine) calls this as
+        // ApplyAsync's "load current row" fallback. A second connection here would block on locks
+        // the caller's own still-open transaction already holds on this table.
+        if (transaction is not null)
+        {
+            var txRow = await transaction.Connection!.QuerySingleOrDefaultAsync(
+                new CommandDefinition(sql, new { publicId }, transaction, cancellationToken: ct));
+            if (txRow is null) throw new NotFoundException("Record", publicId);
+
+            var txDict = ToDictionary(txRow);
+            var txEnc = await GetEncryptionContextAsync(transaction.Connection!, table.AppId, transaction, ct);
+            await txEnc.DecryptRowAsync((System.Collections.Generic.IDictionary<string, object?>)txDict, fields, ct);
+            return txDict;
+        }
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var row = await connection.QuerySingleOrDefaultAsync(
@@ -1806,8 +1822,23 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
                 return $"{targetExpr} <= @{pname}";
             }
-            case "date_eq":        p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) = CAST(@{pname} AS DATE)";
-            case "date_ne":        p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) <> CAST(@{pname} AS DATE)";
+            //case "date_eq": p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) = CAST(@{pname} AS DATE)";
+            //case "date_ne": p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) <> CAST(@{pname} AS DATE)";
+
+            // date_* operators compare a calendar day, not an instant. The column stores a UTC
+            // instant (Date Created/Modified are timestamps, not dates), and the picker value is
+            // the exact UTC instant of the picked day's local midnight — so CAST(col AS DATE) =
+            // CAST(@val AS DATE) truncates the column to its own UTC calendar day, which is not
+            // necessarily the local day the user picked (two records "the same local day" can sit
+            // on different UTC calendar days depending on time-of-day). A day-window comparison
+            // anchored on that local-midnight instant matches the day the user actually picked,
+            // regardless of which UTC day each row's timestamp happens to fall on.
+            case "date_eq":  p.Add(pname, formatVal(cond.Value)); return $"({colExpr} >= @{pname} AND {colExpr} < DATEADD(day, 1, @{pname}))";
+            case "date_ne":  p.Add(pname, formatVal(cond.Value)); return $"NOT ({colExpr} >= @{pname} AND {colExpr} < DATEADD(day, 1, @{pname}))";
+            case "date_gt":  p.Add(pname, formatVal(cond.Value)); return $"{colExpr} >= DATEADD(day, 1, @{pname})";
+            case "date_gte": p.Add(pname, formatVal(cond.Value)); return $"{colExpr} >= @{pname}";
+            case "date_lt":  p.Add(pname, formatVal(cond.Value)); return $"{colExpr} < @{pname}";
+            case "date_lte": p.Add(pname, formatVal(cond.Value)); return $"{colExpr} < DATEADD(day, 1, @{pname})";
             case "contains":       p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) LIKE @{pname}";
             case "notContains":    p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
             case "startsWith":     p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) LIKE @{pname}";
@@ -2044,11 +2075,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
     }
 
-    public async Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, CancellationToken ct = default)
+    public async Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(field.Fid!.Value);
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        await using var ownedConnection = transaction is null ? await ConnectionFactory.CreateAsync(ct) : null;
+        var connection = transaction?.Connection ?? ownedConnection!;
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
 
         if (enc.IsActive && NeedsDecrypt(enc, field))
         {
@@ -2061,7 +2093,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                   AND (@excludeRecordId IS NULL OR Id <> @excludeRecordId)
                 """;
             var rawCiphers = await connection.QueryAsync<string>(
-                new CommandDefinition(sqlEnc, new { excludeRecordId }, cancellationToken: ct));
+                new CommandDefinition(sqlEnc, new { excludeRecordId }, transaction, cancellationToken: ct));
 
             foreach (var cipher in rawCiphers)
             {
@@ -2084,6 +2116,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                   AND (@excludeRecordId IS NULL OR Id <> @excludeRecordId)
             ) THEN 1 ELSE 0 END AS BIT)
             """;
+
+        // When called mid-write (e.g. bulk upsert's per-row constraint check), the caller's own
+        // transaction may already hold locks on this table from earlier rows in the same commit.
+        // Opening a second connection here — instead of reusing transaction.Connection — makes
+        // that second connection block on those locks under READ COMMITTED, while the first
+        // connection sits waiting for THIS call to return: a self-deadlock that only resolves via
+        // command timeout ("Execution Timeout Expired"). Same fix as UpdateAsync/CreateAsync.
+        if (transaction is not null)
+        {
+            return await transaction.Connection!.ExecuteScalarAsync<bool>(
+                new CommandDefinition(sql, new { value, excludeRecordId }, transaction, cancellationToken: ct));
+        }
+
         return await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(sql, new { value, excludeRecordId }, cancellationToken: ct));
     }

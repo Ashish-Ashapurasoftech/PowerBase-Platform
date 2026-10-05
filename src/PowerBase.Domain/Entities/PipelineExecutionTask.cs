@@ -14,5 +14,6 @@ public class PipelineExecutionTask
     public string? PipelineChain { get; set; }
     public string? MessageId { get; set; }
     public string? WorkerId { get; set; }
+    public int MaxAttempts { get; set; }
 }
 

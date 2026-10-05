@@ -326,7 +326,79 @@ public class PipelineTriggersAndExternalActionsTests
         output.Should().Contain("John");
     }
 
+    [Fact]
+    public async Task ExecuteStepAsync_SearchRecords_AdvancedFilter_ParsesQueryIntoFilterTree()
+    {
+        // Arrange: Advanced filter mode ({FieldId.OP.'value'} grammar) should reach RecordRepository
+        // as the same FilterGroup tree the Simple Filter path builds — same SQL filtering underneath.
+        var step = new PipelineStep
+        {
+            Id = 101,
+            RefId = "search_ref_advanced",
+            Type = "query",
+            Subtype = "search-records",
+            ConfigJson = "{\"tableId\":\"372e0f07-5d92-f111-bbf5-002324be71d8\",\"isSimpleFilter\":false,\"advancedQuery\":\"{1.EX.'John'}\"}"
+        };
 
+        var table = new AppTable { Id = 2, PublicId = Guid.Parse("372e0f07-5d92-f111-bbf5-002324be71d8") };
+        var fields = new List<AppField>
+        {
+            new AppField { Id = 10, Fid = 1, Name = "Name", TypeCode = "TEXT" }
+        };
+
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        var queryResults = new List<Dictionary<string, object?>> { new() { { "Name", "John" } } };
+        _recordRepo.ListAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(),
+                Arg.Is<FilterGroup>(tree => tree != null && tree.Nodes[0].Group!.Nodes[0].Condition!.FieldId == 1
+                    && tree.Nodes[0].Group!.Nodes[0].Condition!.Operator == "eq"
+                    && tree.Nodes[0].Group!.Nodes[0].Condition!.Value == "John"),
+                Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+            .Returns(queryResults);
+
+        // Act
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var task = (Task<string>)method!.Invoke(_engine, new object[] { step, "{}", new Dictionary<string, object>(), new List<PipelineStep>(), new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "trigger_1", CancellationToken.None })!;
+        var output = await task;
+
+        // Assert
+        output.Should().Contain("John");
+    }
+
+    [Fact]
+    public async Task ExecuteStepAsync_SearchRecords_AdvancedFilter_InvalidSyntax_ThrowsInvalidOperationException()
+    {
+        var step = new PipelineStep
+        {
+            Id = 102,
+            RefId = "search_ref_bad_query",
+            Type = "query",
+            Subtype = "search-records",
+            ConfigJson = "{\"tableId\":\"372e0f07-5d92-f111-bbf5-002324be71d9\",\"isSimpleFilter\":false,\"advancedQuery\":\"not a valid query\"}"
+        };
+
+        var table = new AppTable { Id = 3, PublicId = Guid.Parse("372e0f07-5d92-f111-bbf5-002324be71d9") };
+        var fields = new List<AppField> { new AppField { Id = 10, Fid = 1, Name = "Name", TypeCode = "TEXT" } };
+
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+
+        var method = typeof(PipelineEngine).GetMethod("ExecuteStepAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Func<Task> act = async () =>
+        {
+            try
+            {
+                await (Task<string>)method!.Invoke(_engine, new object[] { step, "{}", new Dictionary<string, object>(), new List<PipelineStep>(), new Dictionary<string, object>(), 1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "trigger_1", CancellationToken.None })!;
+            }
+            catch (System.Reflection.TargetInvocationException tie) when (tie.InnerException != null)
+            {
+                throw tie.InnerException;
+            }
+        };
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
 
     [Fact]
     public async Task Engine_FailedRunRetry_DoesNotAckBeforeExecutionFinishes()
@@ -526,6 +598,110 @@ public class PipelineTriggersAndExternalActionsTests
         await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
 
         // Assert: Zero outbox rows should be created
+        await pipelineRepo.DidNotReceive().CreateOutboxItemAsync(Arg.Any<PowerBase.Domain.Entities.PipelineOutboxItem>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData("Mumbai", true)]
+    [InlineData("Delhi", false)]
+    public async Task Interceptor_OnNewEvent_AdvancedFilter_OnlyFiresForMatchingRecords(string cityValue, bool shouldFire)
+    {
+        // Arrange: "On New Event" saved with the Advanced filter (isSimpleFilter:false), using the
+        // same {FieldId.OP.'value'} grammar as Search Records/Copy Records — City must equal Mumbai.
+        var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid() };
+        var fields = new List<AppField> { new AppField { Id = 20, Fid = 3, Name = "City", TypeCode = "TEXT" } };
+
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(dbTx);
+
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        var logger = Substitute.For<ILogger<PipelineTriggerInterceptor>>();
+
+        var pipeline = new Pipeline { Id = 201, IsActive = true, IsDeleted = false };
+        var step = new PipelineStep
+        {
+            Type = "trigger",
+            Subtype = "new-event",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ConnectionPublicId = Guid.NewGuid().ToString(),
+                AppPublicId = Guid.NewGuid().ToString(),
+                TablePublicId = table.PublicId.ToString(),
+                TriggerOnAdded = true,
+                TriggerOnAnyField = true,
+                IsSimpleFilter = false,
+                AdvancedQuery = "{3.EX.'Mumbai'}"
+            })
+        };
+
+        pipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { pipeline });
+        pipelineRepo.GetStepsByPipelineIdAsync(201, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep> { step });
+
+        var interceptor = new PipelineTriggerInterceptor(pipelineRepo, recordRepo, queryContext, uow, logger);
+
+        var changes = new List<PowerBase.Application.Common.Models.PipelineRecordChange>
+        {
+            new(Guid.NewGuid(), new Dictionary<long, object?>(), new Dictionary<long, object?> { [20] = cityValue }, new List<long>(), PipelineRecordEventType.Added)
+        };
+
+        // Act
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
+
+        // Assert
+        var expectedCalls = shouldFire ? 1 : 0;
+        await pipelineRepo.Received(expectedCalls).CreateOutboxItemAsync(Arg.Any<PowerBase.Domain.Entities.PipelineOutboxItem>(), dbTx, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Interceptor_OnNewEvent_AdvancedFilter_InvalidQuery_SkipsRatherThanThrows()
+    {
+        // A malformed Advanced Query must never crash trigger evaluation for unrelated pipelines —
+        // it fails closed (no match) and is logged, mirroring how a missing/renamed field behaves
+        // for the Simple Filter path (PipelineFilterEvaluator.EvaluateRule logs and returns false).
+        var table = new AppTable { Id = 1, AppId = 1, PublicId = Guid.NewGuid() };
+        var fields = new List<AppField> { new AppField { Id = 20, Fid = 3, Name = "City", TypeCode = "TEXT" } };
+
+        var uow = Substitute.For<ITenantUnitOfWork>();
+        var dbTx = Substitute.For<System.Data.IDbTransaction>();
+        uow.Transaction.Returns(dbTx);
+
+        var pipelineRepo = Substitute.For<IPipelineRepository>();
+        var recordRepo = Substitute.For<IRecordRepository>();
+        var queryContext = Substitute.For<IQueryContext>();
+        var logger = Substitute.For<ILogger<PipelineTriggerInterceptor>>();
+
+        var pipeline = new Pipeline { Id = 202, IsActive = true, IsDeleted = false };
+        var step = new PipelineStep
+        {
+            Type = "trigger",
+            Subtype = "new-event",
+            ConfigJson = JsonSerializer.Serialize(new
+            {
+                ConnectionPublicId = Guid.NewGuid().ToString(),
+                AppPublicId = Guid.NewGuid().ToString(),
+                TablePublicId = table.PublicId.ToString(),
+                TriggerOnAdded = true,
+                TriggerOnAnyField = true,
+                IsSimpleFilter = false,
+                AdvancedQuery = "not a valid query"
+            })
+        };
+
+        pipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { pipeline });
+        pipelineRepo.GetStepsByPipelineIdAsync(202, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep> { step });
+
+        var interceptor = new PipelineTriggerInterceptor(pipelineRepo, recordRepo, queryContext, uow, logger);
+
+        var changes = new List<PowerBase.Application.Common.Models.PipelineRecordChange>
+        {
+            new(Guid.NewGuid(), new Dictionary<long, object?>(), new Dictionary<long, object?> { [20] = "Mumbai" }, new List<long>(), PipelineRecordEventType.Added)
+        };
+
+        // Act / Assert: no exception, and no outbox row since the query never matches.
+        await interceptor.InterceptBulkAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), 1L, CancellationToken.None);
         await pipelineRepo.DidNotReceive().CreateOutboxItemAsync(Arg.Any<PowerBase.Domain.Entities.PipelineOutboxItem>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>());
     }
 
@@ -1185,7 +1361,7 @@ public class PipelineTriggersAndExternalActionsTests
         fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
 
         var recordData = new Dictionary<string, object?> { { "f_101", "New" } };
-        recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<CancellationToken>()).Returns(recordData);
+        recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(recordData);
 
         var command = new BulkDeleteRecordsCommand(table.PublicId, new List<Guid> { recordId });
         await handler.HandleAsync(command, CancellationToken.None);
@@ -1511,7 +1687,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         var recordPublicId = Guid.NewGuid();
         var oldRecord = new Dictionary<string, object?> { ["Id"] = 100L, ["f_6"] = "Draft" };
-        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<CancellationToken>())
+        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
@@ -1553,7 +1729,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         var recordPublicId = Guid.NewGuid();
         var oldRecord = new Dictionary<string, object?> { ["Id"] = 100L, ["f_6"] = "Published" };
-        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<CancellationToken>())
+        recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
@@ -1597,14 +1773,16 @@ public class PipelineTriggersAndExternalActionsTests
         recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, long> { [recId1] = 1L, [recId2] = 2L });
 
-        recordRepo.GetByPublicIdAsync(table, fields, Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+        recordRepo.GetByPublicIdAsync(table, fields, Arg.Any<Guid>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?> { ["f_6"] = "Old" });
 
         recordRepo.MassUpdateAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>(), Arg.Any<System.Data.IDbTransaction>())
             .Returns(2);
 
         var handler = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommandHandler(
-            tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), enforcer, auditRepo, triggerInterceptor, uow, queryContext, appRepo, Substitute.For<IMessagePublisher>(), new PowerBase.Formula.FormulaEngine(), Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(), Substitute.For<IUserRepository>());
+            tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), enforcer, auditRepo, triggerInterceptor, uow, queryContext, appRepo, Substitute.For<IMessagePublisher>(),
+            new PowerBase.Formula.FormulaEngine(), Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(),
+            Substitute.For<IUserRepository>(), Substitute.For<IAppUserRepository>());
 
         var command = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommand(
             table.PublicId, new List<Guid> { recId1, recId2 }, new Dictionary<long, object?> { [6] = "New" });

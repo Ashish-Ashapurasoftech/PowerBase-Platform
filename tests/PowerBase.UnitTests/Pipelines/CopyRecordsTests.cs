@@ -142,6 +142,17 @@ public class CopyRecordsTests
         Assert.Equal(value, CopyRecordsDefinition.ConvertValue(value, Field(6, "Source"), Field(9, "Destination")));
 
     [Fact]
+    public void TextTrimsEdgesAndPreservesInternalWhitespace()
+    {
+        var value = CopyRecordsDefinition.ConvertValue(
+            " \t Alice  Smith \r\n",
+            Field(6, "Source"),
+            Field(9, "Destination"));
+
+        Assert.Equal("Alice  Smith", value);
+    }
+
+    [Fact]
     public void NumericToTextPreservesZeroAndTextToNumberUsesCreateRecordParsing()
     {
         Assert.Equal("0", CopyRecordsDefinition.ConvertValue(0, Field(6, "Source", "Number"), Field(9, "Target")));

@@ -86,7 +86,7 @@ public class DeletePipelinesCommandHandlerTests
             AuditActions.Deleted,
             AuditEntityTypes.Pipeline,
             pipelineId2.ToString(),
-            "Pipeline workflow deleted: Cross App Pipeline",
+            "PowerFlow workflow deleted: Cross App Pipeline",
             appId: 999L,
             ct: Arg.Any<CancellationToken>());
 
@@ -174,7 +174,7 @@ public class DeletePipelinesCommandHandlerTests
             AuditActions.Deleted,
             AuditEntityTypes.Pipeline,
             pipelineId1.ToString(),
-            "Pipeline workflow deleted: Pipeline 1",
+            "PowerFlow workflow deleted: Pipeline 1",
             appId: _appId,
             ct: Arg.Any<CancellationToken>());
     }
@@ -207,7 +207,7 @@ public class DeletePipelinesCommandHandlerTests
             AuditActions.Deleted,
             AuditEntityTypes.Pipeline,
             activeId.ToString(),
-            "Pipeline workflow deleted: Active Flow",
+            "PowerFlow workflow deleted: Active Flow",
             appId: _appId,
             ct: Arg.Any<CancellationToken>());
 
@@ -215,7 +215,7 @@ public class DeletePipelinesCommandHandlerTests
             AuditActions.Deleted,
             AuditEntityTypes.Pipeline,
             draftId.ToString(),
-            "Pipeline workflow deleted: Draft Flow",
+            "PowerFlow workflow deleted: Draft Flow",
             appId: _appId,
             ct: Arg.Any<CancellationToken>());
     }

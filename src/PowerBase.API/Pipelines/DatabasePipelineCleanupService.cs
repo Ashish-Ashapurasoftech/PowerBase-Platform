@@ -111,6 +111,7 @@ public class DatabasePipelineCleanupService : BackgroundService
                 queryContext.SetTenantId(tenant.Id);
 
                 var pipelineRepo = tenantScope.ServiceProvider.GetRequiredService<IPipelineRepository>();
+                await pipelineRepo.PruneOutboxItemsAsync(olderThan, ct);
                 await pipelineRepo.DeleteExpiredBulkEventRecordsAsync(olderThan, ct);
             }
             catch (Exception ex)

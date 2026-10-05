@@ -11,6 +11,28 @@ namespace PowerBase.UnitTests.Pipelines;
 
 public class SendEmailAttachmentTests
 {
+    [Fact]
+    public void ResolvesUploadedAndPreviousStepAttachmentJson()
+    {
+        var config = new SendEmailStepConfig
+        {
+            UploadedAttachments = "[{\"name\":\"one.pdf\",\"path\":\"/files/one.pdf\",\"type\":\"application/pdf\"}]",
+            AttachmentReferences = "first\nsecond"
+        };
+
+        var files = config.ResolveStoredAttachments(value => value switch
+        {
+            "first" => "{\"name\":\"two.csv\",\"path\":\"/files/two.csv\",\"type\":\"text/csv\"}",
+            "second" => "[{\"name\":\"three.txt\",\"path\":\"/files/three.txt\"}]",
+            _ => value ?? string.Empty
+        });
+
+        Assert.Equal(3, files.Count);
+        Assert.Equal("one.pdf", files[0].Name);
+        Assert.Equal("text/csv", files[1].ContentType);
+        Assert.Equal("/files/three.txt", files[2].Path);
+    }
+
     private sealed class Handler(Func<HttpRequestMessage, HttpResponseMessage> response) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)

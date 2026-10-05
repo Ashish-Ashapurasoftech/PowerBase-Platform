@@ -171,7 +171,7 @@ public class PipelineSchedulerWorker : BackgroundService
 
                         if (deletedPipelineIds.Count > 0)
                         {
-                            var cancelledCount = await queueRepo.CancelPendingJobsForPipelinesAsync(tenantId, deletedPipelineIds, "Pipeline deleted", ct);
+                            var cancelledCount = await queueRepo.CancelPendingJobsForPipelinesAsync(tenantId, deletedPipelineIds, "PowerFlow deleted", ct);
                             if (cancelledCount > 0)
                             {
                                 _logger.LogInformation("Recovery sweep: Cancelled {CancelledCount} pending jobs for deleted/missing pipelines in Tenant {TenantId}.", cancelledCount, tenantId);

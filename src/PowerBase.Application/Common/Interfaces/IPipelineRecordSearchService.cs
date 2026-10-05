@@ -8,6 +8,8 @@ namespace PowerBase.Application.Common.Interfaces;
 
 public interface IPipelineRecordSearchService
 {
+    bool SupportsKeysetPaging => false;
+
     IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadCopySnapshotAsync(
         AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree,
         CancellationToken ct = default);
@@ -25,4 +27,16 @@ public interface IPipelineRecordSearchService
         FilterGroup? filterTree = null,
         CancellationToken ct = default,
         int page = 1);
+
+}
+
+public interface IKeysetPipelineRecordSearchService
+{
+    Task<long> GetMaxRecordIdAsync(AppTable table, CancellationToken ct = default);
+
+    /// <summary>Reads bounded pages using the stable record Id as a continuation cursor.</summary>
+    IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SearchPagesAsync(
+        AppTable table, IReadOnlyList<AppField> fields, int pageSize,
+        FilterGroup? filterTree = null, long afterId = 0, long maxId = long.MaxValue,
+        CancellationToken ct = default);
 }
