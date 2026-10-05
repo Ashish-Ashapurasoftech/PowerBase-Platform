@@ -1781,7 +1781,8 @@ public class PipelineTriggersAndExternalActionsTests
 
         var handler = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommandHandler(
             tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), enforcer, auditRepo, triggerInterceptor, uow, queryContext, appRepo, Substitute.For<IMessagePublisher>(),
-            new PowerBase.Formula.FormulaEngine(), Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(), Substitute.For<IUserRepository>(), Substitute.For<IAppUserRepository>());
+            new PowerBase.Formula.FormulaEngine(), Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(),
+            Substitute.For<IUserRepository>(), Substitute.For<IAppUserRepository>());
 
         var command = new PowerBase.Application.Records.Commands.MassUpdateRecords.MassUpdateRecordsCommand(
             table.PublicId, new List<Guid> { recId1, recId2 }, new Dictionary<long, object?> { [6] = "New" });

@@ -53,15 +53,16 @@ public class RecordConstraintValidatorTests
     }
 
     [Fact]
-    public async Task ValidateAsync_RequiredFieldFalseBoolean_IsNotTreatedAsBlank()
+    public async Task ValidateAsync_RequiredFieldFalseBoolean_IsTreatedAsMissing()
     {
+        // A required Boolean must be true (mirrors the frontend's Validators.requiredTrue).
         var table = MakeTable();
         var field = MakeField(1, isRequired: true, typeCode: "Boolean");
         var values = new Dictionary<long, object?> { [1L] = false };
 
         await FluentActions.Invoking(() =>
                 RecordConstraintValidator.ValidateAsync(table, [field], values, _recordRepo, isCreate: true, excludeRecordId: null, CancellationToken.None))
-            .Should().NotThrowAsync();
+            .Should().ThrowAsync<ValidationException>();
     }
 
     [Fact]
