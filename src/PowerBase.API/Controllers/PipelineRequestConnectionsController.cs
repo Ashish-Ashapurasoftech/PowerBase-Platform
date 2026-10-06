@@ -99,7 +99,7 @@ public sealed class PipelineRequestConnectionsController : ControllerBase
         State ticket;
         try { ticket=JsonSerializer.Deserialize<State>(_state.Unprotect(state))!; }
         catch { return BadRequest("Invalid OAuth state."); }
-        if(ticket.ExpiresAt<DateTimeOffset.UtcNow || string.IsNullOrEmpty(code) || error!=null) return BadRequest("OAuth authorization expired or was denied. Reconnect from the pipeline.");
+        if(ticket.ExpiresAt<DateTimeOffset.UtcNow || string.IsNullOrEmpty(code) || error!=null) return BadRequest("OAuth authorization expired or was denied. Reconnect from the PowerFlow.");
         _identity.SetTenantId(ticket.TenantId);
         var row=await _repository.GetConnectionByPublicIdAsync(ticket.ConnectionId,ct);
         if(row==null || row.IsDeleted || row.CreatedBy!=ticket.UserId || row.Type!="http-request") return BadRequest("Invalid OAuth connection.");
@@ -110,6 +110,6 @@ public sealed class PipelineRequestConnectionsController : ControllerBase
         _identity.SetUserIdentity(ticket.UserId, false, "", "", new HashSet<string>(), "");
         row.CredentialsJson=_credentials.Protect(credentials);
         await _repository.UpdateConnectionAsync(row,ct:ct);
-        return Content("Account connected. You can close this window and return to the pipeline.","text/plain");
+        return Content("Account connected. You can close this window and return to the PowerFlow.","text/plain");
     }
 }

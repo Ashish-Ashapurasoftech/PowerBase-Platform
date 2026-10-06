@@ -21,7 +21,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         var steps = command.Steps;
         if (steps == null || steps.Count == 0)
         {
-            context.AddFailure("Steps", "Pipeline must contain at least one step.");
+            context.AddFailure("Steps", "PowerFlow must contain at least one step.");
             return;
         }
 
@@ -34,7 +34,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             (firstStep.Type == "email" && (firstStep.Subtype == "send-email" || firstStep.Subtype == "send-email-outlook"));
         if (!isValidFirstStep)
         {
-            context.AddFailure("Steps", "A pipeline must begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, Prepare Bulk Record Upsert, Pause, or Send Email step.");
+            context.AddFailure("Steps", "A PowerFlow must begin with a Trigger, Search/Query, Make Request, Copy Records, Handle Errors, Prepare Bulk Record Upsert, Pause, or Send Email step.");
         }
 
         var stepById = new Dictionary<string, SavePipelineStepDto>();
@@ -79,7 +79,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
         // Rule 2 & 3: Only one trigger is allowed in a pipeline, and no nested triggers
         if (triggerCount > 1)
         {
-            context.AddFailure("Steps", "Multiple triggers are forbidden in a single pipeline.");
+            context.AddFailure("Steps", "Multiple triggers are forbidden in a single PowerFlow.");
         }
 
         bool IsAncestor(string childRefId, string ancestorRefId)
@@ -152,7 +152,7 @@ public class SavePipelineStepsCommandValidator : AbstractValidator<SavePipelineS
             }
             if ((step.Subtype == "pipeline-called" && (step.Type != "trigger" || step != firstStep)) ||
                 (step.Subtype == "call-another-pipeline" && step.Type != "action"))
-                context.AddFailure("Steps", "Pipeline Called must be the first root trigger; Call Another Pipeline must be an action.");
+                context.AddFailure("Steps", "PowerFlow Called must be the first root trigger; Call Another PowerFlow must be an action.");
             // Rule 3 (Nested triggers check): If trigger, it must be at the root (parentRefId == null)
             if (step.Type == "trigger" && parentRefId != null)
             {

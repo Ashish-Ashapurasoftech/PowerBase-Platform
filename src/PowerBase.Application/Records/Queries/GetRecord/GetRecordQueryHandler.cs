@@ -75,7 +75,7 @@ public class GetRecordQueryHandler
         }
 
         var visibleFields = access.VisibleFields;
-        var row = await _recordRepo.GetByPublicIdAsync(table, visibleFields, query.RecordPublicId, ct);
+        var row = await _recordRepo.GetByPublicIdAsync(table, visibleFields, query.RecordPublicId, ct: ct);
         // A single record fetched here backs the Add/Edit Record form's own picker for User/
         // MultiUser fields — that picker is keyed by userPublicId Guid (see
         // AppUserPickerResponse), not a display name, so this needs the Guid resolution

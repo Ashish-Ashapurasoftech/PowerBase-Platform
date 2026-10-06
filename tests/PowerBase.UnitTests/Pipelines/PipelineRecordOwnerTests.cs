@@ -158,8 +158,10 @@ public class PipelineRecordOwnerTests
         _queryContext.UserId.Should().Be(99L); // Preserved manual actor
     }
 
-    [Fact]
-    public async Task InvalidRecordMapping_FailsQueueWithoutRetry()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InvalidRecordMapping_FailsQueueWithoutRetry(bool callable)
     {
         var job = new PipelineQueue { Id = 31, TenantId = 10, PipelineId = 100, TriggeredBy = 99L,
             MessageId = Guid.NewGuid(), ClaimToken = Guid.NewGuid() };
@@ -172,7 +174,9 @@ public class PipelineRecordOwnerTests
             .Returns(new HashSet<string> { "PowerFlows:read" });
         var engine = (IPipelineEngine)_serviceProvider.GetService(typeof(IPipelineEngine))!;
         engine.ExecuteAsync(Arg.Any<PipelineExecutionTask>(), Arg.Any<CancellationToken>())
-            .Returns<Task>(_ => throw new PipelineMappingException("Number mapping failed", new FormatException()));
+            .Returns<Task>(_ => throw (callable
+                ? new PipelineMappingException("Call argument reference is missing", new KeyNotFoundException("fid_6"))
+                : new PipelineMappingException("Number mapping failed", new FormatException())));
         var worker = new DatabasePipelineExecutionWorker(_serviceProvider,
             Substitute.For<IControlConnectionFactory>(), Options.Create(new PipelineExecutionOptions()),
             Substitute.For<ILogger<DatabasePipelineExecutionWorker>>());
@@ -180,7 +184,7 @@ public class PipelineRecordOwnerTests
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
         await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None })!;
         await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value,
-            Arg.Is<string>(message => message.Contains("Number mapping failed")), Arg.Any<CancellationToken>());
+            Arg.Is<string>(message => message.Contains(callable ? "Call argument reference is missing" : "Number mapping failed")), Arg.Any<CancellationToken>());
         await _queueRepo.DidNotReceive().ScheduleRetryAsync(Arg.Any<long>(), Arg.Any<string>(),
             Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }

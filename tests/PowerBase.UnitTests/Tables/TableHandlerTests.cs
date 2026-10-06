@@ -118,6 +118,54 @@ public class TableHandlerTests
 
         result.Table.Should().BeSameAs(table);
         result.Fields.Should().HaveCount(1);
+        result.SummarySourceSettings.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetTable_MinMaxSummary_CarriesSourceFieldSettings_OnlyForMinMax()
+    {
+        var table = MakeTable();
+        const string dueDateSettings = "{\"showMonthName\":true}";
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 30, Name = "Latest Due", TypeCode = "Summary",
+                    Settings = "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Max\",\"targetFid\":6}" },
+            new() { Id = 2, Fid = 31, Name = "Tasks", TypeCode = "Summary",
+                    Settings = "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Count\"}" },
+            new() { Id = 3, Fid = 32, Name = "Titles", TypeCode = "Summary",
+                    Settings = "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"CombinedText\",\"targetFid\":5}" },
+            new() { Id = 4, Fid = 33, Name = "Earliest Due", TypeCode = "Summary",
+                    Settings = "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Min\",\"targetFid\":6}" },
+        };
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(fields);
+        _fieldRepo.ListByTableAsync(77).Returns(new List<AppField>
+        {
+            new() { Id = 50, Fid = 5, Name = "Title", TypeCode = "Text", Settings = "{}" },
+            new() { Id = 60, Fid = 6, Name = "Due Date", TypeCode = "Date", Settings = dueDateSettings },
+        });
+        var sut = new GetTableQueryHandler(_tableRepo, _fieldRepo);
+
+        var result = await sut.HandleAsync(new GetTableQuery(table.PublicId));
+
+        result.SummarySourceSettings.Should().BeEquivalentTo(new Dictionary<long, string?> { [1] = dueDateSettings, [4] = dueDateSettings });
+        await _fieldRepo.Received(1).ListByTableAsync(77, Arg.Any<CancellationToken>());   // once per child table
+    }
+
+    [Fact]
+    public async Task GetTable_NoMinMaxSummaries_ReadsNoChildTables()
+    {
+        var table = MakeTable();
+        _tableRepo.GetByPublicIdAsync(table.PublicId).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField>
+        {
+            new() { Id = 2, Fid = 31, Name = "Tasks", TypeCode = "Summary", Settings = "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Count\"}" },
+        });
+        var sut = new GetTableQueryHandler(_tableRepo, _fieldRepo);
+
+        await sut.HandleAsync(new GetTableQuery(table.PublicId));
+
+        await _fieldRepo.DidNotReceive().ListByTableAsync(77, Arg.Any<CancellationToken>());
     }
 
     // --- ListTablesQueryHandler ---

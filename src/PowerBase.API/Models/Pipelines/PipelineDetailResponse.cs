@@ -11,6 +11,8 @@ public class PipelineDetailResponse
     public string? Description { get; set; }
     public string? VariablesJson { get; set; }
     public bool IsActive { get; set; }
+    public DateTime CreatedOn { get; set; }
+    public DateTime? ModifiedOn { get; set; }
     public string RowVersion { get; set; } = string.Empty;
     public List<PipelineStepResponse> Steps { get; set; } = new();
 }

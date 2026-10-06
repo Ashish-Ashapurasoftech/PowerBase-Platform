@@ -209,7 +209,7 @@ public class PipelineGapsVerificationTests
         var table = new AppTable { Id = 100, PublicId = tableGuid };
         tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
         fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
-        recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordPublicId, Arg.Any<CancellationToken>())
+        recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordPublicId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?>());
 
         // Act
@@ -280,16 +280,16 @@ public class PipelineGapsVerificationTests
         await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(
             1L, 
             Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), 
-            "Pipeline deleted", 
+            "PowerFlow deleted", 
             Arg.Any<CancellationToken>()
         );
         
         // Simulating the row state updates that CancelPendingJobsForPipelinesAsync does:
         var job = new PipelineQueue { Status = "Pending", AttemptCount = 2, NextAttemptOn = DateTime.UtcNow };
-        UpdateJobStateOnDeletion(job, "Pipeline deleted");
+        UpdateJobStateOnDeletion(job, "PowerFlow deleted");
 
         job.Status.Should().Be("Skipped");
-        job.SkipReason.Should().Be("Pipeline deleted");
+        job.SkipReason.Should().Be("PowerFlow deleted");
         job.NextAttemptOn.Should().BeNull();
         job.PausedNextAttemptOn.Should().BeNull();
         job.LockedBy.Should().BeNull();
@@ -320,7 +320,7 @@ public class PipelineGapsVerificationTests
         await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(
             1L, 
             Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), 
-            "Pipeline deleted", 
+            "PowerFlow deleted", 
             Arg.Any<CancellationToken>()
         );
 
@@ -333,10 +333,10 @@ public class PipelineGapsVerificationTests
             NextAttemptOn = sentinelDate, 
             PausedNextAttemptOn = DateTime.UtcNow.AddMinutes(5) 
         };
-        UpdateJobStateOnDeletion(job, "Pipeline deleted");
+        UpdateJobStateOnDeletion(job, "PowerFlow deleted");
 
         job.Status.Should().Be("Skipped");
-        job.SkipReason.Should().Be("Pipeline deleted");
+        job.SkipReason.Should().Be("PowerFlow deleted");
         job.NextAttemptOn.Should().BeNull();
         job.PausedNextAttemptOn.Should().BeNull();
         job.LockedBy.Should().BeNull();
@@ -370,16 +370,16 @@ public class PipelineGapsVerificationTests
         await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(
             1L, 
             Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), 
-            "Pipeline deleted", 
+            "PowerFlow deleted", 
             Arg.Any<CancellationToken>()
         );
 
         // Simulating row state updates:
         var job = new PipelineQueue { Status = "Pending", AttemptCount = 1, NextAttemptOn = DateTime.UtcNow };
-        UpdateJobStateOnDeletion(job, "Pipeline deleted");
+        UpdateJobStateOnDeletion(job, "PowerFlow deleted");
 
         job.Status.Should().Be("Skipped");
-        job.SkipReason.Should().Be("Pipeline deleted");
+        job.SkipReason.Should().Be("PowerFlow deleted");
         job.NextAttemptOn.Should().BeNull();
         job.PausedNextAttemptOn.Should().BeNull();
         job.LockedBy.Should().BeNull();
@@ -413,7 +413,7 @@ public class PipelineGapsVerificationTests
         await queueRepo.Received(1).CancelPendingJobsForPipelinesAsync(
             1L, 
             Arg.Is<IEnumerable<long>>(ids => ids.Contains(10L)), 
-            "Pipeline deleted", 
+            "PowerFlow deleted", 
             Arg.Any<CancellationToken>()
         );
 
@@ -426,10 +426,10 @@ public class PipelineGapsVerificationTests
             NextAttemptOn = sentinelDate, 
             PausedNextAttemptOn = DateTime.UtcNow.AddMinutes(10) 
         };
-        UpdateJobStateOnDeletion(job, "Pipeline deleted");
+        UpdateJobStateOnDeletion(job, "PowerFlow deleted");
 
         job.Status.Should().Be("Skipped");
-        job.SkipReason.Should().Be("Pipeline deleted");
+        job.SkipReason.Should().Be("PowerFlow deleted");
         job.NextAttemptOn.Should().BeNull();
         job.PausedNextAttemptOn.Should().BeNull();
         job.LockedBy.Should().BeNull();

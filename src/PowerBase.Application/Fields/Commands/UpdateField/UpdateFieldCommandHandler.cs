@@ -4,6 +4,7 @@ using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Application.Fields.Versioning;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -25,6 +26,7 @@ public class UpdateFieldCommandHandler
     private readonly IMessagePublisher _messagePublisher;
     private readonly IQueryContext _queryContext;
     private readonly IAzureSearchService _searchService;
+    private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
 
     /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
@@ -44,6 +46,7 @@ public class UpdateFieldCommandHandler
         IMessagePublisher messagePublisher,
         IQueryContext queryContext,
         IAzureSearchService searchService,
+        IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null)
     {
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
@@ -59,6 +62,7 @@ public class UpdateFieldCommandHandler
         _messagePublisher = messagePublisher;
         _queryContext = queryContext;
         _searchService = searchService;
+        _relRepo = relRepo;
     }
 
     public async Task HandleAsync(UpdateFieldCommand command, CancellationToken ct = default)
@@ -146,6 +150,10 @@ public class UpdateFieldCommandHandler
             {
                 var targetFieldType = await _fieldTypeRepo.GetByCodeAsync(displayAs, ct)
                     ?? throw new NotFoundException("FieldType", displayAs);
+
+                // Refuse the switch if a Summary field built on this field couldn't aggregate the new type.
+                await SummaryDependencyGuard.EnsureTypeChangeKeepsSummariesValidAsync(
+                    existing, displayAs, _relRepo, _tableRepo, _fieldRepo, ct);
 
                 // Bring a legacy INT (pre-migration Rating) column up to DECIMAL(18,4) first —
                 // a no-op for every field created after that migration, since Number/Currency/

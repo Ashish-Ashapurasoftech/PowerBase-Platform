@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Relationships;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -16,7 +17,7 @@ public class BulkDeleteFieldsCommandHandler
     private readonly IAppAccessService _appAccessService;
     private readonly IAuditRepository _auditRepo;
     private readonly ITenantUnitOfWork _uow;
-    private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IRelationshipRepository _relRepo;
 
     public BulkDeleteFieldsCommandHandler(
         IAppTableRepository tableRepo,
@@ -25,8 +26,10 @@ public class BulkDeleteFieldsCommandHandler
         IAppAccessService appAccessService,
         IAuditRepository auditRepo,
         ITenantUnitOfWork uow,
+        IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null)
     {
+        _relRepo = relRepo;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -43,6 +46,9 @@ public class BulkDeleteFieldsCommandHandler
         // Fetch all fields in the table to match their FIDs and system status
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         var fieldsToDelete = fields.Where(f => command.FieldPublicIds.Contains(f.PublicId) && !f.IsSystem).ToList();
+
+        await RelationshipKeyFieldDeleteGuard.EnsureNotRelationshipKeyAsync(table, fieldsToDelete, _relRepo, ct);
+        ReferenceFilterDependencyGuard.EnsureNotControlling(table, fields, fieldsToDelete);
 
         var blockedFieldsErrors = new Dictionary<string, string[]>();
         var pipelinesToDeactivate = new Dictionary<Guid, Pipeline>();

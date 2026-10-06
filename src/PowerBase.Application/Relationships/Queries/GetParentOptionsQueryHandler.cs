@@ -1,6 +1,10 @@
+using System.Globalization;
+using PowerBase.Application.Common.Formatting;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Formulas;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.ValueObjects;
 
 namespace PowerBase.Application.Relationships.Queries;
 
@@ -12,21 +16,31 @@ public class GetParentOptionsQueryHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRelationshipRepository _relRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IRelationalProjector _relationalProjector;
+    private readonly IFormulaProjector _formulaProjector;
+    private readonly IQueryContext _queryContext;
 
     public GetParentOptionsQueryHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRelationshipRepository relRepo,
-        IRecordRepository recordRepo)
+        IRecordRepository recordRepo,
+        IRelationalProjector relationalProjector,
+        IFormulaProjector formulaProjector,
+        IQueryContext queryContext)
     {
+        _queryContext = queryContext;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _relRepo = relRepo;
         _recordRepo = recordRepo;
+        _relationalProjector = relationalProjector;
+        _formulaProjector = formulaProjector;
     }
 
     public async Task<GetParentOptionsResult> HandleAsync(
-        Guid relationshipPublicId, string? search, int take, CancellationToken ct = default)
+        Guid relationshipPublicId, string? search, int take,
+        IReadOnlyDictionary<int, string?>? filterValues = null, CancellationToken ct = default)
     {
         var rel = await _relRepo.GetByPublicIdAsync(relationshipPublicId, ct)
             ?? throw new NotFoundException("Relationship", relationshipPublicId);
@@ -78,11 +92,105 @@ public class GetParentOptionsQueryHandler
         // The reference column always stores the parent row Id, so the picker always submits it
         // (option.Id). SearchForReferenceAsync already returns the row Id as text; DisplayKeyFieldId
         // only changes which column is shown as the label (labelFields above).
+        var effectiveTake = take == 0 ? 50 : take;
+
+        // Dependent dropdown: narrow the parent records by the reference field's filter conditions
+        // against the form's current values (see ReferenceSettings.FilterConditions).
+        var childFields = await _fieldRepo.ListByTableAsync(rel.ChildTableId, ct);
+        var referenceField = childFields.FirstOrDefault(f => f.Id == rel.ReferenceFieldId);
+        var filters = await ReferenceFilterResolver.BuildAsync(
+            FormulaTypeMap.ParseReferenceSettings(referenceField?.Settings), childFields, parentFields,
+            filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId);
+        var hasComputed = labelFields.Any(IsComputedLabel) || (primaryLabelField is not null && IsComputedLabel(primaryLabelField));
+        if (!hasComputed)
+        {
+            var plain = await _recordRepo.SearchForReferenceAsync(
+                parent, labelFields, search, effectiveTake, primaryLabelField, ct, filters);
+            return new GetParentOptionsResult(headers, plain);
+        }
+
+        // A computed label (Formula/Lookup/Summary) has no SQL column, so it can't be searched in
+        // SQL: fetch the (capped) page unfiltered, compute the labels, then filter in memory.
+        var hasSearch = !string.IsNullOrWhiteSpace(search);
         var options = await _recordRepo.SearchForReferenceAsync(
-            parent, labelFields, search, take == 0 ? 50 : take, primaryLabelField, ct);
+            parent, labelFields, null, hasSearch ? 200 : effectiveTake, primaryLabelField, ct, filters);
+        await FillComputedLabelsAsync(parent, parentFields, labelFields, primaryLabelField, options, ct);
+
+        if (hasSearch)
+        {
+            options = options
+                .Where(o => new[] { o.Value1, o.Value2, o.Value3 }
+                    .Any(v => v is not null && v.Contains(search!, StringComparison.OrdinalIgnoreCase)))
+                .Take(effectiveTake)
+                .ToList();
+        }
 
         return new GetParentOptionsResult(headers, options);
     }
+
+    /// <summary>
+    /// Computes the values of computed label fields (Formula/Lookup/Summary) for the fetched
+    /// options — the same relational → formula projection every record read uses — and writes
+    /// them into Value1..3 / Label. The SQL query only selects NULL placeholders for these.
+    /// </summary>
+    private async Task FillComputedLabelsAsync(
+        AppTable parent, IReadOnlyList<AppField> parentFields, IReadOnlyList<AppField> labelFields,
+        AppField? primaryLabelField, IReadOnlyList<ReferenceOption> options, CancellationToken ct)
+    {
+        if (options.Count == 0) return;
+
+        var ids = options.Select(o => long.TryParse(o.Id, out var id) ? id : (long?)null)
+            .Where(id => id.HasValue).Select(id => id!.Value).Distinct().ToList();
+        var rowsById = await _recordRepo.GetRowsByIdsAsync(parent, parentFields, ids, ct);
+
+        var pairs = options
+            .Select(o => (Option: o, Row: long.TryParse(o.Id, out var id) && rowsById.TryGetValue(id, out var row) ? row : null))
+            .Where(x => x.Row is not null)
+            .ToList();
+        if (pairs.Count == 0) return;
+
+        var rows = pairs.Select(x => x.Row!).ToList();
+        var relational = await _relationalProjector.ProjectAsync(parent, parentFields, rows, ct);
+        var computed = _formulaProjector.Project(parentFields, rows, relational, parent);
+        var appFormatting = new AppFormattingSettings();
+
+        string? Compute(AppField field, IReadOnlyDictionary<long, object?> values)
+        {
+            var typeCode = field.TypeCode.StartsWith("Formula_", StringComparison.Ordinal)
+                ? field.TypeCode["Formula_".Length..] switch { "Bool" => "Boolean", var t => t }
+                : "Text";
+            return values.TryGetValue(field.Fid!.Value, out var raw) && raw is not null
+                ? DisplayValueFormatter.Format(raw, typeCode, field.Settings, appFormatting)
+                : null;
+        }
+
+        for (var i = 0; i < pairs.Count; i++)
+        {
+            var (opt, _) = pairs[i];
+            var values = computed[i];
+            if (labelFields.Count > 0 && IsComputedLabel(labelFields[0])) opt.Value1 = Compute(labelFields[0], values);
+            if (labelFields.Count > 1 && IsComputedLabel(labelFields[1])) opt.Value2 = Compute(labelFields[1], values);
+            if (labelFields.Count > 2 && IsComputedLabel(labelFields[2])) opt.Value3 = Compute(labelFields[2], values);
+            if (primaryLabelField is not null && IsComputedLabel(primaryLabelField)) opt.Label = Compute(primaryLabelField, values);
+            else if (primaryLabelField is null && labelFields.Count > 0 && IsComputedLabel(labelFields[0])) opt.Label = opt.Value1;
+        }
+    }
+
+    /// <summary>True for a label field whose value is computed at read time (Formula variants,
+    /// Lookup, Summary) instead of being stored in a physical SQL column.</summary>
+    private static bool IsComputedLabel(AppField f)
+        => f.Fid.HasValue && Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode);
+
+    /// <summary>
+    /// Returns true when <paramref name="f"/> can serve as a picker label: it either has a
+    /// physical storage column (projected directly in SQL), or it is a Formula / Lookup / Summary
+    /// field computed on read (<see cref="FillComputedLabelsAsync"/>). ReportLink and ActionButton
+    /// are computed too but have no meaningful text value, so they never serve as a label.
+    /// </summary>
+    private static bool CanServeAsLabel(AppField f)
+        => f.Fid.HasValue && (!Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode)
+            || f.TypeCode is "Lookup" or "Summary"
+            || FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings));
 
     private static IReadOnlyList<AppField> ResolveLabelFields(AppTable parent, IReadOnlyList<AppField> parentFields)
     {
@@ -90,18 +198,21 @@ public class GetParentOptionsQueryHandler
 
         if (parent.DefaultRecordPickerField1Id.HasValue)
         {
-            var f1 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField1Id.Value);
+            // Skip fields that cannot serve as a label (ReportLink/ActionButton have no text value).
+            // Formula/Lookup/Summary are allowed: their values are computed after the SQL query
+            // (FillComputedLabelsAsync). The resolution falls through to the next tier otherwise.
+            var f1 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField1Id.Value && CanServeAsLabel(f));
             if (f1 != null) fields.Add(f1);
 
             if (parent.DefaultRecordPickerField2Id.HasValue)
             {
-                var f2 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField2Id.Value);
+                var f2 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField2Id.Value && CanServeAsLabel(f));
                 if (f2 != null) fields.Add(f2);
             }
 
             if (parent.DefaultRecordPickerField3Id.HasValue)
             {
-                var f3 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField3Id.Value);
+                var f3 = parentFields.FirstOrDefault(f => f.Id == parent.DefaultRecordPickerField3Id.Value && CanServeAsLabel(f));
                 if (f3 != null) fields.Add(f3);
             }
 
@@ -110,12 +221,13 @@ public class GetParentOptionsQueryHandler
 
         if (parent.DisplayFieldId.HasValue)
         {
-            var display = parentFields.FirstOrDefault(f => f.Id == parent.DisplayFieldId.Value);
+            // Same guard: skip if the configured display field cannot serve as a label.
+            var display = parentFields.FirstOrDefault(f => f.Id == parent.DisplayFieldId.Value && CanServeAsLabel(f));
             if (display is not null) return [display];
         }
-        // Fall back to the first non-system, non-computed field with a physical column.
-        var fallback = parentFields.FirstOrDefault(f => !f.IsSystem && f.Fid.HasValue
-            && !Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode));
+
+        // Fall back to the first non-system field that can serve as a label.
+        var fallback = parentFields.FirstOrDefault(f => !f.IsSystem && CanServeAsLabel(f));
         if (fallback != null) return [fallback];
 
         // Ultimate fallback: Record ID# (Fid 3), so a table with zero business fields still shows

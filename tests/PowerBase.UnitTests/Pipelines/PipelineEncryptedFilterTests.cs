@@ -210,12 +210,14 @@ public class PipelineEncryptedFilterTests
             {
                 new
                 {
-                    LogicalOp = "OR",
-                    Rules = new List<object>
-                    {
-                        new { Field = "fid_6", Operator = "contains", Value = "ronak" },
-                        new { Field = "fid_7", Operator = "is", Value = "Active" }
-                    }
+                    LogicalOp = "AND",
+                    Rules = new List<object> { new { Field = "fid_6", Operator = "contains", Value = "ronak" } }
+                },
+                // Rules inside one box are AND-connected; separate boxes are OR-connected.
+                new
+                {
+                    LogicalOp = "AND",
+                    Rules = new List<object> { new { Field = "fid_7", Operator = "is", Value = "Active" } }
                 }
             }
         };

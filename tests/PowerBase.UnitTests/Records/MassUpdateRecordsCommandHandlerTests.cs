@@ -23,13 +23,17 @@ public class MassUpdateRecordsCommandHandlerTests
     private readonly IAppRepository _appRepo = Substitute.For<IAppRepository>();
     private readonly IMessagePublisher _messagePublisher = Substitute.For<IMessagePublisher>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
+    private readonly PowerBase.Formula.FormulaEngine _engine = new();
+    private readonly IFormRuleRepository _formRuleRepo = Substitute.For<IFormRuleRepository>();
+    private readonly IFormRepository _formRepo = Substitute.For<IFormRepository>();
+    private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
 
     private static AppTable MakeTable(long id = 5) => new() { Id = id, PublicId = Guid.NewGuid(), Name = "T" };
 
     private static AppField MakeField(int fid, bool isRequired = false, bool isUnique = false) =>
         new() { Id = fid, Fid = fid, Name = $"C_field{fid}", Label = $"Field {fid}", TypeCode = "Text", IsRequired = isRequired, IsUnique = isUnique };
 
-    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _appRepo, _messagePublisher, new PowerBase.Formula.FormulaEngine(), Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(), Substitute.For<IUserRepository>());
+    private MassUpdateRecordsCommandHandler CreateSut() => new(_tableRepo, _fieldRepo, _recordRepo, _relRepo, _enforcer, _auditRepo, _triggerInterceptor, _uow, _queryContext, _appRepo, _messagePublisher, _engine, _formRuleRepo, _formRepo, _userRepo, Substitute.For<IAppUserRepository>());
 
     public MassUpdateRecordsCommandHandlerTests()
     {
@@ -49,7 +53,7 @@ public class MassUpdateRecordsCommandHandlerTests
         _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new[] { field });
         _recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, long> { [recordId] = 1 });
-        _recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordId, Arg.Any<CancellationToken>())
+        _recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<string, object?> { ["f_1"] = "before" });
         var transaction = Substitute.For<IDbTransaction>();
         IDbTransaction? active = null;
@@ -127,7 +131,7 @@ public class MassUpdateRecordsCommandHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(fields);
         _recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns((IReadOnlyDictionary<Guid, long>)idMap);
-        _recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<CancellationToken>()).Returns(oldRecord);
+        _recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(oldRecord);
         _recordRepo.MassUpdateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<CancellationToken>(), Arg.Any<Action<SearchIndexMessage>>(), Arg.Any<IDbTransaction>())
             .Returns(1);
 
@@ -197,7 +201,7 @@ public class MassUpdateRecordsCommandHandlerTests
         _fieldRepo.ListByTableAsync(table.Id).Returns(new List<AppField> { field });
         _recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns((IReadOnlyDictionary<Guid, long>)idMap);
-        _recordRepo.HasValueDuplicateAsync(table, field, "taken", 100L, Arg.Any<CancellationToken>()).Returns(true);
+        _recordRepo.HasValueDuplicateAsync(table, field, "taken", 100L, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(true);
 
         var sut = CreateSut();
         var ex = await sut.Invoking(s => s.HandleAsync(new MassUpdateRecordsCommand(table.PublicId, recordIds, new Dictionary<long, object?> { [1L] = "taken" })))

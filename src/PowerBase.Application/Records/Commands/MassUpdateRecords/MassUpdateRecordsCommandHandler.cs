@@ -200,7 +200,7 @@ public class MassUpdateRecordsCommandHandler
 
             try
             {
-                var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+                var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct: ct);
                 foreach (var f in fields)
                 {
                     if (f.Fid.HasValue)

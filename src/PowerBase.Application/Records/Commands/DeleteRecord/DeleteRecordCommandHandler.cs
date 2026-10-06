@@ -61,7 +61,7 @@ public class DeleteRecordCommandHandler
             await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _fieldRepo, _recordRepo, ct);
         }
 
-        var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, command.RecordPublicId, ct);
+        var oldRecord = await _recordRepo.GetByPublicIdAsync(table, fields, command.RecordPublicId, ct: ct);
         var oldValuesDict = new Dictionary<long, object?>();
         foreach (var field in fields)
         {

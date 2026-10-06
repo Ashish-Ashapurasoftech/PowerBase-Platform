@@ -17,12 +17,13 @@ public class DeleteFieldDependencyTests
     private readonly IAppAccessService _appAccessService = Substitute.For<IAppAccessService>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
     private readonly ITenantUnitOfWork _uow = Substitute.For<ITenantUnitOfWork>();
+    private readonly IRelationshipRepository _relRepo = Substitute.For<IRelationshipRepository>();
 
     private DeleteFieldCommandHandler CreateDeleteFieldSut() =>
-        new(_tableRepo, _fieldRepo, _pipelineRepo, _auditRepo, _uow);
+        new(_tableRepo, _fieldRepo, _pipelineRepo, _auditRepo, _uow, _relRepo);
 
     private BulkDeleteFieldsCommandHandler CreateBulkDeleteFieldSut() =>
-        new(_tableRepo, _fieldRepo, _pipelineRepo, _appAccessService, _auditRepo, _uow);
+        new(_tableRepo, _fieldRepo, _pipelineRepo, _appAccessService, _auditRepo, _uow, _relRepo);
 
     private static AppTable MakeTable(long id = 5) =>
         new() { Id = id, PublicId = Guid.NewGuid(), Name = "TestTable", AppId = 1 };

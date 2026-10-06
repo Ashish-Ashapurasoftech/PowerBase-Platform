@@ -90,7 +90,7 @@ public class InvokeButtonActionHandlerTests
 
     private void SetupRow(IReadOnlyDictionary<string, object?>? row = null)
     {
-        _recordRepo.GetByPublicIdAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), _recordId, Arg.Any<CancellationToken>())
+        _recordRepo.GetByPublicIdAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), _recordId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(row ?? new Dictionary<string, object?>());
     }
 

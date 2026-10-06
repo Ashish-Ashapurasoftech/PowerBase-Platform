@@ -70,7 +70,7 @@ public class DeletePipelinesCommandHandler
         try
         {
             var pipelineIds = pipelines.Select(p => p.Id).ToList();
-            await _queueRepo.CancelPendingJobsForPipelinesAsync(_queryContext.TenantId, pipelineIds, "Pipeline deleted", ct);
+            await _queueRepo.CancelPendingJobsForPipelinesAsync(_queryContext.TenantId, pipelineIds, "PowerFlow deleted", ct);
         }
         catch (System.Exception ex)
         {
@@ -99,7 +99,7 @@ public class DeletePipelinesCommandHandler
                 AuditActions.Deleted,
                 AuditEntityTypes.Pipeline,
                 pipeline.PublicId.ToString(),
-                $"Pipeline workflow deleted: {pipeline.Name}",
+                $"PowerFlow workflow deleted: {pipeline.Name}",
                 appId: pipeline.AppId,
                 ct: ct);
         }

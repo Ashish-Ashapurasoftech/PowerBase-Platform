@@ -10,9 +10,12 @@ using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Relationships.Commands.DeleteRelationship;
 using PowerBase.Application.Relationships.Commands.RemoveRelationshipField;
 using PowerBase.Application.Relationships.Commands.UpdateDisplayKey;
+using PowerBase.Application.Relationships.Commands.UpdateReferenceFilter;
+using PowerBase.Application.Relationships.Commands.UpdateSummaryField;
 using PowerBase.Application.Relationships.Queries;
 using PowerBase.Application.Records.Queries.ListRecords;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.FieldSettings;
 
 namespace PowerBase.API.Controllers;
 
@@ -23,32 +26,41 @@ public class RelationshipsController : ControllerBase
     private readonly DeleteRelationshipCommandHandler _deleteHandler;
     private readonly RelationshipQueriesHandler _queries;
     private readonly GetParentOptionsQueryHandler _parentOptions;
+    private readonly IsParentAllowedQueryHandler _parentAllowed;
     private readonly GetChildRecordsForParentQueryHandler _childRecords;
     private readonly AddLookupFieldsCommandHandler _addLookups;
     private readonly AddSummaryFieldCommandHandler _addSummary;
+    private readonly UpdateSummaryFieldCommandHandler _updateSummary;
     private readonly RemoveRelationshipFieldCommandHandler _removeField;
     private readonly UpdateDisplayKeyCommandHandler _updateDisplayKey;
+    private readonly UpdateReferenceFilterCommandHandler _updateReferenceFilter;
 
     public RelationshipsController(
         CreateRelationshipCommandHandler createHandler,
         DeleteRelationshipCommandHandler deleteHandler,
         RelationshipQueriesHandler queries,
         GetParentOptionsQueryHandler parentOptions,
+        IsParentAllowedQueryHandler parentAllowed,
         GetChildRecordsForParentQueryHandler childRecords,
         AddLookupFieldsCommandHandler addLookups,
         AddSummaryFieldCommandHandler addSummary,
+        UpdateSummaryFieldCommandHandler updateSummary,
         RemoveRelationshipFieldCommandHandler removeField,
-        UpdateDisplayKeyCommandHandler updateDisplayKey)
+        UpdateDisplayKeyCommandHandler updateDisplayKey,
+        UpdateReferenceFilterCommandHandler updateReferenceFilter)
     {
         _createHandler = createHandler;
         _deleteHandler = deleteHandler;
         _queries = queries;
         _parentOptions = parentOptions;
+        _parentAllowed = parentAllowed;
         _childRecords = childRecords;
         _addLookups = addLookups;
         _addSummary = addSummary;
+        _updateSummary = updateSummary;
         _removeField = removeField;
         _updateDisplayKey = updateDisplayKey;
+        _updateReferenceFilter = updateReferenceFilter;
     }
 
     /// <summary>Create a one-to-many relationship (provisions the reference, lookup and summary fields).</summary>
@@ -141,8 +153,29 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> AddSummary(Guid appId, Guid id, [FromBody] AddSummaryFieldRequest request, CancellationToken ct)
     {
-        var command = new AddSummaryFieldCommand(id, request.Label, request.Function, request.TargetFid, request.MatchingCriteria);
+        var command = new AddSummaryFieldCommand(id, request.Label, request.Function, request.TargetFid, request.MatchingCriteria,
+            new CombinedTextOptions(request.Delimiter ?? SummaryFunctions.DefaultCombinedTextDelimiter,
+                request.SortFid, request.SortDescending, request.DistinctValues));
         var result = await _addSummary.HandleAsync(command, ct);
+        return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
+    /// <summary>Edit a summary field of a relationship: label, calculation, matching criteria and Combined Text options.
+    /// A change of result type (e.g. Count → Combined Text) is refused with 409 while formulas, lookups or report
+    /// filters depend on the field.</summary>
+    [HttpPut("apps/{appId:guid}/relationships/{id:guid}/summaries/{fieldId:guid}")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> UpdateSummary(Guid appId, Guid id, Guid fieldId, [FromBody] UpdateSummaryFieldRequest request, CancellationToken ct)
+    {
+        var command = new UpdateSummaryFieldCommand(id, fieldId, request.Label, request.Function, request.TargetFid, request.MatchingCriteria,
+            new CombinedTextOptions(request.Delimiter ?? SummaryFunctions.DefaultCombinedTextDelimiter,
+                request.SortFid, request.SortDescending, request.DistinctValues),
+            request.CommitMessage);
+        var result = await _updateSummary.HandleAsync(command, ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
 
@@ -155,6 +188,21 @@ public class RelationshipsController : ControllerBase
     public async Task<IActionResult> UpdateDisplayKey(Guid appId, Guid id, [FromBody] UpdateDisplayKeyRequest request, CancellationToken ct)
     {
         var result = await _updateDisplayKey.HandleAsync(new UpdateDisplayKeyCommand(id, request.DisplayKeyFieldFid), ct);
+        return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
+    /// <summary>Set the dependent-dropdown conditions of the relationship's Reference field (empty clears them).</summary>
+    [HttpPut("apps/{appId:guid}/relationships/{id:guid}/reference-filter")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<RelationshipDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateReferenceFilter(Guid appId, Guid id, [FromBody] UpdateReferenceFilterRequest request, CancellationToken ct)
+    {
+        var conditions = request.Conditions
+            .Select(c => new ReferenceFilterConditionInput(c.FormFid, c.ParentFid, c.JunctionTableId, c.JunctionParentFid, c.JunctionValueFid))
+            .ToList();
+        var result = await _updateReferenceFilter.HandleAsync(new UpdateReferenceFilterCommand(id, conditions, request.FilterTree), ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
     }
 
@@ -187,11 +235,50 @@ public class RelationshipsController : ControllerBase
     [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<ParentOptionsResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ParentOptions(
-        Guid tableId, Guid relId, [FromQuery] string? search, [FromQuery] int take, CancellationToken ct)
+        Guid tableId, Guid relId, [FromQuery] string? search, [FromQuery] int take,
+        [FromQuery] string? filterValues, CancellationToken ct)
     {
-        var result = await _parentOptions.HandleAsync(relId, search, take, ct);
+        if (!TryParseFilterValues(filterValues, out var values))
+            return InvalidFilterValues();
+        var result = await _parentOptions.HandleAsync(relId, search, take, values, ct);
         return Ok(new ApiResponse<ParentOptionsResponse>(new ParentOptionsResponse(result.Headers, result.Options)));
     }
+
+    /// <summary>Whether one parent record passes the Reference field's dropdown filter (i.e. the picker
+    /// would offer it). A single exists-check, for callers that only need yes/no — e.g. deciding whether
+    /// an "Add child" action may link a new child to this parent — instead of loading picker options.</summary>
+    [HttpGet("tables/{tableId:guid}/relationships/{relId:guid}/parent-allowed/{recordId}")]
+    [RequireAppPermission(PermissionCodes.RecordsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<ParentAllowedResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ParentAllowed(
+        Guid tableId, Guid relId, string recordId, [FromQuery] string? filterValues, CancellationToken ct)
+    {
+        if (!TryParseFilterValues(filterValues, out var values))
+            return InvalidFilterValues();
+        var allowed = await _parentAllowed.HandleAsync(relId, recordId, values, ct);
+        return Ok(new ApiResponse<ParentAllowedResponse>(new ParentAllowedResponse(allowed)));
+    }
+
+    /// <summary>filterValues: JSON object {"&lt;fid&gt;": "&lt;current form value&gt;"} for a dependent dropdown.</summary>
+    private static bool TryParseFilterValues(string? filterValues, out Dictionary<int, string?>? values)
+    {
+        values = null;
+        if (string.IsNullOrWhiteSpace(filterValues)) return true;
+        try
+        {
+            values = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string?>>(filterValues)?
+                .Where(kv => int.TryParse(kv.Key, out _))
+                .ToDictionary(kv => int.Parse(kv.Key), kv => kv.Value);
+            return true;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    private IActionResult InvalidFilterValues() =>
+        BadRequest(new { error = new { code = "INVALID_FILTER_VALUES", message = "filterValues must be a JSON object of fid → value." } });
 
     /// <summary>
     /// Fetch child records already linked to a specific parent record, for rendering the

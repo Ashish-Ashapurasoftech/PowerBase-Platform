@@ -194,7 +194,7 @@ public class SavePipelineStepsCommandValidatorTests
 
         var result = await _validator.ValidateAsync(command);
 
-        result.Errors.Should().NotContain(e => e.ErrorMessage.Contains("A pipeline must begin with"));
+        result.Errors.Should().NotContain(e => e.ErrorMessage.Contains("A PowerFlow must begin with"));
     }
 
     [Fact]
@@ -212,7 +212,7 @@ public class SavePipelineStepsCommandValidatorTests
 
         // Assert
         result.IsValid.Should().BeFalse();
-        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("A pipeline must begin with"));
+        result.Errors.Should().Contain(e => e.ErrorMessage.Contains("A PowerFlow must begin with"));
     }
 
     [Fact]

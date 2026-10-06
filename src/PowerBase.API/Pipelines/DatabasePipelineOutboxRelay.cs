@@ -107,7 +107,8 @@ public class DatabasePipelineOutboxRelay : BackgroundService
                 var mainQueueRepo = scope.ServiceProvider.GetRequiredService<IMainPipelineQueueRepository>();
                 
                 // Phase 1: Claim Transaction (commits lease immediately in Tenant DB)
-                IReadOnlyList<PipelineOutboxItem> claimed = await pipelineRepo.ClaimOutboxItemsAsync(_workerId, ct);
+                IReadOnlyList<PipelineOutboxItem> claimed = await pipelineRepo.ClaimOutboxItemsAsync(
+                    _workerId, ct, _options.DatabaseQueue.RelayBatchSize);
                 if (claimed.Count == 0) return;
                 PipelineOutboxWakeNotifier.Wake();
 
@@ -125,12 +126,13 @@ public class DatabasePipelineOutboxRelay : BackgroundService
                         {
                             // Pipeline no longer exists, mark as skipped
                             await pipelineRepo.UpdateOutboxItemStatusAsync(
-                                item.Id, _workerId, 2, failedOn: DateTime.UtcNow, error: $"Pipeline with ID {item.PipelineId} not found.", ct: ct);
+                                item.Id, _workerId, 2, failedOn: DateTime.UtcNow, error: $"PowerFlow with ID {item.PipelineId} not found.", ct: ct);
                             continue;
                         }
 
                         // Map outbox item to main DB queue DTO
-                        var mainQueueJob = TenantPipelinePayloadMapper.MapFromOutbox(item, tenant.Id, tenant.PublicId, pipeline.PublicId);
+                        var mainQueueJob = TenantPipelinePayloadMapper.MapFromOutbox(
+                            item, tenant.Id, tenant.PublicId, pipeline.PublicId, _options.DatabaseQueue.MaxAttempts);
 
                         // Phase 2: Main DB insertion (outside Tenant DB transaction)
                         try
@@ -171,8 +173,15 @@ public class DatabasePipelineOutboxRelay : BackgroundService
                             }
                             else
                             {
-                                // Normal database failure (e.g. timeout), log and allow outbox lease to expire for retry
-                                _logger.LogError(dbEx, "Main DB Enqueue failed for MessageId {MessageId}. Relay lease will time out.", item.MessageId);
+                                // Record a bounded retry immediately. Waiting only for the lease to expire did not
+                                // increment AttemptCount, so poison rows could retry forever and never reach the
+                                // repository's terminal-failure threshold.
+                                await pipelineRepo.UpdateOutboxItemStatusAsync(
+                                    item.Id, _workerId, 0, error: dbEx.Message, ct: ct);
+                                _logger.LogError(dbEx,
+                                    "Main DB enqueue failed for MessageId {MessageId}. Scheduled bounded outbox retry.",
+                                    item.MessageId);
+                                PipelineOutboxWakeNotifier.Wake();
                             }
                         }
                     }

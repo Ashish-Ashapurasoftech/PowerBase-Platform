@@ -12,12 +12,13 @@ public sealed class CallablePipelineDispatcher(IPipelineRepository repository, I
 {
     public async Task<IReadOnlyList<Guid>> DispatchAsync(long tenantId, long ownerId, long callerPipelineId,
         Guid parentMessageId, Guid callerStepId, string executionPath, string? correlationId, int depth,
-        CallablePipelineDefinition definition, IReadOnlyDictionary<string, object?> arguments, CancellationToken ct, string? pipelineChain = null)
+        CallablePipelineDefinition definition, IReadOnlyDictionary<string, object?> arguments, CancellationToken ct, string? pipelineChain = null,
+        object? callingPipeline = null)
     {
         if (tenantId <= 0 || ownerId <= 0 || parentMessageId == Guid.Empty)
-            throw new PipelineNonRetryableException("Callable dispatch requires a tenant, pipeline owner and stable run message identity.");
+            throw new PipelineNonRetryableException("Callable dispatch requires a tenant, PowerFlow owner and stable run message identity.");
         var targets = await repository.FindCallablePipelinesAsync(ownerId, definition.Definition, ct);
-        if (targets.Count == 0) throw new PipelineNonRetryableException("No active pipeline owned by you matches this Call Definition.");
+        if (targets.Count == 0) return Array.Empty<Guid>();
         var messages = new List<Guid>();
         // Older manual queue jobs stored a correlation GUID in PipelineChain instead of a JSON array.
         var chain = string.IsNullOrWhiteSpace(pipelineChain) || Guid.TryParse(pipelineChain, out _)
@@ -27,12 +28,12 @@ public sealed class CallablePipelineDispatcher(IPipelineRepository repository, I
         {
             ct.ThrowIfCancellationRequested();
             if (target.CreatedBy != ownerId || !target.IsActive || target.IsDeleted)
-                throw new PipelineNonRetryableException("The called pipeline is unavailable.");
+                throw new PipelineNonRetryableException("The called PowerFlow is unavailable.");
             var steps = await repository.GetStepsByPipelineIdAsync(target.Id, ct);
             var trigger = steps.Where(step => !step.IsDeleted && step.ParentStepId == null).OrderBy(step => step.DisplayOrder).ThenBy(step => step.Id).FirstOrDefault();
             if (trigger is null || !trigger.IsValidated || trigger.Type != "trigger" || trigger.Subtype != "pipeline-called" ||
                 CallablePipelineDefinition.ValidateConfig(trigger.ConfigJson, false).Definition != definition.Definition)
-                throw new PipelineNonRetryableException("The called pipeline's definition changed. Retry with the matching definition.");
+                throw new PipelineNonRetryableException("The called PowerFlow's definition changed. Retry with the matching definition.");
 
             var messageId = CreateMessageId(parentMessageId, callerStepId, executionPath, target.PublicId);
             queue.QueueTask(new PipelineExecutionTask
@@ -46,7 +47,7 @@ public sealed class CallablePipelineDispatcher(IPipelineRepository repository, I
                     TriggerStepId = trigger.Id, TriggerStepRefId = trigger.RefId,
                     CallDefinition = definition.Definition, Arguments = arguments,
                     CallerPipelineId = callerPipelineId, CallerStepId = callerStepId,
-                    ParentMessageId = parentMessageId
+                    ParentMessageId = parentMessageId, CallingPipeline = callingPipeline
                 })
             });
             messages.Add(messageId);

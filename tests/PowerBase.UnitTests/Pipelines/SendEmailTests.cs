@@ -52,6 +52,15 @@ public class SendEmailTests
         Assert.Equal("<p>Hi</p>\n<table><tr><td>19</td></tr></table>", message.Body);
     }
 
+    [Theory]
+    [InlineData("Invoice\r\nSeptember", "Invoice September")]
+    [InlineData("  Customer\tUpdate\nReady  ", "Customer Update Ready")]
+    public void DynamicMultilineSubjectIsNormalizedForSmtp(string subject, string expected)
+    {
+        using var message = Build(new("to@example.com", subject, "Body"));
+        Assert.Equal(expected, message.Subject);
+    }
+
     [Fact]
     public void SharedMailboxOverridesFromWithoutChangingTransportAccount()
     {

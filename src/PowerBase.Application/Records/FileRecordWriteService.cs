@@ -83,7 +83,7 @@ public sealed class FileRecordWriteService : IRecordWriteService, IFileRecordWri
         bool isGridEditSave = false)
     {
         var oldRecord = existingRecord ??
-            await _recordRepository.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+            await _recordRepository.GetByPublicIdAsync(table, fields, recordPublicId, transaction, ct);
         var effectiveValues = new Dictionary<long, object?>(fieldValues);
 
         if (!bypassFileReservation)

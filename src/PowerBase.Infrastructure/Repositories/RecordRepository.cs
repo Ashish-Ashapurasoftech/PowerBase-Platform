@@ -224,20 +224,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     public async Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
-        AppField? primaryLabelField = null, CancellationToken ct = default)
+        AppField? primaryLabelField = null, CancellationToken ct = default,
+        IReadOnlyList<ReferenceFilterClause>? filters = null)
     {
         take = Math.Clamp(take, 1, 200);
 
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
+        if (filters is { Count: > 0 })
+            where += $" AND {BuildReferenceFilterSql(filters, parameters)}";
 
-        var searchColExpr = labelFields.Count > 0 ? LabelColumnExpr(labelFields[0]) : "CAST(Id AS NVARCHAR(400))";
+        // Computed label fields (Formula/Lookup/Summary) have no SQL column: they are selected as NULL
+        // placeholders and filled in by the caller after projection (see GetParentOptionsQueryHandler).
+        // They can't be searched or ordered by in SQL, so those fall to the first physical label
+        // field, or the row Id when there is none.
+        var physicalLabelFields = labelFields.Where(f => !IsComputedLabel(f)).ToList();
+        var searchColExpr = physicalLabelFields.Count > 0 ? LabelColumnExpr(physicalLabelFields[0]) : "CAST(Id AS NVARCHAR(400))";
         if (!string.IsNullOrWhiteSpace(search))
         {
             parameters.Add("search", $"%{search}%");
-            if (labelFields.Count > 0)
+            if (physicalLabelFields.Count > 0)
             {
-                var searchConditions = labelFields.Select(f => $"{LabelColumnExpr(f)} LIKE @search");
+                var searchConditions = physicalLabelFields.Select(f => $"{LabelColumnExpr(f)} LIKE @search");
                 where += $" AND ({string.Join(" OR ", searchConditions)})";
             }
             else
@@ -253,18 +261,18 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // dropdown's own "selection changed" moment) can hit GetById directly — it plays no part
         // in what gets submitted/stored.
         var selectCols = new List<string> { "CAST(Id AS NVARCHAR(400)) AS Id", "PublicId" };
-        if (labelFields.Count > 0) selectCols.Add($"{LabelColumnExpr(labelFields[0])} AS Value1");
-        if (labelFields.Count > 1) selectCols.Add($"{LabelColumnExpr(labelFields[1])} AS Value2");
-        if (labelFields.Count > 2) selectCols.Add($"{LabelColumnExpr(labelFields[2])} AS Value3");
+        if (labelFields.Count > 0) selectCols.Add($"{SelectLabelExpr(labelFields[0])} AS Value1");
+        if (labelFields.Count > 1) selectCols.Add($"{SelectLabelExpr(labelFields[1])} AS Value2");
+        if (labelFields.Count > 2) selectCols.Add($"{SelectLabelExpr(labelFields[2])} AS Value3");
         
         if (labelFields.Count == 0) selectCols.Add($"{searchColExpr} AS Value1");
 
-        var labelExpr = primaryLabelField is not null ? LabelColumnExpr(primaryLabelField) : searchColExpr;
+        var labelExpr = primaryLabelField is not null ? SelectLabelExpr(primaryLabelField) : searchColExpr;
         selectCols.Add($"{labelExpr} AS Label");
 
         var sql = $"""
             SELECT TOP (@take) {string.Join(", ", selectCols)}
-            FROM {PhysicalNaming.FullTableName(parentTable.Id)}
+            FROM {PhysicalNaming.FullTableName(parentTable.Id)} AS p
             WHERE {where}
             ORDER BY {searchColExpr}
             """;
@@ -296,6 +304,55 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
 
         return list;
+    }
+
+    public async Task<bool> MatchesReferenceFilterAsync(
+        AppTable parentTable, long parentRowId, IReadOnlyList<ReferenceFilterClause> filters, CancellationToken ct = default)
+    {
+        if (filters.Count == 0) return true;
+        var parameters = new DynamicParameters();
+        parameters.Add("parentRowId", parentRowId);
+        var sql = $"""
+            SELECT COUNT(1)
+            FROM {PhysicalNaming.FullTableName(parentTable.Id)} AS p
+            WHERE p.IsDeleted = 0 AND p.Id = @parentRowId AND {BuildReferenceFilterSql(filters, parameters)}
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct)) > 0;
+    }
+
+    /// <summary>Dependent-dropdown predicate over the parent table aliased <c>p</c>. Values are always
+    /// bound as parameters; column names come from field metadata (integers), never user text.</summary>
+    private static string BuildReferenceFilterSql(IReadOnlyList<ReferenceFilterClause> filters, DynamicParameters parameters)
+    {
+        static string Col(AppField f) => f.IsSystem && !string.IsNullOrEmpty(f.PhysicalColumnName)
+            ? f.PhysicalColumnName!
+            : PhysicalNaming.ColumnName(f.Fid!.Value);
+
+        var parts = new List<string>();
+        for (var i = 0; i < filters.Count; i++)
+        {
+            var f = filters[i];
+            if (f.Tree is not null)
+            {
+                // Its own parameter range, clear of the fv{i} names the other clauses use.
+                var treeIdx = 1000 * (i + 1);
+                var fragment = BuildTreeFragment(f.Tree, parameters, ref treeIdx, BuildFieldLookup(f.TreeFields ?? []), lookupAlias: "p");
+                if (!string.IsNullOrEmpty(fragment)) parts.Add($"({fragment})");
+                continue;
+            }
+            if (string.IsNullOrWhiteSpace(f.Value)) { parts.Add("1 = 0"); continue; }
+            var name = $"fv{i}";
+            parameters.Add(name, f.Value);
+
+            if (f.ParentField is not null)
+                parts.Add($"CAST(p.{Col(f.ParentField)} AS NVARCHAR(400)) = @{name}");
+            else if (f.JunctionTable is not null && f.JunctionParentField is not null && f.JunctionValueField is not null)
+                parts.Add($"EXISTS (SELECT 1 FROM {PhysicalNaming.FullTableName(f.JunctionTable.Id)} AS j " +
+                          $"WHERE j.IsDeleted = 0 AND j.{Col(f.JunctionParentField)} = p.Id " +
+                          $"AND CAST(j.{Col(f.JunctionValueField)} AS NVARCHAR(400)) = @{name})");
+        }
+        return parts.Count == 0 ? "1 = 1" : string.Join(" AND ", parts);
     }
 
     public async Task<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>> GetRowsByIdsAsync(
@@ -397,39 +454,45 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<IReadOnlyDictionary<object, object?>> AggregateByReferenceAsync(
         AppTable childTable, int referenceFid, string function, int? targetFid,
         IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree, string? targetSubField = null,
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null,
         CancellationToken ct = default)
     {
         var result = new Dictionary<object, object?>();
         if (parentKeyValues.Count == 0) return result;
 
         var refCol = PhysicalNaming.ColumnName(referenceFid);
-        // Address sub-field targeting: aggregate the JSON_VALUE-extracted sub-key instead of the
-        // raw column, same JSON_VALUE pattern already used for Address report filters below.
-        string TargetColExpr() => targetFid.HasValue
-            ? (string.IsNullOrWhiteSpace(targetSubField)
-                ? PhysicalNaming.ColumnName(targetFid.Value)
-                : $"JSON_VALUE({PhysicalNaming.ColumnName(targetFid.Value)}, '$.{System.Text.RegularExpressions.Regex.Replace(targetSubField, "[^a-zA-Z0-9_]", "")}')")
-            : "";
+        // Aggregated over the inner query's TargetValue column: a lookup target is a subquery on
+        // the parent table, and SQL Server can't aggregate an expression containing a subquery.
+        const string target = "TargetValue";
         var aggExpr = function switch
         {
             "Count" => "COUNT(*)",
             "Exists" => "CAST(CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS BIT)",
-            "Sum" when targetFid.HasValue => $"SUM(CAST({TargetColExpr()} AS DECIMAL(18,4)))",
-            "Avg" when targetFid.HasValue => $"AVG(CAST({TargetColExpr()} AS DECIMAL(18,4)))",
-            "Min" when targetFid.HasValue => $"MIN({TargetColExpr()})",
-            "Max" when targetFid.HasValue => $"MAX({TargetColExpr()})",
+            "Sum" when targetFid.HasValue => $"SUM(CAST({target} AS DECIMAL(18,4)))",
+            "Avg" when targetFid.HasValue => $"AVG(CAST({target} AS DECIMAL(18,4)))",
+            "Min" when targetFid.HasValue => $"MIN({target})",
+            "Max" when targetFid.HasValue => $"MAX({target})",
+            // Any column type: cast to text so NULLIF can also drop blank strings (a cleared text
+            // field) alongside the NULLs COUNT already skips — NULLIF(decimalCol, '') would throw.
+            "DistinctCount" when targetFid.HasValue => $"COUNT(DISTINCT NULLIF(CAST({target} AS NVARCHAR(MAX)), N''))",
             _ => "COUNT(*)",
         };
+        var targetSelect = targetFid.HasValue ? $", {TargetColumnExpr(targetFid.Value, targetSubField, fieldLookup)} AS {target}" : "";
 
         var parameters = new DynamicParameters();
         parameters.Add("parentKeyValues", parentKeyValues);
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup, parentScope);
 
+        // Aliased so a "parentField" condition's subquery can name this row's reference column
+        // (c.f_X) without colliding with the parent table's own same-named columns.
         var sql = $"""
-            SELECT {refCol} AS ParentKey, {aggExpr} AS Value
-            FROM {PhysicalNaming.FullTableName(childTable.Id)}
-            WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues{filterWhere}
-            GROUP BY {refCol}
+            SELECT ParentKey, {aggExpr} AS Value
+            FROM (
+                SELECT {refCol} AS ParentKey{targetSelect}
+                FROM {PhysicalNaming.FullTableName(childTable.Id)} {ChildAlias}
+                WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues{filterWhere}
+            ) matched
+            GROUP BY ParentKey
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
@@ -449,6 +512,108 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         return result;
     }
+
+    public async Task<IReadOnlyList<(object ParentKey, object Value)>> ListValuesByReferenceAsync(
+        AppTable childTable, int referenceFid, int targetFid, string? targetSubField,
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree,
+        int? sortFid, bool sortDescending, IReadOnlyDictionary<long, AppField>? fieldLookup = null,
+        ParentFieldScope? parentScope = null, CancellationToken ct = default)
+    {
+        var result = new List<(object, object)>();
+        if (parentKeyValues.Count == 0) return result;
+
+        var refCol = PhysicalNaming.ColumnName(referenceFid);
+        var targetExpr = TargetColumnExpr(targetFid, targetSubField, fieldLookup);
+        var dir = sortDescending ? "DESC" : "ASC";
+        var order = sortFid.HasValue ? $"{TargetColumnExpr(sortFid.Value, null, fieldLookup)} {dir}, Id {dir}" : $"Id {dir}";
+
+        var parameters = new DynamicParameters();
+        parameters.Add("parentKeyValues", parentKeyValues);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup, parentScope);
+
+        var sql = $"""
+            SELECT {refCol} AS ParentKey, {targetExpr} AS Value
+            FROM {PhysicalNaming.FullTableName(childTable.Id)} {ChildAlias}
+            WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues AND {targetExpr} IS NOT NULL{filterWhere}
+            ORDER BY {refCol}, {order}
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        foreach (var row in rows)
+        {
+            var dict = (IDictionary<string, object>)row;
+            if (dict.TryGetValue("ParentKey", out var pk) && pk is not null && pk != DBNull.Value
+                && dict.TryGetValue("Value", out var v) && v is not null && v != DBNull.Value)
+                result.Add((pk, v));
+        }
+        return result;
+    }
+
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListRowsByReferenceAsync(
+        AppTable childTable, IReadOnlyList<AppField> fields, int referenceFid,
+        IReadOnlyCollection<object> parentKeyValues, FilterGroup? filterTree,
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null,
+        CancellationToken ct = default)
+    {
+        if (parentKeyValues.Count == 0) return [];
+
+        var refCol = PhysicalNaming.ColumnName(referenceFid);
+        var parameters = new DynamicParameters();
+        parameters.Add("parentKeyValues", parentKeyValues);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup, parentScope);
+
+        var sql = $"""
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
+            FROM {PhysicalNaming.FullTableName(childTable.Id)} {ChildAlias}
+            WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues{filterWhere}
+            ORDER BY Id
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
+
+        var enc = await GetEncryptionContextAsync(connection, childTable.AppId, null, ct);
+        await enc.DecryptRowsAsync(mutableRows, fields, ct);
+        return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
+    }
+
+    /// <summary>The SQL expression for a summary's target (or Combined Text sort): its f_{fid}
+    /// column, a system field's own column (Id, CreatedOn, …), a Lookup's parent column (see
+    /// <see cref="LookupColumnExpr"/>), or — for a composite Address field's sub-key — the
+    /// JSON_VALUE-extracted part (same pattern as Address report filters).</summary>
+    private static string TargetColumnExpr(int targetFid, string? targetSubField, IReadOnlyDictionary<long, AppField>? fieldLookup)
+    {
+        if (fieldLookup is not null && fieldLookup.TryGetValue(targetFid, out var field))
+        {
+            if (SummaryLookupSources.IsLookup(field)) return LookupColumnExpr(field) ?? "NULL";
+            if (field.IsSystem) return ResolveColumnName(field, targetFid);
+        }
+        return string.IsNullOrWhiteSpace(targetSubField)
+            ? PhysicalNaming.ColumnName(targetFid)
+            : $"JSON_VALUE({PhysicalNaming.ColumnName(targetFid)}, '$.{SafeJsonKey(targetSubField)}')";
+    }
+
+    /// <summary>A summary query's value for a child Lookup field: the parent column it pulls down,
+    /// read with a correlated subquery through the child's reference column (the child is aliased
+    /// <see cref="ChildAlias"/>) — the same value the record read projects, a deleted parent giving
+    /// NULL. Null when the lookup's settings are incomplete.</summary>
+    private static string? LookupColumnExpr(AppField lookup, string rowAlias = ChildAlias)
+    {
+        var s = SummaryLookupSources.Settings(lookup);
+        if (s is not { SourceTableId: long sourceTableId, ReferenceFid: int refFid, SourceFid: int sourceFid }) return null;
+        var sourceCol = sourceFid switch
+        {
+            1 => "CreatedOn", 2 => "ModifiedOn", 3 => "Id", 4 => "CreatedBy", 5 => "ModifiedBy",
+            _ => PhysicalNaming.ColumnName(sourceFid),
+        };
+        var value = string.IsNullOrWhiteSpace(s.SourceSubField)
+            ? $"lk.{sourceCol}"
+            : $"JSON_VALUE(lk.{sourceCol}, '$.{SafeJsonKey(s.SourceSubField)}')";
+        return $"(SELECT {value} FROM {PhysicalNaming.FullTableName(sourceTableId)} lk "
+             + $"WHERE lk.Id = {rowAlias}.{PhysicalNaming.ColumnName(refFid)} AND lk.IsDeleted = 0)";
+    }
+
+    private static string SafeJsonKey(string key) => System.Text.RegularExpressions.Regex.Replace(key, "[^a-zA-Z0-9_]", "");
 
     public async Task<IReadOnlyDictionary<long, object?>> GetColumnValuesByIdsAsync(
         AppTable table, string columnName, IReadOnlyCollection<long> ids, CancellationToken ct = default)
@@ -536,12 +701,27 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return result;
     }
 
+    private static bool IsComputedLabel(AppField field)
+        => field.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(field.TypeCode);
+
+    /// <summary>SELECT-list expression for a picker label: the field's column, or a NULL
+    /// placeholder for a computed field the caller fills in after projection.</summary>
+    private static string SelectLabelExpr(AppField field)
+        => IsComputedLabel(field) ? "CAST(NULL AS NVARCHAR(400))" : LabelColumnExpr(field);
+
     private static string LabelColumnExpr(AppField? labelField)
     {
         if (labelField is null) return "CAST(Id AS NVARCHAR(400))";
+
+        // Computed fields (Formula/Lookup/Summary/ReportLink) have no physical SQL column.
+        // If one somehow reaches here, fall back to the record Id rather than generating an
+        // invalid column reference that would crash the query with "Invalid column name 'f_N'".
+        if (!labelField.Fid.HasValue || PhysicalNaming.IsComputedTypeCode(labelField.TypeCode))
+            return "CAST(Id AS NVARCHAR(400))";
+
         var col = labelField.IsSystem && !string.IsNullOrEmpty(labelField.PhysicalColumnName)
             ? labelField.PhysicalColumnName!
-            : PhysicalNaming.ColumnName(labelField.Fid!.Value);
+            : PhysicalNaming.ColumnName(labelField.Fid.Value);
         return $"CAST({col} AS NVARCHAR(400))";
     }
 
@@ -553,7 +733,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
            && (enc.IsAppEncrypted || field.IsEncrypted);
 
     public async Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
-        AppTable table, IReadOnlyList<AppField> fields, Guid publicId, CancellationToken ct = default)
+        AppTable table, IReadOnlyList<AppField> fields, Guid publicId, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var fieldCols = BuildFieldColumnList(fields);
         var sql = $"""
@@ -561,6 +741,22 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             FROM {PhysicalNaming.FullTableName(table.Id)}
             WHERE PublicId = @publicId AND IsDeleted = 0
             """;
+
+        // Same self-deadlock risk as HasValueDuplicateAsync: a pipeline action step running mid-
+        // transaction (e.g. Update Record / File Upload steps in PipelineEngine) calls this as
+        // ApplyAsync's "load current row" fallback. A second connection here would block on locks
+        // the caller's own still-open transaction already holds on this table.
+        if (transaction is not null)
+        {
+            var txRow = await transaction.Connection!.QuerySingleOrDefaultAsync(
+                new CommandDefinition(sql, new { publicId }, transaction, cancellationToken: ct));
+            if (txRow is null) throw new NotFoundException("Record", publicId);
+
+            var txDict = ToDictionary(txRow);
+            var txEnc = await GetEncryptionContextAsync(transaction.Connection!, table.AppId, transaction, ct);
+            await txEnc.DecryptRowAsync((System.Collections.Generic.IDictionary<string, object?>)txDict, fields, ct);
+            return txDict;
+        }
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var row = await connection.QuerySingleOrDefaultAsync(
@@ -1488,29 +1684,38 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return " AND CreatedBy = @ownerUserId";
     }
 
+    /// <summary>The alias the summary queries (AggregateByReferenceAsync / ListValuesByReferenceAsync)
+    /// give the child table, which a "parentField" condition's correlated subquery refers back to.</summary>
+    private const string ChildAlias = "c";
+
+    /// <param name="parentScope">Only for a query whose FROM aliases the child table as
+    /// <see cref="ChildAlias"/> — "parentField" conditions are no-ops without it.</param>
     private static string BuildFilterTreeWhere(FilterGroup? group, DynamicParameters parameters,
-        IReadOnlyDictionary<long, AppField>? fieldLookup = null)
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null)
     {
         if (group is null || group.Nodes.Count == 0) return string.Empty;
         var paramIdx = 0;
-        var fragment = BuildTreeFragment(group, parameters, ref paramIdx, fieldLookup);
+        var fragment = BuildTreeFragment(group, parameters, ref paramIdx, fieldLookup, parentScope);
         return string.IsNullOrEmpty(fragment) ? string.Empty : $" AND ({fragment})";
     }
 
+    /// <param name="lookupAlias">For a query that isn't a summary (no <paramref name="parentScope"/>) but filters a
+    /// table's own Lookup fields — the reference dropdown filters the parent table aliased <c>p</c>: the alias
+    /// of the row that holds the lookup's reference column.</param>
     private static string BuildTreeFragment(FilterGroup group, DynamicParameters parameters, ref int paramIdx,
-        IReadOnlyDictionary<long, AppField>? fieldLookup = null)
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null, string? lookupAlias = null)
     {
         var parts = new List<string>();
         foreach (var node in group.Nodes)
         {
             if (node.Condition is { } cond)
             {
-                var clause = BuildConditionClause(cond, parameters, ref paramIdx, fieldLookup);
+                var clause = BuildConditionClause(cond, parameters, ref paramIdx, fieldLookup, parentScope, lookupAlias);
                 if (clause is not null) parts.Add(clause);
             }
             else if (node.Group is { } sub && sub.Nodes.Count > 0)
             {
-                var subSql = BuildTreeFragment(sub, parameters, ref paramIdx, fieldLookup);
+                var subSql = BuildTreeFragment(sub, parameters, ref paramIdx, fieldLookup, parentScope, lookupAlias);
                 if (!string.IsNullOrEmpty(subSql)) parts.Add($"({subSql})");
             }
         }
@@ -1611,29 +1816,72 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return escaped.Replace("*", "%").Replace("?", "_");
     }
 
-    private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
-        IReadOnlyDictionary<long, AppField>? fieldLookup = null)
+    /// <summary>A numeric column as text the way it reads on screen — "42500", "5.5", not the
+    /// DECIMAL(18,4) storage form "42500.0000" — so text-style operators (contains, starts with,
+    /// wildcard …) match what the user sees: "*5" finds 5 and 15, "contains 0" doesn't find every
+    /// number. Trailing zeros after the decimal point go, then a trailing point; integer columns
+    /// (Record ID#, user ids) have no point and pass through unchanged.</summary>
+    private static string NumberAsShownExpr(string colExpr)
     {
-        // "the value in the field" conditions legitimately carry no Value at all (ValueFieldId
-        // is the comparison target instead) — don't let the empty-value skip below drop them.
-        // "ask the user" conditions DO still fall through this skip when left unresolved (no
-        // Value AND no ValueFieldId) — that's the intended no-op behavior documented at the call
-        // site in RunReportQueryHandler.
-        var isFieldToFieldComparison = string.Equals(cond.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && cond.ValueFieldId.HasValue;
+        var text = $"CAST({colExpr} AS NVARCHAR(50))";
+        var noTrailingZeros = $"REPLACE(RTRIM(REPLACE({text}, '0', ' ')), ' ', '0')";
+        return $"(CASE WHEN CHARINDEX('.', {text}) = 0 THEN {text} "
+             + $"WHEN RIGHT({noTrailingZeros}, 1) = '.' THEN LEFT({noTrailingZeros}, LEN({noTrailingZeros}) - 1) "
+             + $"ELSE {noTrailingZeros} END)";
+    }
+
+    /// <summary>True for a Date &amp; Time column (a DateTime field, or the system Date Created /
+    /// Date Modified), whose values carry a time of day.</summary>
+    private static bool IsDateTimeColumn(string col, AppField? field) =>
+        col is "CreatedOn" or "ModifiedOn"
+        || (field is not null && field.TypeCode.Equals("DateTime", StringComparison.OrdinalIgnoreCase));
+
+    private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null, string? lookupAlias = null)
+    {
+        // "the value in the field" / "the value in the parent's field" conditions legitimately
+        // carry no Value at all (ValueFieldId is the comparison target instead) — don't let the
+        // empty-value skip below drop them. "ask the user" conditions DO still fall through this
+        // skip when left unresolved (no Value AND no ValueFieldId) — that's the intended no-op
+        // behavior documented at the call site in RunReportQueryHandler.
+        var isParentFieldComparison = ParentFieldScope.IsParentFieldMode(cond.ValueMode) && cond.ValueFieldId.HasValue;
+        var isFieldToFieldComparison = isParentFieldComparison
+            || (string.Equals(cond.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && cond.ValueFieldId.HasValue);
 
         // Skip empty filter values for operators that require a value
         if (cond.Operator is not ("isEmpty" or "isNotEmpty") && string.IsNullOrEmpty(cond.Value) && !isFieldToFieldComparison)
             return null;
 
+        // In a summary query (parentScope set) a Lookup is filtered on the parent column it pulls
+        // down, typed as that field — see LookupColumnExpr.
+        AppField? lookupAsSource = null;
+        string? lookupCol = null;
+        var rowAlias = lookupAlias ?? ChildAlias;
+        if ((parentScope is not null || lookupAlias is not null) && fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var lookupField)
+            && SummaryLookupSources.IsLookup(lookupField) && LookupColumnExpr(lookupField, rowAlias) is { } lookupExpr)
+        {
+            lookupCol = lookupExpr;
+            lookupAsSource = new AppField
+            {
+                Fid = lookupField.Fid,
+                TypeCode = SummaryLookupSources.Settings(lookupField)?.SourceTypeCode ?? "Text",
+            };
+        }
+
         // Skip formula/computed fields — they have no physical column; filtered in-memory instead.
-        if (fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var checkField)
+        if (lookupCol is null && fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var checkField)
             && PhysicalNaming.IsComputedTypeCode(checkField.TypeCode))
             return null;
 
         // Use physical column name or resolved Fid/Id column name
         AppField? resolvedField = null;
         string col;
-        if (cond.FieldId == -1)
+        if (lookupCol is not null)
+        {
+            resolvedField = lookupAsSource;
+            col = lookupCol;
+        }
+        else if (cond.FieldId == -1)
         {
             col = "PublicId";
         }
@@ -1655,8 +1903,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             };
         }
 
-        // Range field: SubField "start" targets f_{fid}, "end" targets f_{fid}_e
-        if (resolvedField != null && PhysicalNaming.IsRangeTypeCode(resolvedField.TypeCode) && !string.IsNullOrWhiteSpace(cond.SubField))
+        // Range field: SubField "start" targets f_{fid}, "end" targets f_{fid}_e (never a lookup —
+        // summaries refuse range lookups in criteria)
+        if (lookupCol is null && resolvedField != null && PhysicalNaming.IsRangeTypeCode(resolvedField.TypeCode) && !string.IsNullOrWhiteSpace(cond.SubField))
         {
             col = cond.SubField == "end"
                 ? PhysicalNaming.EndColumnName((int)cond.FieldId)
@@ -1685,13 +1934,36 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // (Address-subfield-vs-Address-subfield is out of scope) — the target always resolves to
         // its own plain column. Native SQL NULL semantics apply with no special-casing: a NULL on
         // either side makes the comparison false, same as every other operator in this method.
+        //
+        // "the value in the parent's field" is the same comparison, with the target read from the
+        // parent record this child references: a correlated subquery on the parent's primary key,
+        // so one query still covers every parent on the page. A blank parent value matches no
+        // children. Without a parentScope (i.e. outside a summary query) it's a no-op.
         if (isFieldToFieldComparison)
         {
             i--; // no @pname needed for a column-vs-column comparison — release the reserved slot
-            if (fieldLookup == null || !fieldLookup.TryGetValue(cond.ValueFieldId!.Value, out var targetField)
-                || PhysicalNaming.IsComputedTypeCode(targetField.TypeCode))
-                return null;
-            var colExpr2 = ResolveColumnName(targetField, cond.ValueFieldId.Value);
+            string colExpr2;
+            if (isParentFieldComparison)
+            {
+                if (parentScope is null
+                    || !parentScope.ParentFieldsByFid.TryGetValue(cond.ValueFieldId!.Value, out var parentField)
+                    || PhysicalNaming.IsComputedTypeCode(parentField.TypeCode))
+                    return null;
+                var parentCol = ResolveColumnName(parentField, cond.ValueFieldId.Value);
+                colExpr2 = $"(SELECT p.{parentCol} FROM {PhysicalNaming.FullTableName(parentScope.ParentTableId)} p "
+                         + $"WHERE p.Id = {ChildAlias}.{PhysicalNaming.ColumnName(parentScope.ReferenceFid)})";
+            }
+            else
+            {
+                if (fieldLookup == null || !fieldLookup.TryGetValue(cond.ValueFieldId!.Value, out var targetField))
+                    return null;
+                if ((parentScope is not null || lookupAlias is not null) && SummaryLookupSources.IsLookup(targetField) && LookupColumnExpr(targetField, rowAlias) is { } otherLookup)
+                    colExpr2 = otherLookup;
+                else if (PhysicalNaming.IsComputedTypeCode(targetField.TypeCode))
+                    return null;
+                else
+                    colExpr2 = ResolveColumnName(targetField, cond.ValueFieldId.Value);
+            }
             if (cond.Operator == "date_eq")
                 return $"CAST({colExpr} AS DATE) = CAST({colExpr2} AS DATE)";
             var sqlOp = cond.Operator switch
@@ -1760,7 +2032,32 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             resolvedField.TypeCode.Equals("Address", StringComparison.OrdinalIgnoreCase)
         );
 
-        var stringColExpr = isStringCol ? colExpr : $"CAST({colExpr} AS NVARCHAR(MAX))";
+        var stringColExpr = isStringCol ? colExpr
+            : isNumericCol ? NumberAsShownExpr(colExpr)
+            : $"CAST({colExpr} AS NVARCHAR(MAX))";
+
+        // A Date & Time column against a plain date ("is after 09-28-2026", "today", "during the
+        // current day" — which arrives here as gte/lte of dates) compares whole days: the date
+        // means that day, not its midnight. Otherwise "is on or before today" would drop today's
+        // records and "is after today" keep them. Kept sargable: ranges on the column itself.
+        if (IsDateTimeColumn(col, resolvedField) && string.IsNullOrWhiteSpace(cond.SubField)
+            && cond.Operator is "eq" or "ne" or "gt" or "gte" or "lt" or "lte"
+            && DateTime.TryParseExact(cond.Value, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var day))
+        {
+            var nextDay = $"{pname}next";
+            p.Add(pname, day);
+            p.Add(nextDay, day.AddDays(1));
+            return cond.Operator switch
+            {
+                "eq" => $"({colExpr} >= @{pname} AND {colExpr} < @{nextDay})",
+                "ne" => $"({colExpr} < @{pname} OR {colExpr} >= @{nextDay})",
+                "gt" => $"{colExpr} >= @{nextDay}",
+                "gte" => $"{colExpr} >= @{pname}",
+                "lt" => $"{colExpr} < @{pname}",
+                _ => $"{colExpr} < @{nextDay}",   // lte
+            };
+        }
 
         switch (cond.Operator)
         {
@@ -1806,8 +2103,23 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 var targetExpr = (isNumericCol && val is string) ? stringColExpr : colExpr;
                 return $"{targetExpr} <= @{pname}";
             }
-            case "date_eq":        p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) = CAST(@{pname} AS DATE)";
-            case "date_ne":        p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) <> CAST(@{pname} AS DATE)";
+            //case "date_eq": p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) = CAST(@{pname} AS DATE)";
+            //case "date_ne": p.Add(pname, formatVal(cond.Value)); return $"CAST({colExpr} AS DATE) <> CAST(@{pname} AS DATE)";
+
+            // date_* operators compare a calendar day, not an instant. The column stores a UTC
+            // instant (Date Created/Modified are timestamps, not dates), and the picker value is
+            // the exact UTC instant of the picked day's local midnight — so CAST(col AS DATE) =
+            // CAST(@val AS DATE) truncates the column to its own UTC calendar day, which is not
+            // necessarily the local day the user picked (two records "the same local day" can sit
+            // on different UTC calendar days depending on time-of-day). A day-window comparison
+            // anchored on that local-midnight instant matches the day the user actually picked,
+            // regardless of which UTC day each row's timestamp happens to fall on.
+            case "date_eq":  p.Add(pname, formatVal(cond.Value)); return $"({colExpr} >= @{pname} AND {colExpr} < DATEADD(day, 1, @{pname}))";
+            case "date_ne":  p.Add(pname, formatVal(cond.Value)); return $"NOT ({colExpr} >= @{pname} AND {colExpr} < DATEADD(day, 1, @{pname}))";
+            case "date_gt":  p.Add(pname, formatVal(cond.Value)); return $"{colExpr} >= DATEADD(day, 1, @{pname})";
+            case "date_gte": p.Add(pname, formatVal(cond.Value)); return $"{colExpr} >= @{pname}";
+            case "date_lt":  p.Add(pname, formatVal(cond.Value)); return $"{colExpr} < @{pname}";
+            case "date_lte": p.Add(pname, formatVal(cond.Value)); return $"{colExpr} < DATEADD(day, 1, @{pname})";
             case "contains":       p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) LIKE @{pname}";
             case "notContains":    p.Add(pname, $"%{cond.Value?.ToLower()}%"); return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
             case "startsWith":     p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) LIKE @{pname}";
@@ -1835,8 +2147,22 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 var op = cond.Operator == "includes" ? "LIKE" : "NOT LIKE";
                 return $"LOWER({normalizedExpr}) {op} @{pname}";
             }
-            case "isEmpty":    i--; return $"({colExpr} IS NULL OR {colExpr} = '')";
-            case "isNotEmpty": i--; return $"({colExpr} IS NOT NULL AND {colExpr} <> '')";
+            // '' only means blank in a column that stores text. Anywhere else SQL Server converts
+            // it instead: a DECIMAL column throws ("Error converting data type varchar to
+            // numeric"), an INT column matches 0 and a DATE column 1900-01-01 — so those check
+            // NULL alone. The system columns (Fid 1-5) never store text; any other column whose
+            // field isn't known here keeps both checks.
+            case "isEmpty":
+            case "isNotEmpty":
+            {
+                i--;
+                var storesText = resolvedField is not null
+                    ? PhysicalNaming.IsTextStoringTypeCode(resolvedField.TypeCode)
+                    : cond.FieldId > 5;
+                var isEmpty = cond.Operator == "isEmpty";
+                if (!storesText) return isEmpty ? $"{colExpr} IS NULL" : $"{colExpr} IS NOT NULL";
+                return isEmpty ? $"({colExpr} IS NULL OR {colExpr} = '')" : $"({colExpr} IS NOT NULL AND {colExpr} <> '')";
+            }
             case "in":
             case "notIn":
             {
@@ -2044,11 +2370,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, cancellationToken: ct));
     }
 
-    public async Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, CancellationToken ct = default)
+    public async Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(field.Fid!.Value);
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        await using var ownedConnection = transaction is null ? await ConnectionFactory.CreateAsync(ct) : null;
+        var connection = transaction?.Connection ?? ownedConnection!;
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
 
         if (enc.IsActive && NeedsDecrypt(enc, field))
         {
@@ -2061,7 +2388,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                   AND (@excludeRecordId IS NULL OR Id <> @excludeRecordId)
                 """;
             var rawCiphers = await connection.QueryAsync<string>(
-                new CommandDefinition(sqlEnc, new { excludeRecordId }, cancellationToken: ct));
+                new CommandDefinition(sqlEnc, new { excludeRecordId }, transaction, cancellationToken: ct));
 
             foreach (var cipher in rawCiphers)
             {
@@ -2084,6 +2411,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                   AND (@excludeRecordId IS NULL OR Id <> @excludeRecordId)
             ) THEN 1 ELSE 0 END AS BIT)
             """;
+
+        // When called mid-write (e.g. bulk upsert's per-row constraint check), the caller's own
+        // transaction may already hold locks on this table from earlier rows in the same commit.
+        // Opening a second connection here — instead of reusing transaction.Connection — makes
+        // that second connection block on those locks under READ COMMITTED, while the first
+        // connection sits waiting for THIS call to return: a self-deadlock that only resolves via
+        // command timeout ("Execution Timeout Expired"). Same fix as UpdateAsync/CreateAsync.
+        if (transaction is not null)
+        {
+            return await transaction.Connection!.ExecuteScalarAsync<bool>(
+                new CommandDefinition(sql, new { value, excludeRecordId }, transaction, cancellationToken: ct));
+        }
+
         return await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(sql, new { value, excludeRecordId }, cancellationToken: ct));
     }

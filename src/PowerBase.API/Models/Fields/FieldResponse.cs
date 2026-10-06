@@ -23,4 +23,8 @@ public class FieldResponse
     public int? Fid { get; init; }
     public string? Settings { get; init; }
     public DateTime CreatedOn { get; init; }
+    /// <summary>Only on Min/Max Summary fields, and only from GET /tables/{publicId}: the current
+    /// Settings JSON of the child field being summarized, so the value (e.g. the latest Due Date)
+    /// renders in that field's display format. Read-only — never sent back when saving a field.</summary>
+    public string? SummarySourceSettings { get; init; }
 }

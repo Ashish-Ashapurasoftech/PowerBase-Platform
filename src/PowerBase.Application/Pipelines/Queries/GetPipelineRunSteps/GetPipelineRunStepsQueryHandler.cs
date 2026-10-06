@@ -21,7 +21,7 @@ public class GetPipelineRunStepsQueryHandler
     {
         var run = await _pipelineRepo.GetRunByPublicIdAsync(query.RunPublicId, ct);
         if (run == null)
-            throw new NotFoundException("PipelineRun", query.RunPublicId);
+            throw new NotFoundException("PowerFlowRun", query.RunPublicId);
 
         var steps = await _pipelineRepo.GetStepsByPipelineIdAsync(run.PipelineId, ct);
         var stepsMap = steps.ToDictionary(s => s.Id);

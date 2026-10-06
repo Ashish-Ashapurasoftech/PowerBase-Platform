@@ -50,7 +50,8 @@ public class UpdateFieldSystemFieldCoercionTests
         _tableRepo, _fieldRepo, _recordRepo, _auditRepo, _schemaEngine,
         new FieldSettingsGuard(_permRepo, _recordRepo, _settingsRegistry),
         new FieldVersionService(_fieldVersionRepo, _queryContext),
-        _uow, _fieldTypeRepo, _messagePublisher, _queryContext, _searchService);
+        _uow, _fieldTypeRepo, _messagePublisher, _queryContext, _searchService,
+        Substitute.For<IRelationshipRepository>());
 
     private AppTable MakeTable(long id = 5)
     {

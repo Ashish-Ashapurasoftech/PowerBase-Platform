@@ -1,5 +1,6 @@
 using System.Linq;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Relationships;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
@@ -13,16 +14,19 @@ public class DeleteFieldCommandHandler
     private readonly IPipelineRepository _pipelineRepo;
     private readonly IAuditRepository _auditRepo;
     private readonly ITenantUnitOfWork _uow;
+    private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
 
     public DeleteFieldCommandHandler(
-        IAppTableRepository tableRepo, 
-        IAppFieldRepository fieldRepo, 
+        IAppTableRepository tableRepo,
+        IAppFieldRepository fieldRepo,
         IPipelineRepository pipelineRepo,
         IAuditRepository auditRepo,
         ITenantUnitOfWork uow,
+        IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null)
     {
+        _relRepo = relRepo;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -47,6 +51,10 @@ public class DeleteFieldCommandHandler
 
         if (field.IsSystem)
             throw new UnauthorizedActionException("System fields cannot be deleted.");
+
+        await RelationshipKeyFieldDeleteGuard.EnsureNotRelationshipKeyAsync(table, [field], _relRepo, ct);
+        ReferenceFilterDependencyGuard.EnsureNotControlling(
+            table, await _fieldRepo.ListByTableAsync(table.Id, ct), [field]);
 
         // Dependency Check: Pipeline Field Lock
         if (field.Fid.HasValue)

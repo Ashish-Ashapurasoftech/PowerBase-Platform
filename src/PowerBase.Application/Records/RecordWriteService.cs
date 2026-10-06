@@ -134,13 +134,23 @@ public sealed class RecordWriteService : IRecordWriteService
         Guid? reportId = null,
         bool isGridEditSave = false)
     {
-        // Reference fields must point at an existing parent record; a value submitted as a
-        // human key is resolved to the parent row Id here.
-        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
-
         // Bulk upsert already loaded the row on its transaction. Reusing that snapshot avoids a
         // second connection waiting on locks held by the bulk commit itself.
-        var oldRecord = existingRecord ?? await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct);
+        var oldRecord = existingRecord ?? await _recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, transaction, ct);
+
+        // Current stored values by Fid, so a dependent-dropdown Reference is only re-validated when
+        // it (or its controlling field) actually changes — see ReferenceWriteValidator.
+        var existingByFid = new Dictionary<long, object?>();
+        foreach (var f in fields.Where(f => f.Fid.HasValue && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode)))
+        {
+            if (oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var stored))
+                existingByFid[f.Fid!.Value] = stored;
+        }
+
+        // Reference fields must point at an existing parent record; a value submitted as a
+        // human key is resolved to the parent row Id here.
+        var refOverrides = await ReferenceWriteValidator.ValidateAsync(
+            fields, fieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct, existingByFid);
 
         var effectiveValues = new Dictionary<long, object?>(fieldValues);
         foreach (var kvp in refOverrides)
@@ -158,7 +168,7 @@ public sealed class RecordWriteService : IRecordWriteService
         var recordId = Convert.ToInt64(oldRecord["Id"]);
         var app = await _appRepo.GetByIdAsync(table.AppId, ct);
         var dateFormat = AppFormattingSettings.GetDateFormatString(app.Formatting);
-        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct, appDateFormat: dateFormat);
+        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: false, excludeRecordId: recordId, ct, appDateFormat: dateFormat, transaction: transaction);
 
         // Custom Data Rule — same formula-based save gate as record creation (see
         // CreateRecordCommandHandler), covering both plain record edits and Action Button writes
