@@ -270,7 +270,7 @@ public class FieldsController : ControllerBase
         return NoContent();
     }
 
-    /// <summary>Get field usage (where it is referenced in forms, reports, and roles).</summary>
+    /// <summary>Get field usage (where it is referenced in forms, reports, form rules, other fields' formulas and settings, and roles).</summary>
     [HttpGet("tables/{tableId:guid}/fields/{fieldId:guid}/usage")]
     [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
     [ProducesResponseType(typeof(ApiResponse<FieldUsageDto>), StatusCodes.Status200OK)]
@@ -282,6 +282,21 @@ public class FieldsController : ControllerBase
     {
         var dto = await usageHandler.HandleAsync(new GetFieldUsageQuery(tableId, fieldId), ct);
         return Ok(new ApiResponse<FieldUsageDto>(dto));
+    }
+
+    /// <summary>Rebuilds the table's field-reference index (what the Usage tab reads) from its reports, forms, rules and fields.
+    /// Backfills a table that predates the index and repairs drift; safe to run any time.</summary>
+    [HttpPost("tables/{tableId:guid}/field-references/rebuild")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> RebuildReferences(
+        [FromServices] PowerBase.Application.FieldReferences.RebuildFieldReferencesCommandHandler rebuildHandler,
+        Guid tableId, [FromRoute(Name = "appId")] Guid? appId, CancellationToken ct)
+    {
+        await rebuildHandler.HandleAsync(new PowerBase.Application.FieldReferences.RebuildFieldReferencesCommand(tableId), ct);
+        return NoContent();
     }
 
     private static FieldResponse MapToResponse(CreateFieldResult r) => new()

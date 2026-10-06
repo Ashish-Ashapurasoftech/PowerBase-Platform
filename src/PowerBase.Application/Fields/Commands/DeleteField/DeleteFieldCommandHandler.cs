@@ -1,5 +1,6 @@
 using System.Linq;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -12,14 +13,17 @@ public class DeleteFieldCommandHandler
     private readonly IPipelineRepository _pipelineRepo;
     private readonly IAuditRepository _auditRepo;
     private readonly ITenantUnitOfWork _uow;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public DeleteFieldCommandHandler(
         IAppTableRepository tableRepo, 
         IAppFieldRepository fieldRepo, 
         IPipelineRepository pipelineRepo,
         IAuditRepository auditRepo,
-        ITenantUnitOfWork uow)
+        ITenantUnitOfWork uow,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _pipelineRepo = pipelineRepo;
@@ -82,6 +86,7 @@ public class DeleteFieldCommandHandler
 
                 await _auditRepo.LogActivityAsync(
                     AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
+                await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Field, field.PublicId, ct);
 
                 return;
             }
@@ -105,5 +110,6 @@ public class DeleteFieldCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
+        await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Field, field.PublicId, ct);
     }
 }

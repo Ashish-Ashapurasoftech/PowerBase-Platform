@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -15,6 +16,7 @@ public class BulkDeleteFieldsCommandHandler
     private readonly IAppAccessService _appAccessService;
     private readonly IAuditRepository _auditRepo;
     private readonly ITenantUnitOfWork _uow;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public BulkDeleteFieldsCommandHandler(
         IAppTableRepository tableRepo,
@@ -22,8 +24,10 @@ public class BulkDeleteFieldsCommandHandler
         IPipelineRepository pipelineRepo,
         IAppAccessService appAccessService,
         IAuditRepository auditRepo,
-        ITenantUnitOfWork uow)
+        ITenantUnitOfWork uow,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _pipelineRepo = pipelineRepo;
@@ -115,6 +119,7 @@ public class BulkDeleteFieldsCommandHandler
                 $"{deletedFieldsCount} field(s) bulk-deleted from table {table.Name}",
                 appId: table.AppId,
                 ct: ct);
+            await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
 
             return;
         }
@@ -128,5 +133,12 @@ public class BulkDeleteFieldsCommandHandler
             $"{normalDeletedCount} field(s) bulk-deleted from table {table.Name}",
             appId: table.AppId,
             ct: ct);
+        await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
+    }
+
+    private async Task RemoveDeletedFieldsAsync(IEnumerable<Guid> fieldPublicIds, CancellationToken ct)
+    {
+        foreach (var id in fieldPublicIds)
+            await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Field, id, ct);
     }
 }

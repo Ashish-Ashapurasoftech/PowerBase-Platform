@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
@@ -18,6 +19,7 @@ public class UpdateReportCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
     private readonly ReportConfigValidatorRegistry _configValidatorRegistry;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     private static readonly HashSet<string> AllowedVisibilities = ["Personal", "Shared", "MyRole", "SpecificRoles", "RoleScoped"];
 
@@ -29,8 +31,10 @@ public class UpdateReportCommandHandler
         IAppRoleRepository appRoleRepo,
         IQueryContext queryContext,
         IAuditRepository auditRepo,
-        ReportConfigValidatorRegistry configValidatorRegistry)
+        ReportConfigValidatorRegistry configValidatorRegistry,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _reportRepo = reportRepo;
         _fieldRepo = fieldRepo;
         _appAccessService = appAccessService;
@@ -193,5 +197,6 @@ public class UpdateReportCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Report name changed to {command.Name}", appId: appId, ct: ct);
+        await _refIndexer.ReindexReportAsync(command.ReportPublicId, ct);
     }
 }

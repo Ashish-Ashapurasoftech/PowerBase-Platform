@@ -51,5 +51,7 @@ public interface IAppFieldRepository
         CancellationToken ct = default, IDbTransaction? transaction = null);
     Task<int> DeleteAsync(Guid publicId, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null);
     Task<int> BulkDeleteAsync(IEnumerable<Guid> publicIds, long tableId, CancellationToken ct = default, IDbTransaction? transaction = null);
-    Task<FieldUsageDto> GetFieldUsageAsync(long tableId, long fieldId, int fid, long appId, CancellationToken ct = default);
+    /// <summary>The field's per-role permission rows (Default when no custom permission was set). Where the field is used
+    /// by forms, reports and formulas lives in meta.FieldReference — see IFieldReferenceRepository.</summary>
+    Task<IReadOnlyList<FieldUsageRoleItem>> GetRoleUsageAsync(long fieldId, long appId, CancellationToken ct = default);
 }

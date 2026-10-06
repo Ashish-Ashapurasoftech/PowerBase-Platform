@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Application.Fields.Commands;
@@ -19,6 +20,7 @@ public class BulkCreateFieldsCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
     private readonly IFieldNameResolver _fieldNameResolver;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public BulkCreateFieldsCommandHandler(
         IAppTableRepository tableRepo,
@@ -29,8 +31,10 @@ public class BulkCreateFieldsCommandHandler
         IAuditRepository auditRepo,
         IFormRepository formRepo,
         FieldSettingsValidatorRegistry settingsRegistry,
-        IFieldNameResolver fieldNameResolver)
+        IFieldNameResolver fieldNameResolver,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _fieldTypeRepo = fieldTypeRepo;
@@ -232,6 +236,11 @@ public class BulkCreateFieldsCommandHandler
                 IsEncrypted = field.IsEncrypted,
             });
         }
+
+        // One pass after the batch: the new fields' own settings, and every form that auto-added them.
+        await _refIndexer.ReindexTableFieldsAsync(table.Id, ct);
+        foreach (var form in formsForTable.Where(f => f.AutoAddNewFields && !f.IsQuickPeekForm))
+            await _refIndexer.ReindexFormAsync(form.PublicId, ct);
 
         return results;
     }

@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Forms.Commands.CreateForm;
 using PowerBase.Domain.Constants;
 
@@ -9,12 +10,15 @@ public class DuplicateFormCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public DuplicateFormCommandHandler(
         IFormRepository formRepo,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _formRepo = formRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
@@ -33,6 +37,7 @@ public class DuplicateFormCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.Form, created.Id.ToString(),
             ct: ct);
+        await _refIndexer.ReindexFormAsync(newPublicId, ct);
 
         return CreateFormCommandHandler.MapToDetail(created);
     }

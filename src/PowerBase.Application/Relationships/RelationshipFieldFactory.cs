@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -23,6 +24,7 @@ public sealed class RelationshipFieldFactory
     private readonly IFormRepository _formRepo;
     private readonly IQueryContext _queryContext;
     private readonly IFieldNameResolver _fieldNameResolver;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public RelationshipFieldFactory(
         IAppFieldRepository fieldRepo,
@@ -30,8 +32,10 @@ public sealed class RelationshipFieldFactory
         ISchemaEngineService schemaEngine,
         IFormRepository formRepo,
         IQueryContext queryContext,
-        IFieldNameResolver fieldNameResolver)
+        IFieldNameResolver fieldNameResolver,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _fieldRepo = fieldRepo;
         _fieldTypeRepo = fieldTypeRepo;
         _schemaEngine = schemaEngine;
@@ -87,6 +91,9 @@ public sealed class RelationshipFieldFactory
             field.PhysicalColumnName = col;
             await _schemaEngine.AddColumnAsync(table, field, ct);
         }
+
+        // A Lookup/Summary/Report Link points at fields of other tables — index what it reads.
+        await _refIndexer.ReindexFieldAsync(publicId, ct);
         return field;
     }
 
@@ -95,8 +102,11 @@ public sealed class RelationshipFieldFactory
         if (fids.Count == 0) return;
         var forms = await _formRepo.ListByTableAsync(tablePublicId, ct);
         foreach (var form in forms.Where(f => f.AutoAddNewFields && !f.IsQuickPeekForm))
+        {
             foreach (var fid in fids)
                 await _formRepo.AppendFieldToLastSectionAsync(form.Id, fid, ct);
+            await _refIndexer.ReindexFormAsync(form.PublicId, ct);
+        }
     }
 
     private async Task<string> ResolveUniqueLabelAsync(long tableId, string label, CancellationToken ct)
