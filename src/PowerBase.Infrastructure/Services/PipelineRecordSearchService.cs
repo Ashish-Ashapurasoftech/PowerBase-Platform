@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
@@ -48,16 +47,12 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
         CancellationToken ct = default,
         int page = 1)
     {
-        var buildFieldColsMethod = typeof(RecordRepository).GetMethod("BuildFieldColumnList", BindingFlags.NonPublic | BindingFlags.Static);
-        var buildFilterTreeMethod = typeof(RecordRepository).GetMethod("BuildFilterTreeWhere", BindingFlags.NonPublic | BindingFlags.Static);
-        var buildOwnerMethod = typeof(RecordRepository).GetMethod("BuildOwnerWhere", BindingFlags.NonPublic | BindingFlags.Static);
-
-        var fieldCols = (string)buildFieldColsMethod!.Invoke(null, new object[] { fields })!;
+        var fieldCols = RecordRepository.BuildFieldColumnList(fields);
         var parameters = new DynamicParameters();
 
         var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
-        var filterWhere = (string)buildFilterTreeMethod!.Invoke(null, new object[] { filterTree, parameters, fieldLookup })!
-            + (string)buildOwnerMethod!.Invoke(null, new object[] { (long?)null, parameters })!;
+        var filterWhere = RecordRepository.BuildFilterTreeWhere(filterTree, parameters, fieldLookup)
+            + RecordRepository.BuildOwnerWhere(null, parameters);
 
         var orderBy = "Id";
 
@@ -94,14 +89,11 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         if (pageSize <= 0) throw new ArgumentOutOfRangeException(nameof(pageSize));
-        var buildFieldColsMethod = typeof(RecordRepository).GetMethod("BuildFieldColumnList", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var buildFilterTreeMethod = typeof(RecordRepository).GetMethod("BuildFilterTreeWhere", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var buildOwnerMethod = typeof(RecordRepository).GetMethod("BuildOwnerWhere", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var fieldCols = (string)buildFieldColsMethod.Invoke(null, new object[] { fields })!;
+        var fieldCols = RecordRepository.BuildFieldColumnList(fields);
         var parameters = new DynamicParameters();
         var fieldLookup = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
-        var filterWhere = (string)buildFilterTreeMethod.Invoke(null, new object[] { filterTree, parameters, fieldLookup })!
-            + (string)buildOwnerMethod.Invoke(null, new object[] { (long?)null, parameters })!;
+        var filterWhere = RecordRepository.BuildFilterTreeWhere(filterTree, parameters, fieldLookup)
+            + RecordRepository.BuildOwnerWhere(null, parameters);
         parameters.Add("pageSize", pageSize);
         parameters.Add("maxId", maxId);
 
@@ -148,12 +140,10 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
         // is also the destination. HOLDLOCK protects only snapshot materialization.
         if (fields.Any(f => PhysicalNaming.IsComputedTypeCode(f.TypeCode)))
             throw PowerBase.Application.Pipelines.CopyRecordsDefinition.Error("Computed source fields are not supported by the Copy Records snapshot reader.");
-        var columnMethod = typeof(RecordRepository).GetMethod("BuildFieldColumnList", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var filterMethod = typeof(RecordRepository).GetMethod("BuildFilterTreeWhere", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var columns = (string)columnMethod.Invoke(null, new object[] { fields })!;
+        var columns = RecordRepository.BuildFieldColumnList(fields);
         var parameters = new DynamicParameters();
         var lookup = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
-        var where = (string)filterMethod.Invoke(null, new object?[] { filterTree, parameters, lookup })!;
+        var where = RecordRepository.BuildFilterTreeWhere(filterTree, parameters, lookup);
         await using var connection = await _connectionFactory.CreateAsync(ct);
         // TenantConnectionFactory returns a closed SqlConnection. Keep it explicitly open
         // for the full snapshot lifetime because the temp table, transaction, paging, and
