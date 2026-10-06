@@ -76,8 +76,9 @@ public static class SummaryCriteriaValidator
         return null;
     }
 
-    /// <summary>A stored or system field, or a lookup of one that isn't a range.</summary>
+    /// <summary>A stored or system field, a lookup of one that isn't a range, or a Formula/Summary (computed per record
+    /// and judged in memory).</summary>
     private static bool IsFilterable(AppField field, IReadOnlyDictionary<long, AppField>? lookupSources) =>
-        SummaryLookupSources.IsReadable(field, lookupSources)
+        (SummaryLookupSources.IsReadable(field, lookupSources) || SummaryComputedTargets.ResultKind(field) is not null)
         && !(SummaryLookupSources.IsLookup(field) && PhysicalNaming.IsRangeTypeCode(lookupSources![field.Fid!.Value].TypeCode));
 }

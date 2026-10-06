@@ -60,8 +60,14 @@ public class SummaryCriteriaValidatorTests
         SummaryCriteriaValidator.FindProblem(Group("and", Cond(6, "sounds like")), ChildFields, ParentFields).Should().Contain("Invalid operator");
 
     [Fact]
-    public void FindProblem_CalculatedField_IsRefused() =>
-        SummaryCriteriaValidator.FindProblem(Group("and", Cond(8, "gt", "3")), ChildFields, ParentFields).Should().Contain("'Days Left' is calculated");
+    public void FindProblem_FormulaField_IsAllowed_JudgedInMemory() =>
+        SummaryCriteriaValidator.FindProblem(Group("and", Cond(8, "gt", "3")), ChildFields, ParentFields).Should().BeNull();
+
+    [Fact]
+    public void FindProblem_FormulaThatCantBeCompared_IsRefused() =>
+        SummaryCriteriaValidator.FindProblem(Group("and", Cond(91, "eq", "x")),
+            [.. ChildFields, new AppField { Id = 91, Fid = 91, Name = "T", Label = "T", TypeCode = "Formula_Time" }], ParentFields)
+            .Should().Contain("'T' is calculated");
 
     [Fact]
     public void FindProblem_CurrentUser_IsFineAtAnyDepth() =>

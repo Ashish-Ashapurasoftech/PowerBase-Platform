@@ -138,7 +138,7 @@ public class CreateFieldCommandHandler
             IsFilterable = advancedDefaults.Filterable,
             IsReportable = advancedDefaults.Reportable,
             IsAuditable = command.IsAuditable,
-            IsEncrypted = command.IsEncrypted,
+            IsEncrypted = command.IsEncrypted && !PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(fieldType.Code),
             // Auto-fill defaults to ON for every type that supports it (see
             // FieldAutoFillCapability) — off for the rest, since it isn't meaningful there.
             IsAutoFill = FieldAutoFillCapability.IsSupported(fieldType.Code),

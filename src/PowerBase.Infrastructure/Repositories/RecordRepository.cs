@@ -1,6 +1,7 @@
 using System.Data;
 using System.Text.Json;
 using Dapper;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Data.SqlClient;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
@@ -19,15 +20,19 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private readonly IMessagePublisher _messagePublisher;
     private readonly IEncryptionService _encryptionService;
     private readonly IControlConnectionFactory _controlConnectionFactory;
+    /// <summary>Resolves the projectors lazily (they depend on this repository, so they can't be constructor-injected).</summary>
+    private readonly IServiceProvider? _services;
 
     public RecordRepository(
         ITenantConnectionFactory connectionFactory, 
         IQueryContext queryContext,
         IMessagePublisher messagePublisher,
         IEncryptionService encryptionService,
-        IControlConnectionFactory controlConnectionFactory)
-        : base(connectionFactory, queryContext) 
-    { 
+        IControlConnectionFactory controlConnectionFactory,
+        IServiceProvider? services = null)
+        : base(connectionFactory, queryContext)
+    {
+        _services = services;
         _messagePublisher = messagePublisher;
         _encryptionService = encryptionService;
         _controlConnectionFactory = controlConnectionFactory;
@@ -217,8 +222,30 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(referenceFid);
-        var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(childTable.Id)} WHERE IsDeleted = 0 AND {col} = @parentRecordId";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+
+        // An encrypted reference column holds ciphertext, so "= @parentRecordId" can never match: count the
+        // children by decrypting the column instead (otherwise a parent with children looks deletable).
+        var enc = await GetEncryptionContextAsync(connection, childTable.AppId, null, ct);
+        var fieldEncrypted = await connection.ExecuteScalarAsync<bool?>(new CommandDefinition(
+            "SELECT TOP 1 IsEncrypted FROM meta.AppField WHERE AppTableId = @tableId AND Fid = @fid",
+            new { tableId = childTable.Id, fid = referenceFid }, cancellationToken: ct)) ?? false;
+        if (enc.IsActive && (enc.IsAppEncrypted || fieldEncrypted))
+        {
+            var stored = await connection.QueryAsync<object>(new CommandDefinition(
+                $"SELECT {col} FROM {PhysicalNaming.FullTableName(childTable.Id)} WHERE IsDeleted = 0 AND {col} IS NOT NULL",
+                cancellationToken: ct));
+            var count = 0;
+            foreach (var raw in stored)
+            {
+                var text = await enc.DecryptValueAsync(Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture) ?? "", ct);
+                if (decimal.TryParse(text, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var id) && id == parentRecordId)
+                    count++;
+            }
+            return count;
+        }
+
+        var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(childTable.Id)} WHERE IsDeleted = 0 AND {col} = @parentRecordId";
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, new { parentRecordId }, cancellationToken: ct));
     }
 
@@ -232,7 +259,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
         if (filters is { Count: > 0 })
-            where += $" AND {BuildReferenceFilterSql(filters, parameters)}";
+            where += $" AND {BuildReferenceFilterSql(filters, parameters, await MatchEncryptedTreesAsync(parentTable, filters, ct))}";
 
         // Computed label fields (Formula/Lookup/Summary) have no SQL column: they are selected as NULL
         // placeholders and filled in by the caller after projection (see GetParentOptionsQueryHandler).
@@ -315,15 +342,78 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var sql = $"""
             SELECT COUNT(1)
             FROM {PhysicalNaming.FullTableName(parentTable.Id)} AS p
-            WHERE p.IsDeleted = 0 AND p.Id = @parentRowId AND {BuildReferenceFilterSql(filters, parameters)}
+            WHERE p.IsDeleted = 0 AND p.Id = @parentRowId AND {BuildReferenceFilterSql(filters, parameters, await MatchEncryptedTreesAsync(parentTable, filters, ct))}
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct)) > 0;
     }
 
+    /// <summary>A filter tree that reads an encrypted parent field can't be a WHERE clause (the column holds
+    /// ciphertext). Such a tree is judged in memory over the decrypted parent rows instead; this returns,
+    /// by clause index, the Ids of the parent rows each one matches — which <see cref="BuildReferenceFilterSql"/>
+    /// then uses in place of the tree. Trees that read no encrypted field stay SQL.</summary>
+    private async Task<IReadOnlyDictionary<int, IReadOnlyList<long>>> MatchEncryptedTreesAsync(
+        AppTable parentTable, IReadOnlyList<ReferenceFilterClause> filters, CancellationToken ct)
+    {
+        var result = new Dictionary<int, IReadOnlyList<long>>();
+        if (!filters.Any(f => f.Tree is not null)) return result;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var appEncrypted = (await GetEncryptionContextAsync(connection, parentTable.AppId, null, ct)).IsAppEncrypted;
+
+        for (var i = 0; i < filters.Count; i++)
+        {
+            if (filters[i] is not { Tree: { } tree, TreeFields: { } treeFields }) continue;
+
+            // The parent Lookups the tree reads: each is judged by its source field on another table, which
+            // may be encrypted too — either way it has no column of its own to compare in SQL.
+            var lookups = new List<(AppField Lookup, LookupSettings Settings, AppField Source, AppTable SourceTable, List<AppField> SourceFields)>();
+            var sourceEncrypted = false;
+            foreach (var lookup in treeFields.Where(f => f.Fid.HasValue && SummaryLookupSources.IsLookup(f) && ReadsField(tree, f.Fid.Value)))
+            {
+                if (SummaryLookupSources.Settings(lookup) is not { SourceTableId: long sourceTableId, SourceFid: int sourceFid, ReferenceFid: int } settings) continue;
+                var sourceTable = await connection.QueryFirstOrDefaultAsync<AppTable>(new CommandDefinition(
+                    "SELECT Id, AppId FROM meta.AppTable WHERE Id = @id", new { id = sourceTableId }, cancellationToken: ct));
+                if (sourceTable is null) continue;
+                var sourceFields = (await connection.QueryAsync<AppField>(new CommandDefinition(
+                    "SELECT Id, AppTableId, Name, TypeCode, Settings, PhysicalColumnName, Fid, IsSystem, IsSearchable, IsFilterable, IsEncrypted FROM meta.AppField WHERE AppTableId = @id",
+                    new { id = sourceTableId }, cancellationToken: ct))).ToList();
+                if (sourceFields.FirstOrDefault(f => f.Fid == sourceFid) is not { } source) continue;
+                var sourceAppEncrypted = (await GetEncryptionContextAsync(connection, sourceTable.AppId, null, ct)).IsAppEncrypted;
+                sourceEncrypted |= EncryptedRowFilter.IsEncrypted(source, sourceAppEncrypted);
+                lookups.Add((lookup, settings, source, sourceTable, sourceFields));
+            }
+
+            // A Formula/Summary has no column either: its value is computed per record, as a record read does.
+            var readsComputed = treeFields.Any(f => f.Fid.HasValue && SummaryComputedTargets.ResultKind(f) is not null && ReadsField(tree, f.Fid.Value));
+            if (!sourceEncrypted && !readsComputed && !EncryptedRowFilter.TouchesEncrypted(tree, treeFields, appEncrypted)) continue;
+
+            IReadOnlyList<IReadOnlyDictionary<string, object?>> rows = await ListAllRowsDecryptedAsync(parentTable, treeFields, ct);
+            IReadOnlyList<IReadOnlyDictionary<long, object?>>? computed = null;
+            if (readsComputed && _services is not null)
+            {
+                var relational = await _services.GetRequiredService<PowerBase.Application.Relationships.IRelationalProjector>().ProjectAsync(parentTable, treeFields, rows, ct);
+                computed = _services.GetRequiredService<PowerBase.Application.Formulas.IFormulaProjector>().Project(treeFields, rows, relational, parentTable);
+            }
+            IReadOnlyList<AppField> fields = treeFields;
+            foreach (var (lookup, settings, source, sourceTable, sourceFields) in lookups)
+            {
+                var sourceRows = await ListAllRowsDecryptedAsync(sourceTable, sourceFields, ct);
+                (rows, fields) = EncryptedRowFilter.WithLookupValue(rows, fields, lookup, settings, source, sourceRows);
+            }
+            result[i] = EncryptedRowFilter.MatchingIds(rows, fields, tree, computed);
+        }
+        return result;
+    }
+
+    private static bool ReadsField(FilterGroup group, int fid) =>
+        group.Nodes.Any(n => n.Condition?.FieldId == fid || (n.Group is { } sub && ReadsField(sub, fid)));
+
     /// <summary>Dependent-dropdown predicate over the parent table aliased <c>p</c>. Values are always
     /// bound as parameters; column names come from field metadata (integers), never user text.</summary>
-    private static string BuildReferenceFilterSql(IReadOnlyList<ReferenceFilterClause> filters, DynamicParameters parameters)
+    private static string BuildReferenceFilterSql(
+        IReadOnlyList<ReferenceFilterClause> filters, DynamicParameters parameters,
+        IReadOnlyDictionary<int, IReadOnlyList<long>>? memoryMatches = null)
     {
         static string Col(AppField f) => f.IsSystem && !string.IsNullOrEmpty(f.PhysicalColumnName)
             ? f.PhysicalColumnName!
@@ -333,6 +423,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         for (var i = 0; i < filters.Count; i++)
         {
             var f = filters[i];
+            if (memoryMatches is not null && memoryMatches.TryGetValue(i, out var matchedIds))
+            {
+                if (matchedIds.Count == 0) { parts.Add("1 = 0"); continue; }
+                parameters.Add($"encIds{i}", JsonSerializer.Serialize(matchedIds));
+                parts.Add($"p.Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@encIds{i}))");
+                continue;
+            }
             if (f.Tree is not null)
             {
                 // Its own parameter range, clear of the fv{i} names the other clauses use.
@@ -577,6 +674,24 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
     }
 
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllRowsDecryptedAsync(
+        AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default)
+    {
+        var sql = $"""
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0
+            ORDER BY Id
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, cancellationToken: ct));
+        var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
+
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        await enc.DecryptRowsAsync(mutableRows, fields, ct);
+        return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
+    }
+
     /// <summary>The SQL expression for a summary's target (or Combined Text sort): its f_{fid}
     /// column, a system field's own column (Id, CreatedOn, …), a Lookup's parent column (see
     /// <see cref="LookupColumnExpr"/>), or — for a composite Address field's sub-key — the
@@ -730,6 +845,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     /// <c>FieldsToEncrypt</c> predicate inside <see cref="Services.FieldEncryptionContext"/>.</summary>
     private static bool NeedsDecrypt(Services.FieldEncryptionContext enc, AppField? field)
         => field is not null && field.Fid.HasValue && !field.IsSystem
+           && !PhysicalNaming.IsEncryptionExemptTypeCode(field.TypeCode)
            && (enc.IsAppEncrypted || field.IsEncrypted);
 
     public async Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(

@@ -114,7 +114,8 @@ public class UpdateReferenceFilterCommandHandler
     /// <summary>The tree filters PARENT records by their stored fields (a calculated one has no column), and a
     /// "parentField" comparison reads the value of another stored field on this (child) form. As in a
     /// summary's criteria, a parent Lookup is filtered on the grandparent column it pulls down (not a
-    /// range, not an encrypted or calculated source).</summary>
+    /// range, not a calculated source). Encrypted parent fields are allowed: the tree is then judged in
+    /// memory over decrypted rows (<see cref="EncryptedRowFilter"/>).</summary>
     private async Task ValidateTreeAsync(
         FilterGroup? tree, IReadOnlyList<AppField> parentFields, IReadOnlyList<AppField> childFields, AppField referenceField,
         CancellationToken ct)
@@ -126,14 +127,17 @@ public class UpdateReferenceFilterCommandHandler
             .Select(f => (long)f.Fid!.Value).ToHashSet();
 
         var lookupSources = await SummaryLookupSources.LoadAsync(parentFields, _fieldRepo, ct);
-        var parentFids = StoredFids(parentFields.Where(f => !f.IsEncrypted));
+        var parentFids = StoredFids(parentFields);
         foreach (var f in parentFields)
-            if (f.Fid.HasValue && !f.IsEncrypted && SummaryLookupSources.IsLookup(f)
+            if (f.Fid.HasValue && SummaryLookupSources.IsLookup(f)
                 && SummaryLookupSources.IsReadable(f, lookupSources)
-                && lookupSources[f.Fid.Value] is { IsEncrypted: false } source
+                && lookupSources[f.Fid.Value] is { } source
                 && !PhysicalNaming.IsRangeTypeCode(source.TypeCode))
                 parentFids.Add(f.Fid.Value);
-        var formFids = StoredFids(childFields.Where(f => f.Id != referenceField.Id && !f.IsEncrypted));
+        // Formula and Summary fields have no column but a value per record: allowed too (judged in memory).
+        foreach (var f in parentFields)
+            if (f.Fid.HasValue && SummaryComputedTargets.ResultKind(f) is not null) parentFids.Add(f.Fid.Value);
+        var formFids = StoredFids(childFields.Where(f => f.Id != referenceField.Id));
 
         var errors = new Dictionary<string, string[]>();
         CommonReportValidationHelpers.ValidateFilterGroup(tree, parentFids, errors, validParentFieldIds: formFids);

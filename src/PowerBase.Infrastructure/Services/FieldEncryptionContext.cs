@@ -145,9 +145,12 @@ public sealed class FieldEncryptionContext
     /// <summary>
     /// If App is globally encrypted, encrypt ALL non-system fields.
     /// Otherwise, encrypt ONLY non-system fields explicitly marked as IsEncrypted = true.
+    /// Reference fields are never encrypted (see PhysicalNaming.IsEncryptionExemptTypeCode).
     /// </summary>
     private IEnumerable<AppField> FieldsToEncrypt(IEnumerable<AppField> fields)
-        => fields.Where(f => f.Fid.HasValue && !f.IsSystem && (this.IsAppEncrypted || f.IsEncrypted));
+        => fields.Where(f => f.Fid.HasValue && !f.IsSystem
+            && !PhysicalNaming.IsEncryptionExemptTypeCode(f.TypeCode)
+            && (this.IsAppEncrypted || f.IsEncrypted));
 
     // ------------------------------------------------------------------
     // Encrypt helpers

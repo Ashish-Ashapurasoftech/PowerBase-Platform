@@ -31,6 +31,12 @@ public static class PhysicalNaming
         typeCode is "Formula" or "Lookup" or "Summary" or "ReportLink"
         || IsActionButtonTypeCode(typeCode) || IsFormulaVariantTypeCode(typeCode);
 
+    /// <summary>True for field types that are never encrypted, even in an encrypted app. A Reference is
+    /// a plain BIGINT foreign key to another record's Id: it must stay filterable/joinable in SQL
+    /// (related records, lookups), which ciphertext would break.</summary>
+    public static bool IsEncryptionExemptTypeCode(string? typeCode) =>
+        typeCode == "Reference";
+
     /// <summary>True for the generic 'Formula' TypeCode's per-variant codes (Formula_Text,
     /// Formula_Number, Formula_Time, …) — mirrors <see cref="IsActionButtonTypeCode"/>'s
     /// StartsWith pattern for the same reason: each variant is a distinct, independently
