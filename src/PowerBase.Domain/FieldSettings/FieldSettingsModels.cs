@@ -264,6 +264,8 @@ public sealed class BooleanSettings
 {
     /// <summary>Show the value as "Yes"/"No" in reports instead of a checkbox glyph.</summary>
     public bool? ShowYesNo { get; set; }
+    /// <summary>Show a totals row (count of true) in reports.</summary>
+    public bool? ShowTotalsRow { get; set; }
     public bool? DisplayBold { get; set; }
     public bool? NoWrap { get; set; }
     public int? ColumnWidth { get; set; }
