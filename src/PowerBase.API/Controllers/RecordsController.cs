@@ -120,7 +120,7 @@ public class RecordsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Update(Guid tableId, Guid id, [FromBody] UpdateRecordRequest request, CancellationToken ct)
     {
-        var command = new UpdateRecordCommand(tableId, id, ParseFieldValues(request.Fields));
+        var command = new UpdateRecordCommand(tableId, id, ParseFieldValues(request.Fields), request.ReportId, request.IsGridEditSave);
         await _updateHandler.HandleAsync(command, ct);
         return NoContent();
     }

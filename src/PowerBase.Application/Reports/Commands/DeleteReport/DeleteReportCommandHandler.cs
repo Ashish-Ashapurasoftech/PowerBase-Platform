@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -9,9 +10,12 @@ public class DeleteReportCommandHandler
     private readonly IReportRepository _reportRepo;
     private readonly IAppAccessService _appAccessService;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
-    public DeleteReportCommandHandler(IReportRepository reportRepo, IAppAccessService appAccessService, IAuditRepository auditRepo)
+    public DeleteReportCommandHandler(IReportRepository reportRepo, IAppAccessService appAccessService, IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _reportRepo = reportRepo;
         _appAccessService = appAccessService;
         _auditRepo = auditRepo;
@@ -30,5 +34,6 @@ public class DeleteReportCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Deleted, AuditEntityTypes.Report, command.ReportPublicId.ToString(), $"Report deleted: {report.Name}", appId: appId, ct: ct);
+        await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Report, command.ReportPublicId, ct);
     }
 }

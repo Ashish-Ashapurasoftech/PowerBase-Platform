@@ -30,7 +30,9 @@ public interface IRecordWriteService
         System.Data.IDbTransaction? transaction = null,
         bool suppressInterception = false,
         Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
-        IReadOnlyDictionary<string, object?>? existingRecord = null);
+        IReadOnlyDictionary<string, object?>? existingRecord = null,
+        Guid? reportId = null,
+        bool isGridEditSave = false);
 }
 
 public sealed class RecordWriteService : IRecordWriteService
@@ -47,6 +49,7 @@ public sealed class RecordWriteService : IRecordWriteService
     private readonly IAppRepository _appRepo;
     private readonly IFormRuleRepository _formRuleRepo;
     private readonly IFormRepository _formRepo;
+    private readonly IReportRepository _reportRepo;
     private readonly IQueryContext _queryContext;
 
     public RecordWriteService(
@@ -62,6 +65,7 @@ public sealed class RecordWriteService : IRecordWriteService
         IAppRepository appRepo,
         IFormRuleRepository formRuleRepo,
         IFormRepository formRepo,
+        IReportRepository reportRepo,
         IQueryContext queryContext)
     {
         _tableRepo = tableRepo;
@@ -76,6 +80,7 @@ public sealed class RecordWriteService : IRecordWriteService
         _appRepo = appRepo;
         _formRuleRepo = formRuleRepo;
         _formRepo = formRepo;
+        _reportRepo = reportRepo;
         _queryContext = queryContext;
     }
 
@@ -125,7 +130,9 @@ public sealed class RecordWriteService : IRecordWriteService
         System.Data.IDbTransaction? transaction = null,
         bool suppressInterception = false,
         Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
-        IReadOnlyDictionary<string, object?>? existingRecord = null)
+        IReadOnlyDictionary<string, object?>? existingRecord = null,
+        Guid? reportId = null,
+        bool isGridEditSave = false)
     {
         // Bulk upsert already loaded the row on its transaction. Reusing that snapshot avoids a
         // second connection waiting on locks held by the bulk commit itself.
@@ -181,7 +188,8 @@ public sealed class RecordWriteService : IRecordWriteService
                 f => oldRecord.TryGetValue(PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f), out var ov) ? ov : null);
         await FormRuleServerValidator.ValidateAsync(
             table, fields, effectiveValues, oldValuesByFid, _queryContext.UserId,
-            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _appUserRepo, _engine, ct);
+            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _appUserRepo, _engine, ct,
+            reportRepo: _reportRepo, reportId: reportId, isGridEditSave: isGridEditSave);
 
         await _recordRepo.UpdateAsync(table, fields, recordPublicId, effectiveValues, transaction, ct, onIndexMessageCreated);
 

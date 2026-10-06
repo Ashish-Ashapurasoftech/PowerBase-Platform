@@ -2,10 +2,21 @@ using PowerBase.API.Models.Reports;
 
 namespace PowerBase.API.Models.Pages;
 
+public class DashboardFilterValueRequest
+{
+    /// <summary>eq/contains/gte/lte/during/notDuring/... (see filter-condition-operators.ts), or
+    /// the synthetic "dateRange" (Value = "startIso|endIso") for a custom Date range.</summary>
+    public string Operator { get; set; } = "eq";
+    public string? Value { get; set; }
+    /// <summary>null/"literal" for Text/User; "today"/"duringCurrent"/"duringPrevious"/
+    /// "duringNext" for a Date range preset.</summary>
+    public string? ValueMode { get; set; }
+}
+
 public class RenderPageRequest
 {
-    /// <summary>Page-level filter slot key → selected value(s).</summary>
-    public Dictionary<string, List<string>>? FilterValues { get; set; }
+    /// <summary>Page-level filter slot key → its live operator+value.</summary>
+    public Dictionary<string, DashboardFilterValueRequest>? FilterValues { get; set; }
     /// <summary>Search widget id → typed text.</summary>
     public Dictionary<string, string>? SearchValues { get; set; }
 }
@@ -21,8 +32,9 @@ public class DashboardFilterSlotResponse
 {
     public string Key { get; set; } = string.Empty;
     public string Label { get; set; } = string.Empty;
-    public string InputType { get; set; } = "select";
-    public string? DefaultValue { get; set; }
+    public string FilterType { get; set; } = "Text";
+    public string? UserMode { get; set; }
+    public string? SearchType { get; set; }
 }
 
 public class DashboardWidgetLayoutResponse

@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Formulas;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -15,6 +16,7 @@ public class SaveFormRuleCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IFormulaExpressionValidator _exprValidator;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public SaveFormRuleCommandHandler(
         IFormRuleRepository ruleRepo,
@@ -22,8 +24,10 @@ public class SaveFormRuleCommandHandler
         IAuditRepository auditRepo,
         IFormRepository formRepo,
         IAppFieldRepository fieldRepo,
-        IFormulaExpressionValidator exprValidator)
+        IFormulaExpressionValidator exprValidator,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _ruleRepo = ruleRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
@@ -145,6 +149,7 @@ public class SaveFormRuleCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.FormRule, rule.Id.ToString(),
             ct: ct);
+        await _refIndexer.ReindexFormRuleAsync(command.RulePublicId, ct);
     }
 
     /// <summary>The formula type a Change value formula must produce to fit a target field of this

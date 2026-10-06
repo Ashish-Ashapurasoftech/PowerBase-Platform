@@ -13,17 +13,19 @@ public class UpdatePageCommandHandler
     private readonly IAppUserRepository _appUserRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly ITenantRepository _tenantRepo;
     private readonly UpdatePageCommandValidator _validator;
 
     public UpdatePageCommandHandler(
         IPageRepository pageRepo, IAppRoleRepository appRoleRepo, IAppUserRepository appUserRepo,
-        IQueryContext queryContext, IAuditRepository auditRepo)
+        IQueryContext queryContext, IAuditRepository auditRepo, ITenantRepository tenantRepo)
     {
         _pageRepo = pageRepo;
         _appRoleRepo = appRoleRepo;
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
+        _tenantRepo = tenantRepo;
         _validator = new UpdatePageCommandValidator();
     }
 
@@ -37,11 +39,19 @@ public class UpdatePageCommandHandler
 
         var page = await _pageRepo.GetByPublicIdAsync(command.PagePublicId, ct);
 
-        if (page.PageType == PageTypes.Code && !_queryContext.IsSuperAdmin)
+        if (page.PageType == PageTypes.Code)
         {
-            var appPermissions = await _appUserRepo.GetUserAppPermissionsAsync(page.AppId, _queryContext.UserId, ct);
-            if (!appPermissions.Contains(PermissionCodes.PagesCode))
-                throw new UnauthorizedActionException("Editing a Code page requires the Code Page Builder capability.");
+            // Same tenant-level gate as CreatePageCommandHandler — see its comment.
+            var tenant = await _tenantRepo.GetByIdAsync(_queryContext.TenantId, ct);
+            if (!tenant.CodePagesEnabled)
+                throw new UnauthorizedActionException("Code Pages are not enabled for this tenant.");
+
+            if (!_queryContext.IsSuperAdmin)
+            {
+                var appPermissions = await _appUserRepo.GetUserAppPermissionsAsync(page.AppId, _queryContext.UserId, ct);
+                if (!appPermissions.Contains(PermissionCodes.PagesCode))
+                    throw new UnauthorizedActionException("Editing a Code page requires the Code Page Builder capability.");
+            }
         }
 
         // Snapshot the PRE-EDIT state at the current version number — version N is always

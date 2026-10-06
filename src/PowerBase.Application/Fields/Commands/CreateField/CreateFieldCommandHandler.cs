@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Commands;
 using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
@@ -38,6 +39,7 @@ public class CreateFieldCommandHandler
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
     private readonly IFieldNameResolver _fieldNameResolver;
     private readonly FieldSettingsGuard _guard;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public CreateFieldCommandHandler(
         IAppTableRepository tableRepo,
@@ -49,8 +51,10 @@ public class CreateFieldCommandHandler
         IFormRepository formRepo,
         FieldSettingsValidatorRegistry settingsRegistry,
         IFieldNameResolver fieldNameResolver,
-        FieldSettingsGuard guard)
+        FieldSettingsGuard guard,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _fieldTypeRepo = fieldTypeRepo;
@@ -166,7 +170,9 @@ public class CreateFieldCommandHandler
         foreach (var form in formsForTable.Where(f => f.AutoAddNewFields && !f.IsQuickPeekForm))
         {
             await _formRepo.AppendFieldToLastSectionAsync(form.Id, field.Fid!.Value, ct);
+            await _refIndexer.ReindexFormAsync(form.PublicId, ct);
         }
+        await _refIndexer.ReindexFieldAsync(publicId, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, id.ToString(), $"Field added: {label} To TableName : {table.Name}", appId: table.AppId, ct: ct);

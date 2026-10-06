@@ -233,7 +233,7 @@ public class RenderPageQueryHandlerTests
             }));
         var sut = MakeSut();
 
-        var filterValues = new Dictionary<string, IReadOnlyList<string>> { ["region"] = ["West"] };
+        var filterValues = new Dictionary<string, DashboardFilterValue> { ["region"] = new DashboardFilterValue("eq", "West") };
         var result = await sut.HandleAsync(new RenderPageQuery(page.PublicId, filterValues));
 
         result.Tabs.SelectMany(t => t.Widgets).Should().ContainSingle(w => w.Status == "ok");

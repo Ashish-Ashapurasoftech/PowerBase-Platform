@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Application.Fields.Versioning;
@@ -26,6 +27,7 @@ public class UpdateFieldCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAzureSearchService _searchService;
     private readonly IRelationshipRepository _relRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
     /// "Display As" Behavior Setting is allowed to switch between (see NumericDisplayAs).</summary>
@@ -44,8 +46,10 @@ public class UpdateFieldCommandHandler
         IMessagePublisher messagePublisher,
         IQueryContext queryContext,
         IAzureSearchService searchService,
-        IRelationshipRepository relRepo)
+        IRelationshipRepository relRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -244,6 +248,12 @@ public class UpdateFieldCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
             $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+
+        // Formulas bind by name or label, so renaming this field can change what OTHER fields' formulas read.
+        if (!string.Equals(label, existing.Label, StringComparison.Ordinal))
+            await _refIndexer.ReindexTableFieldsAsync(table.Id, ct);
+        else
+            await _refIndexer.ReindexFieldAsync(existing.PublicId, ct);
     }
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();

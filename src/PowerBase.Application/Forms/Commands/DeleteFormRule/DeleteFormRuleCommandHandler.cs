@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 
 namespace PowerBase.Application.Forms.Commands.DeleteFormRule;
@@ -8,12 +9,15 @@ public class DeleteFormRuleCommandHandler
     private readonly IFormRuleRepository _ruleRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public DeleteFormRuleCommandHandler(
         IFormRuleRepository ruleRepo,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _ruleRepo = ruleRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
@@ -25,5 +29,6 @@ public class DeleteFormRuleCommandHandler
         await _ruleRepo.DeleteAsync(command.RulePublicId, ct);
         await _auditRepo.LogActivityAsync(
             AuditActions.Deleted, AuditEntityTypes.FormRule, rule.Id.ToString(), ct: ct);
+        await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.FormRule, command.RulePublicId, ct);
     }
 }

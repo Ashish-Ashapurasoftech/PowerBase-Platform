@@ -16,6 +16,7 @@ internal static class FormulaRawValue
             FormulaType.Bool => v.AsBool(),
             FormulaType.Date => v.AsDate().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             FormulaType.DateTime => v.AsDateTime().ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture),
+            FormulaType.Time => v.AsTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture),
             FormulaType.Duration => (decimal)v.AsDuration().TotalMinutes,
             FormulaType.User => v.AsUser().UserId,
             FormulaType.UserList => v.AsUserList().Select(u => u.UserId).ToList(),

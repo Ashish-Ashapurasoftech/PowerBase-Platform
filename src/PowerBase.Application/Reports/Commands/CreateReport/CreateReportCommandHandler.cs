@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Validation;
@@ -20,6 +21,7 @@ public class CreateReportCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly ReportConfigValidatorRegistry _configValidatorRegistry;
     private readonly CreateReportCommandValidator _validator;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public CreateReportCommandHandler(
         IAppTableRepository tableRepo,
@@ -29,8 +31,10 @@ public class CreateReportCommandHandler
         IAppRoleRepository appRoleRepo,
         IQueryContext queryContext,
         IAuditRepository auditRepo,
-        ReportConfigValidatorRegistry configValidatorRegistry)
+        ReportConfigValidatorRegistry configValidatorRegistry,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _reportRepo = reportRepo;
@@ -200,6 +204,7 @@ public class CreateReportCommandHandler
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.Report, publicId.ToString(), $"Report added: {command.Name}", appId: table.AppId, ct: ct);
+        await _refIndexer.ReindexReportAsync(publicId, ct);
 
         return new ReportDetailResult
         {

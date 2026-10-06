@@ -10,6 +10,8 @@ using PowerBase.Application.Pages.Commands.PublishPage;
 using PowerBase.Application.Pages.Commands.RestorePageVersion;
 using PowerBase.Application.Pages.Commands.UpdatePage;
 using PowerBase.Application.Pages.Queries.GetPage;
+using PowerBase.Application.Pages.Queries.GetPageCode;
+using PowerBase.Application.Pages.Queries.ListNavPages;
 using PowerBase.Application.Pages.Queries.ListPages;
 using PowerBase.Application.Pages.Queries.ListPageVersions;
 using PowerBase.Application.Pages.Commands.SetDefaultHome;
@@ -36,6 +38,8 @@ public class PagesController : ControllerBase
     private readonly RestorePageVersionCommandHandler _restoreHandler;
     private readonly RenderPageQueryHandler _renderHandler;
     private readonly SetDefaultHomeCommandHandler _setDefaultHomeHandler;
+    private readonly GetPageCodeQueryHandler _getPageCodeHandler;
+    private readonly ListNavPagesQueryHandler _listNavPagesHandler;
 
     public PagesController(
         ListPagesQueryHandler listHandler,
@@ -48,7 +52,9 @@ public class PagesController : ControllerBase
         PublishPageCommandHandler publishHandler,
         RestorePageVersionCommandHandler restoreHandler,
         RenderPageQueryHandler renderHandler,
-        SetDefaultHomeCommandHandler setDefaultHomeHandler)
+        SetDefaultHomeCommandHandler setDefaultHomeHandler,
+        GetPageCodeQueryHandler getPageCodeHandler,
+        ListNavPagesQueryHandler listNavPagesHandler)
     {
         _listHandler = listHandler;
         _getHandler = getHandler;
@@ -61,6 +67,25 @@ public class PagesController : ControllerBase
         _restoreHandler = restoreHandler;
         _renderHandler = renderHandler;
         _setDefaultHomeHandler = setDefaultHomeHandler;
+        _getPageCodeHandler = getPageCodeHandler;
+        _listNavPagesHandler = listNavPagesHandler;
+    }
+
+    /// <summary>Every published, nav-flagged page the CURRENT user can see (role-filtered),
+    /// ordered by NavOrder then Name — backs the app sidebar's Pages section. Membership-only,
+    /// not the pages:read Builder permission: every regular app user should see their nav, not
+    /// just people with Pages management access.</summary>
+    [HttpGet("nav")]
+    [RequireAppMember(AppAccessResolver.ByAppId)]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<NavPageResponse>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListNav(Guid appId, CancellationToken ct)
+    {
+        var pages = await _listNavPagesHandler.HandleAsync(new ListNavPagesQuery(appId), ct);
+        var mapped = pages.Select(p => new NavPageResponse
+        {
+            Id = p.Id, Name = p.Name, PageType = p.PageType, NavIcon = p.NavIcon, PageNumber = p.PageNumber,
+        }).ToList();
+        return Ok(new ApiResponse<IReadOnlyList<NavPageResponse>>(mapped));
     }
 
     /// <summary>List pages for this app. AllPages=true (App Settings authoring view) also
@@ -196,10 +221,34 @@ public class PagesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Render(Guid appId, Guid publicId, [FromBody] RenderPageRequest request, CancellationToken ct)
     {
-        IReadOnlyDictionary<string, IReadOnlyList<string>>? filterValues = request.FilterValues?
-            .ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value);
+        IReadOnlyDictionary<string, Application.Pages.Queries.RenderPage.DashboardFilterValue>? filterValues = request.FilterValues?
+            .ToDictionary(kv => kv.Key, kv => new Application.Pages.Queries.RenderPage.DashboardFilterValue(kv.Value.Operator, kv.Value.Value, kv.Value.ValueMode));
         var result = await _renderHandler.HandleAsync(new RenderPageQuery(publicId, filterValues, request.SearchValues), ct);
         return Ok(new ApiResponse<RenderPageResponse>(MapRender(result)));
+    }
+
+    /// <summary>Serves a Code page's single authored file (its ContentType picks which of
+    /// CodeHtml/CodeCss/CodeJs is actually returned) as a plain document — not through Angular,
+    /// per spec. Reached via a plain browser navigation (new tab), not the SPA's HttpClient, so
+    /// auth can't ride the usual Authorization header — JwtMiddleware falls back to this `token`
+    /// query param when there's no header. This is the simplified, non-cookie MVP path: the
+    /// launcher route builds this URL from the SPA's own stored token immediately before opening
+    /// it (see dashboard-widget's sibling, the Code Page "open" flow, on the frontend).</summary>
+    [HttpGet("{publicId:guid}/code/raw")]
+    [RequireAppMember(AppAccessResolver.ByPagePublicId)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetCode(Guid appId, Guid publicId, [FromQuery] string? token, CancellationToken ct)
+    {
+        var result = await _getPageCodeHandler.HandleAsync(new GetPageCodeQuery(publicId, appId, token), ct);
+        var mimeType = result.ContentType switch
+        {
+            "css" => "text/css",
+            "js" => "application/javascript",
+            _ => "text/html",
+        };
+        return Content(result.Content, $"{mimeType}; charset=utf-8");
     }
 
     private static RenderPageResponse MapRender(Application.Pages.Queries.RenderPage.RenderPageResult r) => new()
@@ -208,8 +257,9 @@ public class PagesController : ControllerBase
         {
             Key = f.Key,
             Label = f.Label,
-            InputType = f.InputType,
-            DefaultValue = f.DefaultValue,
+            FilterType = f.FilterType,
+            UserMode = f.UserMode,
+            SearchType = f.SearchType,
         }).ToList(),
         Tabs = r.Tabs.Select(t => new RenderedTabResponse
         {

@@ -1780,7 +1780,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return col;
     }
 
-    private static string BuildFieldColumnList(IReadOnlyList<AppField> fields)
+    internal static string BuildFieldColumnList(IReadOnlyList<AppField> fields)
     {
         var cols = new List<string>();
         // Computed (Formula) fields have no physical column — they are projected in at read time.
@@ -1793,7 +1793,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return cols.Count > 0 ? ", " + string.Join(", ", cols) : string.Empty;
     }
 
-    private static string BuildOwnerWhere(long? restrictToCreatedBy, DynamicParameters parameters)
+    internal static string BuildOwnerWhere(long? restrictToCreatedBy, DynamicParameters parameters)
     {
         if (restrictToCreatedBy is null) return string.Empty;
         parameters.Add("ownerUserId", restrictToCreatedBy.Value);
@@ -1806,7 +1806,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     /// <param name="parentScope">Only for a query whose FROM aliases the child table as
     /// <see cref="ChildAlias"/> — "parentField" conditions are no-ops without it.</param>
-    private static string BuildFilterTreeWhere(FilterGroup? group, DynamicParameters parameters,
+    internal static string BuildFilterTreeWhere(FilterGroup? group, DynamicParameters parameters,
         IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null)
     {
         if (group is null || group.Nodes.Count == 0) return string.Empty;

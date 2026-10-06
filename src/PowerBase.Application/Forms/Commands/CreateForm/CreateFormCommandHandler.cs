@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -11,13 +12,16 @@ public class CreateFormCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public CreateFormCommandHandler(
         IAppTableRepository tableRepo,
         IFormRepository formRepo,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _formRepo = formRepo;
         _queryContext = queryContext;
@@ -54,6 +58,7 @@ public class CreateFormCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.Form, created.Id.ToString(), $"Form added: {command.Name}",
             appId: table.AppId, ct: ct);
+        await _refIndexer.ReindexFormAsync(publicId, ct);
 
         return MapToDetail(created);
     }

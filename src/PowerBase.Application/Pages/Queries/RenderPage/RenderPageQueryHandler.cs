@@ -103,7 +103,7 @@ public class RenderPageQueryHandler
             });
 
         var definition = DashboardDefinition.Parse(page.Definition);
-        var filterValues = query.FilterValues ?? new Dictionary<string, IReadOnlyList<string>>();
+        var filterValues = query.FilterValues ?? new Dictionary<string, DashboardFilterValue>();
         var searchValues = query.SearchValues ?? new Dictionary<string, string>();
 
         var tabResults = new List<RenderedTabResult>();
@@ -149,7 +149,7 @@ public class RenderPageQueryHandler
 
     private async Task<RenderedWidgetResult> RenderWidgetAsync(
         DashboardWidget widget,
-        IReadOnlyDictionary<string, IReadOnlyList<string>> filterValues,
+        IReadOnlyDictionary<string, DashboardFilterValue> filterValues,
         string? quickSearch,
         CancellationToken ct)
     {
@@ -201,21 +201,16 @@ public class RenderPageQueryHandler
                 };
             }
 
-            // Materialise this widget's runtime filters from the page filter values ∩ its own bindings.
-            var runtimeFilters = new List<(long FieldId, string Value, string? SubField)>();
-            foreach (var (slotKey, binding) in widget.FilterBindings)
-            {
-                if (!filterValues.TryGetValue(slotKey, out var values) || values.Count == 0) continue;
-                foreach (var value in values)
-                {
-                    if (string.IsNullOrWhiteSpace(value)) continue;
-                    runtimeFilters.Add((binding.FieldId, value, binding.SubField));
-                }
-            }
+            // Materialise this widget's runtime filter tree from the page filter values ∩ its own
+            // bindings — reuses the SAME FilterGroup/FilterCondition engine the Advanced filter
+            // builder and "ask the user" prompt already run through (RunReportQueryHandler
+            // resolves User-field ids and date/during tiers on this exact path), rather than the
+            // older per-type-hardcoded-operator RuntimeFilters tuple list.
+            var runtimeFilterTree = BuildRuntimeFilterTree(widget.FilterBindings, filterValues);
 
             var result = await _runReportHandler.HandleAsync(new RunReportQuery(
-                widget.ReportPublicId, Page: 1, PageSize: widget.PageSize,
-                RuntimeFilters: runtimeFilters.Count > 0 ? runtimeFilters : null,
+                widget.ReportPublicId, Page: 1, PageSize: widget.PageSize ?? 10,
+                RuntimeFilterTree: runtimeFilterTree,
                 QuickSearch: quickSearch), ct);
 
             ChartConfig? chart = null;
@@ -268,5 +263,48 @@ public class RenderPageQueryHandler
                 Layout = widget.Layout,
             };
         }
+    }
+
+    /// <summary>Turns this widget's filter-slot bindings ∩ the page's live filter values into a
+    /// single AND'd FilterGroup, one node per bound-and-filled slot. `dateRange` is the one
+    /// synthetic operator with no direct FilterCondition equivalent — a custom Date range picks
+    /// two literal endpoints, so it expands to a nested AND group of two conditions (gte start,
+    /// lte end) on the same field/subfield rather than one condition. Every other operator
+    /// (eq/contains/gte/lte/during/notDuring/...) maps straight through — RunReportQueryHandler
+    /// resolves User-field ids and date/during tiers downstream, same as the Advanced builder.</summary>
+    internal static FilterGroup? BuildRuntimeFilterTree(
+        IReadOnlyDictionary<string, DashboardFilterBinding> filterBindings,
+        IReadOnlyDictionary<string, DashboardFilterValue> filterValues)
+    {
+        var nodes = new List<FilterNode>();
+        foreach (var (slotKey, binding) in filterBindings)
+        {
+            if (!filterValues.TryGetValue(slotKey, out var fv) || string.IsNullOrWhiteSpace(fv.Value)) continue;
+
+            if (string.Equals(fv.Operator, "dateRange", StringComparison.OrdinalIgnoreCase))
+            {
+                var parts = fv.Value.Split('|', 2);
+                if (parts.Length != 2 || string.IsNullOrWhiteSpace(parts[0]) || string.IsNullOrWhiteSpace(parts[1])) continue;
+                nodes.Add(new FilterNode
+                {
+                    Group = new FilterGroup
+                    {
+                        Logic = "and",
+                        Nodes =
+                        [
+                            new FilterNode { Condition = new FilterCondition { FieldId = binding.FieldId, SubField = binding.SubField, Operator = "gte", Value = parts[0] } },
+                            new FilterNode { Condition = new FilterCondition { FieldId = binding.FieldId, SubField = binding.SubField, Operator = "lte", Value = parts[1] } },
+                        ],
+                    },
+                });
+                continue;
+            }
+
+            nodes.Add(new FilterNode
+            {
+                Condition = new FilterCondition { FieldId = binding.FieldId, SubField = binding.SubField, Operator = fv.Operator, Value = fv.Value, ValueMode = fv.ValueMode },
+            });
+        }
+        return nodes.Count > 0 ? new FilterGroup { Logic = "and", Nodes = nodes } : null;
     }
 }

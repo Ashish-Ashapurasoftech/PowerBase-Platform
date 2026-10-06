@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -11,13 +12,16 @@ public class SaveFormLayoutCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public SaveFormLayoutCommandHandler(
         IFormRepository formRepo,
         IAppFieldRepository fieldRepo,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _formRepo = formRepo;
         _fieldRepo = fieldRepo;
         _queryContext = queryContext;
@@ -152,5 +156,8 @@ public class SaveFormLayoutCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.Updated, AuditEntityTypes.Form, form.Id.ToString(),
             ct: ct);
+
+        // The form's elements, and its rules' action targets (which resolve through this layout).
+        await _refIndexer.ReindexFormAsync(command.FormPublicId, ct);
     }
 }

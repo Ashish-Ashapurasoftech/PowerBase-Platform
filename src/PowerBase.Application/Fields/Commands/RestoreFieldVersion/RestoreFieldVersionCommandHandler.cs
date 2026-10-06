@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Versioning;
 using PowerBase.Domain.Constants;
@@ -28,6 +29,7 @@ public class RestoreFieldVersionCommandHandler
     private readonly IMessagePublisher _messagePublisher;
     private readonly IQueryContext _queryContext;
     private readonly IAzureSearchService _searchService;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public RestoreFieldVersionCommandHandler(
         IAppTableRepository tableRepo,
@@ -41,8 +43,10 @@ public class RestoreFieldVersionCommandHandler
         ITenantUnitOfWork uow,
         IMessagePublisher messagePublisher,
         IQueryContext queryContext,
-        IAzureSearchService searchService)
+        IAzureSearchService searchService,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _versionRepo = versionRepo;
@@ -167,5 +171,8 @@ public class RestoreFieldVersionCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
             $"Field '{label}' restored to version {command.VersionToRestore} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+
+        // A restored version can change the formula/settings AND the label other formulas bind to.
+        await _refIndexer.ReindexTableFieldsAsync(table.Id, ct);
     }
 }

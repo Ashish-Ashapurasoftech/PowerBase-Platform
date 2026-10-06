@@ -73,6 +73,14 @@ public class AdminTenantsController : ControllerBase
         return Ok(new ApiResponse<object>(new { }));
     }
 
+    [HttpPatch("{tenantPublicId:guid}/code-pages")]
+    public async Task<IActionResult> SetCodePagesEnabled(Guid tenantPublicId, [FromBody] SetTenantCodePagesRequest request, CancellationToken ct)
+    {
+        var tenantId = await ResolveTenantIdAsync(tenantPublicId, ct);
+        await _adminRepo.UpdateTenantCodePagesEnabledAsync(tenantId, request.Enabled, ct);
+        return Ok(new ApiResponse<object>(new { }));
+    }
+
     [HttpGet("{tenantPublicId:guid}/members")]
     public async Task<IActionResult> ListMembers(Guid tenantPublicId, CancellationToken ct)
     {
@@ -172,6 +180,7 @@ public class AdminTenantsController : ControllerBase
 }
 
 public record SetTenantStatusRequest(string Status);
+public record SetTenantCodePagesRequest(bool Enabled);
 public record AssignTenantMemberRequest(string Email, Guid RolePublicId);
 public record InviteTenantMemberRequest(string Email, Guid RolePublicId);
 public record ChangeMemberRoleRequest(Guid RolePublicId);

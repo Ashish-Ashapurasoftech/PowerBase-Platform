@@ -83,10 +83,10 @@ public class GetRecordQueryHandler
         // export) which wants a ready-to-display name instead. userNames is still resolved too —
         // RecordResult.FromRow keeps using it for the read-only CreatedBy/ModifiedBy system
         // columns regardless of userPublicIds.
-        var userNames = await RunReportQueryHandler.ResolveUserNamesAsync([row], visibleFields, _userRepo, ct);
-        var userPublicIds = await RunReportQueryHandler.ResolveUserPublicIdsAsync([row], visibleFields, _userRepo, ct);
         var relational = await _relationalProjector.ProjectAsync(table, visibleFields, [row], ct);
         var computed = _formulaProjector.Project(visibleFields, [row], relational, table);
+        var userNames = await RunReportQueryHandler.ResolveUserNamesAsync([row], visibleFields, _userRepo, ct, computed);
+        var userPublicIds = await RunReportQueryHandler.ResolveUserPublicIdsAsync([row], visibleFields, _userRepo, ct);
 
         // Level 4: Enforce the formula/lookup part of the ViewFilter now that computed values exist.
         if (!access.Unrestricted && formulaViewFilter != null)

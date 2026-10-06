@@ -21,6 +21,7 @@ public class PageHandlerTests
     private readonly IPageRepository _pageRepo = Substitute.For<IPageRepository>();
     private readonly IQueryContext _queryContext = Substitute.For<IQueryContext>();
     private readonly IAuditRepository _auditRepo = Substitute.For<IAuditRepository>();
+    private readonly ITenantRepository _tenantRepo = Substitute.For<ITenantRepository>();
 
     private readonly Guid _appPublicId = Guid.NewGuid();
     private const long AppId = 1;
@@ -31,6 +32,11 @@ public class PageHandlerTests
         _queryContext.UserId.Returns(42L);
         _queryContext.IsSuperAdmin.Returns(false);
         _queryContext.Permissions.Returns(new HashSet<string>());
+
+        // Default: tenant-level Code Pages switch ON — most tests exercise the APP-role
+        // permission branch below it, not this outer tenant gate (which gets its own tests).
+        _tenantRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new Tenant { CodePagesEnabled = true });
     }
 
     private static Page MakePage(long id = 10, string pageType = "Dashboard", int currentVersionNo = 1, bool isPublished = false) => new()
@@ -61,7 +67,7 @@ public class PageHandlerTests
         _pageRepo.CreateAsync(Arg.Any<Page>(), Arg.Any<CancellationToken>())
             .Returns((11L, Guid.NewGuid(), 3));
 
-        var sut = new CreatePageCommandHandler(_appRepo, _appRoleRepo, _appUserRepo, _pageRepo, _queryContext, _auditRepo);
+        var sut = new CreatePageCommandHandler(_appRepo, _appRoleRepo, _appUserRepo, _pageRepo, _queryContext, _auditRepo, _tenantRepo);
         var result = await sut.HandleAsync(new CreatePageCommand(
             _appPublicId, "Dashboard", "My Dashboard", null, "Personal", null,
             "{}", null, null, null, null, false, 0, null));
@@ -75,7 +81,26 @@ public class PageHandlerTests
     [Fact]
     public async Task CreatePage_CodeType_WithoutCodePermission_ThrowsUnauthorized()
     {
-        var sut = new CreatePageCommandHandler(_appRepo, _appRoleRepo, _appUserRepo, _pageRepo, _queryContext, _auditRepo);
+        var sut = new CreatePageCommandHandler(_appRepo, _appRoleRepo, _appUserRepo, _pageRepo, _queryContext, _auditRepo, _tenantRepo);
+
+        await sut.Invoking(s => s.HandleAsync(new CreatePageCommand(
+                _appPublicId, "Code", "My Code Page", null, "Personal", null,
+                null, "html", "<h1>hi</h1>", null, null, false, 0, null)))
+            .Should().ThrowAsync<UnauthorizedActionException>();
+
+        await _pageRepo.DidNotReceive().CreateAsync(Arg.Any<Page>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CreatePage_CodeType_TenantCodePagesDisabled_ThrowsUnauthorized_EvenForSuperAdmin()
+    {
+        // The tenant-level switch is the OUTER gate — it blocks even a Super Admin, who would
+        // otherwise skip the app-role PagesCode check entirely (see the next assertion).
+        _tenantRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new Tenant { CodePagesEnabled = false });
+        _queryContext.IsSuperAdmin.Returns(true);
+
+        var sut = new CreatePageCommandHandler(_appRepo, _appRoleRepo, _appUserRepo, _pageRepo, _queryContext, _auditRepo, _tenantRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreatePageCommand(
                 _appPublicId, "Code", "My Code Page", null, "Personal", null,
@@ -93,7 +118,7 @@ public class PageHandlerTests
         _pageRepo.CreateAsync(Arg.Any<Page>(), Arg.Any<CancellationToken>())
             .Returns((11L, Guid.NewGuid(), 1));
 
-        var sut = new CreatePageCommandHandler(_appRepo, _appRoleRepo, _appUserRepo, _pageRepo, _queryContext, _auditRepo);
+        var sut = new CreatePageCommandHandler(_appRepo, _appRoleRepo, _appUserRepo, _pageRepo, _queryContext, _auditRepo, _tenantRepo);
         var result = await sut.HandleAsync(new CreatePageCommand(
             _appPublicId, "Code", "My Code Page", null, "Personal", null,
             null, "html", "<h1>hi</h1>", null, null, false, 0, null));
@@ -104,7 +129,7 @@ public class PageHandlerTests
     [Fact]
     public async Task CreatePage_SpecificRolesWithNoRoles_FailsValidation()
     {
-        var sut = new CreatePageCommandHandler(_appRepo, _appRoleRepo, _appUserRepo, _pageRepo, _queryContext, _auditRepo);
+        var sut = new CreatePageCommandHandler(_appRepo, _appRoleRepo, _appUserRepo, _pageRepo, _queryContext, _auditRepo, _tenantRepo);
 
         await sut.Invoking(s => s.HandleAsync(new CreatePageCommand(
                 _appPublicId, "Dashboard", "P", null, "SpecificRoles", null,
@@ -120,7 +145,7 @@ public class PageHandlerTests
         var page = MakePage();
         _pageRepo.GetByPublicIdAsync(page.PublicId, Arg.Any<CancellationToken>()).Returns(page);
 
-        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo);
+        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo, _tenantRepo);
 
         await sut.Invoking(s => s.HandleAsync(new UpdatePageCommand(
                 page.PublicId, "New Name", null, "Personal", null,
@@ -143,7 +168,7 @@ public class PageHandlerTests
         _appUserRepo.GetByAppAndUserAsync(page.AppId, 99, Arg.Any<CancellationToken>())
             .Returns(new AppUser { AppId = page.AppId, UserId = 99, AppRoleId = 7 });
 
-        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo);
+        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo, _tenantRepo);
         await sut.HandleAsync(new UpdatePageCommand(
             page.PublicId, "Renamed", null, "MyRole", null,
             "{}", null, null, null, null, false, 0, null, "Switch to MyRole"));
@@ -162,7 +187,7 @@ public class PageHandlerTests
         var page = MakePage(currentVersionNo: 1);
         _pageRepo.GetByPublicIdAsync(page.PublicId, Arg.Any<CancellationToken>()).Returns(page);
 
-        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo);
+        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo, _tenantRepo);
         var result = await sut.HandleAsync(new UpdatePageCommand(
             page.PublicId, "First Edit", null, "Personal", null,
             "{}", null, null, null, null, false, 0, null, "First real edit"));
@@ -179,7 +204,7 @@ public class PageHandlerTests
         var originalName = page.Name;
         _pageRepo.GetByPublicIdAsync(page.PublicId, Arg.Any<CancellationToken>()).Returns(page);
 
-        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo);
+        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo, _tenantRepo);
         var result = await sut.HandleAsync(new UpdatePageCommand(
             page.PublicId, "Renamed", "new desc", "Personal", null,
             "{\"x\":1}", null, null, null, null, true, 5, "pi-star", "Renamed the page"));
@@ -200,7 +225,24 @@ public class PageHandlerTests
         var page = MakePage(pageType: "Code");
         _pageRepo.GetByPublicIdAsync(page.PublicId, Arg.Any<CancellationToken>()).Returns(page);
 
-        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo);
+        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo, _tenantRepo);
+
+        await sut.Invoking(s => s.HandleAsync(new UpdatePageCommand(
+                page.PublicId, "Name", null, "Personal", null,
+                null, "html", "<p>x</p>", null, null, false, 0, null, "note")))
+            .Should().ThrowAsync<UnauthorizedActionException>();
+    }
+
+    [Fact]
+    public async Task UpdatePage_CodeType_TenantCodePagesDisabled_ThrowsUnauthorized_EvenForSuperAdmin()
+    {
+        var page = MakePage(pageType: "Code");
+        _pageRepo.GetByPublicIdAsync(page.PublicId, Arg.Any<CancellationToken>()).Returns(page);
+        _tenantRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>())
+            .Returns(new Tenant { CodePagesEnabled = false });
+        _queryContext.IsSuperAdmin.Returns(true);
+
+        var sut = new UpdatePageCommandHandler(_pageRepo, _appRoleRepo, _appUserRepo, _queryContext, _auditRepo, _tenantRepo);
 
         await sut.Invoking(s => s.HandleAsync(new UpdatePageCommand(
                 page.PublicId, "Name", null, "Personal", null,

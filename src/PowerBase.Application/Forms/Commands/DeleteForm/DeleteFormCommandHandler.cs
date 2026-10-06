@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -9,12 +10,15 @@ public class DeleteFormCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public DeleteFormCommandHandler(
         IFormRepository formRepo,
         IQueryContext queryContext,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _formRepo = formRepo;
         _queryContext = queryContext;
         _auditRepo = auditRepo;
@@ -36,5 +40,6 @@ public class DeleteFormCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.Deleted, AuditEntityTypes.Form, form.Id.ToString(), $"Form deleted: {form.Name}",
             ct: ct);
+        await _refIndexer.RemoveFormAsync(command.FormPublicId, ct);
     }
 }

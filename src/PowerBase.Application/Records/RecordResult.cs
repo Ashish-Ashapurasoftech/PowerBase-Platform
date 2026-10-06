@@ -33,8 +33,12 @@ public class RecordResult
             if (PhysicalNaming.IsComputedTypeCode(field.TypeCode))
             {
                 var cfid = (field.Fid ?? field.Id).ToString();
-                fieldData[cfid] = computedValues != null && field.Fid.HasValue
+                var computed = computedValues != null && field.Fid.HasValue
                     && computedValues.TryGetValue(field.Fid.Value, out var cv) ? cv : null;
+                // A Formula_User evaluates to a bare user id — show the name, like a stored User field.
+                fieldData[cfid] = field.TypeCode == "Formula_User" && userNames != null
+                    ? ResolveUserValue(computed, userNames)
+                    : computed;
                 continue;
             }
 

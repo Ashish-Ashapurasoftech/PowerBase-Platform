@@ -65,9 +65,9 @@ public class ListRecordsQueryHandler
         var total = await _recordRepo.CountAsync(
             table, fields, filterTree: effectiveFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
-        var userNames = await RunReportQueryHandler.ResolveUserNamesAsync(rows, visibleFields, _userRepo, ct);
         var relational = await _relationalProjector.ProjectAsync(table, visibleFields, rows, ct);
         var computed = _formulaProjector.Project(visibleFields, rows, relational, table);
+        var userNames = await RunReportQueryHandler.ResolveUserNamesAsync(rows, visibleFields, _userRepo, ct, computed);
 
         return new PagedRecordResult
         {

@@ -8,6 +8,7 @@ public interface IAdminRepository
     Task<IReadOnlyList<AdminTenantDto>> ListTenantsAsync(int page, int pageSize, string? search, CancellationToken ct = default);
     Task<int> CountTenantsAsync(string? search, CancellationToken ct = default);
     Task UpdateTenantStatusAsync(long tenantId, string status, CancellationToken ct = default);
+    Task UpdateTenantCodePagesEnabledAsync(long tenantId, bool enabled, CancellationToken ct = default);
 
     // Users
     Task<IReadOnlyList<AdminUserDto>> ListUsersAsync(int page, int pageSize, string? search, CancellationToken ct = default);

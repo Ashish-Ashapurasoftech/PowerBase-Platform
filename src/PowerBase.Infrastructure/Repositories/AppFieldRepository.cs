@@ -647,4 +647,26 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             Roles = rolesRaw.ToList()
         };
     }
+
+    public async Task<IReadOnlyList<FieldUsageRoleItem>> GetRoleUsageAsync(long fieldId, long appId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+
+        // Every role of the app, with the field's custom permission when one was set (IsCustom) and
+        // "Default" otherwise. (Forms, reports and formulas are answered by meta.FieldReference.)
+        const string rolesSql = """
+            SELECT ar.PublicId AS RoleId, ar.Name AS RoleName,
+                ISNULL(fp.Access, 'Default') AS EffectiveAccess,
+                CAST(CASE WHEN fp.Id IS NOT NULL THEN 1 ELSE 0 END AS BIT) AS IsCustom
+            FROM meta.AppRole ar
+            LEFT JOIN meta.AppRoleFieldPermission fp
+                ON fp.AppRoleId = ar.Id AND fp.AppFieldId = @fieldId
+            WHERE ar.AppId = @appId
+              AND ar.IsDeleted = 0
+            """;
+
+        var roles = await connection.QueryAsync<FieldUsageRoleItem>(
+            new CommandDefinition(rolesSql, new { fieldId, appId }, cancellationToken: ct));
+        return roles.ToList();
+    }
 }
