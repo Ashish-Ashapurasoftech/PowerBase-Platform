@@ -18,6 +18,7 @@ public class BulkDeleteFieldsCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly ITenantUnitOfWork _uow;
     private readonly IRelationshipRepository _relRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public BulkDeleteFieldsCommandHandler(
         IAppTableRepository tableRepo,
