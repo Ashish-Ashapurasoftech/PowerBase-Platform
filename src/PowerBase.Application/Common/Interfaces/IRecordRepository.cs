@@ -113,6 +113,12 @@ public interface IRecordRepository
         IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null,
         CancellationToken ct = default);
 
+    /// <summary>Every live row of the table (stored columns of <paramref name="fields"/>, plus Id and
+    /// the system columns), decrypted, ordered by Id. Feeds a summary over encrypted data, which SQL
+    /// can't match, group or aggregate and so is computed in memory.</summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllRowsDecryptedAsync(
+        AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
+
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
         FilterGroup? filterTree = null,

@@ -310,14 +310,17 @@ public sealed class RelationalProjector : IRelationalProjector
                     .GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
             }
 
-            // A summary reading an encrypted column is shown blank and never computed: SQL can't
-            // aggregate ciphertext, and Combined Text would otherwise put it on screen.
+            // A summary reading an encrypted column can't be aggregated in SQL (ciphertext), so it is
+            // computed in memory over decrypted rows. What that path can't do (lookups, calculated
+            // targets, parent-field comparisons) is shown blank, never ciphertext.
             var sortFid = function == SummaryFunctions.CombinedText ? s.SortFid : null;
             if (SummaryEncryptionGuard.FindProblem(app, childFields, refFid, s.TargetFid, sortFid, filter, tableFields, lookupSources) is not null)
             {
                 for (var i = 0; i < rows.Count; i++) maps[i][field.Fid!.Value] = null;
                 continue;
             }
+            var inMemory = SummaryEncryptionGuard.ReadsEncrypted(app, childFields, refFid, s.TargetFid, sortFid, filter, tableFields)
+                || SummaryEncryptionGuard.ReadsComputed(childFields, sortFid, filter);
 
             // Criteria comparing to a parent field that has since been deleted or turned into a
             // calculated field would silently drop that condition in SQL and match too many
@@ -345,7 +348,9 @@ public sealed class RelationalProjector : IRelationalProjector
             var parentScope = new ParentFieldScope(table.Id, refFid, tableFieldsByFid);
             var formulaTarget = s.TargetFid is int formulaFid && childFieldsByFid.TryGetValue(formulaFid, out var tf)
                 && SummaryComputedTargets.IsComputedTarget(tf) ? tf : null;
-            var agg = formulaTarget is not null
+            var agg = inMemory
+                ? await AggregateInMemoryAsync(app, table, tableFields, childTable, childFields, lookupSources, function, refFid, s, sortFid, parentKeyValues, filter, ct)
+                : formulaTarget is not null
                 ? await AggregateFormulaAsync(childTable, childFields, childFieldsByFid, formulaTarget, function, refFid, s, parentKeyValues, filter, parentScope, ct)
                 : function == SummaryFunctions.CombinedText && s.TargetFid is int targetFid
                 ? await CombineTextAsync(app, childTable, childFields, childFieldsByFid, lookupSources, refFid, targetFid, s, parentKeyValues, filter, parentScope, ct)
@@ -403,12 +408,23 @@ public sealed class RelationalProjector : IRelationalProjector
         AppField target, string function, int refFid, SummarySettings s, IReadOnlyCollection<object> parentKeyValues,
         FilterGroup? filter, ParentFieldScope parentScope, CancellationToken ct)
     {
+        var rows = await _recordRepo.ListRowsByReferenceAsync(childTable, childFields, refFid, parentKeyValues, filter, childFieldsByFid, parentScope, ct);
+        var refCol = PhysicalNaming.ColumnName(refFid);
+        return await AggregateFormulaRowsAsync(childTable, childFields, childFieldsByFid, target, function, s, rows,
+            row => row.TryGetValue(refCol, out var p) ? p : null, ct);
+    }
+
+    /// <summary>The part of a formula summary after the matching children are in hand: evaluate the formula on
+    /// each row (lookups/summaries as seed), sort, group by <paramref name="keyOf"/> (the parent a row belongs to,
+    /// null = none) and aggregate. Shared by the SQL path and the encrypted in-memory path.</summary>
+    private async Task<IReadOnlyDictionary<object, object?>> AggregateFormulaRowsAsync(
+        AppTable childTable, IReadOnlyList<AppField> childFields, IReadOnlyDictionary<long, AppField> childFieldsByFid,
+        AppField target, string function, SummarySettings s, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
+        Func<IReadOnlyDictionary<string, object?>, object?> keyOf, CancellationToken ct)
+    {
         var result = new Dictionary<object, object?>();
         var resultKind = SummaryComputedTargets.ResultKind(target);
-        if (resultKind is null || target.Fid is not int targetFid) return result;
-
-        var rows = await _recordRepo.ListRowsByReferenceAsync(childTable, childFields, refFid, parentKeyValues, filter, childFieldsByFid, parentScope, ct);
-        if (rows.Count == 0) return result;
+        if (resultKind is null || target.Fid is not int targetFid || rows.Count == 0) return result;
 
         IReadOnlyList<IReadOnlyDictionary<long, object?>>? seed = null;
         if (_formulaSummaryDepth < MaxFormulaSummaryDepth)
@@ -420,7 +436,6 @@ public sealed class RelationalProjector : IRelationalProjector
         var computed = _formulaProjector.Project(childFields, rows, seed, childTable);
 
         var options = function == SummaryFunctions.CombinedText ? CombinedTextOptions.From(s) : null;
-        var refCol = PhysicalNaming.ColumnName(refFid);
         var sortCol = options?.SortFid is int sortFid && childFieldsByFid.TryGetValue(sortFid, out var sortField) && !SummaryLookupSources.IsLookup(sortField)
             ? sortField.IsSystem ? SystemColumn(sortFid) : PhysicalNaming.ColumnName(sortFid)
             : null;
@@ -436,13 +451,172 @@ public sealed class RelationalProjector : IRelationalProjector
         else if (options is { SortDescending: true })
             indexes = indexes.Reverse();   // record order: newest first
 
-        foreach (var group in indexes.Where(i => rows[i].TryGetValue(refCol, out var p) && p is not null).GroupBy(i => rows[i][refCol]!))
+        foreach (var group in indexes.Where(i => keyOf(rows[i]) is not null).GroupBy(i => keyOf(rows[i])!))
         {
             var values = group.Select(i => computed[i].GetValueOrDefault(targetFid)).ToList();
             var value = SummaryComputedTargets.Aggregate(function, resultKind, values, options);
             if (value is not null) result[group.Key] = value;
         }
         return result;
+    }
+
+    /// <summary>Child rows by table, decrypted, loaded once per projector (scoped per request) so several
+    /// summaries over the same child table share one read.</summary>
+    private readonly Dictionary<long, IReadOnlyList<IReadOnlyDictionary<string, object?>>> _decryptedChildRows = new();
+
+    /// <summary>A summary over encrypted data: SQL can't match or aggregate ciphertext (the reference
+    /// column included), so the child table's rows are decrypted and aggregated here
+    /// (<see cref="EncryptedSummaryAggregator"/>). Returns parentKey → value.</summary>
+    private async Task<IReadOnlyDictionary<object, object?>> AggregateInMemoryAsync(
+        App app, AppTable parentTable, IReadOnlyList<AppField>? parentFields, AppTable childTable,
+        IReadOnlyList<AppField> childFields, IReadOnlyDictionary<long, AppField> lookupSources,
+        string function, int refFid, SummarySettings s, int? sortFid, IReadOnlyCollection<object> parentKeyValues,
+        FilterGroup? filter, CancellationToken ct)
+    {
+        if (!_decryptedChildRows.TryGetValue(childTable.Id, out var childRows))
+        {
+            childRows = await _recordRepo.ListAllRowsDecryptedAsync(childTable, childFields, ct);
+            _decryptedChildRows[childTable.Id] = childRows;
+        }
+
+        var readFids = new List<long>();
+        if (s.TargetFid.HasValue) readFids.Add(s.TargetFid.Value);
+        if (sortFid.HasValue) readFids.Add(sortFid.Value);
+        readFids.AddRange(SummaryEncryptionGuard.ConditionFieldIds(filter));
+        var tableFields = childFields;
+        (childRows, childFields) = await ResolveLookupValuesAsync(childRows, childFields, lookupSources, readFids, ct);
+
+        // Criteria or a sort that read a Formula/Summary: evaluate it on every child record first (the same projection a
+        // record read does), so the value can be compared and sorted like a stored one.
+        var conditionFids = SummaryEncryptionGuard.ConditionFieldIds(filter).Concat(sortFid.HasValue ? new long[] { sortFid.Value } : []).ToList();
+        if (SummaryEncryptionGuard.ReadsComputed(tableFields, sortFid, filter))
+        {
+            IReadOnlyList<IReadOnlyDictionary<long, object?>>? seed = null;
+            if (_formulaSummaryDepth < MaxFormulaSummaryDepth)
+            {
+                _formulaSummaryDepth++;
+                try { seed = await ProjectAsync(childTable, tableFields, childRows, ct); }
+                finally { _formulaSummaryDepth--; }
+            }
+            var computedValues = _formulaProjector.Project(tableFields, childRows, seed, childTable);
+            (childRows, childFields) = EncryptedRowFilter.WithComputedValues(childRows, childFields, computedValues, conditionFids);
+        }
+
+        var parentKeys = parentKeyValues.Select(NormalizeParentKey).OfType<string>().ToHashSet();
+
+        // Criteria that compare a child field to a field of its own parent (e.g. "Due is on or after the
+        // parent's Start Date"): the parent's value, decrypted, stands in for it - one criteria tree per parent.
+        Func<string, FilterGroup?>? filterFor = null;
+        if (HasParentFieldCondition(filter) && parentFields is not null)
+        {
+            var parentRows = await _recordRepo.ListAllRowsDecryptedAsync(parentTable, parentFields, ct);
+            var parentById = new Dictionary<string, IReadOnlyDictionary<string, object?>>();
+            foreach (var r in parentRows)
+                if (r.TryGetValue("Id", out var pid) && EncryptedSummaryAggregator.NormalizeKey(pid) is { } pk) parentById[pk] = r;
+            var parentFieldsByFid = parentFields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+            var perParent = new Dictionary<string, FilterGroup?>();
+            filterFor = key =>
+            {
+                if (!perParent.TryGetValue(key, out var resolvedFilter))
+                    perParent[key] = resolvedFilter = ResolveParentFieldConditions(filter!, parentById.GetValueOrDefault(key), parentFieldsByFid);
+                return resolvedFilter;
+            };
+        }
+
+        // A Formula (or a child's own Summary) has no column: evaluate it on the matching decrypted rows,
+        // exactly as the SQL path does on the rows it fetched, then aggregate per parent.
+        if (tableFields.FirstOrDefault(f => f.Fid == s.TargetFid) is { } computedTarget && SummaryComputedTargets.IsComputedTarget(computedTarget))
+        {
+            var matched = EncryptedSummaryAggregator.MatchingRows(childRows, childFields, refFid, parentKeys, filterFor ?? (_ => filter));
+            var keyByRow = new Dictionary<IReadOnlyDictionary<string, object?>, string>(ReferenceEqualityComparer.Instance);
+            foreach (var (key, row) in matched) keyByRow[row] = key;
+            var fieldsByFid = tableFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
+            return await AggregateFormulaRowsAsync(childTable, tableFields, fieldsByFid, computedTarget, function, s,
+                matched.Select(m => m.Row).ToList(), row => keyByRow.GetValueOrDefault(row), ct);
+        }
+
+        var options = function == SummaryFunctions.CombinedText ? CombinedTextOptions.From(s) : null;
+
+        Func<object?, string?> format = v => Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture);
+        if (function == SummaryFunctions.CombinedText)
+        {
+            var target = childFields.FirstOrDefault(f => f.Fid == s.TargetFid);
+            var typeCode = string.IsNullOrWhiteSpace(s.TargetSubField) ? target?.TypeCode ?? s.TargetTypeCode ?? "Text" : "Text";
+            if (!_appFormatting.TryGetValue(app.Id, out var appFormatting))
+            {
+                appFormatting = DisplayValueFormatter.ParseAppFormatting(app.Formatting);
+                _appFormatting[app.Id] = appFormatting;
+            }
+            var settings = string.IsNullOrWhiteSpace(s.TargetSubField) ? target?.Settings : null;
+            format = v => DisplayValueFormatter.Format(v, typeCode, settings, appFormatting);
+        }
+
+        return EncryptedSummaryAggregator.Aggregate(
+            childRows, childFields, function, refFid, s.TargetFid, s.TargetSubField, parentKeys, filter, options, format, filterFor);
+    }
+
+    /// <summary>The criteria with each "the value in the parent's field" comparison replaced by that parent's
+    /// (decrypted) value as a literal. A parent with no value (or no such field) can match nothing, like in SQL.</summary>
+    private static FilterGroup ResolveParentFieldConditions(
+        FilterGroup group, IReadOnlyDictionary<string, object?>? parentRow, IReadOnlyDictionary<long, AppField> parentFieldsByFid)
+    {
+        var nodes = new List<FilterNode>();
+        foreach (var node in group.Nodes)
+        {
+            if (node.Condition is { } c && ParentFieldScope.IsParentFieldMode(c.ValueMode))
+            {
+                object? raw = null;
+                if (parentRow is not null && c.ValueFieldId is long pf && parentFieldsByFid.TryGetValue(pf, out var parentField))
+                    parentRow.TryGetValue(EncryptedRowFilter.Column(parentField), out raw);
+                var text = raw switch
+                {
+                    null or DBNull => null,
+                    DateTime d => d.ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
+                    _ => Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture),
+                };
+                nodes.Add(new FilterNode
+                {
+                    Condition = string.IsNullOrWhiteSpace(text)
+                        ? new FilterCondition { FieldId = 3, Operator = "eq", Value = "-1" }   // Record ID# is never negative
+                        : new FilterCondition { FieldId = c.FieldId, Operator = c.Operator, Value = text, SubField = c.SubField, ValueMode = "literal" },
+                });
+            }
+            else if (node.Group is { } sub)
+                nodes.Add(new FilterNode { Group = ResolveParentFieldConditions(sub, parentRow, parentFieldsByFid) });
+            else
+                nodes.Add(node);
+        }
+        return new FilterGroup { Logic = group.Logic, Nodes = nodes };
+    }
+
+    /// <summary>A lookup has no column, so for the lookups the summary reads (target, sort, criteria) its
+    /// value is put into a copy of each child row under the lookup's own column: the source table's rows
+    /// are decrypted and the value is taken through the child's reference to it. Those lookups are also
+    /// replaced, in the returned field list, by a field of their source's type, so they are compared,
+    /// summed and formatted as that type. Everything else is returned as it came.</summary>
+    private async Task<(IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows, IReadOnlyList<AppField> Fields)> ResolveLookupValuesAsync(
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, IReadOnlyList<AppField> childFields,
+        IReadOnlyDictionary<long, AppField> lookupSources, IEnumerable<long> readFids, CancellationToken ct)
+    {
+        var lookups = readFids.Distinct()
+            .Select(fid => childFields.FirstOrDefault(f => f.Fid == fid))
+            .Where(f => f is not null && SummaryLookupSources.IsLookup(f) && lookupSources.ContainsKey(f.Fid!.Value))
+            .Select(f => f!).ToList();
+
+        var resultRows = rows;
+        var resultFields = childFields;
+        foreach (var lookup in lookups)
+        {
+            var settings = SummaryLookupSources.Settings(lookup);
+            if (settings is not { SourceTableId: long sourceTableId, ReferenceFid: int } || !lookupSources.TryGetValue(lookup.Fid!.Value, out var source))
+                continue;
+
+            var sourceTable = await _tableRepo.GetByIdAsync(sourceTableId, ct);
+            var sourceFields = await _fieldRepo.ListByTableAsync(sourceTableId, ct);
+            var sourceRows = await _recordRepo.ListAllRowsDecryptedAsync(sourceTable, sourceFields, ct);
+            (resultRows, resultFields) = EncryptedRowFilter.WithLookupValue(resultRows, resultFields, lookup, settings, source, sourceRows);
+        }
+        return (resultRows, resultFields);
     }
 
     /// <summary>A system field's own column (Record ID#, Date Created, …), by its Fid.</summary>
@@ -499,7 +673,7 @@ public sealed class RelationalProjector : IRelationalProjector
     /// <summary>Pulls one JSON property out of a composite Address field's raw stored value
     /// (e.g. just the city). Returns null on any parse failure rather than throwing — malformed
     /// or legacy data shouldn't take down the whole record read.</summary>
-    private static object? ExtractJsonSubField(object? rawValue, string subField)
+    internal static object? ExtractJsonSubField(object? rawValue, string subField)
     {
         if (rawValue is not string json || string.IsNullOrWhiteSpace(json))
             return null;

@@ -176,7 +176,7 @@ public class BulkCreateFieldsCommandHandler
                 IsFilterable = advancedDefaults.Filterable,
                 IsReportable = advancedDefaults.Reportable,
                 IsAuditable = item.IsAuditable,
-                IsEncrypted = item.IsEncrypted,
+                IsEncrypted = item.IsEncrypted && !PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(fieldType.Code),
                 IsAutoFill = FieldAutoFillCapability.IsSupported(fieldType.Code),
             };
 

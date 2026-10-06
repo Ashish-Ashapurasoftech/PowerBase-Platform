@@ -143,15 +143,14 @@ public class CreateRelationshipSummaryGuardTests
     }
 
     [Fact]
-    public async Task Handle_SummariesInEncryptedApp_ThrowsValidation_AndWritesNothing()
+    public async Task Handle_SummariesInEncryptedApp_AreCreated()
     {
         _appRepo.GetByIdAsync(AppId, Arg.Any<CancellationToken>()).Returns(new App { Id = AppId, IsEncrypted = true });
         var created = CaptureCreatedFields();
 
-        (await FluentActions.Invoking(() => _handler.HandleAsync(NewRelationshipWithSummary("Count", targetFid: null)))
-            .Should().ThrowAsync<ValidationException>()).Which.Errors["summaries"].Single().Should().Contain("encrypted app");
-        created.Should().BeEmpty();
-        await _relRepo.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
+        await _handler.HandleAsync(NewRelationshipWithSummary("Count", targetFid: null));
+
+        created.Should().Contain(f => f.TypeCode == "Summary");
     }
 
     [Fact]

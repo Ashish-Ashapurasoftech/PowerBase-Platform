@@ -103,7 +103,9 @@ public class UpdateFieldCommandHandler
         var isSortable = existing.IsSystem ? false : command.IsSortable;
         var isFilterable = existing.IsSystem ? false : command.IsFilterable;
         var isAuditable = existing.IsSystem ? false : command.IsAuditable;
-        var isEncrypted = existing.IsSystem ? false : command.IsEncrypted;
+        var isEncrypted = existing.IsSystem || PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(existing.TypeCode)
+            ? false
+            : command.IsEncrypted;
         var isAutoFill = existing.IsSystem ? false : command.IsAutoFill;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)

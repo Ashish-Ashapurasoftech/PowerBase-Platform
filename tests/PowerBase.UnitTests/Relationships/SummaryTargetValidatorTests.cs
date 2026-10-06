@@ -289,8 +289,14 @@ public class SummaryTargetValidatorTests
             .Should().Throw<ValidationException>().Which.Errors.Should().ContainKey("delimiter");
 
     [Fact]
-    public void ValidateCombinedTextOptions_UnsortableField_ThrowsValidation() =>   // formula — no physical column
-        FluentActions.Invoking(() => SummaryTargetValidator.ValidateCombinedTextOptions("CombinedText", new CombinedTextOptions(", ", 7, false, false), ChildFields))
+    public void ValidateCombinedTextOptions_FormulaSortField_Passes() =>   // computed per record, sorted in memory
+        SummaryTargetValidator.ValidateCombinedTextOptions("CombinedText", new CombinedTextOptions(", ", 7, false, false), ChildFields)
+            .Should().NotBeNull();
+
+    [Fact]
+    public void ValidateCombinedTextOptions_UnsortableField_ThrowsValidation() =>   // a formula that returns a Time can't be compared
+        FluentActions.Invoking(() => SummaryTargetValidator.ValidateCombinedTextOptions("CombinedText", new CombinedTextOptions(", ", 90, false, false),
+                [.. ChildFields, new AppField { Id = 90, Fid = 90, Name = "T", TypeCode = "Formula_Time" }]))
             .Should().Throw<ValidationException>().Which.Errors.Should().ContainKey("sortFid");
 
     [Fact]

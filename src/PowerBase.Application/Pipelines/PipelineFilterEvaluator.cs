@@ -544,6 +544,15 @@ public static class PipelineFilterEvaluator
             case "gte": return EvaluateConditionOperator(leftVal, "greater_than_or_equals", rightVal, typeCategory, logger);
             case "lt": return EvaluateConditionOperator(leftVal, "less_than", rightVal, typeCategory, logger);
             case "lte": return EvaluateConditionOperator(leftVal, "less_than_or_equals", rightVal, typeCategory, logger);
+            case "date_eq": return TryParseDateTime(leftVal, out var dl) && TryParseDateTime(rightVal, out var dr) && dl.Date == dr.Date;
+            case "isEmpty": return string.IsNullOrWhiteSpace(leftVal) || leftVal == "[]";
+            case "isNotEmpty": return !string.IsNullOrWhiteSpace(leftVal) && leftVal != "[]";
+            case "in":
+            case "notIn":
+                {
+                    var found = ParseValueList(rightVal).Any(v => EvaluateConditionOperator(leftVal, "equals", v, typeCategory, logger));
+                    return condition.Operator == "in" ? found : !found;
+                }
             case "wildcard": return IsWildcardMatch(leftVal, rightVal);
             case "notWildcard": return !IsWildcardMatch(leftVal, rightVal);
             case "includes":
@@ -557,6 +566,20 @@ public static class PipelineFilterEvaluator
                 logger?.LogWarning("Unsupported advanced query operator '{Operator}' in trigger filter evaluation.", condition.Operator);
                 return false;
         }
+    }
+
+    /// <summary>An "in" operand: a JSON array (how the UI stores it) or, failing that, comma-separated text.</summary>
+    private static IEnumerable<string> ParseValueList(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return [];
+        try
+        {
+            var list = System.Text.Json.JsonSerializer.Deserialize<List<System.Text.Json.JsonElement>>(raw);
+            if (list is not null)
+                return list.Select(e => e.ValueKind == System.Text.Json.JsonValueKind.String ? e.GetString() ?? "" : e.GetRawText()).ToList();
+        }
+        catch (System.Text.Json.JsonException) { }
+        return raw.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim()).ToList();
     }
 
     private static string ReadFieldValue(AppField field, IReadOnlyDictionary<long, object?> valuesSource)

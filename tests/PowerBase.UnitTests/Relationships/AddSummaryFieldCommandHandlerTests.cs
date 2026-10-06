@@ -109,23 +109,33 @@ public class AddSummaryFieldCommandHandlerTests
             .Should().ThrowAsync<ValidationException>();
 
     [Fact]
-    public async Task Handle_EncryptedApp_ThrowsValidation_AndCreatesNothing()
+    public async Task Handle_EncryptedApp_CreatesTheSummary()
     {
         _appRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(new App { Id = 9, IsEncrypted = true });
 
-        (await FluentActions.Invoking(() => _handler.HandleAsync(Command("Count", null)))
-            .Should().ThrowAsync<ValidationException>()).Which.Errors["targetFid"].Single().Should().Contain("encrypted app");
-        _created.Should().BeNull();
+        await _handler.HandleAsync(Command("Count", null));
+
+        _created.Should().NotBeNull();
     }
 
     [Fact]
-    public async Task Handle_EncryptedTargetField_ThrowsValidation_AndCreatesNothing()
+    public async Task Handle_EncryptedTargetField_CreatesTheSummary()
     {
         TaskFields.Single(f => f.Fid == 6).IsEncrypted = true;   // this test instance's own list
 
-        (await FluentActions.Invoking(() => _handler.HandleAsync(Command("Sum", 6)))
-            .Should().ThrowAsync<ValidationException>()).Which.Errors["targetFid"].Single().Should().Contain("'Amount'");
-        _created.Should().BeNull();
+        await _handler.HandleAsync(Command("Sum", 6));
+
+        _created.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Handle_EncryptedApp_CalculatedTarget_CreatesTheSummary()
+    {
+        _appRepo.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(new App { Id = 9, IsEncrypted = true });
+
+        await _handler.HandleAsync(Command("Sum", 8));
+
+        _created.Should().NotBeNull();
     }
 
     // ── What gets saved ──

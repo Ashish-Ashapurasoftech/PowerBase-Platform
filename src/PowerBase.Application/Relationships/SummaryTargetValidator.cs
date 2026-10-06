@@ -138,9 +138,9 @@ public static class SummaryTargetValidator
         {
             var sortField = childFields.FirstOrDefault(f => f.Fid == sortFid)
                 ?? throw new NotFoundException("Field", sortFid);
-            // Same rule as the target: the sort runs in SQL, so it needs a column — a stored or
-            // system field, or a lookup of one.
-            if (!SummaryLookupSources.IsReadable(sortField, lookupSources))
+            // A stored or system field, a lookup of one, or a Formula/Summary (its value is computed per
+            // record and the sort is done in memory).
+            if (!SummaryLookupSources.IsReadable(sortField, lookupSources) && SummaryComputedTargets.ResultKind(sortField) is null)
                 throw Error("sortFid", $"'{sortField.Label ?? sortField.Name}' can't be used for sorting; choose a stored field.");
         }
 

@@ -68,7 +68,8 @@ public class SchemaEngineService : ISchemaEngineService
         var appIsEncrypted = await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(appEncryptedSql, new { appId = table.AppId }, cancellationToken: ct));
 
-        var shouldEncryptColumn = appIsEncrypted || field.IsEncrypted;
+        var shouldEncryptColumn = !PhysicalNaming.IsEncryptionExemptTypeCode(field.TypeCode)
+            && (appIsEncrypted || field.IsEncrypted);
 
         var collationClause = "";
         var encryptionClause = "";
