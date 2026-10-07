@@ -26,6 +26,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
     private readonly IMainPipelineQueueRepository _mainQueueRepo;
     private readonly ILogger<PipelineTriggerInterceptor> _logger;
     private readonly PipelineExecutionOptions _options;
+    private readonly ITenantConnectionResolver? _tenantResolver;
 
     public PipelineTriggerInterceptor(
         IPipelineRepository pipelineRepo,
@@ -35,8 +36,10 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         IControlConnectionFactory controlConnFactory,
         IMainPipelineQueueRepository mainQueueRepo,
         ILogger<PipelineTriggerInterceptor> logger,
-        IOptions<PipelineExecutionOptions>? options = null)
+        IOptions<PipelineExecutionOptions>? options = null,
+        ITenantConnectionResolver? tenantResolver = null)
     {
+        _tenantResolver = tenantResolver;
         _pipelineRepo = pipelineRepo;
         _recordRepo = recordRepo;
         _queryContext = queryContext;
@@ -92,6 +95,19 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         );
 
         await InterceptBulkAsync(table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
+    }
+
+    /// <summary>Writes bulk-event staging rows into another tenant's database, on its own connection.</summary>
+    protected virtual async Task InsertStagingIntoTenantAsync(long tenantId, List<PipelineBulkEventRecord> records, CancellationToken ct)
+    {
+        if (records.Count == 0) return;
+        var connectionString = await _tenantResolver!.ResolveAsync(tenantId, ct);
+        using var suppressScope = new System.Transactions.TransactionScope(
+            System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled);
+        await using var connection = new Microsoft.Data.SqlClient.SqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(PowerBase.Infrastructure.Repositories.PipelineBulkEventSql.Insert, records, cancellationToken: ct));
+        suppressScope.Complete();
     }
 
     public async Task InterceptBulkAsync(
@@ -411,8 +427,12 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                         });
                     }
 
-                    // Batch insert staging records inside current transaction
-                    await _pipelineRepo.InsertBulkEventRecordsAsync(stagingRecords, _uow.Transaction, ct);
+                    // The flow runs, and reads its staged records, in the owner tenant's database. For a
+                    // cross-tenant trigger the staging therefore goes there (written after this
+                    // transaction commits, just before the job is queued) instead of into this tenant.
+                    var stageInOwnerTenant = !isSameTenant && _tenantResolver != null;
+                    if (!stageInOwnerTenant)
+                        await _pipelineRepo.InsertBulkEventRecordsAsync(stagingRecords, _uow.Transaction, ct);
 
                     // Map centralized queue payload
                     var payloadDict = new Dictionary<string, object?>();
@@ -483,14 +503,21 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                             Status = "Pending"
                         };
 
+                        async Task StageAndEnqueueAsync()
+                        {
+                            if (stageInOwnerTenant)
+                                await InsertStagingIntoTenantAsync(sub.OwnerTenantId, stagingRecords, ct);
+                            await _mainQueueRepo.EnqueueAsync(queueJob, null, ct);
+                            DatabasePipelineQueueWakeNotifier.Wake();
+                        }
+
                         if (_uow is PowerBase.Infrastructure.UOW.TriggerPublishingTenantUnitOfWork publishUow)
                         {
                             publishUow.RegisterPostCommitAction(async () =>
                             {
                                 try
                                 {
-                                    await _mainQueueRepo.EnqueueAsync(queueJob, null, ct);
-                                    DatabasePipelineQueueWakeNotifier.Wake();
+                                    await StageAndEnqueueAsync();
                                 }
                                 catch (Exception ex)
                                 {
@@ -500,8 +527,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                         }
                         else
                         {
-                            await _mainQueueRepo.EnqueueAsync(queueJob, null, ct);
-                            DatabasePipelineQueueWakeNotifier.Wake();
+                            await StageAndEnqueueAsync();
                         }
                     }
                 }

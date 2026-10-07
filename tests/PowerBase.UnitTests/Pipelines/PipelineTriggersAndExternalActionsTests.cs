@@ -1691,7 +1691,7 @@ public class PipelineTriggersAndExternalActionsTests
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
-        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo, Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(), Substitute.For<IQueryContext>());
+        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo, Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(), Substitute.For<IReportRepository>(), Substitute.For<IQueryContext>());
 
         // Act
         await writeService.ApplyAsync(table, fields, recordPublicId, fieldValues, "Updated", "Record modified", CancellationToken.None);
@@ -1733,7 +1733,7 @@ public class PipelineTriggersAndExternalActionsTests
             .Returns(oldRecord);
 
         var fieldValues = new Dictionary<long, object?> { [6] = "Published" };
-        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo, Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(), Substitute.For<IQueryContext>());
+        var writeService = new RecordWriteService(tableRepo, fieldRepo, recordRepo, Substitute.For<IRelationshipRepository>(), appUserRepo, userRepo, auditRepo, triggerInterceptor, engine, appRepo, Substitute.For<IFormRuleRepository>(), Substitute.For<IFormRepository>(), Substitute.For<IReportRepository>(), Substitute.For<IQueryContext>());
 
         // Act
         await writeService.ApplyAsync(table, fields, recordPublicId, fieldValues, "Updated", "Record modified", CancellationToken.None);

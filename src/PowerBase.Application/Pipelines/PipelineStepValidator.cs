@@ -22,6 +22,8 @@ public sealed class TargetTenantRepos : IAsyncDisposable
     public IAppTableRepository TableRepo { get; init; } = null!;
     public IAppFieldRepository FieldRepo { get; init; } = null!;
     public IAppAccessService AppAccessService { get; init; } = null!;
+    /// <summary>Table-level role access for this scope; null in test doubles.</summary>
+    public IRolePermissionEnforcer? Enforcer { get; init; }
 
     private readonly IAsyncDisposable? _scope;
 
@@ -30,8 +32,10 @@ public sealed class TargetTenantRepos : IAsyncDisposable
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IAppAccessService appAccessService,
-        IAsyncDisposable? scope = null)
+        IAsyncDisposable? scope = null,
+        IRolePermissionEnforcer? enforcer = null)
     {
+        Enforcer = enforcer;
         AppRepo = appRepo;
         TableRepo = tableRepo;
         FieldRepo = fieldRepo;
@@ -55,6 +59,7 @@ public class PipelineStepValidator
     private readonly IAppAccessService _appAccessService;
     private readonly ITenantRepository _tenantRepo;
     private readonly IQueryContext _queryContext;
+    private readonly IRolePermissionEnforcer? _enforcer;
 
     /// <summary>
     /// Optional factory that creates a scoped repository set for a given target TenantId.
@@ -95,8 +100,10 @@ public class PipelineStepValidator
         IQueryContext queryContext,
         Func<long, Task<TargetTenantRepos>>? targetScopeFactory = null,
         ConnectionScopeResolver? connectionScopeResolver = null,
-        IServiceScopeFactory? serviceScopeFactory = null)
+        IServiceScopeFactory? serviceScopeFactory = null,
+        IRolePermissionEnforcer? enforcer = null)
     {
+        _enforcer = enforcer;
         _pipelineRepo = pipelineRepo;
         _appRepo = appRepo;
         _tableRepo = tableRepo;
@@ -132,13 +139,30 @@ public class PipelineStepValidator
                 scope.GetRequiredService<IAppTableRepository>(),
                 scope.GetRequiredService<IAppFieldRepository>(),
                 scope.GetRequiredService<IAppAccessService>(),
-                scope);
+                scope,
+                scope.Services.GetService<IRolePermissionEnforcer>());
         }
         catch
         {
             await scope.DisposeAsync();
             throw;
         }
+    }
+
+    /// <summary>
+    /// App membership plus the role's table-level access for the action, the same model the Records API
+    /// and the run-time guard use. The flat records:* permission codes are not consulted: regular roles
+    /// do not carry them, so requiring them rejects users who do have table access.
+    /// </summary>
+    private static async Task RequireRecordAccessAsync(TargetTenantRepos repos, Guid tablePublicId, PipelineRecordAccessKind kind, CancellationToken ct)
+    {
+        await repos.AppAccessService.RequireMembershipByTablePublicIdAsync(tablePublicId, ct);
+        if (repos.Enforcer == null) return;
+        var table = await repos.TableRepo.GetByPublicIdAsync(tablePublicId, ct);
+        var fields = await repos.FieldRepo.ListByTableAsync(table.Id, ct);
+        var access = await repos.Enforcer.GetTableAccessAsync(table, fields, ct);
+        if (!PipelineRecordAccess.IsAllowed(access, kind))
+            throw new UnauthorizedActionException(PipelineRecordAccess.Describe(kind, table.Name));
     }
 
     public async Task ValidateStepConnectionAndTenantAccessAsync(string configJson, CancellationToken ct)
@@ -208,9 +232,8 @@ public class PipelineStepValidator
         {
             var sourceId = CopyRecordsDefinition.TableId(config.SourceTable);
             var destinationId = CopyRecordsDefinition.TableId(config.DestinationTable);
-            await repos.AppAccessService.RequirePermissionByTablePublicIdAsync(sourceId, PermissionCodes.RecordsRead, ct);
-            await repos.AppAccessService.RequirePermissionByTablePublicIdAsync(destinationId, PermissionCodes.RecordsCreate, ct);
-            await repos.AppAccessService.RequirePermissionByTablePublicIdAsync(destinationId, PermissionCodes.RecordsUpdate, ct);
+            await RequireRecordAccessAsync(repos, sourceId, PipelineRecordAccessKind.View, ct);
+            await RequireRecordAccessAsync(repos, destinationId, PipelineRecordAccessKind.AddAndModify, ct);
             var source = await repos.TableRepo.GetByPublicIdAsync(sourceId, ct);
             var destination = await repos.TableRepo.GetByPublicIdAsync(destinationId, ct);
             var sourceFields = await repos.FieldRepo.ListByTableAsync(source.Id, ct);
@@ -237,7 +260,7 @@ public class PipelineStepValidator
                 return;
             }
         }
-        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService));
+        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService, null, _enforcer));
     }
 
     /// <summary>
@@ -297,7 +320,7 @@ public class PipelineStepValidator
                 return;
             }
         }
-        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService));
+        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService, null, _enforcer));
     }
 
     /// <summary>
@@ -333,7 +356,7 @@ public class PipelineStepValidator
 
         async Task Validate(TargetTenantRepos repos)
         {
-            await repos.AppAccessService.RequirePermissionByTablePublicIdAsync(tablePublicId, PermissionCodes.RecordsCreate, ct);
+            await RequireRecordAccessAsync(repos, tablePublicId, PipelineRecordAccessKind.Add, ct);
             var table = await repos.TableRepo.GetByPublicIdAsync(tablePublicId, ct);
             var fields = await repos.FieldRepo.ListByTableAsync(table.Id, ct);
             var values = new Dictionary<int, JsonElement>();
@@ -379,7 +402,7 @@ public class PipelineStepValidator
                 return;
             }
         }
-        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService));
+        await Validate(new TargetTenantRepos(_appRepo, _tableRepo, _fieldRepo, _appAccessService, null, _enforcer));
     }
 
     public async Task ValidateNewEventStepAsync(string configJson, CancellationToken ct)

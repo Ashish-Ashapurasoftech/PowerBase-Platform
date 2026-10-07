@@ -1843,10 +1843,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
     public async Task InsertBulkEventRecordsAsync(List<PipelineBulkEventRecord> records, IDbTransaction? transaction = null, CancellationToken ct = default)
     {
         if (records == null || !records.Any()) return;
-        const string sql = """
-            INSERT INTO meta.PipelineBulkEventRecord (BulkEventId, Ordinal, RecordPublicId, EventType, BeforeValuesJson, AfterValuesJson, ChangedFieldsJson, Processed, CreatedOn)
-            VALUES (@BulkEventId, @Ordinal, @RecordPublicId, @EventType, @BeforeValuesJson, @AfterValuesJson, @ChangedFieldsJson, @Processed, @CreatedOn)
-            """;
+        const string sql = PipelineBulkEventSql.Insert;
 
         if (transaction != null)
         {

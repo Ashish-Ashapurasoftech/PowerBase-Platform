@@ -87,7 +87,8 @@ public class SavePipelineStepsCommandHandler
                 var fieldRepo        = scope.ServiceProvider.GetRequiredService<IAppFieldRepository>();
                 var appAccessService = scope.ServiceProvider.GetRequiredService<IAppAccessService>();
 
-                return new TargetTenantRepos(appRepo, tableRepo, fieldRepo, appAccessService, scope);
+                return new TargetTenantRepos(appRepo, tableRepo, fieldRepo, appAccessService, scope,
+                    scope.ServiceProvider.GetService<IRolePermissionEnforcer>());
             }
             catch
             {
@@ -103,7 +104,8 @@ public class SavePipelineStepsCommandHandler
             // Optional (GetService, not GetRequiredService): when absent the validator simply has
             // no saved-account support, which is what test doubles for IServiceProvider give us.
             _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>(),
-            _serviceProvider.GetService<IServiceScopeFactory>());
+            _serviceProvider.GetService<IServiceScopeFactory>(),
+            _serviceProvider.GetService<IRolePermissionEnforcer>());
         await ValidateStepsConfigAsync(command.Steps, stepValidator, ct);
 
         // Connection credentials live in encrypted PipelineConnection rows. Never persist a

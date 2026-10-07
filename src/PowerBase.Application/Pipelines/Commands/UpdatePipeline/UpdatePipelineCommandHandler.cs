@@ -96,7 +96,8 @@ public class UpdatePipelineCommandHandler
                     var fieldRepo        = scope.ServiceProvider.GetRequiredService<IAppFieldRepository>();
                     var appAccessService = scope.ServiceProvider.GetRequiredService<IAppAccessService>();
 
-                    return new TargetTenantRepos(appRepo, tableRepo, fieldRepo, appAccessService, scope);
+                    return new TargetTenantRepos(appRepo, tableRepo, fieldRepo, appAccessService, scope,
+                        scope.ServiceProvider.GetService<IRolePermissionEnforcer>());
                 }
                 catch
                 {
@@ -111,7 +112,8 @@ public class UpdatePipelineCommandHandler
                 targetScopeFactory,
                 // Optional: absent means no saved-account support (see SavePipelineStepsCommandHandler).
                 _serviceProvider.GetService<Connections.Common.ConnectionScopeResolver>(),
-                _serviceProvider.GetService<IServiceScopeFactory>());
+                _serviceProvider.GetService<IServiceScopeFactory>(),
+                _serviceProvider.GetService<IRolePermissionEnforcer>());
 
             foreach (var step in steps.Where(s => !s.IsDeleted && s.Type == "trigger" && (s.Subtype == "new-event" || s.Subtype == "new-bulk-event")))
             {

@@ -42,8 +42,12 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         catch (JsonException) { return null; }
     }
 
+    /// <param name="onTablesLoaded">Called once the source and destination metadata are loaded, so the
+    /// caller can store table and field names with the step's audit input (the tables may live in a
+    /// tenant the audit formatter cannot read).</param>
     public async Task<string> ExecuteAsync(CopyRecordsDefinition config, string query, Guid stepId,
-        Guid messageId, string executionPath, CancellationToken cancellationToken)
+        Guid messageId, string executionPath, CancellationToken cancellationToken,
+        Action<AppTable, IReadOnlyList<AppField>, AppTable, IReadOnlyList<AppField>>? onTablesLoaded = null)
     {
         config.ValidateShape();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -63,13 +67,15 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var encryption = services.GetRequiredService<IEncryptionService>();
         var sourceId = CopyRecordsDefinition.TableId(config.SourceTable);
         var destinationId = CopyRecordsDefinition.TableId(config.DestinationTable);
-        await accessService.RequirePermissionByTablePublicIdAsync(sourceId, PermissionCodes.RecordsRead, ct);
-        await accessService.RequirePermissionByTablePublicIdAsync(destinationId, PermissionCodes.RecordsCreate, ct);
-        await accessService.RequirePermissionByTablePublicIdAsync(destinationId, PermissionCodes.RecordsUpdate, ct);
+        // Membership only: what the user may do with the records is decided by the table-level
+        // access checks below (the flat records:* codes are not carried by regular roles).
+        await accessService.RequireMembershipByTablePublicIdAsync(sourceId, ct);
+        await accessService.RequireMembershipByTablePublicIdAsync(destinationId, ct);
         var source = await tableRepo.GetByPublicIdAsync(sourceId, ct);
         var destination = await tableRepo.GetByPublicIdAsync(destinationId, ct);
         var sourceFields = await fieldRepo.ListByTableAsync(source.Id, ct);
         var destinationFields = await fieldRepo.ListByTableAsync(destination.Id, ct);
+        onTablesLoaded?.Invoke(source, sourceFields, destination, destinationFields);
         config.ValidateFields(sourceFields, destinationFields);
         var sourceAccess = await enforcer.GetTableAccessAsync(source, sourceFields, ct);
         var destinationAccess = await enforcer.GetTableAccessAsync(destination, destinationFields, ct);
