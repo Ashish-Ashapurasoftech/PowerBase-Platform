@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -27,6 +28,104 @@ public partial class PipelineEngine
     private readonly AsyncLocal<long?> _stepActingUserId = new();
     private long StepActingUserId => _stepActingUserId.Value ?? _queryContext.UserId;
 
+    // The service scope the current step runs in (same tenant, another tenant, or a saved account), so
+    // record-level checks inside a step use the same identity and database as the step itself.
+    private readonly AsyncLocal<IServiceProvider?> _stepServices = new();
+    private IServiceProvider CurrentStepServices => _stepServices.Value ?? _serviceProvider;
+
+    private async Task<string> RunInStepScopeAsync(IServiceProvider services, long? actingUserId, Func<Task<string>> run)
+    {
+        _stepServices.Value = services;
+        _stepActingUserId.Value = actingUserId;
+        try { return await run(); }
+        finally
+        {
+            _stepServices.Value = null;
+            _stepActingUserId.Value = null;
+        }
+    }
+
+    /// <summary>The role's table access for the current step, or null when the identity is unrestricted.</summary>
+    private async Task<TableAccessContext?> GetRestrictedAccessAsync(AppTable table, CancellationToken ct)
+    {
+        try
+        {
+            var context = await GetStepTableAccessAsync(CurrentStepServices, table.PublicId, ct);
+            return context == null || context.Access.Unrestricted ? null : context.Access;
+        }
+        catch (UnauthorizedActionException ex)
+        {
+            throw new PipelineNonRetryableException($"{StepPermissionDeniedMessage} ({ex.Message})");
+        }
+    }
+
+    /// <summary>Field ids the role may read; null when the identity sees every field.</summary>
+    private static HashSet<int>? ReadableFieldIds(TableAccessContext? access) =>
+        access == null ? null : access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => f.Fid!.Value).ToHashSet();
+
+    /// <summary>
+    /// Narrows a search to what the role may see: its record filter and, for "own records" scope, the
+    /// user's own records. Fails closed on a role filter built on calculated fields, which this search
+    /// path cannot evaluate, instead of silently returning everything.
+    /// </summary>
+    private static FilterGroup? ApplyRoleRowRestrictions(FilterGroup? tree, TableAccessContext? access, IReadOnlyList<AppField> fields)
+    {
+        if (access == null || (access.ViewFilter == null && !access.RestrictToCreatedBy.HasValue)) return tree;
+
+        var computed = fields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))
+            .Select(f => (long)f.Fid!.Value).ToHashSet();
+        if (access.ViewFilter != null && computed.Count > 0 &&
+            Formulas.FormulaFilterSorter.TreeContainsFormulaField(access.ViewFilter, computed))
+            throw new PipelineNonRetryableException(
+                "The role's record filter uses calculated fields, which a PowerFlow search cannot apply. Ask an administrator to adjust the role.");
+
+        var combined = new FilterGroup { Logic = "and", Nodes = new List<FilterNode>() };
+        if (tree != null) combined.Nodes.Add(new FilterNode { Group = tree });
+        if (access.ViewFilter != null) combined.Nodes.Add(new FilterNode { Group = access.ViewFilter });
+        if (access.RestrictToCreatedBy.HasValue)
+            combined.Nodes.Add(new FilterNode { Condition = new FilterCondition { FieldId = 4, Operator = "eq", Value = access.RestrictToCreatedBy.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) } });
+        return combined;
+    }
+
+    /// <summary>
+    /// Record-level rules for a step that reads or changes ONE record: "own records" scope and the role's
+    /// record filter, plus (for writes) that every written field is editable for the role.
+    /// </summary>
+    private async Task EnforceRecordAccessAsync(IRecordRepository recordRepo, AppTable table, IReadOnlyList<AppField> fields,
+        Guid recordPublicId, PipelineRecordAccessKind kind, IEnumerable<AppField>? writtenFields, CancellationToken ct)
+    {
+        var access = await GetRestrictedAccessAsync(table, ct);
+        if (access == null) return;
+
+        try
+        {
+            if (!PipelineRecordAccess.IsAllowed(access, kind))
+                throw new UnauthorizedActionException(PipelineRecordAccess.Describe(kind, table.Name));
+
+            if (kind is PipelineRecordAccessKind.Modify or PipelineRecordAccessKind.Delete
+                && (access.ViewScope == RecordScopes.OwnRecords || access.ModifyScope == RecordScopes.OwnRecords))
+            {
+                var enforcer = CurrentStepServices.GetService<IRolePermissionEnforcer>();
+                if (enforcer != null) await enforcer.EnsureRecordOwnedAsync(table, recordPublicId, ct);
+            }
+
+            if ((access.ViewFilter != null || access.RestrictToCreatedBy.HasValue) &&
+                !await recordRepo.ExistsWithViewFilterAsync(table, fields, recordPublicId, access.ViewFilter, access.RestrictToCreatedBy, ct))
+                throw new UnauthorizedActionException($"The record is not accessible to this user in table '{table.Name}'.");
+
+            if (writtenFields != null)
+                foreach (var field in writtenFields)
+                    if (field.Fid != null && !access.EditableFieldIds.Contains(field.Fid.Value))
+                        throw new UnauthorizedActionException(
+                            $"You do not have permission to write to the field '{(!string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name)}' in table '{table.Name}'.");
+        }
+        catch (UnauthorizedActionException ex)
+        {
+            _logger.LogWarning("Pipeline record access denied on table {TableId}: {Reason}", table.Id, ex.Message);
+            throw new PipelineNonRetryableException($"{StepPermissionDeniedMessage} ({ex.Message})");
+        }
+    }
+
     private sealed record StepTableAccess(AppTable Table, IReadOnlyList<AppField> Fields, TableAccessContext Access);
 
     // Successful lookups only, keyed by the DI scope (identity + tenant) so loops do not repeat them.
@@ -43,6 +142,9 @@ public partial class PipelineEngine
             "prepare-bulk-upsert" or "add-bulk-upsert-row" or "commit-upsert" => PipelineRecordAccessKind.AddAndModify,
             _ => null
         },
+        // A trigger reads its source table, so the flow owner must be able to view it.
+        "trigger" => step.Subtype is "new-event" or "new-bulk-event" or "record-added" or "record-updated" or "record-deleted"
+            ? PipelineRecordAccessKind.View : null,
         _ => null
     };
 
@@ -89,6 +191,13 @@ public partial class PipelineEngine
 
                 if (!PipelineRecordAccess.IsAllowed(access, required))
                     throw new UnauthorizedActionException(PipelineRecordAccess.Describe(required, context.Table.Name));
+
+                // A bulk upsert updates existing records matched by key, so it cannot check each one against
+                // the role's row rules; fail closed for roles that have such rules.
+                if (required == PipelineRecordAccessKind.AddAndModify &&
+                    (access.ViewFilter != null || access.ViewScope == RecordScopes.OwnRecords || access.ModifyScope == RecordScopes.OwnRecords))
+                    throw new UnauthorizedActionException(
+                        $"Bulk upsert is not available to roles with record-level restrictions on table '{context.Table.Name}'.");
 
                 if (required is PipelineRecordAccessKind.Add or PipelineRecordAccessKind.Modify
                     && document.RootElement.TryGetProperty("fieldMappings", out var mappings) && mappings.ValueKind == JsonValueKind.Array)

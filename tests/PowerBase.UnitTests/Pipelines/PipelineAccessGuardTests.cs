@@ -170,7 +170,7 @@ public class PipelineAccessGuardTests
     [InlineData("loop", "action")]
     [InlineData("send-email", "action")]
     [InlineData("make-request", "action")]
-    [InlineData("new-event", "trigger")]
+    [InlineData("schedule", "trigger")]
     public async Task StepsWithoutRecordAccess_AreNotChecked(string subtype, string type)
     {
         await Enforce(Step(subtype, type: type));

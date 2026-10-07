@@ -305,6 +305,9 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                 }
 
                 var isSuperAdmin = execUser.SystemRoleCode == PowerBase.Domain.Constants.SystemRoleCodes.SuperAdmin;
+                // The flow acts as its owner, so a super-admin owner keeps the platform-level access it has when
+                // it works interactively; the run-time record guards (membership, table access) honour this flag.
+                if (queryContext is QueryContext qcAdmin) qcAdmin.IsSuperAdmin = isSuperAdmin;
                 if (!isSuperAdmin)
                 {
                     var tenantRepo = scope.ServiceProvider.GetRequiredService<ITenantRepository>();

@@ -1355,6 +1355,26 @@ public class PipelineRecordOwnerTests
         await _queueRepo.DidNotReceive().MarkFailedAsync(job.Id, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
+    [Theory]
+    [InlineData(PowerBase.Domain.Constants.SystemRoleCodes.SuperAdmin, true)]
+    [InlineData(PowerBase.Domain.Constants.SystemRoleCodes.User, false)]
+    public async Task Worker_CarriesTheOwnersSuperAdminFlag_SoRunTimeAccessGuardsMatchInteractiveAccess(string roleCode, bool expected)
+    {
+        var job = new PipelineQueue { Id = 211, TenantId = 6L, PipelineId = 100, TriggeredBy = 99L,
+            MessageId = Guid.NewGuid(), ClaimToken = Guid.NewGuid() };
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true });
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(new User { Id = 42L, IsActive = true, SystemRoleCode = roleCode });
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        var worker = new DatabasePipelineExecutionWorker(_serviceProvider, Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()), Substitute.For<ILogger<DatabasePipelineExecutionWorker>>());
+
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method!.Invoke(worker, new object[] { job, CancellationToken.None })!;
+
+        _queryContext.UserId.Should().Be(42L);
+        _queryContext.IsSuperAdmin.Should().Be(expected);
+    }
+
     [Fact]
     public async Task OwnerWithoutRecordOwnerRoleStillRunsAsOwner_WhenJobHasNoActor()
     {
