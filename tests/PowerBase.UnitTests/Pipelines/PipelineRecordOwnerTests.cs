@@ -122,7 +122,7 @@ public class PipelineRecordOwnerTests
     }
 
     [Fact]
-    public async Task ManualRun_CreateRecord_PreservesActor()
+    public async Task ManualRun_CreateRecord_RunsAsPipelineOwner()
     {
         // Arrange
         var job = new PipelineQueue
@@ -136,12 +136,12 @@ public class PipelineRecordOwnerTests
         };
 
         var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
-        var execUser = new User { Id = 99L, IsActive = true, IsDeleted = false };
+        var execUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
 
         _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
-        _userRepo.GetByIdAsync(99L, Arg.Any<CancellationToken>()).Returns(execUser);
-        _tenantRepo.IsActiveMemberAsync(99L, Arg.Any<CancellationToken>()).Returns(true);
-        _permissionRepo.GetPermissionsAsync(99L, 10L, Arg.Any<CancellationToken>()).Returns(new HashSet<string> { "PowerFlows:read" });
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(42L, 10L, Arg.Any<CancellationToken>()).Returns(new HashSet<string> { "PowerFlows:read" });
 
         var worker = new DatabasePipelineExecutionWorker(
             _serviceProvider,
@@ -155,7 +155,7 @@ public class PipelineRecordOwnerTests
         await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
 
         // Assert
-        _queryContext.UserId.Should().Be(99L); // Preserved manual actor
+        _queryContext.UserId.Should().Be(42L); // A PowerFlow always acts as its owner
     }
 
     [Theory]
@@ -167,10 +167,10 @@ public class PipelineRecordOwnerTests
             MessageId = Guid.NewGuid(), ClaimToken = Guid.NewGuid() };
         _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>())
             .Returns(new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true });
-        _userRepo.GetByIdAsync(99L, Arg.Any<CancellationToken>())
-            .Returns(new User { Id = 99L, IsActive = true });
-        _tenantRepo.IsActiveMemberAsync(99L, Arg.Any<CancellationToken>()).Returns(true);
-        _permissionRepo.GetPermissionsAsync(99L, 10L, Arg.Any<CancellationToken>())
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>())
+            .Returns(new User { Id = 42L, IsActive = true });
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(42L, 10L, Arg.Any<CancellationToken>())
             .Returns(new HashSet<string> { "PowerFlows:read" });
         var engine = (IPipelineEngine)_serviceProvider.GetService(typeof(IPipelineEngine))!;
         engine.ExecuteAsync(Arg.Any<PipelineExecutionTask>(), Arg.Any<CancellationToken>())
@@ -190,7 +190,7 @@ public class PipelineRecordOwnerTests
     }
 
     [Fact]
-    public async Task OnNewEvent_CreateRecord_PreservesActor()
+    public async Task OnNewEvent_CreateRecord_RunsAsPipelineOwner()
     {
         // Arrange
         var job = new PipelineQueue
@@ -204,12 +204,12 @@ public class PipelineRecordOwnerTests
         };
 
         var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
-        var execUser = new User { Id = 88L, IsActive = true, IsDeleted = false };
+        var execUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
 
         _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
-        _userRepo.GetByIdAsync(88L, Arg.Any<CancellationToken>()).Returns(execUser);
-        _tenantRepo.IsActiveMemberAsync(88L, Arg.Any<CancellationToken>()).Returns(true);
-        _permissionRepo.GetPermissionsAsync(88L, 10L, Arg.Any<CancellationToken>()).Returns(new HashSet<string> { "PowerFlows:read" });
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(42L, 10L, Arg.Any<CancellationToken>()).Returns(new HashSet<string> { "PowerFlows:read" });
 
         var worker = new DatabasePipelineExecutionWorker(
             _serviceProvider,
@@ -223,7 +223,7 @@ public class PipelineRecordOwnerTests
         await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
 
         // Assert
-        _queryContext.UserId.Should().Be(88L); // Preserved event actor
+        _queryContext.UserId.Should().Be(42L); // Records created by the flow are owned by the pipeline owner, not user 88
     }
 
     [Fact]
@@ -1034,11 +1034,12 @@ public class PipelineRecordOwnerTests
             ClaimToken = Guid.NewGuid()
         };
 
+        // The flow runs as its owner (42), who is not an active member of this tenant here.
         var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
-        var execUser = new User { Id = 40016L, IsActive = true, IsDeleted = false };
+        var execUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
         _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
-        _userRepo.GetByIdAsync(40016L, Arg.Any<CancellationToken>()).Returns(execUser);
-        _tenantRepo.IsActiveMemberAsync(40016L, Arg.Any<CancellationToken>()).Returns(false); // Non-member
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(false); // Non-member owner
 
         var worker = new TestDatabasePipelineExecutionWorker(
             _serviceProvider,
@@ -1072,10 +1073,10 @@ public class PipelineRecordOwnerTests
         };
 
         var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
-        var execUser = new User { Id = 40016L, IsActive = true, IsDeleted = false };
+        var execUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
         _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
-        _userRepo.GetByIdAsync(40016L, Arg.Any<CancellationToken>()).Returns(execUser);
-        _tenantRepo.IsActiveMemberAsync(40016L, Arg.Any<CancellationToken>()).Returns(false);
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(false);
 
         var worker = new TestDatabasePipelineExecutionWorker(
             _serviceProvider,
@@ -1178,7 +1179,7 @@ public class PipelineRecordOwnerTests
     }
 
     [Fact]
-    public async Task SameTenantTrigger_RetainsOriginalTriggerActor()
+    public async Task SameTenantTrigger_RunsAsPipelineOwner_NotTriggerActor()
     {
         // Arrange
         var job = new PipelineQueue
@@ -1194,12 +1195,12 @@ public class PipelineRecordOwnerTests
         };
 
         var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
-        var execUser = new User { Id = 99L, IsActive = true, IsDeleted = false };
+        var execUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
 
         _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
-        _userRepo.GetByIdAsync(99L, Arg.Any<CancellationToken>()).Returns(execUser);
-        _tenantRepo.IsActiveMemberAsync(99L, Arg.Any<CancellationToken>()).Returns(true);
-        _permissionRepo.GetPermissionsAsync(99L, 6L, Arg.Any<CancellationToken>()).Returns(new HashSet<string>());
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(42L, 6L, Arg.Any<CancellationToken>()).Returns(new HashSet<string>());
 
         var subInfo = new TriggerSubInfo
         {
@@ -1220,13 +1221,13 @@ public class PipelineRecordOwnerTests
         var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
 
-        // Assert: UserId remains 99L (not fallback to creator 42L)
-        _queryContext.UserId.Should().Be(99L);
+        // Assert: the flow acts as its owner 42L, never as the trigger actor 99L
+        _queryContext.UserId.Should().Be(42L);
         await _queueRepo.Received(1).MarkSucceededAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task SameTenantTrigger_NonMemberTriggerActor_BlocksExecution()
+    public async Task SameTenantTrigger_NonMemberOwner_BlocksExecution()
     {
         // Arrange
         var job = new PipelineQueue
@@ -1242,11 +1243,11 @@ public class PipelineRecordOwnerTests
         };
 
         var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
-        var execUser = new User { Id = 99L, IsActive = true, IsDeleted = false };
+        var execUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
 
         _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
-        _userRepo.GetByIdAsync(99L, Arg.Any<CancellationToken>()).Returns(execUser);
-        _tenantRepo.IsActiveMemberAsync(99L, Arg.Any<CancellationToken>()).Returns(false); // Non-member!
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(false); // Non-member owner!
 
         var subInfo = new TriggerSubInfo
         {
@@ -1272,6 +1273,51 @@ public class PipelineRecordOwnerTests
     }
 
     [Fact]
+    public async Task SameTenantTrigger_NonMemberTriggerActor_DoesNotBlock_WhenOwnerIsMember()
+    {
+        // Dipak (99) is no longer a member, but the flow runs as its owner (42), who is.
+        var job = new PipelineQueue
+        {
+            Id = 208, TenantId = 6L, PipelineId = 100, QueueSource = "Event", TriggerStepRefId = "step_trigger",
+            TriggeredBy = 99L, MessageId = Guid.NewGuid(), ClaimToken = Guid.NewGuid()
+        };
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true });
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(new User { Id = 42L, IsActive = true });
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        _tenantRepo.IsActiveMemberAsync(99L, Arg.Any<CancellationToken>()).Returns(false);
+        _permissionRepo.GetPermissionsAsync(42L, 6L, Arg.Any<CancellationToken>()).Returns(new HashSet<string>());
+        var subInfo = new TriggerSubInfo { OwnerTenantId = 6L, TargetTenantId = 6L, TargetConnectionPublicId = Guid.Empty };
+        var worker = new TestDatabasePipelineExecutionWorker(_serviceProvider, Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()), Substitute.For<ILogger<DatabasePipelineExecutionWorker>>(),
+            (_, _) => Task.FromResult<TriggerSubInfo?>(subInfo));
+
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method!.Invoke(worker, new object[] { job, CancellationToken.None })!;
+
+        _queryContext.UserId.Should().Be(42L);
+        await _queueRepo.Received(1).MarkSucceededAsync(job.Id, Arg.Any<string>(), job.ClaimToken!.Value, Arg.Any<CancellationToken>());
+        await _queueRepo.DidNotReceive().MarkFailedAsync(job.Id, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task OwnerWithoutRecordOwnerRoleStillRunsAsOwner_WhenJobHasNoActor()
+    {
+        // Schedules/webhooks have no trigger actor at all; the owner is still the identity.
+        var job = new PipelineQueue { Id = 209, TenantId = 6L, PipelineId = 100, TriggeredBy = null,
+            MessageId = Guid.NewGuid(), ClaimToken = Guid.NewGuid() };
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true });
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(new User { Id = 42L, IsActive = true });
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        var worker = new DatabasePipelineExecutionWorker(_serviceProvider, Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()), Substitute.For<ILogger<DatabasePipelineExecutionWorker>>());
+
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method!.Invoke(worker, new object[] { job, CancellationToken.None })!;
+
+        _queryContext.UserId.Should().Be(42L);
+    }
+
+    [Fact]
     public async Task SameTenantTrigger_CrossTenantAction_RemainsWorking()
     {
         // Arrange: Ronak 6 trigger (Tenant 6) → Tenant 8 action (on Tenant 6 owned pipeline)
@@ -1288,12 +1334,12 @@ public class PipelineRecordOwnerTests
         };
 
         var pipeline = new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true };
-        var execUser = new User { Id = 60001L, IsActive = true, IsDeleted = false };
+        var execUser = new User { Id = 42L, IsActive = true, IsDeleted = false };
 
         _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(pipeline);
-        _userRepo.GetByIdAsync(60001L, Arg.Any<CancellationToken>()).Returns(execUser);
-        _tenantRepo.IsActiveMemberAsync(60001L, Arg.Any<CancellationToken>()).Returns(true);
-        _permissionRepo.GetPermissionsAsync(60001L, 6L, Arg.Any<CancellationToken>()).Returns(new HashSet<string>());
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(execUser);
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(42L, 6L, Arg.Any<CancellationToken>()).Returns(new HashSet<string>());
 
         var subInfo = new TriggerSubInfo
         {
@@ -1314,8 +1360,8 @@ public class PipelineRecordOwnerTests
         var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         await (Task)method.Invoke(worker, new object[] { job, CancellationToken.None });
 
-        // Assert: Preserves same-tenant actor as execution authority (not pipeline creator 42L)
-        _queryContext.UserId.Should().Be(60001L);
+        // Assert: the pipeline owner (42L) is the execution authority, not the trigger actor 60001L
+        _queryContext.UserId.Should().Be(42L);
         await _queueRepo.Received(1).MarkSucceededAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Any<CancellationToken>());
     }
 

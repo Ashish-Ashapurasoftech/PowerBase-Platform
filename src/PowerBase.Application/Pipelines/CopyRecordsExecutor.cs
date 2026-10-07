@@ -63,9 +63,10 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var encryption = services.GetRequiredService<IEncryptionService>();
         var sourceId = CopyRecordsDefinition.TableId(config.SourceTable);
         var destinationId = CopyRecordsDefinition.TableId(config.DestinationTable);
-        await accessService.RequirePermissionByTablePublicIdAsync(sourceId, PermissionCodes.RecordsRead, ct);
-        await accessService.RequirePermissionByTablePublicIdAsync(destinationId, PermissionCodes.RecordsCreate, ct);
-        await accessService.RequirePermissionByTablePublicIdAsync(destinationId, PermissionCodes.RecordsUpdate, ct);
+        // Membership only: what the user may do with the records is decided by the table-level
+        // access checks below (the flat records:* codes are not carried by regular roles).
+        await accessService.RequireMembershipByTablePublicIdAsync(sourceId, ct);
+        await accessService.RequireMembershipByTablePublicIdAsync(destinationId, ct);
         var source = await tableRepo.GetByPublicIdAsync(sourceId, ct);
         var destination = await tableRepo.GetByPublicIdAsync(destinationId, ct);
         var sourceFields = await fieldRepo.ListByTableAsync(source.Id, ct);

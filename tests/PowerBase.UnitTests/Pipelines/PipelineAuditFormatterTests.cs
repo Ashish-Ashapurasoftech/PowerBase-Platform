@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -102,6 +103,127 @@ public class PipelineAuditFormatterTests
         output.TryGetProperty("Record", out _).Should().BeFalse();
         result.LogMessage.Should().Be($"{action} failed: {reason}");
         result.LogMessage.Should().NotContain("Created record").And.NotContain("Updated record");
+    }
+
+    private AppTable StubTable(long id, string name, params (int Fid, string Label)[] fields)
+    {
+        var table = new AppTable { Id = id, PublicId = Guid.NewGuid(), Name = name };
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>())
+            .Returns(fields.Select(f => new AppField { Id = id * 100 + f.Fid, Fid = f.Fid, Name = f.Label, Label = f.Label }).ToList());
+        return table;
+    }
+
+    [Fact]
+    public void CopyRecordsHistoryShowsTableAndFieldNamesInsteadOfFids()
+    {
+        var source = StubTable(1, "A1", (6, "Name"), (7, "City"));
+        var destination = StubTable(2, "A2", (6, "Full name"), (8, "Town"), (3, "Record ID#"));
+        var input = JsonSerializer.Serialize(new
+        {
+            SourceTable = $"conn:{source.PublicId}", DestinationTable = destination.PublicId.ToString(),
+            SourceFields = new[] { "fid_6", "fid_7" }, DestinationFields = new[] { "fid_6", "fid_8" },
+            MergeField = "fid_6", TerminateOnError = "Yes"
+        });
+        var output = JsonSerializer.Serialize(new { InsertedCount = 3, UpdatedCount = 1, ErrorCount = 0, Errors = new string[0] });
+
+        var result = _formatter.FormatStepRun(new PipelineStep { Id = 5, Type = "action", Subtype = "copy-records" },
+            input, output, "Success", "test", DateTime.UtcNow, DateTime.UtcNow);
+
+        using var parsed = JsonDocument.Parse(result.InputContextJson);
+        var friendly = parsed.RootElement.GetProperty("Input");
+        friendly.GetProperty("Source Table").GetString().Should().Be("A1");
+        friendly.GetProperty("Destination Table").GetString().Should().Be("A2");
+        friendly.GetProperty("Source Fields").EnumerateArray().Select(e => e.GetString()).Should().Equal("Name", "City");
+        friendly.GetProperty("Destination Fields").EnumerateArray().Select(e => e.GetString()).Should().Equal("Full name", "Town");
+        friendly.GetProperty("Field Mappings").EnumerateArray().Select(e => e.GetString()).Should().Equal("Name → Full name", "City → Town");
+        friendly.GetProperty("Merge Field").GetString().Should().Be("Full name");
+        parsed.RootElement.GetProperty("Metadata").GetProperty("field_labels").GetProperty("fid_8").GetString().Should().Be("Town");
+        result.InputContextJson.Should().NotContain("\"fid_6\"]");
+        using var outputDoc = JsonDocument.Parse(result.OutputContextJson);
+        var friendlyOutput = outputDoc.RootElement.GetProperty("Output");
+        friendlyOutput.GetProperty("Inserted Record Count").GetInt64().Should().Be(3);
+        friendlyOutput.GetProperty("Updated Record Count").GetInt64().Should().Be(1);
+        friendlyOutput.GetProperty("Status").GetString().Should().Be("Copied");
+        result.LogMessage.Should().Contain("A1").And.Contain("A2");
+    }
+
+    [Fact]
+    public void CopyRecordsHistoryFallsBackToReferencesWhenTablesCannotBeLoaded()
+    {
+        var input = JsonSerializer.Serialize(new
+        {
+            SourceTable = Guid.NewGuid().ToString(), DestinationTable = Guid.NewGuid().ToString(),
+            SourceFields = new[] { "fid_6" }, DestinationFields = new[] { "fid_6" }, MergeField = "fid_6"
+        });
+
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "copy-records" },
+            input, "{}", "Success", "test", null, null);
+
+        using var parsed = JsonDocument.Parse(result.InputContextJson);
+        parsed.RootElement.GetProperty("Input").GetProperty("Source Fields")[0].GetString().Should().Be("fid_6");
+    }
+
+    [Fact]
+    public void CopyRecordsFailureShowsPermissionError()
+    {
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "copy-records" },
+            "{}", JsonSerializer.Serialize(new { ErrorMessage = "You don't have permission to perform this action.", ExceptionType = "PipelineNonRetryableException" }),
+            "Failed", "test", null, null);
+
+        using var parsed = JsonDocument.Parse(result.OutputContextJson);
+        parsed.RootElement.GetProperty("Output").GetProperty("Status").GetString().Should().Be("Failed");
+        parsed.RootElement.GetProperty("Output").GetProperty("Error").GetString().Should().Contain("permission");
+        result.LogMessage.Should().StartWith("Copy Records failed");
+    }
+
+    [Fact]
+    public void ForEachLoopUsesTheLoopHistoryFormat()
+    {
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "for-each" },
+            JsonSerializer.Serialize(new { ItemCount = 4 }), JsonSerializer.Serialize(new { IterationCount = 4 }),
+            "Success", "test", null, null);
+
+        using var parsed = JsonDocument.Parse(result.OutputContextJson);
+        parsed.RootElement.GetProperty("Output").GetProperty("Iterations").GetInt32().Should().Be(4);
+        result.LogMessage.Should().Contain("Loop completed");
+    }
+
+    [Fact]
+    public void AddBulkUpsertRowHistoryResolvesFieldLabelsFromStoredMetadata()
+    {
+        var input = JsonSerializer.Serialize(new
+        {
+            ParentUpsertStepRefId = "ref_prepare",
+            FieldMappings = new Dictionary<string, object> { ["fid_6"] = "hardik", ["fid_7"] = "rajkot" },
+            Metadata = new
+            {
+                table = new { name = "A2", table_id = Guid.NewGuid().ToString() },
+                field_labels = new Dictionary<string, string> { ["fid_6"] = "Name", ["fid_7"] = "City" }
+            }
+        });
+
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "add-bulk-upsert-row" },
+            input, JsonSerializer.Serialize(new { RowCount = 2 }), "Success", "test", null, null);
+
+        using var parsed = JsonDocument.Parse(result.InputContextJson);
+        var friendly = parsed.RootElement.GetProperty("Input");
+        friendly.GetProperty("Table").GetString().Should().Be("A2");
+        friendly.GetProperty("Fields").GetProperty("Name").GetString().Should().Be("hardik");
+        friendly.GetProperty("Fields").GetProperty("City").GetString().Should().Be("rajkot");
+        friendly.GetProperty("Fields").TryGetProperty("fid_6", out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public void AddBulkUpsertRowWithoutMetadataKeepsRawKeys()
+    {
+        var input = JsonSerializer.Serialize(new { FieldMappings = new Dictionary<string, object> { ["fid_6"] = "x" } });
+
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "add-bulk-upsert-row" },
+            input, "{}", "Success", "test", null, null);
+
+        using var parsed = JsonDocument.Parse(result.InputContextJson);
+        parsed.RootElement.GetProperty("Input").GetProperty("Fields").GetProperty("fid_6").GetString().Should().Be("x");
     }
 
     [Fact]

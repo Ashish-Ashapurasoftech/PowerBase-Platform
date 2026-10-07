@@ -1346,6 +1346,7 @@ public partial class PipelineEngine : IPipelineEngine
             var accountFileStorage = accountScopeHandle.GetRequiredService<IFileStorageService>();
             var accountRecordSearchService = accountScopeHandle.Services.GetService<IPipelineRecordSearchService>() ?? _pipelineRecordSearchService;
 
+            await EnforceStepAccessAsync(step, accountScopeHandle.Services, ct);
             return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
                 accountRecordRepo, accountTableRepo, accountFieldRepo, accountWriteService, accountTriggerInterceptor, accountUow, accountIdempotencyRepo, accountFileStorage, accountRecordSearchService, ct);
         }
@@ -1389,6 +1390,7 @@ public partial class PipelineEngine : IPipelineEngine
                 var scopedFileStorage = scope.ServiceProvider.GetRequiredService<IFileStorageService>();
                 var scopedRecordSearchService = scope.ServiceProvider.GetService<IPipelineRecordSearchService>() ?? _pipelineRecordSearchService;
 
+                await EnforceStepAccessAsync(step, scope.ServiceProvider, ct);
                 return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
                     scopedRecordRepo, scopedTableRepo, scopedFieldRepo, scopedWriteService, scopedTriggerInterceptor, scopedUow, scopedIdempotencyRepo, scopedFileStorage, scopedRecordSearchService, ct);
             }
@@ -1397,6 +1399,7 @@ public partial class PipelineEngine : IPipelineEngine
         {
             if (step.Subtype == "copy-records")
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
+            await EnforceStepAccessAsync(step, _serviceProvider, ct);
             return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
                 _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, _triggerInterceptor, _uow, _idempotencyRepo, _fileStorageService, _pipelineRecordSearchService, ct);
         }
