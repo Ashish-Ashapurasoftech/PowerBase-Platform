@@ -42,8 +42,12 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         catch (JsonException) { return null; }
     }
 
+    /// <param name="onTablesLoaded">Called once the source and destination metadata are loaded, so the
+    /// caller can store table and field names with the step's audit input (the tables may live in a
+    /// tenant the audit formatter cannot read).</param>
     public async Task<string> ExecuteAsync(CopyRecordsDefinition config, string query, Guid stepId,
-        Guid messageId, string executionPath, CancellationToken cancellationToken)
+        Guid messageId, string executionPath, CancellationToken cancellationToken,
+        Action<AppTable, IReadOnlyList<AppField>, AppTable, IReadOnlyList<AppField>>? onTablesLoaded = null)
     {
         config.ValidateShape();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -71,6 +75,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var destination = await tableRepo.GetByPublicIdAsync(destinationId, ct);
         var sourceFields = await fieldRepo.ListByTableAsync(source.Id, ct);
         var destinationFields = await fieldRepo.ListByTableAsync(destination.Id, ct);
+        onTablesLoaded?.Invoke(source, sourceFields, destination, destinationFields);
         config.ValidateFields(sourceFields, destinationFields);
         var sourceAccess = await enforcer.GetTableAccessAsync(source, sourceFields, ct);
         var destinationAccess = await enforcer.GetTableAccessAsync(destination, destinationFields, ct);

@@ -550,9 +550,15 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                     var connectionScope = await connectionResolver.TryResolveForUserAsync(subscription.TargetConnectionPublicId, creatorId, ct);
                     if (connectionScope == null)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Saved connection {subscription.TargetConnectionPublicId} not found or not owned by creator {creatorId}.");
+                        // Not a saved account: a plain tenant connection, whose id is the target
+                        // tenant's own id. The creator must be an active member of that tenant.
+                        var targetTenant = await tenantRepo.GetTenantForUserAsync(subscription.TargetConnectionPublicId, creatorId, ct);
+                        if (targetTenant == null || targetTenant.Id != subscription.TargetTenantId)
+                        {
+                            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Saved connection {subscription.TargetConnectionPublicId} not found or not owned by creator {creatorId}.");
+                        }
                     }
-                    if (connectionScope.TargetTenantId != subscription.TargetTenantId)
+                    else if (connectionScope.TargetTenantId != subscription.TargetTenantId)
                     {
                         throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Saved connection {subscription.TargetConnectionPublicId} targets tenant {connectionScope.TargetTenantId} instead of subscription tenant {subscription.TargetTenantId}.");
                     }

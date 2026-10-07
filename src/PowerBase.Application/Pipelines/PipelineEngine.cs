@@ -1347,8 +1347,14 @@ public partial class PipelineEngine : IPipelineEngine
             var accountRecordSearchService = accountScopeHandle.Services.GetService<IPipelineRecordSearchService>() ?? _pipelineRecordSearchService;
 
             await EnforceStepAccessAsync(step, accountScopeHandle.Services, ct);
-            return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
-                accountRecordRepo, accountTableRepo, accountFieldRepo, accountWriteService, accountTriggerInterceptor, accountUow, accountIdempotencyRepo, accountFileStorage, accountRecordSearchService, ct);
+            // Records written through a saved account belong to the token's user, not the flow owner.
+            _stepActingUserId.Value = accountScope.TargetUserId;
+            try
+            {
+                return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
+                    accountRecordRepo, accountTableRepo, accountFieldRepo, accountWriteService, accountTriggerInterceptor, accountUow, accountIdempotencyRepo, accountFileStorage, accountRecordSearchService, ct);
+            }
+            finally { _stepActingUserId.Value = null; }
         }
 
         if (isCrossTenant)
@@ -1417,7 +1423,15 @@ public partial class PipelineEngine : IPipelineEngine
             stepRun.InputContext = SerializeAndSanitizeAudit(new { config.SourceTable, config.DestinationTable,
                 config.SourceFields, config.DestinationFields, config.MergeField, config.TerminateOnError });
             return await new CopyRecordsExecutor(services)
-                .ExecuteAsync(config, query, step.PublicId, messageId, executionPath, ct);
+                .ExecuteAsync(config, query, step.PublicId, messageId, executionPath, ct,
+                    (sourceTable, sourceFields, destinationTable, destinationFields) =>
+                        stepRun.InputContext = SerializeAndSanitizeAudit(new { config.SourceTable, config.DestinationTable,
+                            config.SourceFields, config.DestinationFields, config.MergeField, config.TerminateOnError,
+                            Metadata = new { tables = new[]
+                            {
+                                BuildAuditFieldMetadata(sourceTable, sourceFields),
+                                BuildAuditFieldMetadata(destinationTable, destinationFields)
+                            } } }));
     }
 
     private async Task<string> ExecuteMakeRequestAsync(PipelineStep step, string payloadJson, List<PipelineStep> allSteps,
@@ -2097,7 +2111,7 @@ public partial class PipelineEngine : IPipelineEngine
                 var createdOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
                 if (createdOnField != null) values[createdOnField.Fid!.Value] = DateTime.UtcNow;
                 var createdByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
-                if (createdByField != null) values[createdByField.Fid!.Value] = _queryContext.UserId;
+                if (createdByField != null) values[createdByField.Fid!.Value] = StepActingUserId;
 
                 IReadOnlyDictionary<string, object?>? persistedRecord = null;
                 if (uow.Transaction is not null)
@@ -3401,7 +3415,7 @@ public partial class PipelineEngine : IPipelineEngine
                             var bulkModifiedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedOn" && f.Fid.HasValue);
                             if (bulkModifiedOnField != null) { afterValues[bulkModifiedOnField.Id] = DateTime.UtcNow; afterValues[bulkModifiedOnField.Fid!.Value] = DateTime.UtcNow; }
                             var bulkModifiedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedBy" && f.Fid.HasValue);
-                            if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Id] = _queryContext.UserId; afterValues[bulkModifiedByField.Fid!.Value] = _queryContext.UserId; }
+                            if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Id] = StepActingUserId; afterValues[bulkModifiedByField.Fid!.Value] = StepActingUserId; }
 
                             // UPDATE in DB on uow.Transaction via recordWriteService (with sanitized row)
                             await recordWriteService.ApplyAsync(
@@ -3506,7 +3520,7 @@ public partial class PipelineEngine : IPipelineEngine
                             createdRecordIds.Add(id);
                         }
                         if (bulkCreatedOnField != null) { cv[bulkCreatedOnField.Id] = DateTime.UtcNow; cv[bulkCreatedOnField.Fid!.Value] = DateTime.UtcNow; }
-                        if (bulkCreatedByField != null) { cv[bulkCreatedByField.Id] = _queryContext.UserId; cv[bulkCreatedByField.Fid!.Value] = _queryContext.UserId; }
+                        if (bulkCreatedByField != null) { cv[bulkCreatedByField.Id] = StepActingUserId; cv[bulkCreatedByField.Fid!.Value] = StepActingUserId; }
 
                         addedChanges.Add(new PipelineRecordChange(
                             pubId,

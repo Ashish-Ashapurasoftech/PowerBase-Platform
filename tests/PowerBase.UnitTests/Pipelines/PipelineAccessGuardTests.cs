@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Threading;
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -190,6 +191,43 @@ public class PipelineAccessGuardTests
     {
         await Enforce(new PipelineStep { Type = "action", Subtype = "create-record", ConfigJson = "{}" });
         await Enforce(new PipelineStep { Type = "action", Subtype = "create-record", ConfigJson = null });
+    }
+
+    [Theory]
+    [InlineData("add-bulk-upsert-row")]
+    [InlineData("commit-upsert")]
+    public async Task BulkUpsertRowAndCommit_NeedAddAndModifyOnTheirTable(string subtype)
+    {
+        GrantAccess(Restricted(canAdd: true, modify: RecordScopes.None));
+
+        var act = () => Enforce(Step(subtype));
+
+        await act.Should().ThrowAsync<PipelineNonRetryableException>();
+    }
+
+    [Fact]
+    public void ActingUser_DefaultsToEngineIdentity_AndFollowsTheSavedAccountWhenSet()
+    {
+        var queryContext = Substitute.For<IQueryContext>();
+        queryContext.UserId.Returns(42L);
+        var engine = new PipelineEngine(
+            Substitute.For<IPipelineRepository>(), Substitute.For<IRecordRepository>(), Substitute.For<IRecordWriteService>(),
+            _tables, _fieldRepo, Substitute.For<IRelationshipRepository>(), Substitute.For<IEmailService>(),
+            Substitute.For<IHttpClientFactory>(), Substitute.For<IFileStorageService>(),
+            Options.Create(new PipelineExecutionOptions()), Substitute.For<ILogger<PipelineEngine>>(),
+            Substitute.For<IPipelineTriggerInterceptor>(), Substitute.For<ITenantUnitOfWork>(),
+            Substitute.For<IPipelineAuditFormatter>(), queryContext,
+            Substitute.For<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(), Substitute.For<IServiceProvider>(),
+            Substitute.For<IAdminRepository>(), Substitute.For<ITenantRepository>(),
+            Substitute.For<IPipelineStepIdempotencyRepository>());
+        var property = typeof(PipelineEngine).GetProperty("StepActingUserId", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var local = (AsyncLocal<long?>)typeof(PipelineEngine).GetField("_stepActingUserId", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(engine)!;
+
+        ((long)property.GetValue(engine)!).Should().Be(42L);
+        local.Value = 999L; // token owner of a saved account
+        ((long)property.GetValue(engine)!).Should().Be(999L);
+        local.Value = null;
+        ((long)property.GetValue(engine)!).Should().Be(42L);
     }
 
     [Fact]

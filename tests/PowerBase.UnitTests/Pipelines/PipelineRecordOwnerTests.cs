@@ -1272,6 +1272,62 @@ public class PipelineRecordOwnerTests
         await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken.Value, Arg.Is<string>(s => s.Contains("is not an active member")), Arg.Any<CancellationToken>());
     }
 
+    private async Task<PipelineQueue> RunLegacyTenantCrossTenantTrigger(Tenant? targetTenantForCreator)
+    {
+        var connectionGuid = Guid.NewGuid(); // a plain tenant connection: the id is the target tenant's own id
+        var job = new PipelineQueue
+        {
+            Id = 210, TenantId = 6L, PipelineId = 100, QueueSource = "Event", TriggerStepRefId = "step_trigger",
+            TriggeredBy = 40016L, MessageId = Guid.NewGuid(), ClaimToken = Guid.NewGuid()
+        };
+        _pipelineRepo.GetByIdAsync(100, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 100, CreatedBy = 42L, IsActive = true });
+        _userRepo.GetByIdAsync(42L, Arg.Any<CancellationToken>()).Returns(new User { Id = 42L, IsActive = true });
+        _tenantRepo.IsActiveMemberAsync(42L, Arg.Any<CancellationToken>()).Returns(true);
+        _permissionRepo.GetPermissionsAsync(42L, 6L, Arg.Any<CancellationToken>()).Returns(new HashSet<string>());
+        _tenantRepo.GetTenantForUserAsync(connectionGuid, 42L, Arg.Any<CancellationToken>())
+            .Returns(targetTenantForCreator is null
+                ? Task.FromException<Tenant>(new PowerBase.Domain.Exceptions.NotFoundException("Tenant", connectionGuid))
+                : Task.FromResult(targetTenantForCreator));
+        // Not a saved account: the resolver finds no account row for this id.
+        var resolver = new PowerBase.Application.Connections.Common.ConnectionScopeResolver(
+            Substitute.For<IPipelineAccountRepository>(), Substitute.For<IUserTokenRepository>(), _queryContext);
+        _serviceProvider.GetService(typeof(PowerBase.Application.Connections.Common.ConnectionScopeResolver)).Returns(resolver);
+        var subInfo = new TriggerSubInfo { OwnerTenantId = 6L, TargetTenantId = 8L, TargetConnectionPublicId = connectionGuid };
+        var worker = new TestDatabasePipelineExecutionWorker(_serviceProvider, Substitute.For<IControlConnectionFactory>(),
+            Options.Create(new PipelineExecutionOptions()), Substitute.For<ILogger<DatabasePipelineExecutionWorker>>(),
+            (_, _) => Task.FromResult<TriggerSubInfo?>(subInfo));
+
+        var method = typeof(DatabasePipelineExecutionWorker).GetMethod("ProcessJobAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        await (Task)method!.Invoke(worker, new object[] { job, CancellationToken.None })!;
+        return job;
+    }
+
+    [Fact]
+    public async Task CrossTenantTrigger_PlainTenantConnection_RunsWhenCreatorIsMemberOfTargetTenant()
+    {
+        var job = await RunLegacyTenantCrossTenantTrigger(new Tenant { Id = 8L });
+
+        _queryContext.UserId.Should().Be(42L);
+        await _queueRepo.Received(1).MarkSucceededAsync(job.Id, Arg.Any<string>(), job.ClaimToken!.Value, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CrossTenantTrigger_PlainTenantConnection_FailsWhenCreatorIsNotMemberOfTargetTenant()
+    {
+        var job = await RunLegacyTenantCrossTenantTrigger(null);
+
+        await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken!.Value, Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _queueRepo.DidNotReceive().MarkSucceededAsync(job.Id, Arg.Any<string>(), Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CrossTenantTrigger_PlainTenantConnection_FailsWhenConnectionPointsAtAnotherTenant()
+    {
+        var job = await RunLegacyTenantCrossTenantTrigger(new Tenant { Id = 9L }); // subscription targets tenant 8
+
+        await _queueRepo.Received(1).MarkFailedAsync(job.Id, Arg.Any<string>(), job.ClaimToken!.Value, Arg.Is<string>(s => s.Contains("not found or not owned")), Arg.Any<CancellationToken>());
+    }
+
     [Fact]
     public async Task SameTenantTrigger_NonMemberTriggerActor_DoesNotBlock_WhenOwnerIsMember()
     {

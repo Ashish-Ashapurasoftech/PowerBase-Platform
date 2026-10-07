@@ -26,6 +26,13 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
     private string _triggeredByUserDisplayName = "System";
     private Dictionary<string, object?> _triggeredByUserMetadata = new();
     private readonly Dictionary<Guid, (AppTable Table, List<AppField> Fields)> _metadataCache = new();
+
+    /// <summary>
+    /// Table/field names the engine stored with a step's raw input. A step run through another tenant
+    /// or a saved account touches tables that do not exist in the owner tenant's database, so a live
+    /// lookup cannot name them; these stored labels are the only source for those steps.
+    /// </summary>
+    private readonly Dictionary<Guid, (AppTable Table, List<AppField> Fields)> _storedMetadata = new();
     private readonly Dictionary<Guid, string> _connectionCache = new();
     private readonly Dictionary<Guid, string> _recordDisplayCache = new();
     private readonly Dictionary<long, string> _stepLabelCache = new();
@@ -178,7 +185,38 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
         }
         catch {}
 
-        return null;
+        return _storedMetadata.TryGetValue(tableGuid, out var stored) ? stored : null;
+    }
+
+    /// <summary>Registers the table names and field labels stored under <c>Metadata</c> in a step's raw input.</summary>
+    private void RegisterStoredMetadata(Dictionary<string, object?> inputDict)
+    {
+        if (!inputDict.TryGetValue("Metadata", out var metadataObj) || metadataObj == null) return;
+        var metadata = AsDictionary(metadataObj);
+
+        void Register(Dictionary<string, object?> source)
+        {
+            if (!source.TryGetValue("table", out var tableObj) || tableObj == null) return;
+            var table = AsDictionary(tableObj);
+            if (!table.TryGetValue("table_id", out var idObj) || !Guid.TryParse(idObj?.ToString(), out var tableGuid)) return;
+            var fields = new List<AppField>();
+            if (source.TryGetValue("field_labels", out var labelsObj) && labelsObj != null)
+            {
+                foreach (var label in AsDictionary(labelsObj))
+                {
+                    if (!label.Key.StartsWith("fid_", StringComparison.OrdinalIgnoreCase) || !int.TryParse(label.Key[4..], out var fid)) continue;
+                    var text = label.Value?.ToString() ?? label.Key;
+                    fields.Add(new AppField { Id = fid, Fid = fid, Name = text, Label = text });
+                }
+            }
+            var tableName = table.TryGetValue("name", out var nameObj) ? nameObj?.ToString() ?? "Table" : "Table";
+            _storedMetadata[tableGuid] = (new AppTable { PublicId = tableGuid, Name = tableName }, fields);
+        }
+
+        Register(metadata);
+        if (metadata.TryGetValue("tables", out var tablesObj) && tablesObj != null)
+            foreach (var entry in AsList(tablesObj))
+                if (entry != null) Register(AsDictionary(entry));
     }
 
     private async Task<string> GetOrFetchConnectionNameAsync(Guid connGuid, CancellationToken ct)
@@ -297,6 +335,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
         {
             var inputDict = DeserializeJsonToDict(rawInputJson);
             var outputDict = DeserializeJsonToDict(rawOutputJson);
+            RegisterStoredMetadata(inputDict);
 
             if (status == "Failed" && subtype is ("create-record" or "update-record"))
             {

@@ -215,6 +215,65 @@ public class PipelineAuditFormatterTests
     }
 
     [Fact]
+    public void CreateRecordInAnotherTenant_UsesStoredMetadataBecauseTheTableIsNotInTheOwnerTenant()
+    {
+        var tableId = Guid.NewGuid();
+        // The owner tenant's database does not know this table.
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>())
+            .Returns<AppTable>(_ => throw new PowerBase.Domain.Exceptions.NotFoundException("Table", tableId));
+        var input = JsonSerializer.Serialize(new
+        {
+            TableId = tableId.ToString(),
+            FieldMappings = new Dictionary<string, object> { ["fid_6"] = "hardik" },
+            Metadata = new
+            {
+                table = new { name = "A2", table_id = tableId.ToString() },
+                field_labels = new Dictionary<string, string> { ["fid_6"] = "Name" }
+            }
+        });
+
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "create-record" },
+            input, JsonSerializer.Serialize(new { CreatedRecordPublicId = Guid.NewGuid() }), "Success", "test", null, null);
+
+        using var parsed = JsonDocument.Parse(result.InputContextJson);
+        var friendly = parsed.RootElement.GetProperty("Input");
+        friendly.GetProperty("Table").GetString().Should().Be("A2");
+        friendly.GetProperty("Fields").GetProperty("Name").GetString().Should().Be("hardik");
+    }
+
+    [Fact]
+    public void CopyRecordsAcrossTenants_UsesStoredMetadataForBothTables()
+    {
+        var source = Guid.NewGuid();
+        var destination = Guid.NewGuid();
+        _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
+            .Returns<AppTable>(_ => throw new PowerBase.Domain.Exceptions.NotFoundException("Table", Guid.Empty));
+        var input = JsonSerializer.Serialize(new
+        {
+            SourceTable = source.ToString(), DestinationTable = destination.ToString(),
+            SourceFields = new[] { "fid_6" }, DestinationFields = new[] { "fid_6" }, MergeField = "fid_6",
+            Metadata = new
+            {
+                tables = new[]
+                {
+                    new { table = new { name = "A1", table_id = source.ToString() }, field_labels = new Dictionary<string, string> { ["fid_6"] = "Name" } },
+                    new { table = new { name = "A2", table_id = destination.ToString() }, field_labels = new Dictionary<string, string> { ["fid_6"] = "Full name" } }
+                }
+            }
+        });
+
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "action", Subtype = "copy-records" },
+            input, "{}", "Success", "test", null, null);
+
+        using var parsed = JsonDocument.Parse(result.InputContextJson);
+        var friendly = parsed.RootElement.GetProperty("Input");
+        friendly.GetProperty("Source Table").GetString().Should().Be("A1");
+        friendly.GetProperty("Destination Table").GetString().Should().Be("A2");
+        friendly.GetProperty("Source Fields")[0].GetString().Should().Be("Name");
+        friendly.GetProperty("Destination Fields")[0].GetString().Should().Be("Full name");
+    }
+
+    [Fact]
     public void AddBulkUpsertRowWithoutMetadataKeepsRawKeys()
     {
         var input = JsonSerializer.Serialize(new { FieldMappings = new Dictionary<string, object> { ["fid_6"] = "x" } });

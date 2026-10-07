@@ -22,6 +22,11 @@ public partial class PipelineEngine
 
     
 
+    // The user whose identity the current step's services run as. Set around saved-account steps, where
+    // the scope's identity is the token owner; otherwise the engine's own (flow owner) identity applies.
+    private readonly AsyncLocal<long?> _stepActingUserId = new();
+    private long StepActingUserId => _stepActingUserId.Value ?? _queryContext.UserId;
+
     private sealed record StepTableAccess(AppTable Table, IReadOnlyList<AppField> Fields, TableAccessContext Access);
 
     // Successful lookups only, keyed by the DI scope (identity + tenant) so loops do not repeat them.
@@ -35,7 +40,7 @@ public partial class PipelineEngine
             "update-record" => PipelineRecordAccessKind.Modify,
             "delete-record" => PipelineRecordAccessKind.Delete,
             "search-records" or "look-up-record" => PipelineRecordAccessKind.View,
-            "prepare-bulk-upsert" => PipelineRecordAccessKind.AddAndModify,
+            "prepare-bulk-upsert" or "add-bulk-upsert-row" or "commit-upsert" => PipelineRecordAccessKind.AddAndModify,
             _ => null
         },
         _ => null
