@@ -1249,6 +1249,23 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyOutput["Raw Output"] = outputDict;
                 logMessage = $"Step executed: Type: {step.Type}, Subtype: {step.Subtype}";
             }
+
+            // A failed step must say why it failed, whatever its success formatting looks like (a failed Search
+            // would otherwise read "Found 0 records"). The steps listed here already format their own failures.
+            if (string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase)
+                && subtype is not ("create-record" or "update-record" or "make-request" or "upload-file" or "commit-upsert"
+                    or "copy-records" or "pipeline-called" or "call-another-pipeline")
+                && outputDict.TryGetValue("ErrorMessage", out var failedReasonObj) && !string.IsNullOrWhiteSpace(failedReasonObj?.ToString()))
+            {
+                var failedReason = PipelineEngine.SanitizeErrorMessage(failedReasonObj!.ToString());
+                friendlyOutput.Clear();
+                friendlyOutput["Status"] = "Failed";
+                friendlyOutput["Error"] = failedReason;
+                if (outputDict.TryGetValue("ExceptionType", out var failedType) && failedType != null)
+                    friendlyOutput["ExceptionType"] = failedType;
+                var failedLabel = !string.IsNullOrWhiteSpace(step.Label) ? step.Label : (step.Subtype ?? step.Type);
+                logMessage = $"{failedLabel} failed: {failedReason}";
+            }
         }
         catch (Exception ex)
         {

@@ -177,6 +177,38 @@ public class PipelineAuditFormatterTests
         result.LogMessage.Should().StartWith("Copy Records failed");
     }
 
+    [Theory]
+    [InlineData("query", "search-records")]
+    [InlineData("query", "look-up-record")]
+    [InlineData("action", "delete-record")]
+    [InlineData("action", "loop")]
+    [InlineData("action", "prepare-bulk-upsert")]
+    [InlineData("action", "send-email")]
+    [InlineData("trigger", "new-event")]
+    public void FailedStepAlwaysShowsItsErrorInsteadOfSuccessText(string type, string subtype)
+    {
+        const string reason = "You don't have permission to perform this action. (You do not have permission to view records in table 'A2'.)";
+        var result = _formatter.FormatStepRun(new PipelineStep { Id = 9, Type = type, Subtype = subtype, Label = "My step" },
+            "{}", JsonSerializer.Serialize(new { ErrorMessage = reason, ExceptionType = "PipelineNonRetryableException" }),
+            "Failed", "test", DateTime.UtcNow, DateTime.UtcNow);
+
+        using var parsed = JsonDocument.Parse(result.OutputContextJson);
+        var output = parsed.RootElement.GetProperty("Output");
+        output.GetProperty("Status").GetString().Should().Be("Failed");
+        output.GetProperty("Error").GetString().Should().Be(reason);
+        output.TryGetProperty("Records Found", out _).Should().BeFalse();
+        result.LogMessage.Should().Be($"My step failed: {reason}");
+    }
+
+    [Fact]
+    public void FailedStepWithoutAnErrorMessageKeepsItsNormalFormatting()
+    {
+        var result = _formatter.FormatStepRun(new PipelineStep { Type = "query", Subtype = "search-records" },
+            "{}", "{}", "Failed", "test", null, null);
+
+        result.LogMessage.Should().NotContain("failed:");
+    }
+
     [Fact]
     public void ForEachLoopUsesTheLoopHistoryFormat()
     {
