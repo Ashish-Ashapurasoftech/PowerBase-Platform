@@ -860,7 +860,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     ? "Condition matched. Executed the Yes branch." 
                     : "Condition failed. Executed the No branch.";
             }
-            else if (subtype == "loop")
+            else if (subtype is "loop" or "for-each")
             {
                 var loopOverStepId = inputDict.TryGetValue("LoopOverStepId", out var losId) ? losId?.ToString() : string.Empty;
                 var itemCount = inputDict.TryGetValue("ItemCount", out var icObj) ? icObj?.ToString()
@@ -1008,9 +1008,29 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     : (inputDict.TryGetValue("parentStepRefId", out var psRef) ? psRef?.ToString() : string.Empty));
                 
                 friendlyInput["Parent Bulk Session ID"] = parentRefId;
+                // The engine stores table + fid_N -> label under Metadata with the raw input; the
+                // formatter has no table id here, so resolve labels from that map.
+                var rowFieldLabels = new Dictionary<string, object?>();
+                if (inputDict.TryGetValue("Metadata", out var rowMetaObj) && rowMetaObj != null)
+                {
+                    var rowMeta = AsDictionary(rowMetaObj);
+                    if (rowMeta.TryGetValue("field_labels", out var rowLabelsObj) && rowLabelsObj != null)
+                        rowFieldLabels = AsDictionary(rowLabelsObj);
+                    metadata["field_labels"] = rowFieldLabels;
+                    if (rowMeta.TryGetValue("table", out var rowTableObj) && rowTableObj != null)
+                    {
+                        metadata["table"] = rowTableObj;
+                        var rowTable = AsDictionary(rowTableObj);
+                        if (rowTable.TryGetValue("name", out var rowTableName)) friendlyInput["Table"] = rowTableName;
+                    }
+                }
                 if (inputDict.TryGetValue("FieldMappings", out var fmObj) && fmObj != null)
                 {
-                    friendlyInput["Fields"] = MapFieldValuesToUserFriendly(new List<AppField>(), AsDictionary(fmObj));
+                    var rowLabelFields = rowFieldLabels
+                        .Select(kv => new AppField { Fid = int.TryParse(kv.Key.Replace("fid_", ""), out var rowFid) ? rowFid : null, Name = kv.Value?.ToString() ?? kv.Key })
+                        .Where(f => f.Fid.HasValue)
+                        .ToList();
+                    friendlyInput["Fields"] = MapFieldValuesToUserFriendly(rowLabelFields, AsDictionary(fmObj));
                 }
 
                 var rowCount = outputDict.TryGetValue("RowCount", out var rcObj) ? rcObj?.ToString() : "1";
@@ -1096,6 +1116,92 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                         friendlyOutput["Inner Error"] = innerError?.ToString();
 
                     logMessage = $"Upload file failed: {errorMessage}";
+                }
+            }
+            else if (subtype == "copy-records")
+            {
+                var sourceTableStr = inputDict.TryGetValue("SourceTable", out var stObj) ? stObj?.ToString() : null;
+                var destTableStr = inputDict.TryGetValue("DestinationTable", out var dtObj) ? dtObj?.ToString() : null;
+                var mergeRef = inputDict.TryGetValue("MergeField", out var mfObj) ? mfObj?.ToString() : null;
+
+                (string Name, string? Id, List<AppField> Fields) ResolveTable(string? reference)
+                {
+                    var idPart = (reference ?? string.Empty).Split(':').Last();
+                    if (Guid.TryParse(idPart, out var guid))
+                    {
+                        var meta = GetOrFetchTableMetadataAsync(guid, ct).GetAwaiter().GetResult();
+                        if (meta != null) return (meta.Value.Table.Name, idPart, meta.Value.Fields);
+                    }
+                    return (reference ?? "Table", Guid.TryParse(idPart, out _) ? idPart : null, new List<AppField>());
+                }
+
+                string FieldLabel(List<AppField> tableFields, string reference)
+                {
+                    var raw = reference.StartsWith("fid_", StringComparison.Ordinal) ? reference[4..] : reference;
+                    var matched = int.TryParse(raw, out var fidNumber)
+                        ? tableFields.FirstOrDefault(f => f.Fid == fidNumber)
+                        : tableFields.FirstOrDefault(f => f.Name == reference || f.Label == reference || f.PublicId.ToString() == reference);
+                    return matched != null ? (!string.IsNullOrWhiteSpace(matched.Label) ? matched.Label : matched.Name) : reference;
+                }
+
+                List<string> FieldRefs(string key)
+                {
+                    if (!inputDict.TryGetValue(key, out var listObj) || listObj == null) return new List<string>();
+                    var element = JsonSerializer.SerializeToElement(listObj);
+                    return element.ValueKind == JsonValueKind.Array
+                        ? element.EnumerateArray().Select(e => e.ToString()).Where(s => !string.IsNullOrWhiteSpace(s)).ToList()
+                        : new List<string>();
+                }
+
+                var source = ResolveTable(sourceTableStr);
+                var destination = ResolveTable(destTableStr);
+                var sourceRefs = FieldRefs("SourceFields");
+                var destinationRefs = FieldRefs("DestinationFields");
+                var sourceLabels = sourceRefs.Select(r => FieldLabel(source.Fields, r)).ToList();
+                var destinationLabels = destinationRefs.Select(r => FieldLabel(destination.Fields, r)).ToList();
+
+                friendlyInput["Source Table"] = source.Name;
+                friendlyInput["Destination Table"] = destination.Name;
+                friendlyInput["Source Fields"] = sourceLabels;
+                friendlyInput["Destination Fields"] = destinationLabels;
+                friendlyInput["Field Mappings"] = sourceLabels.Zip(destinationLabels, (s, d) => $"{s} → {d}").ToList();
+                if (!string.IsNullOrWhiteSpace(mergeRef))
+                    friendlyInput["Merge Field"] = FieldLabel(destination.Fields, mergeRef);
+                if (inputDict.TryGetValue("TerminateOnError", out var teObj))
+                    friendlyInput["Terminate On Error"] = teObj;
+
+                metadata["source_table"] = new Dictionary<string, object?> { { "name", source.Name }, { "table_id", source.Id } };
+                metadata["destination_table"] = new Dictionary<string, object?> { { "name", destination.Name }, { "table_id", destination.Id } };
+                var copyFieldLabels = BuildFieldLabelMap(source.Fields);
+                foreach (var entry in BuildFieldLabelMap(destination.Fields))
+                    copyFieldLabels.TryAdd(entry.Key, entry.Value);
+                metadata["field_labels"] = copyFieldLabels;
+                metadata["source_field_labels"] = BuildFieldLabelMap(source.Fields);
+                metadata["destination_field_labels"] = BuildFieldLabelMap(destination.Fields);
+
+                var copyError = outputDict.TryGetValue("ErrorMessage", out var ceObj) ? ceObj?.ToString() : null;
+                if (string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(copyError))
+                {
+                    friendlyOutput["Status"] = "Failed";
+                    friendlyOutput["Error"] = PipelineEngine.SanitizeErrorMessage(copyError);
+                    if (outputDict.TryGetValue("ExceptionType", out var ceType) && ceType != null)
+                        friendlyOutput["ExceptionType"] = ceType.ToString();
+                    logMessage = $"Copy Records failed: {friendlyOutput["Error"]}";
+                }
+                else
+                {
+                    long ReadCount(string pascal, string snake) =>
+                        long.TryParse((outputDict.TryGetValue(pascal, out var v) ? v : outputDict.GetValueOrDefault(snake))?.ToString(), out var n) ? n : 0;
+                    var insertedCount = ReadCount("InsertedCount", "inserted_count");
+                    var updatedCount = ReadCount("UpdatedCount", "updated_count");
+                    var errorCount = ReadCount("ErrorCount", "error_count");
+                    friendlyOutput["Inserted Record Count"] = insertedCount;
+                    friendlyOutput["Updated Record Count"] = updatedCount;
+                    friendlyOutput["Error Count"] = errorCount;
+                    if (outputDict.TryGetValue("Errors", out var errsObj) && errsObj != null && errorCount > 0)
+                        friendlyOutput["Errors"] = errsObj;
+                    friendlyOutput["Status"] = errorCount > 0 ? "Completed with errors" : "Copied";
+                    logMessage = $"Copied records from {source.Name} to {destination.Name}: {insertedCount} inserted, {updatedCount} updated, {errorCount} errors.";
                 }
             }
             else
