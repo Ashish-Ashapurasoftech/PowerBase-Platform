@@ -566,7 +566,11 @@ public class DatabasePipelineExecutionWorker : BackgroundService
             }
         }
 
-        return resolvedUserId > 0 ? resolvedUserId : pipeline.CreatedBy;
+        // A PowerFlow always acts as its owner (Quickbase behaviour): records it creates or
+        // modifies carry the owner as Record Owner / Modified By, never the person whose action
+        // fired the trigger. job.TriggeredBy is still recorded on the run for the activity log.
+        if (pipeline.CreatedBy > 0) return pipeline.CreatedBy;
+        return resolvedUserId;
     }
 
     protected virtual async Task<TriggerSubInfo?> GetTriggerSubscriptionAsync(long pipelineId, string refId, CancellationToken ct)
