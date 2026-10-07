@@ -10,6 +10,9 @@ using Microsoft.Extensions.Options;
 using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
+using PowerBase.Application.Formulas;
+using PowerBase.Application.Relationships;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Enums;
 using PowerBase.Infrastructure.Persistence;
@@ -27,6 +30,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
     private readonly ILogger<PipelineTriggerInterceptor> _logger;
     private readonly PipelineExecutionOptions _options;
     private readonly ITenantConnectionResolver? _tenantResolver;
+    private readonly IFormulaProjector? _formulaProjector;
+    private readonly IRelationalProjector? _relationalProjector;
 
     public PipelineTriggerInterceptor(
         IPipelineRepository pipelineRepo,
@@ -37,8 +42,12 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         IMainPipelineQueueRepository mainQueueRepo,
         ILogger<PipelineTriggerInterceptor> logger,
         IOptions<PipelineExecutionOptions>? options = null,
-        ITenantConnectionResolver? tenantResolver = null)
+        ITenantConnectionResolver? tenantResolver = null,
+        IFormulaProjector? formulaProjector = null,
+        IRelationalProjector? relationalProjector = null)
     {
+        _formulaProjector = formulaProjector;
+        _relationalProjector = relationalProjector;
         _tenantResolver = tenantResolver;
         _pipelineRepo = pipelineRepo;
         _recordRepo = recordRepo;
@@ -95,6 +104,72 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         );
 
         await InterceptBulkAsync(table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
+    }
+
+    /// <summary>Formula (compute-on-read) fields have no stored value, so the written values never
+    /// contain them and an event filter / pipeline condition on one (e.g. CustomerNumber) would see
+    /// blank. Re-reads the affected rows inside the open transaction (in chunks, to stay under SQL
+    /// Server's parameter limit) and projects formula fields into each change's values — After for
+    /// added/modified, Before for deleted (delete events fire before the row is removed). Every
+    /// single and bulk write funnels through here. Best-effort: on any failure the changes are
+    /// returned untouched.</summary>
+    private async Task<IReadOnlyList<PipelineRecordChange>> WithComputedValuesAsync(
+        AppTable table,
+        IReadOnlyList<AppField> fields,
+        IReadOnlyList<PipelineRecordChange> changes,
+        CancellationToken ct)
+    {
+        if (_formulaProjector == null || _uow.Transaction == null) return changes;
+        if (!fields.Any(f => f.Fid.HasValue && !f.IsDeleted && PhysicalNaming.IsComputedTypeCode(f.TypeCode))) return changes;
+
+        try
+        {
+            var result = new List<PipelineRecordChange>(changes.Count);
+            const int chunkSize = 1000;
+            foreach (var chunk in changes.Chunk(chunkSize))
+            {
+                var idMap = await _recordRepo.GetRecordIdsByPublicIdsAsync(
+                    table, chunk.Select(c => c.RecordPublicId).ToList(), _uow.Transaction, ct);
+                var rowsById = await _recordRepo.GetBulkUpsertRowsByIdsAsync(
+                    table, fields, idMap.Values.ToList(), _uow.Transaction, ct);
+
+                var present = chunk.Where(c => idMap.TryGetValue(c.RecordPublicId, out var id) && rowsById.ContainsKey(id)).ToList();
+                var rows = present.Select(c => rowsById[idMap[c.RecordPublicId]]).ToList();
+                var seed = _relationalProjector != null
+                    ? await _relationalProjector.ProjectAsync(table, fields, rows, ct)
+                    : null;
+                var computed = rows.Count > 0 ? _formulaProjector.Project(fields, rows, seed, table) : [];
+
+                var computedByRecord = new Dictionary<Guid, IReadOnlyDictionary<long, object?>>();
+                for (var i = 0; i < present.Count; i++) computedByRecord[present[i].RecordPublicId] = computed[i];
+
+                foreach (var change in chunk)
+                {
+                    if (!computedByRecord.TryGetValue(change.RecordPublicId, out var values))
+                    {
+                        result.Add(change);
+                        continue;
+                    }
+                    if (change.EventType == PipelineRecordEventType.Deleted)
+                        result.Add(change with { BeforeValues = Merge(change.BeforeValues, values) });
+                    else
+                        result.Add(change with { AfterValues = Merge(change.AfterValues, values) });
+                }
+            }
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not project formula fields into the bulk pipeline events; continuing without them.");
+            return changes;
+        }
+
+        static IReadOnlyDictionary<long, object?> Merge(IReadOnlyDictionary<long, object?> source, IReadOnlyDictionary<long, object?> computed)
+        {
+            var merged = new Dictionary<long, object?>(source);
+            foreach (var kvp in computed) merged[kvp.Key] = kvp.Value;
+            return merged;
+        }
     }
 
     /// <summary>Writes bulk-event staging rows into another tenant's database, on its own connection.</summary>
@@ -276,6 +351,10 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                 }
             }
             if (subscriptions.Count == 0) return;
+
+            // Formula fields are compute-on-read; put their values in the events (see
+            // WithComputedValuesAsync) now that we know at least one pipeline is listening.
+            recordChanges = await WithComputedValuesAsync(table, fields, recordChanges, ct);
 
             foreach (var sub in subscriptions)
             {

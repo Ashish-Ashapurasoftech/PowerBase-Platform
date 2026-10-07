@@ -66,9 +66,32 @@ public static class PipelineFilterEvaluator
         ["TEXT"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "contains", "not_contains", "not-contains", "starts_with", "starts-with", "not_starts_with", "not-starts-with", "ends_with", "ends-with", "not_ends_with", "not-ends-with", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty", "is_true", "is-true", "is_false", "is-false" }
     };
 
+    /// <summary>Type category of a field. Formula fields store no type of their own: the result type
+    /// comes from the Formula_{X} variant (or, for the generic Formula code, its ResultType setting),
+    /// so Formula_Number / Formula_Date / Formula_DateTime etc. compare as numbers/dates instead of text.</summary>
+    public static string GetTypeCategory(AppField field)
+    {
+        if (PowerBase.Application.Formulas.FormulaTypeMap.IsFormulaComputed(field.TypeCode, field.Settings)
+            && PowerBase.Application.Formulas.FormulaTypeMap.ExpressionAndType(field.TypeCode, field.Settings) is { } resolved)
+        {
+            return resolved.Type switch
+            {
+                PowerBase.Formula.Types.FormulaType.Number or PowerBase.Formula.Types.FormulaType.Duration => "NUMBER",
+                PowerBase.Formula.Types.FormulaType.Date or PowerBase.Formula.Types.FormulaType.DateTime or PowerBase.Formula.Types.FormulaType.Time => "DATE",
+                PowerBase.Formula.Types.FormulaType.Bool => "BOOLEAN",
+                _ => "TEXT"
+            };
+        }
+        return GetTypeCategory(field.TypeCode);
+    }
+
     public static string GetTypeCategory(string typeCode)
     {
         var code = typeCode?.ToUpperInvariant();
+        // Formula_{X} variants carry their result type in the suffix (settings-free fallback).
+        if (code == "FORMULA_NUMBER" || code == "FORMULA_DURATION") return "NUMBER";
+        if (code == "FORMULA_DATE" || code == "FORMULA_DATETIME" || code == "FORMULA_TIME") return "DATE";
+        if (code == "FORMULA_BOOL") return "BOOLEAN";
         if (code == "NUMBER" || code == "CURRENCY" || code == "PERCENT" || code == "RATING" || code == "NUMERIC" || code == "INTEGER" || code == "FLOAT" || code == "NUMERICRANGE" || code == "RECORDID" || code == "DURATION")
             return "NUMBER";
         if (code == "DATE" || code == "DATE_TIME" || code == "DATETIME" || code == "TIMESTAMP" || code == "TIME" || code == "TIME_OF_DAY" || code == "DATERANGE")
@@ -530,7 +553,7 @@ public static class PipelineFilterEvaluator
             rightVal = condition.Value ?? string.Empty;
         }
 
-        var typeCategory = GetTypeCategory(field.TypeCode);
+        var typeCategory = GetTypeCategory(field);
 
         switch (condition.Operator)
         {
@@ -668,7 +691,7 @@ public static class PipelineFilterEvaluator
         var rightVal = rule.Value ?? string.Empty;
         var op = rule.Operator ?? "is";
 
-        var typeCategory = GetTypeCategory(field.TypeCode);
+        var typeCategory = GetTypeCategory(field);
         return EvaluateConditionOperator(leftVal, op, rightVal, typeCategory, logger);
     }
 
@@ -728,7 +751,7 @@ public static class PipelineFilterEvaluator
             return;
         }
 
-        var typeCategory = GetTypeCategory(field.TypeCode);
+        var typeCategory = GetTypeCategory(field);
         var normalizedOp = rule.Operator.ToLowerInvariant().Trim();
 
         if (AllowedOperatorsByTypeCategory.TryGetValue(typeCategory, out var allowedOps))

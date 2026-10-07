@@ -35,6 +35,30 @@ public partial class PipelineEngine : IPipelineEngine
     /// have no compute-on-read (formula) fields — only encrypted-field in-memory filtering.</summary>
     private static readonly Dictionary<long, object?> EmptyComputedValues = new();
 
+    /// <summary>Computes Formula/Lookup/Summary values for rows read by a step (they have no stored
+    /// column). Returns null when the table has none or the projectors are unavailable.</summary>
+    private async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>?> ProjectComputedAsync(
+        AppTable table, IReadOnlyList<AppField> fields,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, CancellationToken ct)
+    {
+        if (rows.Count == 0 || !fields.Any(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))) return null;
+        var formulaProjector = _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector;
+        var relationalProjector = _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector))
+            as PowerBase.Application.Relationships.IRelationalProjector;
+        if (formulaProjector == null) return null;
+        var relational = relationalProjector != null ? await relationalProjector.ProjectAsync(table, fields, rows, ct) : null;
+        return formulaProjector.Project(fields, rows, relational, table);
+    }
+
+    private static IReadOnlyDictionary<string, object?> MergeComputed(
+        IReadOnlyDictionary<string, object?> row, IReadOnlyDictionary<long, object?> computed)
+    {
+        if (computed.Count == 0) return row;
+        var merged = new Dictionary<string, object?>(row);
+        foreach (var kvp in computed) merged[PhysicalNaming.ColumnName((int)kvp.Key)] = kvp.Value;
+        return merged;
+    }
+
     internal static Dictionary<string, object?> BuildBulkEventRecord(PipelineBulkEventRecord record)
     {
         var valuesJson = string.Equals(record.EventType, "Deleted", StringComparison.OrdinalIgnoreCase)
@@ -1818,10 +1842,16 @@ public partial class PipelineEngine : IPipelineEngine
                 }
                 catch { return false; }
             });
-            var encryptedFilterFidsForStreaming = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
+            // Formula/Lookup/Summary fields have no physical column, and encrypted fields hold
+            // ciphertext: neither can be matched by the SQL filter, so conditions on them are
+            // evaluated in memory against candidate rows instead.
+            var computedFieldFids = fields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))
                 .Select(f => (long)f.Fid!.Value).ToHashSet();
-            var canStreamFilter = encryptedFilterFidsForStreaming.Count == 0 ||
-                !FormulaFilterSorter.TreeContainsFormulaField(filterTree, encryptedFilterFidsForStreaming);
+            var inMemoryFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
+                .Select(f => (long)f.Fid!.Value).ToHashSet();
+            inMemoryFilterFids.UnionWith(computedFieldFids);
+            var canStreamFilter = inMemoryFilterFids.Count == 0 ||
+                !FormulaFilterSorter.TreeContainsFormulaField(filterTree, inMemoryFilterFids);
 
             var requiresChunkedSearch = !limit.HasValue || limit.Value > _options.MaxMaterializedSearchRecords;
             if (requiresChunkedSearch && loopConsumerCount == 1 && canStreamFilter && recordSearchService.SupportsKeysetPaging &&
@@ -1843,6 +1873,11 @@ public partial class PipelineEngine : IPipelineEngine
                             var remaining = limit.HasValue ? limit.Value - ordinal : int.MaxValue;
                             var recordsToStage = pageRows.Take(remaining).ToList();
                             if (recordsToStage.Count == 0) break;
+                            // Formula fields have no stored value: project them so loop items
+                            // ({{steps.<loop>.item.fid_N}}) carry them like the non-chunked search does.
+                            var stagedComputed = await ProjectComputedAsync(table, fields, recordsToStage, ct);
+                            if (stagedComputed != null)
+                                recordsToStage = recordsToStage.Select((r, i) => MergeComputed(r, stagedComputed[i])).ToList();
                             var staged = new List<PipelineBulkEventRecord>(recordsToStage.Count);
                             long lastRecordId = workset.LastRecordId;
                             foreach (var record in recordsToStage)
@@ -1938,6 +1973,7 @@ public partial class PipelineEngine : IPipelineEngine
             // to the SQL path (which has its own encrypted-field handling) on any failure.
             List<IReadOnlyDictionary<string, object?>>? aiSearchRows = null;
             if (_azureSearchService != null && _azureSearchService.IsGridSearchEnabled && filterTree != null
+                && !FormulaFilterSorter.TreeContainsFormulaField(filterTree, computedFieldFids)
                 && fields.Any(f => f.IsSearchable || f.IsFilterable) && await _azureSearchService.IsHealthyAsync(ct))
             {
                 var odata = ODataFilterBuilder.Build(filterTree, fields);
@@ -1967,6 +2003,7 @@ public partial class PipelineEngine : IPipelineEngine
             }
 
             List<IReadOnlyDictionary<string, object?>> resultsList;
+            var computedMerged = false;
             if (aiSearchRows != null)
             {
                 resultsList = (limit.HasValue ? aiSearchRows.Take(limit.Value) : aiSearchRows).ToList();
@@ -1977,22 +2014,22 @@ public partial class PipelineEngine : IPipelineEngine
                 // condition against them can never match. Split those conditions out of the SQL
                 // tree and evaluate them in memory against decrypted candidate rows instead —
                 // mirrors RunReportQueryHandler's handling of formula (compute-on-read) fields.
-                var encryptedFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
-                    .Select(f => (long)f.Fid!.Value).ToHashSet();
-                if (encryptedFilterFids.Count > 0 && FormulaFilterSorter.TreeContainsFormulaField(filterTree, encryptedFilterFids))
+                if (inMemoryFilterFids.Count > 0 && FormulaFilterSorter.TreeContainsFormulaField(filterTree, inMemoryFilterFids))
                 {
-                    var (physicalFilterTree, encryptedFilterTree) = FormulaFilterSorter.SplitFilterTree(filterTree, encryptedFilterFids);
+                    var (physicalFilterTree, inMemoryFilterTree) = FormulaFilterSorter.SplitFilterTree(filterTree, inMemoryFilterFids);
                     // Fetch EVERY physical-filter-matching candidate via pagination — no fixed
-                    // cap — so nothing is silently dropped before the encrypted conditions are
-                    // evaluated in memory below, no matter how many rows match physically.
+                    // cap — so nothing is silently dropped before the in-memory conditions are
+                    // evaluated below, no matter how many rows match physically.
                     var candidates = await FetchAllAsync(physicalFilterTree);
+                    var computedPerRow = await ProjectComputedAsync(table, fields, candidates, ct);
                     var pairs = candidates
-                        .Select(r => (Row: r, Computed: (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
+                        .Select((r, i) => (Row: r, Computed: computedPerRow != null ? computedPerRow[i] : (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
                         .ToList();
-                    if (encryptedFilterTree != null)
-                        pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, encryptedFilterTree, fields);
-                    IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p => p.Row);
+                    if (inMemoryFilterTree != null)
+                        pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, inMemoryFilterTree, fields);
+                    IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p => MergeComputed(p.Row, p.Computed));
                     resultsList = (limit.HasValue ? filtered.Take(limit.Value) : filtered).ToList();
+                    computedMerged = true;
                 }
                 else if (limit.HasValue)
                 {
@@ -2009,6 +2046,14 @@ public partial class PipelineEngine : IPipelineEngine
                     // No user-configured MaxResults — fetch every matching row via pagination.
                     resultsList = await FetchAllAsync(filterTree);
                 }
+            }
+            // Formula fields are compute-on-read, so expose their values in the step output too
+            // (e.g. {{steps.x.CustomerNumber}}) when the filter branch above didn't already.
+            if (!computedMerged && computedFieldFids.Count > 0 && resultsList.Count > 0)
+            {
+                var outputComputed = await ProjectComputedAsync(table, fields, resultsList, ct);
+                if (outputComputed != null)
+                    resultsList = resultsList.Select((r, i) => MergeComputed(r, outputComputed[i])).ToList();
             }
             _logger.LogInformation("Search Records step {StepId} matched {Count} records.", step.Id, resultsList.Count);
 
@@ -2130,6 +2175,13 @@ public partial class PipelineEngine : IPipelineEngine
                         table, fields, [recordId], uow.Transaction, ct);
                     persistedRows?.TryGetValue(recordId, out persistedRecord);
                 }
+                // Formula fields are compute-on-read: add their values so {{steps.<create>.fid_N}}
+                // (and the record-added event published below) carry them.
+                if (persistedRecord is not null)
+                {
+                    var createdComputed = await ProjectComputedAsync(table, fields, [persistedRecord], ct);
+                    if (createdComputed != null) persistedRecord = MergeComputed(persistedRecord, createdComputed[0]);
+                }
                 var output = BuildCreatedRecordOutput(recordPublicId, recordId, fields, values, persistedRecord);
                 // Publish the same complete snapshot exposed by this step, including persisted
                 // defaults and explicit nulls. Submitted mappings alone omit valid fields and
@@ -2232,6 +2284,20 @@ public partial class PipelineEngine : IPipelineEngine
                 };
                 foreach (var fieldValue in persisted)
                     output[$"fid_{fieldValue.Key}"] = fieldValue.Value;
+                // Formula fields are compute-on-read: read the updated row back in this
+                // transaction so {{steps.<update>.fid_N}} also exposes their current values.
+                if (uow.Transaction is not null)
+                {
+                    var updatedId = await recordRepo.GetActiveRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
+                    var updatedRows = await recordRepo.GetBulkUpsertRowsByIdsAsync(table, fields, [updatedId], uow.Transaction, ct);
+                    if (updatedRows.TryGetValue(updatedId, out var updatedRow))
+                    {
+                        var updatedComputed = await ProjectComputedAsync(table, fields, [updatedRow], ct);
+                        if (updatedComputed != null)
+                            foreach (var computedValue in updatedComputed[0])
+                                output[$"fid_{computedValue.Key}"] = computedValue.Value;
+                    }
+                }
                 var outputJson = JsonSerializer.Serialize(output);
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
@@ -4402,7 +4468,7 @@ public partial class PipelineEngine : IPipelineEngine
                 throw new PipelineStepException($"Field metadata for token '{token}' (field '{fieldRef}') could not be resolved.");
             }
 
-            return PipelineFilterEvaluator.GetTypeCategory(matchedField.TypeCode);
+            return PipelineFilterEvaluator.GetTypeCategory(matchedField);
         }
         finally
         {
@@ -5735,7 +5801,7 @@ public partial class PipelineEngine : IPipelineEngine
                 {
                     var rawValue = rule.Value;
                     var dbOp = MapUiOperatorToDbOperator(rule.Operator);
-                    var fieldCategory = PipelineFilterEvaluator.GetTypeCategory(field.TypeCode);
+                    var fieldCategory = PipelineFilterEvaluator.GetTypeCategory(field);
                     if (fieldCategory == "DATE")
                     {
                         dbOp = dbOp switch
