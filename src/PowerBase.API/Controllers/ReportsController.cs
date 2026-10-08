@@ -542,6 +542,9 @@ public class ReportsController : ControllerBase
         PageSize = result.PageSize,
         IsDataMasked = result.IsDataMasked,
         ResolvedGaugeGoalValue = result.ResolvedGaugeGoalValue,
+        Totals = result.Totals.ToDictionary(
+            kv => kv.Key,
+            kv => new ReportColumnTotalDto { Sum = kv.Value.Sum, NonBlankCount = kv.Value.NonBlankCount, RowCount = kv.Value.RowCount }),
     };
 
     /// <summary>Export report results as CSV.</summary>

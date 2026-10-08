@@ -210,4 +210,17 @@ public class SchemaEngineService : ISchemaEngineService
         await connection.OpenAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
     }
+
+    public async Task ScaleNumericColumnForPercentAsync(AppTable table, AppField field, bool toPercent, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var physicalColumn = PhysicalNaming.GetPhysicalColumnName(field);
+        var op = toPercent ? "* 100" : "/ 100";
+
+        var sql = $"UPDATE {physicalTable} SET {physicalColumn} = {physicalColumn} {op} WHERE {physicalColumn} IS NOT NULL;";
+
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+    }
 }

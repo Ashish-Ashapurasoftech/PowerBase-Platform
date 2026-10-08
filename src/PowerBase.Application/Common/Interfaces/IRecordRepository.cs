@@ -128,6 +128,17 @@ public interface IRecordRepository
 
     Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 
+    /// <summary>
+    /// Sum / non-blank count / row count of the given physical numeric (or checkbox) columns across
+    /// EVERY record matching <paramref name="filterTree"/> — one SQL round trip with the same WHERE
+    /// as <see cref="ListAsync"/>/<see cref="CountAsync"/>, so the numbers always agree with the
+    /// grid's own filtering. Only for non-computed, non-encrypted columns (callers route formula and
+    /// encrypted columns through an in-memory pass instead). Keyed by the field's Fid.
+    /// </summary>
+    Task<IReadOnlyDictionary<long, Records.ColumnTotal>> AggregateColumnsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<AppField> columns,
+        FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
+
     /// <summary>Returns true if the table has at least one non-deleted row — an EXISTS check, not a
     /// COUNT, so it stays cheap on tables with millions of records. Used to gate whether a field's
     /// encryption setting can still be changed (see FieldDetailResponse.HasRecords).</summary>

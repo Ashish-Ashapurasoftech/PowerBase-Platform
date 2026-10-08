@@ -305,6 +305,9 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                 }
 
                 var isSuperAdmin = execUser.SystemRoleCode == PowerBase.Domain.Constants.SystemRoleCodes.SuperAdmin;
+                // The flow acts as its owner, so a super-admin owner keeps the platform-level access it has when
+                // it works interactively; the run-time record guards (membership, table access) honour this flag.
+                if (queryContext is QueryContext qcAdmin) qcAdmin.IsSuperAdmin = isSuperAdmin;
                 if (!isSuperAdmin)
                 {
                     var tenantRepo = scope.ServiceProvider.GetRequiredService<ITenantRepository>();
@@ -550,9 +553,15 @@ public class DatabasePipelineExecutionWorker : BackgroundService
                     var connectionScope = await connectionResolver.TryResolveForUserAsync(subscription.TargetConnectionPublicId, creatorId, ct);
                     if (connectionScope == null)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Saved connection {subscription.TargetConnectionPublicId} not found or not owned by creator {creatorId}.");
+                        // Not a saved account: a plain tenant connection, whose id is the target
+                        // tenant's own id. The creator must be an active member of that tenant.
+                        var targetTenant = await tenantRepo.GetTenantForUserAsync(subscription.TargetConnectionPublicId, creatorId, ct);
+                        if (targetTenant == null || targetTenant.Id != subscription.TargetTenantId)
+                        {
+                            throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Saved connection {subscription.TargetConnectionPublicId} not found or not owned by creator {creatorId}.");
+                        }
                     }
-                    if (connectionScope.TargetTenantId != subscription.TargetTenantId)
+                    else if (connectionScope.TargetTenantId != subscription.TargetTenantId)
                     {
                         throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException($"Saved connection {subscription.TargetConnectionPublicId} targets tenant {connectionScope.TargetTenantId} instead of subscription tenant {subscription.TargetTenantId}.");
                     }
@@ -566,7 +575,11 @@ public class DatabasePipelineExecutionWorker : BackgroundService
             }
         }
 
-        return resolvedUserId > 0 ? resolvedUserId : pipeline.CreatedBy;
+        // A PowerFlow always acts as its owner (Quickbase behaviour): records it creates or
+        // modifies carry the owner as Record Owner / Modified By, never the person whose action
+        // fired the trigger. job.TriggeredBy is still recorded on the run for the activity log.
+        if (pipeline.CreatedBy > 0) return pipeline.CreatedBy;
+        return resolvedUserId;
     }
 
     protected virtual async Task<TriggerSubInfo?> GetTriggerSubscriptionAsync(long pipelineId, string refId, CancellationToken ct)

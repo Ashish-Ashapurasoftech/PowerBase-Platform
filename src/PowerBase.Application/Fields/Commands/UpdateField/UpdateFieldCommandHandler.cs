@@ -133,6 +133,7 @@ public class UpdateFieldCommandHandler
         // except for the one narrow, always-lossless INT-to-DECIMAL widening below (only ever
         // needed for a legacy Rating field created before Rating's catalog type became
         // DECIMAL(18,4) — see database/migrations/tenant/045_alter_fieldtype_rating_decimal.sql).
+        var percentRescaled = false;
         if (NumericFamilyTypeCodes.Contains(existing.TypeCode) && !string.IsNullOrWhiteSpace(settings))
         {
             NumericSettings? numericSettings = null;
@@ -162,7 +163,37 @@ public class UpdateFieldCommandHandler
                 // Percent/Rating all already share that physical type.
                 await _schemaEngine.WidenIntColumnToDecimalIfNeededAsync(table, existing, ct);
 
-                await _fieldRepo.UpdateFieldTypeAsync(existing.Id, targetFieldType.Id, settings, isRequired, ct);
+                // Percent is stored as a whole number (115 = 115%), every other numeric type as the
+                // raw quantity (1.15). So switching INTO Percent multiplies the stored values by 100
+                // and switching OUT of it divides by 100 — otherwise 1.15 would read back as 1.15%.
+                var toPercent = string.Equals(displayAs, "Percent", StringComparison.OrdinalIgnoreCase);
+                var fromPercent = string.Equals(existing.TypeCode, "Percent", StringComparison.OrdinalIgnoreCase);
+                if (toPercent || fromPercent)
+                {
+                    // An encrypted column can't be updated with server-side arithmetic.
+                    if (existing.IsEncrypted)
+                        throw new ValidationException(new Dictionary<string, string[]>
+                        {
+                            ["Settings"] = ["An encrypted field can't be switched to or from Percent. Turn encryption off first."]
+                        });
+
+                    await _schemaEngine.ScaleNumericColumnForPercentAsync(table, existing, toPercent, ct);
+                    try
+                    {
+                        await _fieldRepo.UpdateFieldTypeAsync(existing.Id, targetFieldType.Id, settings, isRequired, ct);
+                    }
+                    catch
+                    {
+                        // Best effort: put the values back so data and field type stay in agreement.
+                        await _schemaEngine.ScaleNumericColumnForPercentAsync(table, existing, !toPercent, ct);
+                        throw;
+                    }
+                    percentRescaled = true;
+                }
+                else
+                {
+                    await _fieldRepo.UpdateFieldTypeAsync(existing.Id, targetFieldType.Id, settings, isRequired, ct);
+                }
             }
         }
 
@@ -224,25 +255,12 @@ public class UpdateFieldCommandHandler
         // Search Index Sync: when IsSearchable changes, trigger a backfill or nullify
         if (command.IsSearchable != wasSearchable && existing.Fid.HasValue)
         {
-            var isNullify = !command.IsSearchable;
-            var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, existing.Fid.Value, isNullify, page: 1, pageSize: 500, ct);
-
-            if (docs.Count > 0)
-            {
-                await _searchService.BulkIndexRecordsAsync(docs, ct);
-            }
-
-            var action = command.IsSearchable ? PowerBase.Application.Common.Models.IndexAction.BackfillField : PowerBase.Application.Common.Models.IndexAction.NullifyField;
-            var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
-            {
-                Action = action,
-                TenantId = _queryContext.TenantId,
-                AppId = table.AppId,
-                TableId = table.Id,
-                FieldId = existing.Fid.Value,
-                Page = 1
-            };
-            _ = _messagePublisher.PublishAsync(msg, default);
+            await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: !command.IsSearchable, ct);
+        }
+        else if (percentRescaled && command.IsSearchable && existing.Fid.HasValue)
+        {
+            // The stored values changed (x100 or /100), so the already-indexed copies are stale.
+            await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: false, ct);
         }
 
         await _auditRepo.LogActivityAsync(
@@ -254,6 +272,27 @@ public class UpdateFieldCommandHandler
             await _refIndexer.ReindexTableFieldsAsync(table.Id, ct);
         else
             await _refIndexer.ReindexFieldAsync(existing.PublicId, ct);
+    }
+
+    private async Task SyncSearchIndexAsync(AppTable table, int fid, bool isNullify, CancellationToken ct)
+    {
+        var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, fid, isNullify, page: 1, pageSize: 500, ct);
+
+        if (docs.Count > 0)
+        {
+            await _searchService.BulkIndexRecordsAsync(docs, ct);
+        }
+
+        var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
+        {
+            Action = isNullify ? PowerBase.Application.Common.Models.IndexAction.NullifyField : PowerBase.Application.Common.Models.IndexAction.BackfillField,
+            TenantId = _queryContext.TenantId,
+            AppId = table.AppId,
+            TableId = table.Id,
+            FieldId = fid,
+            Page = 1
+        };
+        _ = _messagePublisher.PublishAsync(msg, default);
     }
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();

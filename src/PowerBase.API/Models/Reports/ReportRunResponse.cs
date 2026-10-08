@@ -16,6 +16,20 @@ public class ReportRunResponse
     /// for a Fixed-goal Gauge (use Chart.GoalValue directly), or when the goal field isn't
     /// visible/configured.</summary>
     public decimal? ResolvedGaugeGoalValue { get; init; }
+    /// <summary>Table reports only: grand-total aggregates per column (keyed by field id) over EVERY
+    /// record matching the report's filters — not just this page's rows. Only columns that opted
+    /// into a total/average row are present; empty when the report hides totals.</summary>
+    public IReadOnlyDictionary<string, ReportColumnTotalDto> Totals { get; init; } = new Dictionary<string, ReportColumnTotalDto>();
+}
+
+public class ReportColumnTotalDto
+{
+    /// <summary>Plain sum (for a checkbox column: how many records are checked).</summary>
+    public decimal Sum { get; init; }
+    /// <summary>Records with a non-blank value — the average's denominator when blanks don't count as 0.</summary>
+    public long NonBlankCount { get; init; }
+    /// <summary>All records matching the report's filters — the average's denominator when blanks count as 0.</summary>
+    public long RowCount { get; init; }
 }
 
 public class ReportColumnDto

@@ -1346,8 +1346,11 @@ public partial class PipelineEngine : IPipelineEngine
             var accountFileStorage = accountScopeHandle.GetRequiredService<IFileStorageService>();
             var accountRecordSearchService = accountScopeHandle.Services.GetService<IPipelineRecordSearchService>() ?? _pipelineRecordSearchService;
 
-            return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
-                accountRecordRepo, accountTableRepo, accountFieldRepo, accountWriteService, accountTriggerInterceptor, accountUow, accountIdempotencyRepo, accountFileStorage, accountRecordSearchService, ct);
+            await EnforceStepAccessAsync(step, accountScopeHandle.Services, ct);
+            // Records written through a saved account belong to the token's user, not the flow owner.
+            return await RunInStepScopeAsync(accountScopeHandle.Services, accountScope.TargetUserId, () =>
+                ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
+                    accountRecordRepo, accountTableRepo, accountFieldRepo, accountWriteService, accountTriggerInterceptor, accountUow, accountIdempotencyRepo, accountFileStorage, accountRecordSearchService, ct));
         }
 
         if (isCrossTenant)
@@ -1389,16 +1392,20 @@ public partial class PipelineEngine : IPipelineEngine
                 var scopedFileStorage = scope.ServiceProvider.GetRequiredService<IFileStorageService>();
                 var scopedRecordSearchService = scope.ServiceProvider.GetService<IPipelineRecordSearchService>() ?? _pipelineRecordSearchService;
 
-                return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
-                    scopedRecordRepo, scopedTableRepo, scopedFieldRepo, scopedWriteService, scopedTriggerInterceptor, scopedUow, scopedIdempotencyRepo, scopedFileStorage, scopedRecordSearchService, ct);
+                await EnforceStepAccessAsync(step, scope.ServiceProvider, ct);
+                return await RunInStepScopeAsync(scope.ServiceProvider, null, () =>
+                    ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
+                        scopedRecordRepo, scopedTableRepo, scopedFieldRepo, scopedWriteService, scopedTriggerInterceptor, scopedUow, scopedIdempotencyRepo, scopedFileStorage, scopedRecordSearchService, ct));
             }
         }
         else
         {
             if (step.Subtype == "copy-records")
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
-            return await ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
-                _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, _triggerInterceptor, _uow, _idempotencyRepo, _fileStorageService, _pipelineRecordSearchService, ct);
+            await EnforceStepAccessAsync(step, _serviceProvider, ct);
+            return await RunInStepScopeAsync(_serviceProvider, null, () =>
+                ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
+                    _recordRepo, _tableRepo, _fieldRepo, _recordWriteService, _triggerInterceptor, _uow, _idempotencyRepo, _fileStorageService, _pipelineRecordSearchService, ct));
         }
     }
 
@@ -1414,7 +1421,15 @@ public partial class PipelineEngine : IPipelineEngine
             stepRun.InputContext = SerializeAndSanitizeAudit(new { config.SourceTable, config.DestinationTable,
                 config.SourceFields, config.DestinationFields, config.MergeField, config.TerminateOnError });
             return await new CopyRecordsExecutor(services)
-                .ExecuteAsync(config, query, step.PublicId, messageId, executionPath, ct);
+                .ExecuteAsync(config, query, step.PublicId, messageId, executionPath, ct,
+                    (sourceTable, sourceFields, destinationTable, destinationFields) =>
+                        stepRun.InputContext = SerializeAndSanitizeAudit(new { config.SourceTable, config.DestinationTable,
+                            config.SourceFields, config.DestinationFields, config.MergeField, config.TerminateOnError,
+                            Metadata = new { tables = new[]
+                            {
+                                BuildAuditFieldMetadata(sourceTable, sourceFields),
+                                BuildAuditFieldMetadata(destinationTable, destinationFields)
+                            } } }));
     }
 
     private async Task<string> ExecuteMakeRequestAsync(PipelineStep step, string payloadJson, List<PipelineStep> allSteps,
@@ -1675,6 +1690,13 @@ public partial class PipelineEngine : IPipelineEngine
 
             _logger.LogInformation("Look Up a Record step {StepId} found record ID {RecordId}.", step.Id, recordId);
 
+            // Row-level rules for the flow owner's role: "own records" scope and the role's record filter.
+            var lookupAccess = await GetRestrictedAccessAsync(table, ct);
+            var lookupReadableFids = ReadableFieldIds(lookupAccess);
+            if (lookupAccess != null && record.TryGetValue("PublicId", out var lookupGuidVal) &&
+                Guid.TryParse(Convert.ToString(lookupGuidVal, CultureInfo.InvariantCulture), out var lookedUpPublicId))
+                await EnforceRecordAccessAsync(recordRepo, table, fields, lookedUpPublicId, PipelineRecordAccessKind.View, null, ct);
+
             var norm = new Dictionary<string, object?>();
             if (record.TryGetValue("Id", out var lookupIdVal)) norm["Id"] = lookupIdVal;
             if (record.TryGetValue("PublicId", out var lookupPubIdVal))
@@ -1689,7 +1711,7 @@ public partial class PipelineEngine : IPipelineEngine
 
             foreach (var f in fields)
             {
-                if (f.Fid.HasValue)
+                if (f.Fid.HasValue && (lookupReadableFids == null || lookupReadableFids.Contains(f.Fid.Value)))
                 {
                     var colName = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                     if (record.TryGetValue(colName, out var val))
@@ -1777,6 +1799,11 @@ public partial class PipelineEngine : IPipelineEngine
                 }
             }
 
+            // The flow reads as its owner: only the records and fields that identity may see.
+            var searchAccess = await GetRestrictedAccessAsync(table, ct);
+            filterTree = ApplyRoleRowRestrictions(filterTree, searchAccess, fields);
+            var readableFids = ReadableFieldIds(searchAccess);
+
             int? limit = config.MaxResults;
             if (limit.HasValue && limit.Value <= 0)
                 throw new PipelineNonRetryableException("Search Records MaxResults must be greater than zero.");
@@ -1821,7 +1848,7 @@ public partial class PipelineEngine : IPipelineEngine
                             foreach (var record in recordsToStage)
                             {
                                 lastRecordId = Convert.ToInt64(record["Id"], CultureInfo.InvariantCulture);
-                                var normalized = NormalizeSearchRecord(record, fields);
+                                var normalized = NormalizeSearchRecord(record, readableFids == null ? fields : fields.Where(f => f.Fid.HasValue && readableFids.Contains(f.Fid.Value)).ToList());
                                 if (!normalized.TryGetValue("RecordPublicId", out var publicIdValue) ||
                                     !Guid.TryParse(Convert.ToString(publicIdValue, CultureInfo.InvariantCulture), out var recordPublicId))
                                     throw new PipelineNonRetryableException("Search Records returned a row without a valid PublicId.");
@@ -2002,7 +2029,7 @@ public partial class PipelineEngine : IPipelineEngine
 
                 foreach (var f in fields)
                 {
-                    if (f.Fid.HasValue)
+                    if (f.Fid.HasValue && (readableFids == null || readableFids.Contains(f.Fid.Value)))
                     {
                         var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                         if (record.TryGetValue(colKey, out var val))
@@ -2094,7 +2121,7 @@ public partial class PipelineEngine : IPipelineEngine
                 var createdOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
                 if (createdOnField != null) values[createdOnField.Fid!.Value] = DateTime.UtcNow;
                 var createdByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
-                if (createdByField != null) values[createdByField.Fid!.Value] = _queryContext.UserId;
+                if (createdByField != null) values[createdByField.Fid!.Value] = StepActingUserId;
 
                 IReadOnlyDictionary<string, object?>? persistedRecord = null;
                 if (uow.Transaction is not null)
@@ -2180,6 +2207,10 @@ public partial class PipelineEngine : IPipelineEngine
                 Metadata = BuildAuditFieldMetadata(table, fields)
             });
 
+            // Row-level rules (own-records scope, role record filter) and field-level write access.
+            await EnforceRecordAccessAsync(recordRepo, table, fields, recordPublicId, PipelineRecordAccessKind.Modify,
+                values.Keys.Select(fid => fields.FirstOrDefault(f => f.Fid == (int)fid)).OfType<AppField>().ToList(), ct);
+
             await uow.BeginAsync(ct);
             try
             {
@@ -2245,6 +2276,8 @@ public partial class PipelineEngine : IPipelineEngine
 
             var tableGuid = Guid.Parse(config.TableId);
             var (table, fields) = await GetRecordStepMetadataAsync(tableRepo, fieldRepo, tableGuid, ct);
+
+            await EnforceRecordAccessAsync(recordRepo, table, fields, recordPublicId, PipelineRecordAccessKind.Delete, null, ct);
 
             var oldRecord = await recordRepo.GetByPublicIdAsync(table, fields, recordPublicId, ct: ct);
             var oldValuesDict = new Dictionary<long, object?>();
@@ -3398,7 +3431,7 @@ public partial class PipelineEngine : IPipelineEngine
                             var bulkModifiedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedOn" && f.Fid.HasValue);
                             if (bulkModifiedOnField != null) { afterValues[bulkModifiedOnField.Id] = DateTime.UtcNow; afterValues[bulkModifiedOnField.Fid!.Value] = DateTime.UtcNow; }
                             var bulkModifiedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedBy" && f.Fid.HasValue);
-                            if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Id] = _queryContext.UserId; afterValues[bulkModifiedByField.Fid!.Value] = _queryContext.UserId; }
+                            if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Id] = StepActingUserId; afterValues[bulkModifiedByField.Fid!.Value] = StepActingUserId; }
 
                             // UPDATE in DB on uow.Transaction via recordWriteService (with sanitized row)
                             await recordWriteService.ApplyAsync(
@@ -3503,7 +3536,7 @@ public partial class PipelineEngine : IPipelineEngine
                             createdRecordIds.Add(id);
                         }
                         if (bulkCreatedOnField != null) { cv[bulkCreatedOnField.Id] = DateTime.UtcNow; cv[bulkCreatedOnField.Fid!.Value] = DateTime.UtcNow; }
-                        if (bulkCreatedByField != null) { cv[bulkCreatedByField.Id] = _queryContext.UserId; cv[bulkCreatedByField.Fid!.Value] = _queryContext.UserId; }
+                        if (bulkCreatedByField != null) { cv[bulkCreatedByField.Id] = StepActingUserId; cv[bulkCreatedByField.Fid!.Value] = StepActingUserId; }
 
                         addedChanges.Add(new PipelineRecordChange(
                             pubId,
@@ -3647,6 +3680,11 @@ public partial class PipelineEngine : IPipelineEngine
             var recordPublicId = UploadFileStepContract.ResolveRecordPublicId(recordOutput);
             if (recordPublicId == Guid.Empty)
                 throw new InvalidOperationException("The selected Upload a File record could not be resolved.");
+
+            // Attaching a file modifies the record: the owner needs Modify on the table, the record must be
+            // within the role's row rules, and each target field must be writable for the role.
+            await EnforceRecordAccessAsync(recordRepo, table, fields, recordPublicId, PipelineRecordAccessKind.Modify,
+                targetFields.OfType<AppField>().ToList(), ct);
 
             var cached = await idempotencyRepo.GetByExecutionKeyAsync(
                 messageGuid, step.PublicId, executionPathHash, null, ct);
