@@ -1,4 +1,6 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Imports.Files;
 using PowerBase.Domain.Entities;
@@ -32,21 +34,22 @@ public sealed class ImportRunProcessor(
     IImportNotifier notifier,
     IImportFileAccess fileAccess,
     ImportMultiTargetRunner multiTarget,
+    IOptions<ImportOptions> options,
     ILogger<ImportRunProcessor> logger)
 {
     /// <summary>The issue table keeps this many rows per run for the run page; the feedback file has them all.</summary>
     private const int IssueCap = 5000;
 
-    /// <summary>Totals of one pass over the source, plus the feedback file being written for it.</summary>
-    private sealed class PassResult(ImportFeedbackWriter feedback) : IAsyncDisposable
+    /// <summary>Totals of one pass over the source, plus the details file being written for it.</summary>
+    private sealed class PassResult(ImportDetailsWriter details) : IAsyncDisposable
     {
-        public ImportFeedbackWriter Feedback { get; } = feedback;
+        public ImportDetailsWriter Details { get; } = details;
         public List<ImportRunIssue> BufferedIssues { get; } = new();
-        public long RowsRead, Inserted, Updated, Skipped, Errored, Cursor;
+        public long RowsRead, Inserted, Updated, Unchanged, Skipped, Errored, Cursor;
         /// <summary>A user asked for the run to stop; the pass ended early.</summary>
         public bool Cancelled { get; set; }
         public long Imported => Inserted + Updated;
-        public ValueTask DisposeAsync() => Feedback.DisposeAsync();
+        public ValueTask DisposeAsync() => Details.DisposeAsync();
     }
 
     public async Task RunAsync(Guid runPublicId, CancellationToken ct)
@@ -136,8 +139,11 @@ public sealed class ImportRunProcessor(
     }
 
     /// <summary>The rows of this plan's source, for one pass: the file when the import reads a file, otherwise the table.</summary>
-    private async Task<IImportChunkReader> OpenSourceAsync(ImportPlan plan, CancellationToken ct) =>
-        plan.File is null ? reader : await fileAccess.OpenChunkReaderAsync(plan, ct);
+    private async Task<IImportChunkReader> OpenSourceAsync(ImportPlan plan, CancellationToken ct)
+    {
+        IImportChunkReader source = plan.File is null ? reader : await fileAccess.OpenChunkReaderAsync(plan, ct);
+        return plan.Virtuals.Count == 0 ? source : new ImportVirtualColumnReader(source, plan, formulaEngine);
+    }
 
     /// <summary>Reads the whole source once, to learn which unique values occur more than once, so the writing pass can
     /// leave out each such group entirely. Writes nothing. Null when the run was stopped.</summary>
@@ -171,7 +177,7 @@ public sealed class ImportRunProcessor(
     {
         var writer = new ImportChunkWriter(plan, store, records, gate, formulaEngine, run.TriggeredByUserId, mode, new ImportDuplicateTracker(groups));
         await writer.PrepareAsync(ct);
-        var result = new PassResult(NewFeedbackWriter(plan));
+        var result = new PassResult(NewDetailsWriter(plan));
         await using var source = await OpenSourceAsync(plan, ct);
         try
         {
@@ -184,8 +190,8 @@ public sealed class ImportRunProcessor(
                 var outcome = chunk.Rows.Count == 0 ? ImportChunkOutcome.None : await writer.ProcessAsync(chunk.Rows, ct);
                 result.Cursor = chunk.LastId;
                 result.RowsRead += chunk.Rows.Count; result.Inserted += outcome.Inserted; result.Updated += outcome.Updated;
-                result.Skipped += outcome.Skipped; result.Errored += outcome.Errored;
-                await result.Feedback.AppendAsync(outcome.Feedback, ct);
+                result.Unchanged += outcome.Unchanged; result.Skipped += outcome.Skipped; result.Errored += outcome.Errored;
+                await result.Details.AppendAsync(outcome.Feedback, outcome.Written, ct);
 
                 var progress = Progress(progressFrom, progressTo, result.Cursor, maxId);
                 bool stop;
@@ -194,7 +200,7 @@ public sealed class ImportRunProcessor(
                     if (outcome.Inserted > 0) await store.AddRecordCountAsync(plan.Destination.Id, (int)outcome.Inserted, ct);
                     if (outcome.Feedback.Count > 0) await runs.AddIssuesAsync(run.Id, outcome.Feedback.Select(f => f.Issue).ToList(), IssueCap, ct);
                     stop = await runs.AdvanceAsync(run.Id, new ImportChunkResult(result.Cursor, chunk.Rows.Count, outcome.Inserted, outcome.Updated,
-                        outcome.Skipped, outcome.Errored), progress, ct);
+                        outcome.Skipped, outcome.Errored, outcome.Unchanged), progress, ct);
                 }
                 else
                 {
@@ -224,17 +230,17 @@ public sealed class ImportRunProcessor(
         await runs.AdvanceAsync(run.Id, new ImportChunkResult(check.Cursor, check.RowsRead, 0, 0, check.Skipped, check.Errored), 100, ct);
         var detail = $"Nothing was imported. {check.Errored:N0} of {check.RowsRead:N0} rows have problems, and this import is set to stop when any row does. " +
                      "The details file lists them.";
-        var (path, note) = await SaveFeedbackAsync(check.Feedback, run, ct);
+        var (path, note) = await SaveDetailsAsync(check.Details, run, ct);
         await EndAsync(run, snapshot, plan, ImportRunStatus.Failed, note is null ? detail : $"{detail} {note}", path, ct);
     }
 
     private async Task CompleteRunAsync(ImportPlan plan, ImportRun run, ImportRunSnapshot? snapshot, PassResult final, CancellationToken ct)
     {
-        if (final.RowsRead != final.Imported + final.Skipped + final.Errored)
-            logger.LogError("Import run {RunId} does not reconcile: read {Read}, imported {Imported}, skipped {Skipped}, errored {Errored}.",
-                run.PublicId, final.RowsRead, final.Imported, final.Skipped, final.Errored);
+        if (final.RowsRead != final.Imported + final.Unchanged + final.Skipped + final.Errored)
+            logger.LogError("Import run {RunId} does not reconcile: read {Read}, imported {Imported}, unchanged {Unchanged}, skipped {Skipped}, errored {Errored}.",
+                run.PublicId, final.RowsRead, final.Imported, final.Unchanged, final.Skipped, final.Errored);
 
-        var (path, note) = await SaveFeedbackAsync(final.Feedback, run, ct);
+        var (path, note) = await SaveDetailsAsync(final.Details, run, ct);
         if (final.Cancelled)
         {
             var detail = final.Imported == 0
@@ -245,7 +251,7 @@ public sealed class ImportRunProcessor(
         }
 
         // Rows left out by a rule are not failures; the run is "partial" whenever any row was not imported.
-        var status = final.Errored > 0 && final.Imported == 0 ? ImportRunStatus.Failed
+        var status = final.Errored > 0 && final.Imported + final.Unchanged == 0 ? ImportRunStatus.Failed
             : final.Errored + final.Skipped > 0 ? ImportRunStatus.Partial
             : ImportRunStatus.Success;
         await EndAsync(run, snapshot, plan, status, note, path, ct);
@@ -257,13 +263,13 @@ public sealed class ImportRunProcessor(
         ImportRun run, ImportRunSnapshot? snapshot, ImportPlan? plan, string status, string? detail, string? feedbackPath, CancellationToken ct)
     {
         await runs.CompleteAsync(run.Id, status, detail, feedbackPath, ct);
-        // The uploaded file held the person's data only to be imported; however the run ended, it is not kept.
+        // The uploaded file is kept, so the history can show what was imported from, until the retention ends; then the clean-up deletes it.
         if (snapshot?.File is not null)
         {
-            try { await fileAccess.DiscardAsync(snapshot, ct); }
+            try { await fileAccess.RetainAsync(snapshot, DateTime.UtcNow.AddDays(options.Value.EffectiveRetentionDays), ct); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger.LogWarning(ex, "Could not delete the uploaded file of import run {RunId}; the clean-up will retry.", run.PublicId);
+                logger.LogWarning(ex, "Could not keep the uploaded file of import run {RunId}; the day-old clean-up may remove it.", run.PublicId);
             }
         }
         var finished = await runs.GetByPublicIdAsync(run.PublicId, ct) ?? run;
@@ -278,7 +284,7 @@ public sealed class ImportRunProcessor(
         if (snapshot is null) return;
         try
         {
-            // A mail that could not go out is said on the run, where the person who started it will see it (it is otherwise only in the log).
+            // PRAI: Import Email Functionality Commented Temporary
             //if (await notifier.NotifyAsync(finished, snapshot, ct) is { Length: > 0 } mailNote) await runs.AppendDetailAsync(run.Id, mailNote, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -288,19 +294,20 @@ public sealed class ImportRunProcessor(
         }
     }
 
-    /// <summary>Uploads the feedback file. A storage problem must not undo an import that has otherwise finished, so it
-    /// is reported on the run instead of failing it.</summary>
-    private async Task<(string? Path, string? Note)> SaveFeedbackAsync(ImportFeedbackWriter feedback, ImportRun run, CancellationToken ct)
+    /// <summary>Uploads the details file (every run has one, even when nothing was imported). A storage problem must not undo an import that
+    /// has otherwise finished, so it is reported on the run instead of failing it.</summary>
+    private async Task<(string? Path, string? Note)> SaveDetailsAsync(ImportDetailsWriter details, ImportRun run, CancellationToken ct)
     {
-        try { return (await feedback.SaveAsync(storage, run.PublicId, ct), null); }
+        try { return (await details.SaveAsync(storage, run.PublicId, 0, ct), null); }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Could not save the feedback file for import run {RunId}.", run.PublicId);
+            logger.LogWarning(ex, "Could not save the details file for import run {RunId}.", run.PublicId);
             return (null, "The details file could not be saved; the rows that were not imported are listed on this page.");
         }
     }
 
-    private static ImportFeedbackWriter NewFeedbackWriter(ImportPlan plan) => new(
+    /// <summary>The details file of one table: its headings are the fields the rows were mapped into.</summary>
+    internal static ImportDetailsWriter NewDetailsWriter(ImportPlan plan) => new(
         plan.Mappings.Select(m => ImportTypeCompatibility.DisplayName(m.Destination)).ToList(),
         plan.DestinationFields.Where(f => f.Fid.HasValue).GroupBy(f => f.Fid!.Value)
             .ToDictionary(g => g.Key, g => ImportTypeCompatibility.DisplayName(g.First())));

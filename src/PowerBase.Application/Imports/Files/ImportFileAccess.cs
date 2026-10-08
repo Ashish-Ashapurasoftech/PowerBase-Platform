@@ -25,6 +25,8 @@ public interface IImportFileAccess
     Task<Stream> OpenAsync(string storagePath, CancellationToken ct);
     /// <summary>Deletes the uploaded file once the run has ended; the data it held must not outlive the import.</summary>
     Task DiscardAsync(ImportRunSnapshot snapshot, CancellationToken ct);
+    /// <summary>Keeps the uploaded file a run used until <paramref name="until"/> (the history shows it; it is deleted then), instead of deleting it.</summary>
+    Task RetainAsync(ImportRunSnapshot snapshot, DateTime until, CancellationToken ct);
 }
 
 /// <summary>Reads a file's rows in the shape the import engine reads a table's: a dictionary per row keyed by column, the row's
@@ -168,6 +170,12 @@ public sealed class ImportFileAccess(IFileStorageService storage, IImportFileRep
         try { await storage.DeleteAsync(file.StoragePath, ct); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* the nightly clean-up retries from the record below */ }
         await files.DeleteAsync(file.FileId, ct);
+    }
+
+    public async Task RetainAsync(ImportRunSnapshot snapshot, DateTime until, CancellationToken ct)
+    {
+        if (snapshot.File is not { } file) return;
+        await files.RetainAsync(file.FileId, until, ct);
     }
 
     public async Task<Stream> OpenAsync(string path, CancellationToken ct)

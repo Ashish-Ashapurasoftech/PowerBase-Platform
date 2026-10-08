@@ -355,6 +355,8 @@ builder.Services.AddScoped<PowerBase.Application.Imports.Files.UploadImportFileH
 builder.Services.AddScoped<PowerBase.Application.Imports.Files.PreviewImportFileHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.Files.DiscardImportFileHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.Files.ImportFileCleanup>();
+builder.Services.AddScoped<PowerBase.Application.Imports.ImportRetentionCleanup>();
+builder.Services.Configure<PowerBase.Application.Common.Configurations.ImportOptions>(builder.Configuration.GetSection(PowerBase.Application.Common.Configurations.ImportOptions.SectionName));
 builder.Services.AddScoped<PowerBase.Application.Imports.IImportQueue, PowerBase.Infrastructure.Imports.ImportQueue>();
 builder.Services.AddScoped<PowerBase.Application.Imports.IImportDataStore, PowerBase.Infrastructure.Imports.ImportDataStore>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ImportPlanBuilder>();
@@ -363,6 +365,11 @@ builder.Services.AddScoped<PowerBase.Application.Imports.ImportMultiTargetRunner
 builder.Services.AddScoped<PowerBase.Application.Imports.ImportRunProcessor>();
 builder.Services.AddScoped<PowerBase.Application.Imports.SaveImportDefinitionHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListImportDefinitionsHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.ListAppImportDefinitionsHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.ValidateImportFormulaHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.ListImportHistoryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.GetImportSourceFileHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.DeleteImportDefinitionsHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.GetImportDefinitionHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.DeleteImportDefinitionHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.StartImportRunHandler>();

@@ -225,14 +225,14 @@ public class ImportRunProcessorTests
     }
 
     [Fact]
-    public async Task A_run_with_nothing_to_import_succeeds_without_a_feedback_file()
+    public async Task A_run_with_nothing_to_import_succeeds_and_its_details_file_has_only_the_headings()
     {
         var h = ImportHarness.Create(options: new HarnessOptions { RowCount = 0 });
 
         await h.RunAsync();
 
         h.Completion!.Value.Status.Should().Be(ImportRunStatus.Success);
-        h.Completion!.Value.FeedbackPath.Should().BeNull();
-        h.FeedbackCsv.Should().BeNull();
+        h.Completion!.Value.FeedbackPath.Should().NotBeNull();
+        h.FeedbackCsv!.Trim().Should().StartWith("Source row,Result,Record ID#").And.NotContain("\n");
     }
 }

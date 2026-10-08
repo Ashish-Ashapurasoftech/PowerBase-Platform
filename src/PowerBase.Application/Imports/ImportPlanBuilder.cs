@@ -58,6 +58,11 @@ public sealed class ImportPlan
     /// <summary>The clock and user every formula of the run sees. The clock is fixed when the run starts, so Today() and Now()
     /// give the same answer for every row.</summary>
     public EvaluationOptions FormulaOptions { get; init; } = EvaluationOptions.Default;
+    /// <summary>The import's virtual columns, in the order to calculate them. Empty for an import without any.</summary>
+    public IReadOnlyList<ResolvedVirtual> Virtuals { get; init; } = [];
+    /// <summary>This table's own filter, for an import that fills several tables: checked on each row read, in memory, to decide whether this
+    /// table gets it. Null when the table takes every row that was read.</summary>
+    public ImportRowFilter? TableFilter { get; init; }
 }
 
 /// <summary>Validates an import configuration against the live schema and the caller's access, and resolves it
@@ -125,7 +130,11 @@ public sealed class ImportPlanBuilder(
         var mergeKey = isMerge ? ResolveMergeKey(cfg.MergeKeyFid!.Value, destFields) : null;
         var visibleSource = sourceAccess is null || sourceAccess.Unrestricted ? sourceFields : sourceAccess.VisibleFields;
         var mappings = new List<ResolvedMapping>(active.Count);
-        var sourceSchema = new AppFieldSchema(visibleSource);
+        // Virtual columns are sources like any other, but exist only inside the import: they are added after what the user can see.
+        var (virtuals, virtualError) = ImportVirtual.Resolve(cfg.VirtualColumns, visibleSource, formulaEngine);
+        if (virtualError is not null) throw Invalid(virtualError);
+        var sourceWithVirtuals = virtuals.Count == 0 ? visibleSource : visibleSource.Concat(virtuals.Select(v => v.Field)).ToList();
+        var sourceSchema = new AppFieldSchema(sourceWithVirtuals);
         foreach (var m in active)
         {
             var dest = destFields.FirstOrDefault(f => f.Fid == m.DestFid && !f.IsDeleted)
@@ -139,7 +148,7 @@ public sealed class ImportPlanBuilder(
 
             mappings.Add(m.Source switch
             {
-                ImportMappingSource.Dynamic => ResolveDynamic(m, dest, visibleSource, anySourceType: file is not null),
+                ImportMappingSource.Dynamic => ResolveDynamic(m, dest, sourceWithVirtuals, anySourceType: file is not null || (m.SourceFid is { } sf && ImportVirtual.IsVirtualFid(sf))),
                 ImportMappingSource.Static => ResolveStatic(m, dest, dest.Fid == mergeKey?.Fid),
                 ImportMappingSource.Formula => ResolveFormula(m, dest, sourceSchema),
                 _ => throw Invalid($"'{ImportTypeCompatibility.DisplayName(dest)}' has an unknown value source.")
@@ -163,6 +172,18 @@ public sealed class ImportPlanBuilder(
             .Select(f => (long)f.Fid!.Value).ToHashSet();
         var (sqlFilter, rowFilterTree) = FormulaFilterSorter.SplitFilterTree(resolved, rowFids);
 
+        // This table's own filter is checked on each row in memory, whatever the field: the source is read once for every table, so SQL
+        // cannot be asked a different question for each. Its fields are read along with everything else the tables need.
+        ImportRowFilter? tableFilter = null;
+        var tableFids = new HashSet<long>();
+        if (cfg.TableConditions is { Nodes.Count: > 0 })
+        {
+            ValidateConditions(cfg.TableConditions, visibleSource);
+            var own = await ResolveAsync(cfg.TableConditions, sourceFields, ct);
+            tableFilter = new ImportRowFilter(own, sourceFields);
+            CollectFids(own, tableFids);
+        }
+
         var recordId = sourceFields.FirstOrDefault(ImportTypeCompatibility.IsRecordId)
             ?? throw Invalid("The source table has no Record ID# field.");
         var conditionFids = new HashSet<long>();
@@ -171,10 +192,12 @@ public sealed class ImportPlanBuilder(
             .Select(f => (long)f.Fid!.Value).ToHashSet();
         // The fields the mappings read: source fields, and whatever each formula refers to.
         var mappedFids = mappings.Where(m => m.Source is not null).Select(m => (long)m.Source!.Fid!.Value)
-            .Concat(mappings.Where(m => m.Formula is not null).SelectMany(m => m.Formula!.ReferencedFieldIds)).ToHashSet();
-        var needsProjection = file is null && mappedFids.Any(computedFids.Contains) || FormulaFilterSorter.TreeContainsFormulaField(rowFilterTree, computedFids);
+            .Concat(mappings.Where(m => m.Formula is not null).SelectMany(m => m.Formula!.ReferencedFieldIds))
+            .Concat(virtuals.Where(v => v.Formula is not null).SelectMany(v => v.Formula!.ReferencedFieldIds)).ToHashSet();
+        var needsProjection = file is null && (mappedFids.Any(computedFids.Contains) || tableFids.Any(computedFids.Contains))
+            || FormulaFilterSorter.TreeContainsFormulaField(rowFilterTree, computedFids);
 
-        var readFids = mappedFids.Concat(conditionFids.Where(f => f > 0)).ToHashSet();
+        var readFids = mappedFids.Concat(conditionFids.Where(f => f > 0)).Concat(tableFids.Where(f => f > 0)).ToHashSet();
         if (file?.Sheets is not null && ImportFileSheets.MissingColumns(file, readFids) is { Count: > 0 } sheetProblems)
             throw Invalid(string.Join(" ", sheetProblems.Take(5)) + (sheetProblems.Count > 5 ? $" ...and {sheetProblems.Count - 5} more." : ""));
         var readFields = needsProjection
@@ -187,7 +210,7 @@ public sealed class ImportPlanBuilder(
             Mappings = mappings, ImportType = cfg.ImportType, MergeKey = mergeKey, Rules = rules, ConstraintPolicy = cfg.ConstraintPolicy,
             SourceFilter = sqlFilter, RowFilter = rowFilterTree is null ? null : new ImportRowFilter(rowFilterTree, sourceFields),
             SourceOwnerRestriction = sourceAccess?.RestrictToCreatedBy, File = file, ReadFields = readFields, NeedsProjection = needsProjection,
-            FormulaOptions = FormulaOptionsForRun(source, runClock)
+            FormulaOptions = FormulaOptionsForRun(source, runClock), Virtuals = virtuals, TableFilter = tableFilter
         };
     }
 
@@ -199,6 +222,9 @@ public sealed class ImportPlanBuilder(
     /// the one plan <see cref="BuildAsync"/> would.</summary>
     public async Task<IReadOnlyList<ImportPlan>> BuildAllAsync(ImportDefinitionConfig cfg, Guid homeTableId, CancellationToken ct, ImportFileSource? file = null)
     {
+        // With one table, the import's conditions already say which rows go in; a second set would only be a way to get them wrong.
+        if (cfg.AdditionalTargets.Count == 0 && cfg.TableConditions is { Nodes.Count: > 0 })
+            throw Invalid("A table's own filter is for an import that fills more than one table. Use the conditions above instead.");
         var clock = DateTime.UtcNow;
         var plans = new List<ImportPlan> { await BuildAsync(cfg, homeTableId, ct, file, clock) };
         if (cfg.AdditionalTargets.Count == 0) return plans;
@@ -213,6 +239,7 @@ public sealed class ImportPlanBuilder(
         {
             var view = ImportJson.Deserialize<ImportDefinitionConfig>(ImportJson.Serialize(cfg))!;
             view.AdditionalTargets = [];
+            view.TableConditions = target.Conditions;
             view.ImportType = target.ImportType;
             view.MergeKeyFid = target.MergeKeyFid;
             view.Mappings = target.Mappings;
@@ -247,7 +274,7 @@ public sealed class ImportPlanBuilder(
             SourceFilter = first.SourceFilter, RowFilter = first.RowFilter, MergeKey = first.MergeKey, Rules = first.Rules,
             ConstraintPolicy = first.ConstraintPolicy, SourceOwnerRestriction = first.SourceOwnerRestriction,
             ReadFields = plans.SelectMany(p => p.ReadFields).GroupBy(f => f.Id).Select(g => g.First()).ToList(),
-            NeedsProjection = plans.Any(p => p.NeedsProjection), FormulaOptions = first.FormulaOptions
+            NeedsProjection = plans.Any(p => p.NeedsProjection), FormulaOptions = first.FormulaOptions, Virtuals = first.Virtuals
         };
     }
 

@@ -185,4 +185,20 @@ public class ImportDataStoreSqlTests : IClassFixture<SqlFixture>
         await using var c = new SqlConnection(SqlFixture.ConnectionString);
         (await c.ExecuteScalarAsync<int>("SELECT RecordCount FROM meta.AppTable WHERE Id = @id", new { id = _db.TableId })).Should().Be(3);
     }
+
+    [SqlFact]
+    public async Task Inserting_returns_the_record_id_each_row_was_given_in_the_order_of_the_rows()
+    {
+        // More than the thousand ids one read-back query takes, so the batching is exercised too.
+        var rows = Enumerable.Range(1, 2500).Select(i => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?> { [6] = $"ID-{i}", [7] = i }).ToList();
+
+        var ids = await _db.Store.InsertAsync(_db.Table, _db.Fields, rows, createdBy: 5);
+
+        ids.Should().HaveCount(2500).And.OnlyHaveUniqueItems();
+        var stored = (await _db.RowsAsync()).ToDictionary(r => (string)r.f_6, r => (long)r.Id);
+        for (var i = 1; i <= 2500; i += 97) ids[i - 1].Should().Be(stored[$"ID-{i}"]);
+        ids[2499].Should().Be(stored["ID-2500"]);
+        // The table is shared with the other scenario: leave it as it was found.
+        await _db.ExecuteAsync($"DELETE FROM data.t_{_db.TableId} WHERE f_6 LIKE 'ID-%'");
+    }
 }

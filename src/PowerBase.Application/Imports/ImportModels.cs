@@ -55,6 +55,11 @@ public static class ImportOutcome
     public const string Skipped = "skipped";
     /// <summary>Could not be imported because of a problem with the data or a constraint.</summary>
     public const string Errored = "errored";
+    // What happened to a row that was imported. Only the details file names these: nothing is recorded for them as an issue.
+    public const string Inserted = "inserted";
+    public const string Updated = "updated";
+    /// <summary>A merge matched the record, but it already held every value.</summary>
+    public const string Unchanged = "unchanged";
 }
 
 /// <summary>Stable reason codes written to run issues and the feedback file.</summary>
@@ -113,6 +118,9 @@ public sealed class ImportTargetConfig
     private List<ImportColumnRule> _columnRules = new();
     public List<ImportFieldMapping> Mappings { get => _mappings; set => _mappings = value ?? new(); }
     public List<ImportColumnRule> ColumnRules { get => _columnRules; set => _columnRules = value ?? new(); }
+    /// <summary>Only the source rows that match go into this table. A row must first pass the import's own conditions (which decide what is read
+    /// at all); these then decide whether this table gets it. None means every row that was read.</summary>
+    public FilterGroup? Conditions { get; set; }
 }
 
 /// <summary>The saved configuration of an import (everything except identity/audit columns). Also the shape
@@ -139,6 +147,13 @@ public sealed class ImportDefinitionConfig
     /// above). Empty for an import into one table, which is how every import saved before this existed reads.</summary>
     public List<ImportTargetConfig> AdditionalTargets { get => _additionalTargets; set => _additionalTargets = value ?? new(); }
     private List<ImportTargetConfig> _additionalTargets = new();
+    /// <summary>Columns that exist only inside this import (fixed text or formulas). Any mapping, of any table the import fills, may use one
+    /// as its source, and other virtual columns' formulas may refer to one by name. None for an import saved before they existed.</summary>
+    public List<ImportVirtualColumn> VirtualColumns { get => _virtualColumns; set => _virtualColumns = value ?? new(); }
+    private List<ImportVirtualColumn> _virtualColumns = new();
+    /// <summary>The same as <see cref="ImportTargetConfig.Conditions"/>, for the import's own table (the one the fields above belong to).
+    /// Only for an import that fills several tables: with one table, <see cref="Conditions"/> already says which rows go in.</summary>
+    public FilterGroup? TableConditions { get; set; }
 }
 
 public static class ImportJson
@@ -158,18 +173,18 @@ public sealed record ImportDefinitionListItem(
     Guid PublicId, string Name, string ImportType, Guid SourceTableId, string SourceTableName,
     int MappingCount, bool NeedsAttention, string? AttentionReason, string? LastRunStatus, DateTime? LastRunOn,
     IReadOnlyList<string> NotifyEmails, string? ScheduleSummary, DateTime? NextRunOn, string SourceKind = ImportSourceKinds.Table,
-    int TableCount = 1);
+    int TableCount = 1, Guid DestinationTableId = default, string DestinationTableName = "");
 
 public sealed record ImportDefinitionDetail(
     Guid PublicId, string Name, Guid DestinationTableId, Guid SourceTableId, string ImportType, int? MergeKeyFid,
     FilterGroup? Conditions, IReadOnlyList<ImportFieldMapping> Mappings, IReadOnlyList<ImportColumnRule> ColumnRules,
     string ConstraintPolicy, IReadOnlyList<string> NotifyEmails, bool NeedsAttention, string? AttentionReason,
     ImportSchedule? Schedule, DateTime? NextRunOn, string SourceKind = ImportSourceKinds.Table, ImportFileOptions? File = null,
-    IReadOnlyList<ImportTargetConfig>? AdditionalTargets = null);
+    IReadOnlyList<ImportTargetConfig>? AdditionalTargets = null, IReadOnlyList<ImportVirtualColumn>? VirtualColumns = null, FilterGroup? TableConditions = null);
 
 public sealed record ImportRunListItem(
     Guid PublicId, string TriggeredBy, string Status, byte Progress, long RowsRead, long Inserted, long Updated,
-    long Skipped, long Errored, DateTime? StartedOn, DateTime? CompletedOn);
+    long Skipped, long Errored, DateTime? StartedOn, DateTime? CompletedOn, long Unchanged = 0);
 
 public sealed record ImportRunIssueItem(
     long? SourceRowRef, int? ColumnFid, string Outcome, string ReasonCode, string Message, long? ExistingRecordRef);
@@ -186,8 +201,8 @@ public sealed record ImportRunNotice(
 public sealed record ImportRunNotices(DateTime ServerTime, IReadOnlyList<ImportRunNotice> Runs);
 
 /// <summary>One table's share of a run that filled several.</summary>
-public sealed record ImportRunTargetItem(Guid TableId, string TableName, long Inserted, long Updated, long Skipped, long Errored);
+public sealed record ImportRunTargetItem(Guid TableId, string TableName, long Inserted, long Updated, long Skipped, long Errored, long Unchanged = 0, bool HasDetails = false);
 
 public sealed record ImportRunDetail(
     ImportRunListItem Run, string? ErrorDetail, bool HasFeedback, IReadOnlyList<ImportRunIssueItem> Issues, int IssueTotal,
-    IReadOnlyList<ImportRunTargetItem>? Targets = null);
+    IReadOnlyList<ImportRunTargetItem>? Targets = null, string? SourceFileName = null, bool HasSourceFile = false, bool FilesExpired = false);

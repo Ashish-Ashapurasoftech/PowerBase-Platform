@@ -61,7 +61,7 @@ public sealed class ImportCompletionNotifier(
         if (string.IsNullOrWhiteSpace(snapshot.FrontendBaseUrl)) return null;
         var table = await tables.GetByPublicIdAsync(snapshot.DestinationTableId, ct);
         var appId = await apps.GetPublicIdByIdAsync(table.AppId, ct);
-        return $"{snapshot.FrontendBaseUrl.TrimEnd('/')}/app/{appId}/tables/{table.PublicId}/settings/imports/runs/{run.PublicId}";
+        return $"{snapshot.FrontendBaseUrl.TrimEnd('/')}/app/{appId}/imports/runs/{run.PublicId}";
     }
 
     internal static (string Subject, string Body) Compose(ImportRun run, string name, string? link, IReadOnlyList<ImportRunTargetItem>? targets = null)
@@ -79,6 +79,7 @@ public sealed class ImportCompletionNotifier(
         html.Append("<table cellpadding=\"4\" style=\"border-collapse:collapse\">");
         Row(html, "Rows read", run.RowsRead.ToString("N0"));
         Row(html, "Imported", $"{run.Inserted + run.Updated:N0}" + (run.Updated > 0 ? $" ({run.Inserted:N0} added, {run.Updated:N0} updated)" : ""));
+        if (run.Unchanged > 0) Row(html, "Unchanged", run.Unchanged.ToString("N0"));
         Row(html, "Skipped", run.Skipped.ToString("N0"));
         Row(html, "Errors", run.Errored.ToString("N0"));
         if (run.StartedOn is { } started && run.CompletedOn is { } completed)
@@ -89,7 +90,7 @@ public sealed class ImportCompletionNotifier(
             // Counts for each table of a multi-table import; the totals above add them up.
             html.Append("<p>By table:</p><table cellpadding=\"4\" style=\"border-collapse:collapse\">");
             foreach (var t in targets)
-                Row(html, WebUtility.HtmlEncode(t.TableName), $"{t.Inserted + t.Updated:N0} imported, {t.Skipped:N0} skipped, {t.Errored:N0} errors");
+                Row(html, WebUtility.HtmlEncode(t.TableName), $"{t.Inserted + t.Updated:N0} imported" + (t.Unchanged > 0 ? $", {t.Unchanged:N0} unchanged" : "") + $", {t.Skipped:N0} skipped, {t.Errored:N0} errors");
             html.Append("</table>");
         }
         if (!string.IsNullOrWhiteSpace(run.ErrorDetail)) html.Append("<p>").Append(WebUtility.HtmlEncode(run.ErrorDetail)).Append("</p>");

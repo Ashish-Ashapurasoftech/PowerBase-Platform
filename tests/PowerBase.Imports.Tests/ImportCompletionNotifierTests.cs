@@ -119,7 +119,7 @@ public class ImportCompletionNotifierTests
         var (_, subject, body) = _sent[0];
         subject.Should().Be("Import \"Nightly sync\" finished with some rows not imported");
         body.Should().Contain("1,500").And.Contain("1,400").And.Contain("1,000 added, 400 updated").And.Contain("60").And.Contain("40").And.Contain("2 min 5 s");
-        body.Should().Contain($"https://app.example.com/app/{AppId}/tables/{TableId}/settings/imports/runs/{run.PublicId}");
+        body.Should().Contain($"https://app.example.com/app/{AppId}/imports/runs/{run.PublicId}");
     }
 
     [Fact]

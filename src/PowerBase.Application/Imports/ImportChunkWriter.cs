@@ -19,10 +19,19 @@ public enum ImportPassMode
 
 /// <summary>What one chunk produced. Every source row in the chunk ends up in exactly one of the four counts, and every
 /// row that was not imported has exactly one entry in <see cref="Feedback"/>.</summary>
-public sealed record ImportChunkOutcome(long Inserted, long Updated, long Skipped, long Errored, List<ImportFeedbackRow> Feedback)
+/// <param name="Unchanged">A merge matched the record, but every value was already what the import would write, so it was left alone.</param>
+/// <param name="Written">Every row that was written or left unchanged, for the details file (a write pass only).</param>
+public sealed record ImportChunkOutcome(
+    long Inserted, long Updated, long Skipped, long Errored, List<ImportFeedbackRow> Feedback, long Unchanged = 0,
+    IReadOnlyList<ImportWrittenRow>? Written = null)
 {
     public static readonly ImportChunkOutcome None = new(0, 0, 0, 0, []);
 }
+
+/// <summary>A source row that was imported, as the details file lists it: what happened to it, the record it became or matched, and the
+/// values it carried.</summary>
+/// <param name="Outcome">One of <see cref="ImportOutcome"/>: inserted, updated or unchanged.</param>
+public sealed record ImportWrittenRow(long SourceRowRef, string Outcome, long RecordId, IReadOnlyList<string?> SourceValues, string? Note = null);
 
 /// <summary>Turns source rows into destination writes for one pass over the source. A row goes through the same stages
 /// in the same order every time, and the first stage that rejects it decides its single reason:
@@ -38,6 +47,11 @@ public sealed class ImportChunkWriter
         public Dictionary<long, object?> Values { get; } = values;
         /// <summary>Merge: the Record ID# of the destination record this row updates (null = insert a new record).</summary>
         public long? MatchedId { get; set; }
+        /// <summary>Merge: the normalised value the row was matched on. The key is dropped from <see cref="Values"/> once the record is found, so the
+        /// duplicate check (which comes last) reads it from here.</summary>
+        public string? MatchKey { get; set; }
+        /// <summary>The Record ID# the row was given when it was inserted.</summary>
+        public long? InsertedId { get; set; }
         /// <summary>What each formula mapping returned for this row, by mapping position, for the details file.</summary>
         public string?[]? FormulaResults { get; set; }
     }
@@ -76,6 +90,13 @@ public sealed class ImportChunkWriter
         _key = plan.MergeKey;
         // Formulas read a row through the column each source field is stored in (computed values were projected into the row).
         _fidToColumn = plan.SourceFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value, PhysicalNaming.GetPhysicalColumnName);
+        // Virtual columns were added to every row as it was read, so a formula can use them like any other column.
+        if (plan.Virtuals.Count > 0)
+        {
+            var withVirtuals = new Dictionary<long, string>(_fidToColumn);
+            foreach (var v in plan.Virtuals) withVirtuals[v.Field.Fid!.Value] = v.Column;
+            _fidToColumn = withVirtuals;
+        }
         _rules = plan.Mappings.Where(m => plan.Rules.ContainsKey(m.Destination.Fid!.Value))
             .Select(m => (m.Destination, plan.Rules[m.Destination.Fid!.Value])).ToList();
 
@@ -156,7 +177,7 @@ public sealed class ImportChunkWriter
     {
         var discard = new List<ImportFeedbackRow>();
         var constraintColumns = _unique.Select(f => f.Fid!.Value).Concat(_keyChecksDuplicates ? [_key!.Fid!.Value] : []);
-        foreach (var row in ApplyColumnRules(MapRows(chunk, discard), discard))
+        foreach (var row in RemoveDuplicateRows(ApplyColumnRules(MapRows(chunk, discard), discard), discard))
             foreach (var fid in constraintColumns)
                 if (ImportKey.Normalize(row.Values.GetValueOrDefault(fid)) is { } key && !_tracker.MarkSeen(fid, key))
                     _tracker.MarkDuplicateGroup(fid, key);
@@ -177,27 +198,104 @@ public sealed class ImportChunkWriter
             if (Finalize(row, stored, feedback)) alive.Add(row);
 
         foreach (var field in _unique)
-            alive = await RejectConstraintDuplicatesAsync(alive, field, feedback, ct);
+            alive = await RejectDestinationConflictsAsync(alive, field, feedback, ct);
+
+        // Rows now compete with each other, in source order: a value that is unique (or the merge key) may be carried by one row of the import, and
+        // "Remove duplicates" leaves out later rows that repeat a value. These come last, so a row that fails any check above never uses up a
+        // value and costs the row after it; and a row left out here, for either reason, uses up none of its values either.
+        alive = ResolveCompetition(alive, feedback);
 
         var updates = alive.Where(r => r.MatchedId.HasValue).ToList();
         var inserts = alive.Where(r => !r.MatchedId.HasValue).ToList();
-        long updated, inserted;
+        List<Row> unchanged = [];
+        List<Row> updatedRows, insertedRows;
         if (_mode == ImportPassMode.Write)
         {
-            updated = await WriteAsync(updates, batch => _store.UpdateAsync(_plan.Destination, _plan.DestinationFields,
-                batch.Select(r => new ImportUpdateRow(r.MatchedId!.Value, r.Values)).ToList(), _userId, ct), feedback);
-            inserted = await WriteAsync(inserts, batch => _store.InsertAsync(_plan.Destination, _plan.DestinationFields,
-                batch.Select(r => (IReadOnlyDictionary<long, object?>)r.Values).ToList(), _userId, ct), feedback);
+            // A matched record whose values are already what the import would write is left alone: not written, and counted as unchanged.
+            if (updates.Count > 0)
+            {
+                var current = stored ?? await _records.GetRowsByIdsAsync(_plan.Destination, MappedFields(), updates.Select(r => r.MatchedId!.Value).ToList(), ct);
+                unchanged = updates.Where(r => IsUnchanged(r, current)).ToList();
+                if (unchanged.Count > 0) updates = updates.Except(unchanged).ToList();
+            }
+            updatedRows = await WriteAsync(updates, async batch =>
+            {
+                await _store.UpdateAsync(_plan.Destination, _plan.DestinationFields,
+                    batch.Select(r => new ImportUpdateRow(r.MatchedId!.Value, r.Values)).ToList(), _userId, ct);
+                return null;
+            }, feedback);
+            insertedRows = await WriteAsync(inserts, async batch =>
+            {
+                var ids = await _store.InsertAsync(_plan.Destination, _plan.DestinationFields,
+                    batch.Select(r => (IReadOnlyDictionary<long, object?>)r.Values).ToList(), _userId, ct);
+                for (var i = 0; i < batch.Count && i < ids.Count; i++) batch[i].InsertedId = ids[i];
+                return ids;
+            }, feedback);
         }
         else
         {
-            updated = updates.Count;
-            inserted = inserts.Count;
+            updatedRows = updates;
+            insertedRows = inserts;
         }
 
         var errored = feedback.Count(f => f.Issue.Outcome == ImportOutcome.Errored);
-        return new ImportChunkOutcome(inserted, updated, feedback.Count - errored, errored, feedback);
+        var written = _mode == ImportPassMode.Write ? WrittenRows(insertedRows, updatedRows, unchanged) : null;
+        return new ImportChunkOutcome(insertedRows.Count, updatedRows.Count, feedback.Count - errored, errored, feedback, unchanged.Count, written);
     }
+
+    /// <summary>The destination fields the import writes (and the Record ID#): all that is needed to see whether a matched record would change.</summary>
+    private IReadOnlyList<AppField> MappedFields()
+    {
+        var mapped = _plan.Mappings.Select(m => m.Destination.Fid).ToHashSet();
+        return _plan.DestinationFields.Where(f => f.Fid.HasValue && (mapped.Contains(f.Fid) || ImportTypeCompatibility.IsRecordId(f))).ToList();
+    }
+
+    /// <summary>True when the record the row matched already holds every value the row would write. An encrypted field cannot be compared
+    /// (its stored value is ciphertext), and a value of a kind that is not plainly comparable counts as changed: a write that was not
+    /// needed is harmless, a skipped write that was is not.</summary>
+    private bool IsUnchanged(Row row, IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> current)
+    {
+        if (!current.TryGetValue(row.MatchedId!.Value, out var existing) || row.Values.Count == 0) return false;
+        foreach (var (fid, value) in row.Values)
+        {
+            var field = _plan.DestinationFields.FirstOrDefault(f => f.Fid == fid);
+            if (field is null || field.IsEncrypted) return false;
+            if (!existing.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var stored) || !ImportValueEquality.Same(stored, value)) return false;
+        }
+        return true;
+    }
+
+    private List<ImportWrittenRow> WrittenRows(List<Row> inserted, List<Row> updated, List<Row> unchanged)
+    {
+        var rows = new List<ImportWrittenRow>(inserted.Count + updated.Count + unchanged.Count);
+        foreach (var r in inserted) if (r.InsertedId is { } id) rows.Add(Written(r, ImportOutcome.Inserted, id));
+        foreach (var r in updated) rows.Add(Written(r, ImportOutcome.Updated, r.MatchedId!.Value));
+        foreach (var r in unchanged) rows.Add(Written(r, ImportOutcome.Unchanged, r.MatchedId!.Value));
+        rows.Sort((a, b) => a.SourceRowRef.CompareTo(b.SourceRowRef));
+        return rows;
+    }
+
+    private ImportWrittenRow Written(Row row, string outcome, long recordId)
+    {
+        var (rowRef, sheet) = RowRef(row);
+        return new ImportWrittenRow(rowRef, outcome, recordId, Carried(row), sheet is null ? null : $"Sheet '{sheet}'");
+    }
+
+    /// <summary>The row's number in its file or sheet (a person is shown the row where they would look for it), and the sheet's name.</summary>
+    private (long Row, string? Sheet) RowRef(Row row)
+    {
+        if (_plan.File?.Sheets is not { } sheets) return (row.SourceId, null);
+        var (sheetIndex, rowNumber) = ImportFileSheets.Split(row.SourceId);
+        return (rowNumber, sheetIndex < sheets.Count ? sheets[sheetIndex].Name : null);
+    }
+
+    /// <summary>The values a row carries, as text, one per mapping: the source value, the fixed value, or what the formula returned.</summary>
+    private string?[] Carried(Row row) => _plan.Mappings.Select((m, i) => m.Kind switch
+    {
+        ImportMappingSource.Static => m.StaticText,
+        ImportMappingSource.Formula => row.FormulaResults?[i],
+        _ => ImportFeedbackWriter.Format(row.Source.GetValueOrDefault(m.SourceColumn!))
+    }).ToArray();
 
     /// <summary>Converts each source row into destination values; a value that cannot be converted safely rejects the row.</summary>
     private List<Row> MapRows(IReadOnlyList<IReadOnlyDictionary<string, object?>> chunk, List<ImportFeedbackRow> feedback)
@@ -271,47 +369,119 @@ public sealed class ImportChunkWriter
         }
     }
 
-    /// <summary>The per-column rules, evaluated independently for each column. Require field and Remove duplicates leave
-    /// the row out (skipped, with the reason); Ignore blanks keeps the row but drops the blank value, so an existing
-    /// value is not overwritten. A value only counts as "seen" once its row has passed every rule, so a row rejected by
-    /// one column never causes a later row to be rejected as its duplicate.</summary>
+    /// <summary>The per-column rules that look at a row on its own, evaluated independently for each column: Require field leaves the row out
+    /// (skipped, with the reason) and Ignore blanks keeps the row but drops the blank value, so an existing value is not overwritten. They
+    /// come first, because the matching and required checks that follow need to see the values as they will be written.
+    /// "Remove duplicates" is not here: it compares rows with each other, so it runs last (<see cref="RemoveDuplicateRows"/>).</summary>
     private List<Row> ApplyColumnRules(List<Row> rows, List<ImportFeedbackRow> feedback)
     {
-        if (_rules.Count == 0) return rows;
+        if (_rules.All(r => !r.Rule.RequireField && !r.Rule.IgnoreBlanks)) return rows;
         var kept = new List<Row>(rows.Count);
-        var pending = new List<(int Fid, string Key)>();
         foreach (var row in rows)
         {
-            pending.Clear();
             var skipped = false;
             foreach (var (field, rule) in _rules)
             {
                 var fid = field.Fid!.Value;
-                var value = row.Values.GetValueOrDefault(fid);
-                var name = ImportTypeCompatibility.DisplayName(field);
-                if (IsBlank(value))
+                if (!IsBlank(row.Values.GetValueOrDefault(fid))) continue;
+                if (rule.RequireField)
                 {
-                    if (rule.RequireField)
-                    {
-                        Report(feedback, row, fid, ImportOutcome.Skipped, ImportReason.RequiredBlank, $"'{name}' is blank, and this import requires a value.");
-                        skipped = true;
-                        break;
-                    }
-                    if (rule.IgnoreBlanks) row.Values.Remove(fid);
-                    continue;
+                    Report(feedback, row, fid, ImportOutcome.Skipped, ImportReason.RequiredBlank,
+                        $"'{ImportTypeCompatibility.DisplayName(field)}' is blank, and this import requires a value.");
+                    skipped = true;
+                    break;
                 }
-                if (!rule.RemoveDuplicates || ImportKey.Normalize(value) is not { } key) continue;
-
-                if (!_isMerge && _tracker.ExistsInDestination(fid, key))
-                    Report(feedback, row, fid, ImportOutcome.Skipped, ImportReason.DuplicateInDestination, $"'{name}' value '{key}' already exists in {_plan.Destination.Name}.");
-                else if (_tracker.WasSeen(fid, key))
-                    Report(feedback, row, fid, ImportOutcome.Skipped, ImportReason.DuplicateInRun, $"'{name}' value '{key}' appeared in an earlier row of this import.");
-                else { pending.Add((fid, key)); continue; }
-                skipped = true;
-                break;
+                if (rule.IgnoreBlanks) row.Values.Remove(fid);
             }
-            if (skipped) continue;
-            foreach (var (fid, key) in pending) _tracker.MarkSeen(fid, key);
+            if (!skipped) kept.Add(row);
+        }
+        return kept;
+    }
+
+    /// <summary>The rows of a chunk compete, in source order, for the values only one row may have. A row is left out (and says why) when it
+    /// repeats a value another row of this run already has: a unique field or the merge key (an error, as the import says no two rows may share
+    /// it) or a column with "Remove duplicates" (skipped on purpose; for a Copy, so is a value that already exists in the destination). A row
+    /// takes its values only if it passes all of these, so a row that is left out never causes a later row to be left out because of it. This
+    /// is the last row check before the write, and "Remove duplicates" is the last of the rules: the first row that survives everything is the
+    /// one kept.</summary>
+    private List<Row> ResolveCompetition(List<Row> rows, List<ImportFeedbackRow> feedback)
+    {
+        var deduped = _rules.Where(r => r.Rule.RemoveDuplicates).ToList();
+        if (_unique.Count == 0 && !_keyChecksDuplicates && deduped.Count == 0) return rows;
+        var kept = new List<Row>(rows.Count);
+        var claims = new List<(int Fid, string Key)>();
+        foreach (var row in rows)
+        {
+            claims.Clear();
+            if (RepeatsInRun(row, feedback, claims) || RepeatsForRule(row, deduped, feedback, claims)) continue;
+            foreach (var (fid, key) in claims) _tracker.MarkSeen(fid, key);
+            kept.Add(row);
+        }
+        return kept;
+    }
+
+    /// <summary>True (after reporting an error) when the row repeats a unique value or merge key already used in this run; otherwise adds what
+    /// the row would use to <paramref name="claims"/>.</summary>
+    private bool RepeatsInRun(Row row, List<ImportFeedbackRow> feedback, List<(int Fid, string Key)> claims)
+    {
+        if (_keyChecksDuplicates && row.MatchKey is { } matchKey)
+        {
+            if (RepeatedValueMessage(_key!, matchKey) is { } repeated)
+            {
+                Report(feedback, row, _key!.Fid!.Value, ImportOutcome.Errored, ImportReason.DuplicateInRun, repeated);
+                return true;
+            }
+            claims.Add((_key!.Fid!.Value, matchKey));
+        }
+        foreach (var field in _unique)
+        {
+            var fid = field.Fid!.Value;
+            if (ImportKey.Normalize(row.Values.GetValueOrDefault(fid)) is not { } key) continue;
+            if (RepeatedValueMessage(field, key) is { } message)
+            {
+                Report(feedback, row, fid, ImportOutcome.Errored, ImportReason.DuplicateInRun, message);
+                return true;
+            }
+            claims.Add((fid, key));
+        }
+        return false;
+    }
+
+    /// <summary>True (after reporting it as skipped) when the row repeats a value in a column with "Remove duplicates"; otherwise adds the
+    /// values it would use to <paramref name="claims"/>.</summary>
+    private bool RepeatsForRule(Row row, List<(AppField Field, ImportColumnRule Rule)> deduped, List<ImportFeedbackRow> feedback, List<(int Fid, string Key)> claims)
+    {
+        foreach (var (field, _) in deduped)
+        {
+            var fid = field.Fid!.Value;
+            // A merge drops the key from the values once the record is found; the value it was matched on is kept for this check.
+            var value = fid == _key?.Fid && row.MatchKey is not null ? row.MatchKey : row.Values.GetValueOrDefault(fid);
+            if (IsBlank(value) || ImportKey.Normalize(value) is not { } key) continue;
+            var name = ImportTypeCompatibility.DisplayName(field);
+
+            if (!_isMerge && _tracker.ExistsInDestination(fid, key))
+                Report(feedback, row, fid, ImportOutcome.Skipped, ImportReason.DuplicateInDestination, $"'{name}' value '{key}' already exists in {_plan.Destination.Name}.");
+            else if (_tracker.WasSeen(fid, key))
+                Report(feedback, row, fid, ImportOutcome.Skipped, ImportReason.DuplicateInRun, $"'{name}' value '{key}' appeared in an earlier row of this import.");
+            else { claims.Add((fid, key)); continue; }
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>"Remove duplicates" on its own, for the scan that finds duplicate groups: the rows that reach the constraint stage there are
+    /// those the rule has not already left out.</summary>
+    private List<Row> RemoveDuplicateRows(List<Row> rows, List<ImportFeedbackRow> feedback)
+    {
+        var deduped = _rules.Where(r => r.Rule.RemoveDuplicates).ToList();
+        if (deduped.Count == 0) return rows;
+        var kept = new List<Row>(rows.Count);
+        var claims = new List<(int Fid, string Key)>();
+        foreach (var row in rows)
+        {
+            claims.Clear();
+            if (RepeatsForRule(row, deduped, feedback, claims)) continue;
+            foreach (var (fid, key) in claims) _tracker.MarkSeen(fid, key);
             kept.Add(row);
         }
         return kept;
@@ -329,15 +499,16 @@ public sealed class ImportChunkWriter
             if (key is null)
                 Report(feedback, row, keyFid, ImportOutcome.Errored, ImportReason.MergeKeyMissing,
                     $"'{ImportTypeCompatibility.DisplayName(_key)}' is blank, so the record to update cannot be found.");
-            else if (_keyChecksDuplicates && RepeatedValueMessage(_key, key) is { } repeated)
-                Report(feedback, row, keyFid, ImportOutcome.Errored, ImportReason.DuplicateInRun, repeated);
             else keyed.Add((row, key));
         }
         if (keyed.Count == 0) return [];
 
-        var matches = _encryptedKeyIndex ?? await _store.FindRecordIdsAsync(_plan.Destination, _key, keyed.Select(k => k.Row.Values[keyFid]!).ToList(), ct);
+        var matches = _encryptedKeyIndex ?? await _store.FindRecordIdsAsync(_plan.Destination, _key, keyed.DistinctBy(k => k.Key, ImportKey.Comparer).Select(k => k.Row.Values[keyFid]!).ToList(), ct);
         foreach (var (row, key) in keyed)
+        {
+            row.MatchKey = key;
             if (matches.TryGetValue(key, out var recordId)) row.MatchedId = recordId;
+        }
         return keyed.Select(k => k.Row).ToList();
     }
 
@@ -389,27 +560,18 @@ public sealed class ImportChunkWriter
         return effective;
     }
 
-    /// <summary>Reports rows whose unique value repeats in this import (per the constraint policy) or belongs to a
-    /// different record in the destination.</summary>
-    private async Task<List<Row>> RejectConstraintDuplicatesAsync(List<Row> rows, AppField field, List<ImportFeedbackRow> feedback, CancellationToken ct)
+    /// <summary>Reports rows whose unique value belongs to a different record in the destination. (A value that repeats within the import is
+    /// decided later, when the rows compete, so that only rows that survive every check can use a value up.)</summary>
+    private async Task<List<Row>> RejectDestinationConflictsAsync(List<Row> rows, AppField field, List<ImportFeedbackRow> feedback, CancellationToken ct)
     {
         var fid = field.Fid!.Value;
-        var keyed = new List<(Row Row, string? Key)>(rows.Count);
-        foreach (var row in rows)
-        {
-            var key = ImportKey.Normalize(row.Values.GetValueOrDefault(fid));
-            if (key is not null && RepeatedValueMessage(field, key) is { } repeated)
-            {
-                Report(feedback, row, fid, ImportOutcome.Errored, ImportReason.DuplicateInRun, repeated);
-                continue;
-            }
-            keyed.Add((row, key));
-        }
         // Encrypted values cannot be compared with what is stored, so the database's own unique index is the check.
-        if (field.IsEncrypted || keyed.All(k => k.Key is null)) return keyed.Select(k => k.Row).ToList();
+        if (field.IsEncrypted) return rows;
+        var keyed = rows.Select(r => (Row: r, Key: ImportKey.Normalize(r.Values.GetValueOrDefault(fid)))).ToList();
+        if (keyed.All(k => k.Key is null)) return rows;
 
         var owners = await _store.FindRecordIdsAsync(_plan.Destination, field,
-            keyed.Where(k => k.Key is not null).Select(k => k.Row.Values[fid]!).ToList(), ct);
+            keyed.Where(k => k.Key is not null).DistinctBy(k => k.Key, ImportKey.Comparer).Select(k => k.Row.Values[fid]!).ToList(), ct);
         var kept = new List<Row>(keyed.Count);
         foreach (var (row, key) in keyed)
         {
@@ -422,36 +584,39 @@ public sealed class ImportChunkWriter
         return kept;
     }
 
-    /// <summary>Why a unique value cannot be used again: it is part of a duplicate group the policy excludes entirely, or
-    /// it was already used earlier in this run. Null when the value is free (and now taken).</summary>
+    /// <summary>Why a unique value cannot be used again: it is part of a duplicate group the policy excludes entirely, or it was already used
+    /// by an earlier row of this run. Null when the value is free. It only looks: a row claims its values (see <see cref="ResolveCompetition"/>)
+    /// once it has passed every check.</summary>
     private string? RepeatedValueMessage(AppField field, string key)
     {
         var fid = field.Fid!.Value;
         var name = ImportTypeCompatibility.DisplayName(field);
         if (_tracker.IsInDuplicateGroup(fid, key))
             return $"'{name}' value '{key}' appears more than once in the source, so none of those rows were imported.";
-        return _tracker.MarkSeen(fid, key) ? null : $"'{name}' value '{key}' appears more than once in this import.";
+        return _tracker.WasSeen(fid, key) ? $"'{name}' value '{key}' appears more than once in this import." : null;
     }
 
     /// <summary>Writes the rows in one batch; if the database rejects it, halves the batch until the offending rows
-    /// are isolated, so only those rows are reported and everything else still imports.</summary>
-    private async Task<long> WriteAsync(List<Row> rows, Func<List<Row>, Task> write, List<ImportFeedbackRow> feedback)
+    /// are isolated, so only those rows are reported and everything else still imports. Returns the rows that were written.</summary>
+    private async Task<List<Row>> WriteAsync(List<Row> rows, Func<List<Row>, Task<IReadOnlyList<long>?>> write, List<ImportFeedbackRow> feedback)
     {
-        if (rows.Count == 0) return 0;
+        if (rows.Count == 0) return [];
         try
         {
             await write(rows);
-            return rows.Count;
+            return rows;
         }
         catch (ImportRowRejectedException ex)
         {
             if (rows.Count == 1)
             {
                 Report(feedback, rows[0], null, ImportOutcome.Errored, ImportReason.WriteFailed, ex.Message);
-                return 0;
+                return [];
             }
             var half = rows.Count / 2;
-            return await WriteAsync(rows.GetRange(0, half), write, feedback) + await WriteAsync(rows.GetRange(half, rows.Count - half), write, feedback);
+            var first = await WriteAsync(rows.GetRange(0, half), write, feedback);
+            first.AddRange(await WriteAsync(rows.GetRange(half, rows.Count - half), write, feedback));
+            return first;
         }
     }
 
@@ -461,13 +626,8 @@ public sealed class ImportChunkWriter
     private void Report(List<ImportFeedbackRow> sink, Row row, int? fid, string outcome, string reason, string message, long? existingRecord = null)
     {
         // Reading every sheet numbers rows across sheets; a person is shown the row in its sheet, and the sheet's name.
-        var rowRef = row.SourceId;
-        if (_plan.File?.Sheets is { } sheets)
-        {
-            var (sheetIndex, rowNumber) = ImportFileSheets.Split(row.SourceId);
-            rowRef = rowNumber;
-            if (sheetIndex < sheets.Count) message = $"Sheet '{sheets[sheetIndex].Name}': {message}";
-        }
+        var (rowRef, sheetName) = RowRef(row);
+        if (sheetName is not null) message = $"Sheet '{sheetName}': {message}";
         if (_tableLabel is not null) message = $"{_tableLabel}: {message}";
         var issue = new ImportRunIssue
         {
@@ -475,20 +635,11 @@ public sealed class ImportChunkWriter
             Message = message.Length <= 500 ? message : message[..500]
         };
         // The carried values are read only now, for rejected rows, so a clean row costs nothing.
-        var carried = _plan.Mappings.Select((m, i) => m.Kind switch
-        {
-            ImportMappingSource.Static => m.StaticText,
-            ImportMappingSource.Formula => row.FormulaResults?[i],
-            _ => ImportFeedbackWriter.Format(row.Source.GetValueOrDefault(m.SourceColumn!))
-        }).ToArray();
-        if (_tableLabel is not null)
-        {
-            // Several tables share one details file: a line says which table it was for, names its column, and lists the values it carried.
-            var columnLabel = fid is { } f ? _plan.DestinationFields.FirstOrDefault(d => d.Fid == f) is { } field ? ImportTypeCompatibility.DisplayName(field) : null : null;
-            var values = string.Join("; ", _plan.Mappings.Select((m, i) => $"{ImportTypeCompatibility.DisplayName(m.Destination)}={carried[i]}"));
-            sink.Add(new ImportFeedbackRow(issue, [values], _tableLabel, columnLabel));
-            return;
-        }
-        sink.Add(new ImportFeedbackRow(issue, carried));
+        var carried = Carried(row);
+        // Several tables: the line also names the field it refers to (field ids repeat across tables) and the table it was meant for.
+        string? columnLabel = null;
+        if (_tableLabel is not null && fid is { } f && _plan.DestinationFields.FirstOrDefault(d => d.Fid == f) is { } field)
+            columnLabel = ImportTypeCompatibility.DisplayName(field);
+        sink.Add(new ImportFeedbackRow(issue, carried, _tableLabel, columnLabel, row.MatchedId));
     }
 }

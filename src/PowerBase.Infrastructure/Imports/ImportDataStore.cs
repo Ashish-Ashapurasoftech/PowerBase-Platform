@@ -85,11 +85,11 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         return found;
     }
 
-    public async Task InsertAsync(
+    public async Task<IReadOnlyList<long>> InsertAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows,
         long createdBy, CancellationToken ct = default)
     {
-        if (rows.Count == 0) return;
+        if (rows.Count == 0) return [];
         // Rows may set different fields (a blank skipped by "Ignore blanks" leaves that field out): a field a row does
         // not set is stored as NULL, exactly like a field the import never mapped.
         var written = WrittenFields(fields, rows.SelectMany(r => r.Keys));
@@ -128,6 +128,22 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         }
 
         await PublishSearchUpdatesAsync(table, fields, rows, publicIds, ct);
+        return await RecordIdsAsync(conn, table, publicIds, ct);
+    }
+
+    /// <summary>The Record ID# each just-inserted row was given, in the order of <paramref name="publicIds"/>. A bulk copy does not return
+    /// them, so they are read back by the ids the rows were given before they went in: one query per thousand rows.</summary>
+    private static async Task<IReadOnlyList<long>> RecordIdsAsync(SqlConnection conn, AppTable table, IReadOnlyList<Guid> publicIds, CancellationToken ct)
+    {
+        var byPublicId = new Dictionary<Guid, long>(publicIds.Count);
+        var sql = $"SELECT PublicId, Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @ids";
+        for (var from = 0; from < publicIds.Count; from += 1000)
+        {
+            var batch = publicIds.Skip(from).Take(1000).ToList();
+            foreach (var (publicId, id) in await conn.QueryAsync<(Guid, long)>(new CommandDefinition(sql, new { ids = batch }, cancellationToken: ct)))
+                byPublicId[publicId] = id;
+        }
+        return publicIds.Select(p => byPublicId.GetValueOrDefault(p)).ToList();
     }
 
     public async Task UpdateAsync(

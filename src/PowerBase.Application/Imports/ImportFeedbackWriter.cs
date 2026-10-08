@@ -8,7 +8,8 @@ namespace PowerBase.Application.Imports;
 /// <summary>A source row that was not imported, with the values it carried so the user can fix and retry it.</summary>
 /// <param name="Table">When an import fills several tables: the table the row was meant for.</param>
 /// <param name="ColumnLabel">When an import fills several tables: the name of the field the issue refers to (field ids repeat across tables).</param>
-public sealed record ImportFeedbackRow(ImportRunIssue Issue, IReadOnlyList<string?> SourceValues, string? Table = null, string? ColumnLabel = null);
+/// <param name="RecordId">When the row matched an existing record (a merge): its Record ID#, even though the row was not imported.</param>
+public sealed record ImportFeedbackRow(ImportRunIssue Issue, IReadOnlyList<string?> SourceValues, string? Table = null, string? ColumnLabel = null, long? RecordId = null);
 
 /// <summary>Writes the feedback file: one CSV line for every source row that was not imported, with the reason, the
 /// column, and the record it clashes with. Lines go to a temporary file as the run goes, so a million rejected rows
@@ -29,6 +30,9 @@ public sealed class ImportFeedbackWriter : IAsyncDisposable
         [ImportReason.MergeKeyMissing] = "Match key missing",
         [ImportReason.NoChanges] = "Nothing to update",
     };
+
+    /// <summary>The words a person is shown for a reason code.</summary>
+    public static string ReasonOf(string code) => ReasonText.GetValueOrDefault(code, code);
 
     private readonly IReadOnlyList<string> _valueHeaders;
     private readonly IReadOnlyDictionary<int, string> _columnLabels;

@@ -6,7 +6,7 @@ using PowerBase.Domain.Entities;
 
 namespace PowerBase.Imports.Tests;
 
-/// <summary>The feedback file: every row that was not imported, with the reason, safe to open in a spreadsheet.</summary>
+/// <summary>The details file: a line for every source row, whatever happened to it, with the reason when it was not imported, safe to open in a spreadsheet.</summary>
 public class ImportFeedbackTests
 {
     private static List<string[]> ParseCsv(string csv)
@@ -41,15 +41,16 @@ public class ImportFeedbackTests
         await h.RunAsync();
 
         var rows = ParseCsv(h.FeedbackCsv!);
-        rows[0].Should().StartWith(["Source row", "Result", "Reason", "Column", "Details", "Existing record", "Name", "Qty"]);
-        rows.Should().HaveCount(6); // header + the five bad rows
+        rows[0].Should().StartWith(["Source row", "Result", "Record ID#", "Reason", "Column", "Details", "Existing record", "Name", "Qty"]);
+        rows.Should().HaveCount(2501); // the header and a line for every source row
+        rows.Count(r => r[1] == "Error").Should().Be(5);
         var duplicate = rows.Single(r => r[0] == "9");
         duplicate[1].Should().Be("Error");
-        duplicate[2].Should().Be("Already exists");
-        duplicate[3].Should().Be("Name");
-        duplicate[5].Should().Be("900", "the file points at the record that already holds the value");
-        duplicate[6].Should().Be("EXIST", "and shows what the rejected row carried");
-        rows.Single(r => r[0] == "13")[7].Should().Be("abc");
+        duplicate[3].Should().Be("Already exists");
+        duplicate[4].Should().Be("Name");
+        duplicate[6].Should().Be("900", "the file points at the record that already holds the value");
+        duplicate[7].Should().Be("EXIST", "and shows what the rejected row carried");
+        rows.Single(r => r[0] == "13")[8].Should().Be("abc");
     }
 
     [Fact]
@@ -67,12 +68,15 @@ public class ImportFeedbackTests
 
         await h.RunAsync();
 
-        var line = ParseCsv(h.FeedbackCsv!)[1];
-        line.Take(4).Should().Equal("2", "Skipped", "Blank value (Require field)", "Note");
+        var line = ParseCsv(h.FeedbackCsv!).Single(r => r[0] == "2");
+        line[1].Should().Be("Skipped");
+        line[2].Should().BeEmpty("a skipped row of a copy matched no record");
+        line[3].Should().Be("Blank value (Require field)");
+        line[4].Should().Be("Note");
     }
 
     [Fact]
-    public async Task A_run_that_rejects_nothing_has_no_feedback_file()
+    public async Task A_run_that_rejects_nothing_still_has_a_details_file_listing_every_row_with_its_record()
     {
         var h = ImportHarness.Create(options: new HarnessOptions
         {
@@ -81,8 +85,11 @@ public class ImportFeedbackTests
 
         await h.RunAsync();
 
-        h.FeedbackCsv.Should().BeNull();
-        h.Completion!.Value.FeedbackPath.Should().BeNull();
+        var rows = ParseCsv(h.FeedbackCsv!);
+        rows.Should().HaveCount(6);
+        rows.Skip(1).Should().OnlyContain(r => r[1] == "Inserted" && r[2].Length > 0, "an inserted row names the record it became");
+        rows.Skip(1).Select(r => r[2]).Should().OnlyHaveUniqueItems();
+        h.Completion!.Value.FeedbackPath.Should().NotBeNull();
         h.Completion!.Value.Status.Should().Be(ImportRunStatus.Success);
     }
 
@@ -111,10 +118,10 @@ public class ImportFeedbackTests
         await h.RunAsync(); // every row has a non-numeric Qty, so all four are rejected and listed
 
         var rows = ParseCsv(h.FeedbackCsv!);
-        rows.Single(r => r[0] == "1")[6].Should().StartWith("'=");
-        rows.Single(r => r[0] == "2")[6].Should().Be("'+cmd");
-        rows.Single(r => r[0] == "3")[6].Should().Be("'@SUM(A1)");
-        rows.Single(r => r[0] == "4")[6].Should().Be("-5", "a plain negative number is not a formula");
+        rows.Single(r => r[0] == "1")[7].Should().StartWith("'=");
+        rows.Single(r => r[0] == "2")[7].Should().Be("'+cmd");
+        rows.Single(r => r[0] == "3")[7].Should().Be("'@SUM(A1)");
+        rows.Single(r => r[0] == "4")[7].Should().Be("-5", "a plain negative number is not a formula");
     }
 
     [Fact]
@@ -130,7 +137,7 @@ public class ImportFeedbackTests
 
         var rows = ParseCsv(h.FeedbackCsv!);
         rows.Should().HaveCount(2);
-        rows[1][6].Should().Be("a, \"b\"\nc");
+        rows[1][7].Should().Be("a, \"b\"\nc");
         rows[1].Should().HaveCount(rows[0].Length);
     }
 

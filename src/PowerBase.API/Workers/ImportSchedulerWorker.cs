@@ -65,6 +65,8 @@ public sealed class ImportSchedulerWorker(
         var now = DateTime.UtcNow;
         // Uploaded files nobody imported are not kept past a day.
         await scope.ServiceProvider.GetRequiredService<PowerBase.Application.Imports.Files.ImportFileCleanup>().RunAsync(now, ct);
+        // Details files and uploaded source files are kept for the configured retention, then deleted (the run's counts stay).
+        await scope.ServiceProvider.GetRequiredService<PowerBase.Application.Imports.ImportRetentionCleanup>().RunAsync(now, ct);
         var due = await dispatcher.ListDueAsync(now, ct);
         foreach (var def in due)
         {
