@@ -39,7 +39,7 @@ public partial class PipelineEngine : IPipelineEngine
     /// column). Returns null when the table has none or the projectors are unavailable.</summary>
     private async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>?> ProjectComputedAsync(
         AppTable table, IReadOnlyList<AppField> fields,
-        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, CancellationToken ct)
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, CancellationToken ct, bool inWriteTransaction = false)
     {
         if (rows.Count == 0 || !fields.Any(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))) return null;
         // The computed values only enrich a step's output. A failure to compute them (a Lookup / Summary /
@@ -50,7 +50,8 @@ public partial class PipelineEngine : IPipelineEngine
         var computed = await PipelineComputedProjection.ProjectAsync(
             _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector,
             _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector,
-            table, fields, rows, _logger, ct);
+            table, fields, rows, _logger, ct,
+            inWriteTransaction ? PipelineComputedProjection.InTransactionBudget : null);
         return computed?.Values;
     }
 
@@ -607,6 +608,12 @@ public partial class PipelineEngine : IPipelineEngine
                         var triggerData = JsonSerializer.Deserialize<Dictionary<string, object>>(task.TriggerPayloadJson);
                         if (triggerData != null)
                         {
+                            // The event captured Lookup / Summary / Formula values at write time; read them again now
+                            // that the write (and whatever was saved with it) is committed.
+                            await PipelineTriggerRefresh.RefreshAsync(triggerData, _tableRepo, _fieldRepo, _recordRepo,
+                                _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector,
+                                _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector, _logger, ct);
+
                             contextDict["trigger"] = triggerData;
                             foreach (var kvp in triggerData)
                             {
@@ -2209,7 +2216,7 @@ public partial class PipelineEngine : IPipelineEngine
                 // (and the record-added event published below) carry them.
                 if (persistedRecord is not null)
                 {
-                    var createdComputed = await ProjectComputedAsync(table, fields, [persistedRecord], ct);
+                    var createdComputed = await ProjectComputedAsync(table, fields, [persistedRecord], ct, inWriteTransaction: true);
                     if (createdComputed != null) persistedRecord = MergeComputed(persistedRecord, createdComputed[0]);
                 }
                 var output = BuildCreatedRecordOutput(recordPublicId, recordId, fields, values, persistedRecord);
@@ -2323,7 +2330,7 @@ public partial class PipelineEngine : IPipelineEngine
                     var updatedRows = await recordRepo.GetBulkUpsertRowsByIdsAsync(table, fields, [updatedId], uow.Transaction, ct);
                     if (updatedRows.TryGetValue(updatedId, out var updatedRow))
                     {
-                        var updatedComputed = await ProjectComputedAsync(table, fields, [updatedRow], ct);
+                        var updatedComputed = await ProjectComputedAsync(table, fields, [updatedRow], ct, inWriteTransaction: true);
                         if (updatedComputed != null)
                             foreach (var computedValue in updatedComputed[0])
                                 output[$"fid_{computedValue.Key}"] = computedValue.Value;

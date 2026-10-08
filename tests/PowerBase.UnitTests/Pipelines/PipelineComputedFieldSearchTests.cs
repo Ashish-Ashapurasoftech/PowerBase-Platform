@@ -897,4 +897,210 @@ public class PipelineComputedFieldSearchTests
             new Dictionary<long, object?> { [ReferenceFid] = "Hardik" }, tables, default);
         await tables.DidNotReceiveWithAnyArgs().GetByIdAsync(default, default);
     }
+
+    // ───────────────────────── trigger record: computed values re-read at run time ─────────────────────────
+    // An Order saved together with its Order Detail rows fires "record added" before the details exist, so the
+    // Summary in the event is blank; the PowerFlow runs after they do. A Condition on it took the "not met" branch.
+
+    private static readonly Guid TriggerRecord = Guid.NewGuid();
+
+    private static Dictionary<string, object> EventPayload(object? summary, string eventType = "Added", string? connection = null) =>
+        JsonSerializer.Deserialize<Dictionary<string, object>>(JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["EventType"] = eventType,
+            ["ConnectionPublicId"] = connection,
+            ["TablePublicId"] = Table.PublicId.ToString(),
+            ["RecordPublicId"] = TriggerRecord.ToString(),
+            ["SelectedFieldValues"] = new Dictionary<string, object?> { ["fid_6"] = "ORD0003", ["fid_14"] = summary, ["fid_9"] = 42 },
+            ["NewValues"] = new Dictionary<string, object?> { ["fid_6"] = "ORD0003", ["fid_14"] = summary, ["fid_9"] = 42 },
+        }))!;
+
+    private sealed class RefreshHarness
+    {
+        public IAppTableRepository Tables { get; } = Substitute.For<IAppTableRepository>();
+        public IAppFieldRepository FieldRepo { get; } = Substitute.For<IAppFieldRepository>();
+        public IRecordRepository Records { get; } = Substitute.For<IRecordRepository>();
+        public IRelationalProjector Relational { get; } = Substitute.For<IRelationalProjector>();
+        public IFormulaProjector Formula { get; } = Substitute.For<IFormulaProjector>();
+
+        public RefreshHarness(object? currentSummary, params AppField[] extraFields)
+        {
+            Tables.GetByPublicIdAsync(Table.PublicId, Arg.Any<CancellationToken>()).Returns(Table);
+            FieldRepo.ListByTableAsync(Table.Id, Arg.Any<CancellationToken>()).Returns(TableFields(new[] { Summary("Sum"), Reference() }.Concat(extraFields).ToArray()));
+            Records.GetRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>())
+                .Returns(new Dictionary<Guid, long> { [TriggerRecord] = 3 });
+            Records.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+                .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { [3] = new Dictionary<string, object?> { ["Id"] = 3L, ["f_6"] = "ORD0003", ["f_9"] = 42L } });
+            Relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+                .Returns(Task.FromResult<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(new List<IReadOnlyDictionary<long, object?>>
+                    { new Dictionary<long, object?> { [SummaryFid] = currentSummary, [ReferenceFid] = "Hardik Patel" } }));
+            Formula.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                    Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+                .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(2)!);
+        }
+
+        public Task<bool> Run(Dictionary<string, object> payload) =>
+            PipelineTriggerRefresh.RefreshAsync(payload, Tables, FieldRepo, Records, Relational, Formula, null, default);
+    }
+
+    private static JsonElement Section(Dictionary<string, object> payload, string name) => (JsonElement)payload[name];
+
+    [Fact]
+    public async Task TriggerRefresh_BlankSummaryInTheEvent_IsReplacedWithTheCurrentValue()
+    {
+        var payload = EventPayload(null);
+        var changed = await new RefreshHarness(1000m).Run(payload);
+
+        Assert.True(changed);
+        Assert.Equal(1000m, Section(payload, "SelectedFieldValues").GetProperty("fid_14").GetDecimal());
+        Assert.Equal(1000m, Section(payload, "NewValues").GetProperty("fid_14").GetDecimal());
+    }
+
+    [Fact]
+    public async Task TriggerRefresh_OnlyTouchesComputedFields_StoredValuesAndReferenceStayAsCaptured()
+    {
+        var payload = EventPayload(null);
+        await new RefreshHarness(1000m).Run(payload);
+
+        var values = Section(payload, "SelectedFieldValues");
+        Assert.Equal("ORD0003", values.GetProperty("fid_6").GetString());
+        Assert.Equal(42, values.GetProperty("fid_9").GetInt32());   // the Reference keeps its stored id
+    }
+
+    [Fact]
+    public async Task TriggerRefresh_DoesNotAddValuesTheEventDidNotCarry()
+    {
+        var payload = EventPayload(null);
+        var extra = new AppField { Id = 15, Fid = 15, Name = "Other", TypeCode = "Formula_Number", Settings = "{\"expression\":\"1\"}" };
+        var h = new RefreshHarness(1000m, extra);
+        h.Formula.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?> { [SummaryFid] = 1000m, [15] = 7m } });
+
+        await h.Run(payload);
+
+        Assert.False(Section(payload, "SelectedFieldValues").TryGetProperty("fid_15", out _));
+    }
+
+    [Theory]
+    [InlineData("Deleted")]
+    [InlineData("Bulk")]
+    public async Task TriggerRefresh_OtherEventTypes_AreLeftAlone(string eventType)
+    {
+        var payload = EventPayload(null, eventType);
+        var h = new RefreshHarness(1000m);
+
+        Assert.False(await h.Run(payload));
+        await h.Records.DidNotReceiveWithAnyArgs().GetRowsByIdsAsync(default!, default!, default!, default);
+        Assert.Equal(JsonValueKind.Null, Section(payload, "SelectedFieldValues").GetProperty("fid_14").ValueKind);
+    }
+
+    [Fact]
+    public async Task TriggerRefresh_CrossTenantTrigger_IsLeftAlone()
+    {
+        var payload = EventPayload(null, connection: Guid.NewGuid().ToString());
+        var h = new RefreshHarness(1000m);
+
+        Assert.False(await h.Run(payload));
+        await h.Tables.DidNotReceiveWithAnyArgs().GetByPublicIdAsync(default, default);
+    }
+
+    [Fact]
+    public async Task TriggerRefresh_NoComputedFieldInTheEvent_ReadsNothing()
+    {
+        var payload = JsonSerializer.Deserialize<Dictionary<string, object>>(JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["EventType"] = "Added", ["TablePublicId"] = Table.PublicId.ToString(), ["RecordPublicId"] = TriggerRecord.ToString(),
+            ["SelectedFieldValues"] = new Dictionary<string, object?> { ["fid_6"] = "ORD0003" },
+        }))!;
+        var h = new RefreshHarness(1000m);
+
+        Assert.False(await h.Run(payload));
+        await h.Records.DidNotReceiveWithAnyArgs().GetRowsByIdsAsync(default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task TriggerRefresh_WhenTheReadFails_KeepsTheEventValues()
+    {
+        var payload = EventPayload(250m);
+        var h = new RefreshHarness(1000m);
+        h.Records.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>>(_ => throw new InvalidOperationException("boom"));
+
+        Assert.False(await h.Run(payload));
+        Assert.Equal(250m, Section(payload, "SelectedFieldValues").GetProperty("fid_14").GetDecimal());
+    }
+
+    [Fact]
+    public async Task TriggerRefresh_AFieldThatCannotBeComputed_KeepsItsEventValue()
+    {
+        var payload = EventPayload(250m);
+        var h = new RefreshHarness(1000m);
+        h.Relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Is<IReadOnlyList<AppField>>(f => f.Any(x => x.TypeCode == "Summary")),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(new PowerBase.Domain.Exceptions.NotFoundException("Table", 4)));
+
+        await h.Run(payload);
+
+        Assert.Equal(250m, Section(payload, "SelectedFieldValues").GetProperty("fid_14").GetDecimal());
+    }
+
+    // ───────────────────────── relationship reads that wait on a lock ─────────────────────────
+
+    private static IFormulaProjector EmptyFormulaProjector()
+    {
+        var formula = Substitute.For<IFormulaProjector>();
+        formula.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(1).Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+        return formula;
+    }
+
+    [Fact]
+    public async Task Projection_ARelationshipReadStuckBehindALock_IsGivenUpOnOnce_NotRetriedPerField()
+    {
+        var calls = 0;
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(async ci =>
+            {
+                Interlocked.Increment(ref calls);
+                await Task.Delay(Timeout.Infinite, ci.ArgAt<CancellationToken>(3));   // blocked until the budget cancels it
+                return (IReadOnlyList<IReadOnlyDictionary<long, object?>>)new List<IReadOnlyDictionary<long, object?>>();
+            });
+        var fields = TableFields(Reference(), Summary("Count"));
+        var rows = new List<IReadOnlyDictionary<string, object?>> { Row(1, Guid.NewGuid()) };
+
+        var started = DateTime.UtcNow;
+        var result = await PipelineComputedProjection.ProjectAsync(relational, EmptyFormulaProjector(), Table, fields, rows, null, default,
+            relationshipBudget: TimeSpan.FromMilliseconds(300));
+
+        Assert.NotNull(result);
+        Assert.Equal(1, calls);                                   // no per-field retries, each of which would wait the same way
+        Assert.Contains(SummaryFid, result!.FailedFids);
+        Assert.Contains(ReferenceFid, result.FailedFids);
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void Budgets_InsideAWriteTransactionIsShorterThanOutside() =>
+        Assert.True(PipelineComputedProjection.InTransactionBudget < PipelineComputedProjection.RelationshipBudget);
+
+    [Fact]
+    public async Task Projection_ACancelledCaller_StillCancels()
+    {
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(async ci =>
+            {
+                await Task.Delay(Timeout.Infinite, ci.ArgAt<CancellationToken>(3));
+                return (IReadOnlyList<IReadOnlyDictionary<long, object?>>)new List<IReadOnlyDictionary<long, object?>>();
+            });
+        using var cts = new CancellationTokenSource();
+        var task = PipelineComputedProjection.ProjectAsync(relational, EmptyFormulaProjector(), Table, TableFields(Summary("Count")),
+            new List<IReadOnlyDictionary<string, object?>> { Row(1, Guid.NewGuid()) }, null, cts.Token);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+    }
 }

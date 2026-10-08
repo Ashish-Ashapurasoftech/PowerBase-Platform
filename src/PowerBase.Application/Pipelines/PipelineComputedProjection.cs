@@ -27,6 +27,17 @@ public static class PipelineComputedProjection
 {
     private static bool IsRelationship(AppField f) => f.Fid.HasValue && f.TypeCode is "Lookup" or "Summary" or "Reference";
 
+    /// <summary>The longest the relationship reads (Lookup / Summary / Reference) may take. These reads run on their
+    /// own connections, so inside a step that has just written the same record they can sit behind that step's own
+    /// uncommitted lock until SQL Server's 30 s command timeout — three of those (the all-at-once read, then one per
+    /// field) made a single Update Record take 90 s. A read that has not finished by then is given up on, once,
+    /// and the values it would have supplied are simply left out.</summary>
+    public static readonly TimeSpan RelationshipBudget = TimeSpan.FromSeconds(10);
+
+    /// <summary>The same limit for reads made while the step's own write transaction is still open (Create / Update
+    /// Record output, trigger interception): there the lock is certain to be the step's own, so waiting longer cannot help.</summary>
+    public static readonly TimeSpan InTransactionBudget = TimeSpan.FromSeconds(3);
+
     public static async Task<PipelineComputedValues?> ProjectAsync(
         IRelationalProjector? relationalProjector,
         IFormulaProjector? formulaProjector,
@@ -34,17 +45,29 @@ public static class PipelineComputedProjection
         IReadOnlyList<AppField> fields,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
         ILogger? logger,
-        CancellationToken ct)
+        CancellationToken ct,
+        TimeSpan? relationshipBudget = null)
     {
         if (rows.Count == 0 || formulaProjector == null) return null;
+        var limit = relationshipBudget ?? RelationshipBudget;
 
         var failed = new HashSet<long>();
         IReadOnlyList<IReadOnlyDictionary<long, object?>>? relational = null;
         if (relationalProjector != null)
         {
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            budget.CancelAfter(limit);
             try
             {
-                relational = await relationalProjector.ProjectAsync(table, fields, rows, ct);
+                relational = await relationalProjector.ProjectAsync(table, fields, rows, budget.Token);
+            }
+            catch (Exception) when (budget.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                // Out of time: do not start the per-field retries, they would wait on the same lock one by one.
+                logger?.LogWarning("Relationship projection for table {TableId} did not finish within {Seconds}s (likely waiting on a lock held by this step's own write); its Lookup / Summary / Reference values are left out.",
+                    table.Id, limit.TotalSeconds);
+                foreach (var field in fields.Where(IsRelationship)) failed.Add(field.Fid!.Value);
+                relational = rows.Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -55,11 +78,11 @@ public static class PipelineComputedProjection
                 {
                     try
                     {
-                        var part = await relationalProjector.ProjectAsync(table, others.Append(field).ToList(), rows, ct);
+                        var part = await relationalProjector.ProjectAsync(table, others.Append(field).ToList(), rows, budget.Token);
                         for (var i = 0; i < rows.Count && i < part.Count; i++)
                             foreach (var kv in part[i]) merged[i][kv.Key] = kv.Value;
                     }
-                    catch (Exception fieldEx) when (fieldEx is not OperationCanceledException)
+                    catch (Exception fieldEx) when (!ct.IsCancellationRequested)
                     {
                         failed.Add(field.Fid!.Value);
                         logger?.LogWarning(fieldEx, "Field '{Field}' ({TypeCode}, fid {Fid}) of table {TableId} could not be computed.",

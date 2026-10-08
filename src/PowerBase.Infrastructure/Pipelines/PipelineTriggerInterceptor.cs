@@ -177,8 +177,12 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
                 var present = chunk.Where(c => idMap.TryGetValue(c.RecordPublicId, out var id) && rowsById.ContainsKey(id)).ToList();
                 var rows = present.Select(c => rowsById[idMap[c.RecordPublicId]]).ToList();
+                // Read on other connections, these can wait behind the lock of the write being intercepted (see
+                // PipelineComputedProjection.RelationshipBudget): give up after the budget instead of SQL's 30 s timeout.
+                using var projectionBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                projectionBudget.CancelAfter(PowerBase.Application.Pipelines.PipelineComputedProjection.InTransactionBudget);
                 var seed = _relationalProjector != null
-                    ? await _relationalProjector.ProjectAsync(table, fields, rows, ct)
+                    ? await _relationalProjector.ProjectAsync(table, fields, rows, projectionBudget.Token)
                     : null;
                 var computed = rows.Count > 0 ? _formulaProjector.Project(fields, rows, seed, table) : [];
 
