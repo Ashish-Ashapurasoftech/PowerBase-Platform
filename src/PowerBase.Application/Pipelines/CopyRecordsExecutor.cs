@@ -149,6 +149,10 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             .Select(f => (long)f.Fid!.Value).ToHashSet();
         var inMemoryFilterFids = new HashSet<long>(computedFids);
         inMemoryFilterFids.UnionWith(encryptedFilterFids);
+        // A Reference searched by its display text can't be matched in SQL (the column holds the
+        // parent's Record ID#); id-style conditions on it stay in SQL.
+        inMemoryFilterFids.UnionWith(PipelineComputedFilter.LabelStyleReferenceFids(sourceFields, effectiveFilter));
+        var referenceFids = sourceFields.Where(f => f.Fid.HasValue && f.TypeCode == "Reference").Select(f => (long)f.Fid!.Value).ToHashSet();
         // AI Search already fully resolved the filter (including any encrypted-field
         // conditions, against its plaintext index) — the resulting Id filter chunks need no
         // further in-memory pass. Otherwise, split as before: physical conditions to SQL,
@@ -237,11 +241,17 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                         var relational = await services.GetRequiredService<IRelationalProjector>().ProjectAsync(source, sourceFields, page, ct);
                         var computed = services.GetRequiredService<IFormulaProjector>().Project(sourceFields, page, relational, source);
                         var pairs = page.Select((row, i) => (Row: row, Computed: computed[i])).ToList();
-                        if (computedFilter != null) pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, computedFilter, sourceFields);
+                        if (computedFilter != null) pairs = PipelineComputedFilter.Apply(pairs, computedFilter, sourceFields);
                         projected = pairs.Select(pair =>
                         {
                             var row = new Dictionary<string, object?>(pair.Row);
-                            foreach (var value in pair.Computed) row[PhysicalNaming.ColumnName((int)value.Key)] = value.Value;
+                            foreach (var value in pair.Computed)
+                            {
+                                // The Reference display text was projected only to evaluate the filter:
+                                // without computed fields the copy keeps the stored Record ID#.
+                                if (computedFids.Count == 0 && referenceFids.Contains(value.Key)) continue;
+                                row[PhysicalNaming.ColumnName((int)value.Key)] = value.Value;
+                            }
                             return (IReadOnlyDictionary<string, object?>)row;
                         }).ToList();
                     }

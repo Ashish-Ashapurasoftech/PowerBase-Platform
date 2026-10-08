@@ -106,6 +106,43 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         await InterceptBulkAsync(table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
     }
 
+    /// <summary>Fids of the Reference fields at least one listening trigger filters on (by field name, fid_N
+    /// token or advanced-query {N.…} id) — only those need their display text projected.</summary>
+    private static IReadOnlyCollection<long> FilterReferenceFids(IReadOnlyList<TriggerSubscription> subscriptions, IReadOnlyList<AppField> fields)
+    {
+        var result = new List<long>();
+        foreach (var field in fields.Where(f => f.Fid.HasValue && !f.IsDeleted && f.TypeCode == "Reference"))
+        {
+            var fid = field.Fid!.Value;
+            var used = subscriptions.Any(s => new[] { s.FiltersJson, s.FilterGroupsJson, s.AdvancedQuery }.Any(text =>
+                !string.IsNullOrEmpty(text) &&
+                (text.Contains($"fid_{fid}", StringComparison.OrdinalIgnoreCase) ||
+                 text.Contains($"fid_{field.Id}", StringComparison.OrdinalIgnoreCase) ||
+                 text.Contains($"{{{fid}.", StringComparison.Ordinal) ||
+                 text.Contains($"\"{field.Name}\"", StringComparison.OrdinalIgnoreCase))));
+            if (used) result.Add(fid);
+        }
+        return result;
+    }
+
+    /// <summary>The values a trigger filter reads: the event values, with each Reference replaced by its
+    /// display text (the user-visible value) and the stored Record ID# kept under the negated Fid so an
+    /// exact-match condition on the id still matches.</summary>
+    private static IReadOnlyDictionary<long, object?> FilterValues(PipelineRecordChange change, IReadOnlyDictionary<long, object?> values)
+    {
+        if (change.ReferenceLabels is not { Count: > 0 } labels) return values;
+        var merged = new Dictionary<long, object?>(values);
+        foreach (var (fid, label) in labels)
+        {
+            if (merged.TryGetValue(fid, out var stored) && stored is not null && stored is not string)
+                merged[-fid] = stored;
+            else if (merged.TryGetValue(fid, out var storedText) && storedText is string s && long.TryParse(s, out _))
+                merged[-fid] = storedText;
+            merged[fid] = label;
+        }
+        return merged;
+    }
+
     /// <summary>Formula (compute-on-read) fields have no stored value, so the written values never
     /// contain them and an event filter / pipeline condition on one (e.g. CustomerNumber) would see
     /// blank. Re-reads the affected rows inside the open transaction (in chunks, to stay under SQL
@@ -117,10 +154,15 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         AppTable table,
         IReadOnlyList<AppField> fields,
         IReadOnlyList<PipelineRecordChange> changes,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlyCollection<long>? filterReferenceFids = null)
     {
         if (_formulaProjector == null || _uow.Transaction == null) return changes;
-        if (!fields.Any(f => f.Fid.HasValue && !f.IsDeleted && PhysicalNaming.IsComputedTypeCode(f.TypeCode))) return changes;
+        var hasComputed = fields.Any(f => f.Fid.HasValue && !f.IsDeleted && PhysicalNaming.IsComputedTypeCode(f.TypeCode));
+        // A Reference a trigger filter matches by display text needs its label projected too (it is
+        // only used to evaluate the filter — the event values keep the stored Record ID#).
+        var referenceFids = filterReferenceFids ?? Array.Empty<long>();
+        if (!hasComputed && referenceFids.Count == 0) return changes;
 
         try
         {
@@ -150,10 +192,16 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                         result.Add(change);
                         continue;
                     }
-                    if (change.EventType == PipelineRecordEventType.Deleted)
-                        result.Add(change with { BeforeValues = Merge(change.BeforeValues, values) });
+                    var labels = referenceFids
+                        .Where(fid => values.TryGetValue(fid, out var label) && label is not null)
+                        .ToDictionary(fid => fid, fid => values[fid]);
+                    var withLabels = change with { ReferenceLabels = labels.Count > 0 ? labels : null };
+                    if (!hasComputed)
+                        result.Add(withLabels);
+                    else if (change.EventType == PipelineRecordEventType.Deleted)
+                        result.Add(withLabels with { BeforeValues = Merge(change.BeforeValues, values) });
                     else
-                        result.Add(change with { AfterValues = Merge(change.AfterValues, values) });
+                        result.Add(withLabels with { AfterValues = Merge(change.AfterValues, values) });
                 }
             }
             return result;
@@ -354,7 +402,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
             // Formula fields are compute-on-read; put their values in the events (see
             // WithComputedValuesAsync) now that we know at least one pipeline is listening.
-            recordChanges = await WithComputedValuesAsync(table, fields, recordChanges, ct);
+            recordChanges = await WithComputedValuesAsync(table, fields, recordChanges, ct, FilterReferenceFids(subscriptions, fields));
 
             foreach (var sub in subscriptions)
             {
@@ -414,7 +462,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
                         if (isCandidate)
                         {
-                            var valuesSource = change.EventType == PipelineRecordEventType.Deleted ? change.BeforeValues : change.AfterValues;
+                            var valuesSource = FilterValues(change, change.EventType == PipelineRecordEventType.Deleted ? change.BeforeValues : change.AfterValues);
                             bool filtersMatch = true;
 
                             if (!sub.IsSimpleFilter && !string.IsNullOrWhiteSpace(sub.AdvancedQuery))

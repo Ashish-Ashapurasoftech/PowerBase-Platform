@@ -50,6 +50,22 @@ public partial class PipelineEngine : IPipelineEngine
         return formulaProjector.Project(fields, rows, relational, table);
     }
 
+    /// <summary>Like <see cref="ProjectComputedAsync"/> but also projects a Reference's display text, so a
+    /// filter can match what the user sees. Used only to evaluate filters, never to build step output.</summary>
+    private async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>?> ProjectForFilterAsync(
+        AppTable table, IReadOnlyList<AppField> fields,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, CancellationToken ct)
+    {
+        if (rows.Count == 0) return null;
+        if (!fields.Any(f => f.Fid.HasValue && (PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.TypeCode == "Reference"))) return null;
+        var formulaProjector = _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector;
+        var relationalProjector = _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector))
+            as PowerBase.Application.Relationships.IRelationalProjector;
+        if (formulaProjector == null) return null;
+        var relational = relationalProjector != null ? await relationalProjector.ProjectAsync(table, fields, rows, ct) : null;
+        return formulaProjector.Project(fields, rows, relational, table);
+    }
+
     private static IReadOnlyDictionary<string, object?> MergeComputed(
         IReadOnlyDictionary<string, object?> row, IReadOnlyDictionary<long, object?> computed)
     {
@@ -1850,6 +1866,10 @@ public partial class PipelineEngine : IPipelineEngine
             var inMemoryFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
                 .Select(f => (long)f.Fid!.Value).ToHashSet();
             inMemoryFilterFids.UnionWith(computedFieldFids);
+            // A Reference searched by its display text ("contains Hardik") can't be matched in SQL — the
+            // column holds the parent's Record ID#. Id-style conditions on a Reference stay in SQL.
+            var labelReferenceFids = PipelineComputedFilter.LabelStyleReferenceFids(fields, filterTree);
+            inMemoryFilterFids.UnionWith(labelReferenceFids);
             var canStreamFilter = inMemoryFilterFids.Count == 0 ||
                 !FormulaFilterSorter.TreeContainsFormulaField(filterTree, inMemoryFilterFids);
 
@@ -1974,6 +1994,7 @@ public partial class PipelineEngine : IPipelineEngine
             List<IReadOnlyDictionary<string, object?>>? aiSearchRows = null;
             if (_azureSearchService != null && _azureSearchService.IsGridSearchEnabled && filterTree != null
                 && !FormulaFilterSorter.TreeContainsFormulaField(filterTree, computedFieldFids)
+                && !FormulaFilterSorter.TreeContainsFormulaField(filterTree, labelReferenceFids)
                 && fields.Any(f => f.IsSearchable || f.IsFilterable) && await _azureSearchService.IsHealthyAsync(ct))
             {
                 var odata = ODataFilterBuilder.Build(filterTree, fields);
@@ -2021,13 +2042,16 @@ public partial class PipelineEngine : IPipelineEngine
                     // cap — so nothing is silently dropped before the in-memory conditions are
                     // evaluated below, no matter how many rows match physically.
                     var candidates = await FetchAllAsync(physicalFilterTree);
-                    var computedPerRow = await ProjectComputedAsync(table, fields, candidates, ct);
+                    var computedPerRow = await ProjectForFilterAsync(table, fields, candidates, ct);
                     var pairs = candidates
                         .Select((r, i) => (Row: r, Computed: computedPerRow != null ? computedPerRow[i] : (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
                         .ToList();
                     if (inMemoryFilterTree != null)
-                        pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, inMemoryFilterTree, fields);
-                    IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p => MergeComputed(p.Row, p.Computed));
+                        pairs = PipelineComputedFilter.Apply(pairs, inMemoryFilterTree, fields);
+                    // The Reference display text was projected only to evaluate the filter: a table with no
+                    // computed fields keeps returning the stored Record ID# in the step output.
+                    IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p =>
+                        computedFieldFids.Count == 0 ? p.Row : MergeComputed(p.Row, p.Computed));
                     resultsList = (limit.HasValue ? filtered.Take(limit.Value) : filtered).ToList();
                     computedMerged = true;
                 }
