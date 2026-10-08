@@ -103,7 +103,7 @@ public static class ImportRunKey
 /// response stays small however large the import is; the details file is a separate download.</summary>
 public sealed record ImportRunStatusResponse(
     Guid RunId, string Status, byte Progress, long RowsRead, long Inserted, long Updated, long Skipped, long Errored,
-    DateTime? StartedOn, DateTime? CompletedOn, string? ErrorDetail, bool HasFeedback);
+    DateTime? StartedOn, DateTime? CompletedOn, string? ErrorDetail, bool HasFeedback, long Unchanged = 0);
 
 public sealed class GetImportRunStatusHandler(
     IAppAccessService access, IImportRunRepository runs, IAppTableRepository tables, IAppRepository apps, IQueryContext user)
@@ -116,7 +116,7 @@ public sealed class GetImportRunStatusHandler(
         var destination = snapshot is null ? null : await tables.GetByPublicIdAsync(snapshot.DestinationTableId, ct);
         if (destination is null || destination.AppId != await apps.GetIdByPublicIdAsync(appId, ct)) throw new NotFoundException("ImportRun", runId);
         return new ImportRunStatusResponse(run.PublicId, run.Status, run.Progress, run.RowsRead, run.Inserted, run.Updated, run.Skipped, run.Errored,
-            run.StartedOn, run.CompletedOn, run.ErrorDetail, ImportRunAccess.CanSeeRows(run, user) && !string.IsNullOrEmpty(run.FeedbackFileUrl));
+            run.StartedOn, run.CompletedOn, run.ErrorDetail, ImportRunAccess.CanSeeRows(run, user) && !string.IsNullOrEmpty(run.FeedbackFileUrl), run.Unchanged);
     }
 }
 
@@ -161,11 +161,13 @@ public sealed class GetImportRunHandler(IAppAccessService access, IImportRunRepo
         var issues = canSeeRows ? await runs.ListIssuesAsync(run.Id, IssuePageSize, ct) : [];
         // The issue table keeps at most a capped number of rows; the real total is the run's own counters.
         var issueTotal = (int)Math.Min(int.MaxValue, run.Skipped + run.Errored);
+        var sourceFile = ImportJson.Deserialize<ImportRunSnapshot>(run.DefinitionSnapshotJson)?.File;
         return new ImportRunDetail(
             new ImportRunListItem(run.PublicId, run.TriggeredBy, run.Status, run.Progress, run.RowsRead, run.Inserted, run.Updated,
-                run.Skipped, run.Errored, run.StartedOn, run.CompletedOn),
-            run.ErrorDetail, canSeeRows && !string.IsNullOrEmpty(run.FeedbackFileUrl), issues, issueTotal,
-            await TargetsAsync(run, ct));
+                run.Skipped, run.Errored, run.StartedOn, run.CompletedOn, run.Unchanged),
+            run.ErrorDetail, canSeeRows && !string.IsNullOrEmpty(run.FeedbackFileUrl) && run.FilesExpiredOn is null, issues, issueTotal,
+            await TargetsAsync(run, ct), sourceFile?.FileName, canSeeRows && sourceFile is not null && run.FilesExpiredOn is null,
+            run.FilesExpiredOn is not null);
     }
 
     /// <summary>Each table's counts, for a run that filled several. A run into one table has none and costs no extra query.</summary>
@@ -182,22 +184,31 @@ public sealed record ImportFeedbackFile(Stream Content, string FileName);
 /// returned to the client, so a leaked run id alone does not expose the file.</summary>
 public sealed class GetImportFeedbackHandler(IAppAccessService access, IImportRunRepository runs, IFileStorageService storage, IQueryContext user)
 {
-    public async Task<ImportFeedbackFile> HandleAsync(Guid runId, CancellationToken ct)
+    /// <param name="tableId">For a run that filled several tables: whose details file. Without it, the first table's (the run's own file).</param>
+    public async Task<ImportFeedbackFile> HandleAsync(Guid runId, CancellationToken ct, Guid? tableId = null)
     {
         var run = await ImportRunAccess.LoadAsync(runId, runs, access, ct);
         if (!ImportRunAccess.CanSeeRows(run, user)) throw new UnauthorizedActionException("download this import's details");
-        if (string.IsNullOrEmpty(run.FeedbackFileUrl)) throw new NotFoundException("ImportFeedback", runId);
+        var path = run.FeedbackFileUrl;
+        var label = "";
+        if (tableId is { } table && ImportJson.Deserialize<ImportRunSnapshot>(run.DefinitionSnapshotJson)?.Config.AdditionalTargets is { Count: > 0 })
+        {
+            var target = await runs.GetTargetDetailsAsync(run.Id, table, ct) ?? throw new NotFoundException("ImportFeedback", runId);
+            path = target.Path;
+            label = "-" + new string(target.TableName.Where(c => char.IsLetterOrDigit(c) || c is '-' or '_').ToArray());
+        }
+        if (string.IsNullOrEmpty(path) || run.FilesExpiredOn is not null) throw new NotFoundException("ImportFeedback", runId);
         // Reading is an optional capability of a storage provider (both shipped providers have it).
         if (storage is not IFileStorageReadService readable)
             throw new InvalidOperationException("The configured file storage cannot read files back.");
         Stream content;
-        try { content = await readable.OpenReadAsync(run.FeedbackFileUrl, ct); }
+        try { content = await readable.OpenReadAsync(path, ct); }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
             throw new NotFoundException("ImportFeedback", runId);
         }
         var stamp = (run.CompletedOn ?? run.CreatedOn).ToString("yyyyMMdd-HHmm");
-        return new ImportFeedbackFile(content, $"import-feedback-{stamp}.csv");
+        return new ImportFeedbackFile(content, $"import-details{label}-{stamp}.csv");
     }
 }
 

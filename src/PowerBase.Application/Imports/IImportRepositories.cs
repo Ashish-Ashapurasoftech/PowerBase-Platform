@@ -6,11 +6,16 @@ public interface IImportDefinitionRepository
 {
     Task<ImportDefinition?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default);
     Task<IReadOnlyList<ImportDefinitionListItem>> ListByDestinationAsync(long destinationTableId, CancellationToken ct = default);
+    /// <summary>Every import of an app, whichever table is its first.</summary>
+    Task<IReadOnlyList<ImportDefinitionListItem>> ListByAppAsync(long appId, CancellationToken ct = default);
+    Task<IReadOnlyList<ImportDefinition>> ListEntitiesByAppAsync(long appId, CancellationToken ct = default);
     /// <summary>The stored definitions of a destination table, for checking them against the tables' current fields.</summary>
     Task<IReadOnlyList<ImportDefinition>> ListEntitiesByDestinationAsync(long destinationTableId, CancellationToken ct = default);
     Task<long> CreateAsync(ImportDefinition definition, CancellationToken ct = default);
     Task UpdateAsync(ImportDefinition definition, CancellationToken ct = default);
     Task DeleteAsync(long id, long deletedBy, CancellationToken ct = default);
+    /// <summary>Deletes several imports in one statement.</summary>
+    Task DeleteManyAsync(IReadOnlyCollection<long> ids, long deletedBy, CancellationToken ct = default);
     Task SetAttentionAsync(long id, bool needsAttention, string? reason, CancellationToken ct = default);
     /// <summary>Definitions whose scheduled time has come (oldest first), at most <paramref name="take"/>.</summary>
     Task<IReadOnlyList<ImportDefinition>> ListDueAsync(DateTime nowUtc, int take, CancellationToken ct = default);
@@ -27,7 +32,14 @@ public interface IImportFileRepository
     Task<int> CountByUserAsync(long userId, CancellationToken ct = default);
     /// <summary>Uploads older than <paramref name="before"/> that were never imported, oldest first.</summary>
     Task<IReadOnlyList<ImportFile>> ListOlderThanAsync(DateTime before, int take, CancellationToken ct = default);
+    /// <summary>Keeps an uploaded file, which a run has used, until <paramref name="until"/> instead of letting the day-old clean-up take it.</summary>
+    Task RetainAsync(Guid publicId, DateTime until, CancellationToken ct = default);
+    /// <summary>Files a run used whose retention has ended, oldest first.</summary>
+    Task<IReadOnlyList<ImportFile>> ListRetentionEndedAsync(DateTime nowUtc, int take, CancellationToken ct = default);
 }
+
+/// <summary>What is left to delete of a run whose retention has ended: its details files and the snapshot that names the uploaded file.</summary>
+public sealed record ImportExpiredFiles(long RunId, string? FeedbackFileUrl, string DefinitionSnapshotJson, IReadOnlyList<string> TargetPaths);
 
 public interface IImportRunRepository
 {
@@ -62,6 +74,16 @@ public interface IImportRunRepository
     /// <summary>Sets the run's own counters to the sum of its tables' (so they agree however the run ended).</summary>
     Task SyncTotalsFromTargetsAsync(long runId, CancellationToken ct = default);
     /// <summary>Each table's share of a multi-table run, in the order saved (empty for a run into one table).</summary>
+    /// <summary>The history: one row per table of every run of the app that matches, newest first, one page of them.</summary>
+    Task<IReadOnlyList<ImportHistoryRow>> ListHistoryAsync(ImportHistoryQuery query, CancellationToken ct = default);
+    /// <summary>Where a table's details file for a run is kept, and the table's name, or null when there is none.</summary>
+    Task<(string Path, string TableName)?> GetTargetDetailsAsync(long runId, Guid tablePublicId, CancellationToken ct = default);
+    /// <summary>Runs that ended before <paramref name="cutoff"/> and whose files have not been deleted yet, oldest first.</summary>
+    Task<IReadOnlyList<ImportExpiredFiles>> ListWithExpiredFilesAsync(DateTime cutoff, int take, CancellationToken ct = default);
+    /// <summary>Records that the run's files were deleted at the end of their retention.</summary>
+    Task MarkFilesExpiredAsync(long runId, CancellationToken ct = default);
+    /// <summary>Records where a table's details file for the run is kept.</summary>
+    Task SetTargetDetailsAsync(long runId, byte targetIndex, string path, CancellationToken ct = default);
     Task<IReadOnlyList<ImportRunTargetItem>> ListTargetsAsync(long runId, CancellationToken ct = default);
     Task<IReadOnlyList<ImportRunIssueItem>> ListIssuesAsync(long runId, int take, CancellationToken ct = default);
     Task<int> CountIssuesAsync(long runId, CancellationToken ct = default);
@@ -88,9 +110,9 @@ public interface IImportNotifier
 }
 
 /// <summary>Counts produced by one committed chunk of source rows.</summary>
-public sealed record ImportTargetCounts(byte Index, long Inserted, long Updated, long Skipped, long Errored);
+public sealed record ImportTargetCounts(byte Index, long Inserted, long Updated, long Skipped, long Errored, long Unchanged = 0);
 
-public sealed record ImportChunkResult(long LastSourceId, long RowsRead, long Inserted, long Updated, long Skipped, long Errored);
+public sealed record ImportChunkResult(long LastSourceId, long RowsRead, long Inserted, long Updated, long Skipped, long Errored, long Unchanged = 0);
 
 /// <summary>Cross-tenant dispatch queue (control DB). Only the worker and the run starter use it.</summary>
 public interface IImportQueue
@@ -127,8 +149,9 @@ public interface IImportDataStore
     Task<Dictionary<string, long>> FindRecordIdsAsync(AppTable table, AppField field, IReadOnlyCollection<object> values, CancellationToken ct = default);
 
     /// <summary>Inserts all rows with one bulk copy in one transaction. Each row is a Fid → value map. Throws on any
-    /// row failure without writing anything, so the caller can bisect to isolate the offending rows.</summary>
-    Task InsertAsync(AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows,
+    /// row failure without writing anything, so the caller can bisect to isolate the offending rows. Returns the Record ID# each row was
+    /// given, in the order of <paramref name="rows"/>.</summary>
+    Task<IReadOnlyList<long>> InsertAsync(AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows,
         long createdBy, CancellationToken ct = default);
 
     /// <summary>Updates all rows (same set of fields in every row) with one bulk copy and one UPDATE in one transaction.

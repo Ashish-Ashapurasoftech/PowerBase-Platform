@@ -71,6 +71,10 @@ public sealed class ImportDefinitionChecker(
 
         var mappings = ImportJson.Deserialize<List<ImportFieldMapping>>(def.FieldMappingJson) ?? [];
         var conditions = ImportJson.Deserialize<FilterGroup>(def.ConditionsJson);
+        // Virtual columns are part of the import: they must still calculate, and mappings may use them as a source.
+        var (virtuals, virtualError) = ImportVirtual.Resolve(ImportConfigMapper.ToConfig(def, Guid.Empty).VirtualColumns, sourceFields, formulaEngine);
+        if (virtualError is not null) return Cap(virtualError);
+        if (virtuals.Count > 0) sourceFields = sourceFields.Concat(virtuals.Select(v => v.Field)).ToList();
         var sourceByFid = Live(sourceFields);
         var destByFid = Live(destination.Fields);
 
@@ -88,6 +92,13 @@ public sealed class ImportDefinitionChecker(
 
         if (MissingConditionField(conditions, sourceByFid) is { } missing)
             return Cap($"A field this import filters on was deleted (field {missing}).");
+        // A table's own filter reads the same source: a field it filters on can be deleted too.
+        var config = ImportConfigMapper.ToConfig(def, Guid.Empty);
+        if (MissingConditionField(config.TableConditions, sourceByFid) is { } missingOwn)
+            return Cap($"A field this import filters a table on was deleted (field {missingOwn}).");
+        foreach (var target in config.AdditionalTargets)
+            if (MissingConditionField(target.Conditions, sourceByFid) is { } missingTarget)
+                return Cap($"A field this import filters a table on was deleted (field {missingTarget}).");
         return null;
     }
 
@@ -136,7 +147,7 @@ public sealed class ImportDefinitionChecker(
     {
         if (m.SourceFid is not { } sourceFid || !sourceByFid.TryGetValue(sourceFid, out var src))
             return $"The source field for '{ImportTypeCompatibility.DisplayName(dest)}' was deleted.";
-        return anySourceType ? null : ImportTypeCompatibility.CheckMapping(src, dest);
+        return anySourceType || ImportVirtual.IsVirtualFid(sourceFid) ? null : ImportTypeCompatibility.CheckMapping(src, dest);
     }
 
     private string? FormulaProblem(ImportFieldMapping m, AppField dest, AppFieldSchema schema)

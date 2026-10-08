@@ -18,6 +18,10 @@ public class ImportRun
     public long Updated { get; set; }
     public long Skipped { get; set; }
     public long Errored { get; set; }
+    /// <summary>A merge matched the record but every value was already what the import would write: it was left alone.</summary>
+    public long Unchanged { get; set; }
+    /// <summary>When the run's details files and uploaded source file were deleted at the end of their retention (null: they still exist).</summary>
+    public DateTime? FilesExpiredOn { get; set; }
     public long LastCommittedSourceId { get; set; }
     public long? SourceMaxId { get; set; }
     /// <summary>A user asked for the running import to stop; the worker sees it when it records its next chunk.</summary>
