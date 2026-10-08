@@ -88,7 +88,7 @@ public class ImportRunAccessTests
 
         var file = await new GetImportFeedbackHandler(_access, _runs, _storage, User(Initiator)).HandleAsync(_run.PublicId, default);
 
-        file.FileName.Should().Be("import-feedback-20260309-1405.csv");
+        file.FileName.Should().Be("import-details-20260309-1405.csv");
         file.Content.Length.Should().Be(3);
     }
 

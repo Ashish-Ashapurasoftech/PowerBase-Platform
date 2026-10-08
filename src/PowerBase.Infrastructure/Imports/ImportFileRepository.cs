@@ -46,7 +46,22 @@ public sealed class ImportFileRepository(ITenantConnectionFactory connections, I
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         return (await conn.QueryAsync<ImportFile>(new CommandDefinition(
-            "SELECT TOP (@take) * FROM meta.ImportFile WHERE CreatedOn < @before ORDER BY CreatedOn",
+            "SELECT TOP (@take) * FROM meta.ImportFile WHERE CreatedOn < @before AND RetainedUntil IS NULL ORDER BY CreatedOn",
             new { before, take }, cancellationToken: ct))).AsList();
+    }
+
+    public async Task RetainAsync(Guid publicId, DateTime until, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition("UPDATE meta.ImportFile SET RetainedUntil = @until WHERE PublicId = @publicId",
+            new { publicId, until }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<ImportFile>> ListRetentionEndedAsync(DateTime nowUtc, int take, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        return (await conn.QueryAsync<ImportFile>(new CommandDefinition(
+            "SELECT TOP (@take) * FROM meta.ImportFile WHERE RetainedUntil IS NOT NULL AND RetainedUntil < @nowUtc ORDER BY RetainedUntil",
+            new { take, nowUtc }, cancellationToken: ct))).AsList();
     }
 }
