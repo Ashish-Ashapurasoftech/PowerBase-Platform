@@ -66,13 +66,15 @@ public static class CommonReportValidationHelpers
     /// <param name="validParentFieldIds">The parent table's Fids, when the filter is a Summary field's
     /// matching criteria — the only place "parentField" conditions mean anything. Null (reports and
     /// every other filter) refuses them.</param>
+    /// <param name="unlimitedDepth">True for a Summary field's matching criteria and a reference field's
+    /// dropdown filter, where groups may be nested to any depth; reports keep <see cref="MaxFilterTreeDepth"/>.</param>
     public static void ValidateFilterGroup(FilterGroup? group, HashSet<long> validFieldIds, IDictionary<string, string[]> errors,
-        int depth = 1, HashSet<long>? validParentFieldIds = null)
+        int depth = 1, HashSet<long>? validParentFieldIds = null, bool unlimitedDepth = false)
     {
         if (group is null)
             return;
 
-        if (depth > MaxFilterTreeDepth)
+        if (!unlimitedDepth && depth > MaxFilterTreeDepth)
         {
             AddError(errors, "filterTree", $"Filter groups may be nested at most {MaxFilterTreeDepth} levels deep.");
             return;
@@ -106,7 +108,7 @@ public static class CommonReportValidationHelpers
             }
 
             if (node.Group is { } sub)
-                ValidateFilterGroup(sub, validFieldIds, errors, depth + 1, validParentFieldIds);
+                ValidateFilterGroup(sub, validFieldIds, errors, depth + 1, validParentFieldIds, unlimitedDepth);
         }
     }
 
