@@ -153,6 +153,47 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
+    public async Task<IReadOnlyDictionary<long, Application.Records.ColumnTotal>> AggregateColumnsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<AppField> columns,
+        FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
+    {
+        var result = new Dictionary<long, Application.Records.ColumnTotal>();
+        var targets = columns.Where(c => c.Fid.HasValue).ToList();
+        if (targets.Count == 0) return result;
+
+        var parameters = new DynamicParameters();
+        var fieldLookup = BuildFieldLookup(fields);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+
+        // SUM ignores NULLs, so it already equals "blank counts as 0"; COUNT(col) is the non-blank
+        // count, and COUNT(*) the row count — together they let the caller pick either average.
+        var selects = new List<string> { "COUNT_BIG(*) AS totalRows" };
+        foreach (var f in targets)
+        {
+            var fid = (long)f.Fid!.Value;
+            var col = ResolveColumnName(f, fid);
+            selects.Add($"SUM(CAST({col} AS DECIMAL(38,4))) AS s{fid}");
+            selects.Add($"COUNT_BIG({col}) AS n{fid}");
+        }
+
+        var sql = $"SELECT {string.Join(", ", selects)} FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var row = (IDictionary<string, object?>)(await connection.QuerySingleAsync<dynamic>(new CommandDefinition(sql, parameters, cancellationToken: ct)));
+
+        var rowCount = Convert.ToInt64(row["totalRows"] ?? 0L);
+        foreach (var f in targets)
+        {
+            var fid = (long)f.Fid!.Value;
+            result[fid] = new Application.Records.ColumnTotal
+            {
+                Sum = row[$"s{fid}"] is { } s ? Convert.ToDecimal(s) : 0m,
+                NonBlankCount = Convert.ToInt64(row[$"n{fid}"] ?? 0L),
+                RowCount = rowCount,
+            };
+        }
+        return result;
+    }
+
     public async Task<bool> ExistsAsync(AppTable table, long recordId, CancellationToken ct = default)
     {
         var sql = $"""
@@ -1861,6 +1902,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private static (object? start, object? end) SplitRangeValue(object? value)
     {
         if (value is null) return (null, null);
+        // A '{"start":..,"end":..}' JSON string (e.g. a client that submitted the field's raw default)
+        // must be split like the object form — never bound whole into a single DATE/DECIMAL column.
+        if (value is string js && js.TrimStart().StartsWith('{'))
+        {
+            try { using var doc = JsonDocument.Parse(js); value = doc.RootElement.Clone(); }
+            catch (JsonException) { /* not JSON — falls through to the scalar fallback */ }
+        }
         if (value is JsonElement je)
         {
             var startVal = je.TryGetProperty("start", out var s) ? (object?)s.ToString() : null;
