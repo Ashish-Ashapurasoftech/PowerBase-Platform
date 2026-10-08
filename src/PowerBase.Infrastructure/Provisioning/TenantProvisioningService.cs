@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Tenants.Commands.CreateTenant;
 using PowerBase.Infrastructure.Migrations;
@@ -17,45 +18,61 @@ public class TenantProvisioningService : ITenantProvisioningService
     private readonly ITenantRepository _tenantRepo;
     private readonly IConfiguration _configuration;
     private readonly ISecretStore _secretStore;
+    private readonly ILogger<TenantProvisioningService>? _logger;
 
     public TenantProvisioningService(
         IControlConnectionFactory controlFactory,
         ITenantConnectionResolver resolver,
         ITenantRepository tenantRepo,
         IConfiguration configuration,
-        ISecretStore secretStore)
+        ISecretStore secretStore,
+        ILogger<TenantProvisioningService>? logger = null)
     {
         _controlFactory = controlFactory;
         _resolver = resolver;
         _tenantRepo = tenantRepo;
         _configuration = configuration;
         _secretStore = secretStore;
+        _logger = logger;
     }
 
-    public async Task ProvisionAsync(long tenantId, TenantServerConfig? serverConfig = null, CancellationToken ct = default)
+    public async Task ProvisionAsync(
+        long tenantId,
+        TenantServerConfig? serverConfig = null,
+        string? elasticPoolName = null,
+        string? serviceObjective = null,
+        CancellationToken ct = default)
     {
         var databaseName = $"Powerbase_{tenantId}";
+        var effectivePool = elasticPoolName ?? serverConfig?.ElasticPoolName;
+        var effectiveObjective = serviceObjective ?? serverConfig?.ServiceObjective;
 
         try
         {
             if (serverConfig is not null)
-                await ProvisionOnTenantServerAsync(tenantId, databaseName, serverConfig, ct);
+                await ProvisionOnTenantServerAsync(tenantId, databaseName, serverConfig, effectivePool, effectiveObjective, ct);
             else
-                await ProvisionOnControlServerAsync(tenantId, databaseName, ct);
+                await ProvisionOnControlServerAsync(tenantId, databaseName, effectivePool, effectiveObjective, ct);
 
             _resolver.Invalidate(tenantId);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "Failed to provision tenant database {DatabaseName} for Tenant {TenantId}", databaseName, tenantId);
             try { await _tenantRepo.UpdateProvisioningAsync(tenantId, "Failed", databaseName, 0, ct: ct); }
             catch { /* don't obscure original exception */ }
             throw;
         }
     }
 
-    private async Task ProvisionOnControlServerAsync(long tenantId, string databaseName, CancellationToken ct)
+    private async Task ProvisionOnControlServerAsync(
+        long tenantId,
+        string databaseName,
+        string? elasticPoolName,
+        string? serviceObjective,
+        CancellationToken ct)
     {
-        await CreateDatabaseAsync(_controlFactory.ConnectionString, databaseName, ct);
+        await CreateDatabaseAsync(_controlFactory.ConnectionString, databaseName, elasticPoolName, serviceObjective, ct);
         var tenantCs = BuildConnectionString(_controlFactory.ConnectionString, databaseName);
         var migrationsPath = FindTenantMigrationsPath();
         await MigrationRunner.RunAsync(tenantCs, migrationsPath, $"Tenant {tenantId}", ct);
@@ -64,12 +81,18 @@ public class TenantProvisioningService : ITenantProvisioningService
             tenantId, "Ready", databaseName, CurrentSchemaVersion, ct: ct);
     }
 
-    private async Task ProvisionOnTenantServerAsync(long tenantId, string databaseName, TenantServerConfig cfg, CancellationToken ct)
+    private async Task ProvisionOnTenantServerAsync(
+        long tenantId,
+        string databaseName,
+        TenantServerConfig cfg,
+        string? elasticPoolName,
+        string? serviceObjective,
+        CancellationToken ct)
     {
         var adminCs = BuildServerConnectionString(cfg);
 
-        // Step 1: create the database using the supplied admin credentials.
-        await CreateDatabaseAsync(adminCs, databaseName, ct);
+        // Step 1: create the database using the supplied admin credentials and pool/serverless options.
+        await CreateDatabaseAsync(adminCs, databaseName, elasticPoolName, serviceObjective, ct);
 
         // Step 2: run baseline migrations as admin.
         var adminTenantCs = BuildConnectionString(adminCs, databaseName);
@@ -163,7 +186,12 @@ public class TenantProvisioningService : ITenantProvisioningService
         return Convert.ToBase64String(bytes) + "Pb1!";
     }
 
-    private static async Task CreateDatabaseAsync(string serverConnectionString, string databaseName, CancellationToken ct)
+    private async Task CreateDatabaseAsync(
+        string serverConnectionString,
+        string databaseName,
+        string? explicitElasticPoolName,
+        string? explicitServiceObjective,
+        CancellationToken ct)
     {
         var masterCs = new SqlConnectionStringBuilder(serverConnectionString)
         {
@@ -180,11 +208,69 @@ public class TenantProvisioningService : ITenantProvisioningService
 
         if (!exists)
         {
-            // Database name is system-generated (Powerbase_{id}) — no user input involved.
-            var createSql = $"CREATE DATABASE [{databaseName}]";
+            var isAzure = await IsAzureSqlDatabaseAsync(connection, serverConnectionString, ct);
+            var createSql = BuildCreateDatabaseSql(databaseName, isAzure, explicitElasticPoolName, explicitServiceObjective);
+
+            _logger?.LogInformation("Executing tenant database creation for '{DatabaseName}' (Azure: {IsAzure}): {Sql}", databaseName, isAzure, createSql);
+
             await using var createCmd = new SqlCommand(createSql, connection);
-            createCmd.CommandTimeout = 120;
+            createCmd.CommandTimeout = 180;
             await createCmd.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    private string BuildCreateDatabaseSql(
+        string databaseName,
+        bool isAzure,
+        string? explicitPoolName,
+        string? explicitServiceObjective)
+    {
+        var safeDbName = databaseName.Replace("]", "]]");
+
+        if (!isAzure)
+        {
+            return $"CREATE DATABASE [{safeDbName}]";
+        }
+
+        // 1. Elastic Pool: explicit override > appsettings (e.g. SQLElasticPool)
+        var poolName = !string.IsNullOrWhiteSpace(explicitPoolName)
+            ? explicitPoolName.Trim()
+            : _configuration["DatabaseProvisioning:ElasticPoolName"]?.Trim();
+
+        // 2. Serverless / Service Objective: explicit override > appsettings (e.g. GP_S_Gen5_1)
+        var serviceObjective = !string.IsNullOrWhiteSpace(explicitServiceObjective)
+            ? explicitServiceObjective.Trim()
+            : _configuration["DatabaseProvisioning:ServiceObjective"]?.Trim();
+
+        if (!string.IsNullOrEmpty(poolName))
+        {
+            var safePoolName = poolName.Replace("]", "]]");
+            return $"CREATE DATABASE [{safeDbName}] ( SERVICE_OBJECTIVE = ELASTIC_POOL ( name = [{safePoolName}] ) )";
+        }
+
+        if (!string.IsNullOrEmpty(serviceObjective))
+        {
+            var safeObjective = serviceObjective.Replace("'", "''");
+            return $"CREATE DATABASE [{safeDbName}] ( SERVICE_OBJECTIVE = '{safeObjective}' )";
+        }
+
+        return $"CREATE DATABASE [{safeDbName}]";
+    }
+
+    private static async Task<bool> IsAzureSqlDatabaseAsync(SqlConnection connection, string connectionString, CancellationToken ct)
+    {
+        if (connectionString.Contains(".database.windows.net", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        try
+        {
+            await using var cmd = new SqlCommand("SELECT CAST(SERVERPROPERTY('EngineEdition') AS INT)", connection);
+            var edition = await cmd.ExecuteScalarAsync(ct);
+            return edition is int ed && ed == 5; // 5 = SQL Database (Azure SQL Database)
+        }
+        catch
+        {
+            return false;
         }
     }
 

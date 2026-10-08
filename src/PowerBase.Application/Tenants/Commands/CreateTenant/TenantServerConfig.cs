@@ -5,4 +5,7 @@ public record TenantServerConfig(
     int Port,
     string AdminLogin,
     string AdminPassword,
-    bool Encrypt);
+    bool Encrypt,
+    string? ElasticPoolName = null,
+    string? ServiceObjective = null);
+

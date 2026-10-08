@@ -54,9 +54,11 @@ public class AdminTenantsController : ControllerBase
     public async Task<IActionResult> Create([FromBody] CreateTenantRequest request, CancellationToken ct)
     {
         var serverConfig = request.ServerConfig is { } sc
-            ? new TenantServerConfig(sc.Host, sc.Port, sc.AdminLogin, sc.AdminPassword, sc.Encrypt)
+            ? new TenantServerConfig(sc.Host, sc.Port, sc.AdminLogin, sc.AdminPassword, sc.Encrypt, sc.ElasticPoolName, sc.ServiceObjective)
             : null;
-        var result = await _createTenantHandler.HandleAsync(new CreateTenantCommand(request.Name, serverConfig), ct);
+        var result = await _createTenantHandler.HandleAsync(
+            new CreateTenantCommand(request.Name, serverConfig, request.ElasticPoolName, request.ServiceObjective), ct);
+
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<object>(new
         {
             publicId = result.TenantPublicId,

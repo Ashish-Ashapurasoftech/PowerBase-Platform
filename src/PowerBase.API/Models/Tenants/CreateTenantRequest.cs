@@ -4,6 +4,8 @@ public class CreateTenantRequest
 {
     public string Name { get; set; } = string.Empty;
     public CreateTenantServerConfigRequest? ServerConfig { get; set; }
+    public string? ElasticPoolName { get; set; }
+    public string? ServiceObjective { get; set; }
 }
 
 public class CreateTenantServerConfigRequest
@@ -13,4 +15,6 @@ public class CreateTenantServerConfigRequest
     public string AdminLogin { get; set; } = string.Empty;
     public string AdminPassword { get; set; } = string.Empty;
     public bool Encrypt { get; set; } = true;
+    public string? ElasticPoolName { get; set; }
+    public string? ServiceObjective { get; set; }
 }

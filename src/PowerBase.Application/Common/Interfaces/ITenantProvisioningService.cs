@@ -10,5 +10,10 @@ public interface ITenantProvisioningService
     /// When <paramref name="serverConfig"/> is provided the database is provisioned on the
     /// tenant's own Azure SQL server; otherwise the shared control server is used.
     /// </summary>
-    Task ProvisionAsync(long tenantId, TenantServerConfig? serverConfig = null, CancellationToken ct = default);
+    Task ProvisionAsync(
+        long tenantId,
+        TenantServerConfig? serverConfig = null,
+        string? elasticPoolName = null,
+        string? serviceObjective = null,
+        CancellationToken ct = default);
 }

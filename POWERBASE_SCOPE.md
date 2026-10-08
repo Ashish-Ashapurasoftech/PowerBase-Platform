@@ -15,20 +15,32 @@
 
 ## MILESTONE PLAN
 
-| M# | Duration | Key Scope | Payment |
-|----|----------|-----------|---------|
-| M0 | — | Advance | 5% |
-| M1 | 3 months | Figma, Tenant, App/User/Table/Field Mgmt, Basic Formula Fields, Table+Summary Reports, Basic Form Rules, Audit Logs | 30% |
-| M2 | 1 month | Connected Tables, Summary+Lookup Fields, Copy App, QBL Import, Formula/Date as Reference, Advanced Form Rules | 10% |
-| M3 | 1 month | Advanced Roles+Groups, Split Admin Capabilities, Column Type Conversion, Chart Reports, Conditional Formatting, Report Link in Forms, Azure Global Search | 10% |
-| M4 | 1 month | Archive/Restore, Automations/Pipelines, Master App Deployment, External Tenant DB | 20% |
-| M5 | 1 month | Data Migration, User Tokens, Public APIs (DoQuery, ImportFromCSV, CRUD, Reports, Fields) | 20% |
-| M6 | 1 month | Go Live + 3-month Hypercare | 5% |
+| M# | Duration | Key Scope | Payment | Status | % Done | Remaining Blockers / Open Items |
+|----|----------|-----------|---------|:---:|:---:|---|
+| M0 | — | Advance | 5% | **COMPLETE** | **100%** | Baseline established. |
+| M1 | 3 months | Figma, Tenant, App/User/Table/Field Mgmt, Basic Formula Fields, Table+Summary Reports, Basic Form Rules, Audit Logs | 30% | **IN PROGRESS** | **92%** | Centrally managed error catalog (#3); Sensitive-app approval UI (#4). |
+| M2 | 1 month | Connected Tables, Summary+Lookup Fields, Copy App, QBL Import, Formula/Date as Reference, Advanced Form Rules | 10% | **IN PROGRESS** | **76%** | Copy App engine (#19, #20); Connected Tables (#26); QBL import upload UI wizard (#22, #23). *(Lookups, Summaries & Reference Filters closed)* |
+| M3 | 1 month | Advanced Roles+Groups, Split Admin Capabilities, Column Type Conversion, Chart Reports, Conditional Formatting, Report Link in Forms, Azure Global Search | 10% | **IN PROGRESS** | **88%** | Column type conversion edge cases; Sidebar navigation module (#40); Code Pages deferred to M5. |
+| M4 | 1 month | Archive/Restore, Automations/Pipelines, Master App Deployment, External Tenant DB | 20% | **IN PROGRESS** | **82%** | Record Restore UI (#42); Master/Child propagation engine (#21); External DB deferred post-M6. *(PowerFlows/Pipelines engine & UI closed)* |
+| M5 | 1 month | Data Migration, User Tokens, Public APIs (DoQuery, ImportFromCSV, CRUD, Reports, Fields) | 20% | **IN PROGRESS** | **60%** | Reusable Template Import (#47); Row-level feedback files (#48); External Public Developer API portal (#49). |
+| M6 | 1 month | Go Live + 3-month Hypercare | 5% | **PENDING** | **0%** | Dependent on completion of M1–M5. |
+| **TOTAL** | — | **Full Contractual Scope** | **100%** | **IN PROGRESS** | **~80%** | **Weighted overall codebase completion.** |
 
-**[NEW] Deferred (not in current milestones — need separate planning + budget):**
+**[NEW] Approved Scope Additions (resolved in scope discussions; milestone/budget allocation needed):**
+- **Action Buttons** (Signature, File, Prompt, Data variants; July 2 URL & Multi-Capture updates) — Core M1+, advanced July 2 additions
+- **Template-Driven File Import & Table-to-Table Import Engine** (Excel/CSV multi-target, virtual formula columns, feedback reports) — Approved additions
+- **Sidebar Navigation Redesign** (Configurable navigation items, custom groups, report hovers, add-record links) — Approved addition
+- **Snapshot Fields** (One-time creation copy, server-side read-only, bulk async re-initialization) — Approved addition
+- **Test As User / Test As Role** (Live permission simulation with banner and real-admin audit logging) — Approved addition / Phase 2
+- **Centrally Managed Handled Error Messages** (English error catalog with tenant-wide propagation) — Approved addition
+
+**[NEW] Deferred & Future Scope (outside current contract — separate planning + budget):**
 - Super Admin / Realm Admin Panel (users, storage, billing, usage analytics) — suggest M3 planning session
 - Full Backup System (daily snapshots, schema revert, data revert, point-in-time restore) — separate milestone required
 - Cross-tenant Master App — future milestone post-M6
+- Code Pages (client-side custom web app execution sandbox) — depends on M5 Public API
+- Users as a System Table (Phase 2 app-level user profile table over master user identity — estimated 4 days)
+- Partial Connected Tables (filtered/relationship-aware bidirectional sync) — future roadmap
 
 ---
 
@@ -37,6 +49,12 @@
 ### App Management (M1)
 - Apps page: list, count, search, export CSV, delete (single or bulk)
 - App Settings: home, branding, navigation, users/groups, roles/permissions, app variables, audit & logs
+
+### Centrally Managed Handled Error Messages [PB] (Approved Addition)
+- All handled (non-system) English error messages are centrally administered in the platform admin panel.
+- Text modifications propagate automatically across all apps in the tenant without requiring code changes or redeployments.
+- Raw system exceptions (e.g. unhandled database connection failures, 500 runtime exceptions) remain system-generated and non-editable.
+- Covers handled validation messages, operational constraints, and permission denial notices.
 
 ### Limit App Access **[UPDATED]**
 - Realm-level approval status per user; only "Approved" users can access sensitive apps
@@ -242,6 +260,17 @@ Rules:
 - Tokens: revoke instantly, rotate without changing password, disable without affecting UI access
 - Admin Console shows: Token ID, name, description, owner, created date, last used, active status, apps used in
 
+### Test As User / Test As Role [PB] (Phase 2 / Approved Addition)
+Enables administrators to preview and verify exactly what a specific user or role can see and do within an app:
+- **Two Simulation Modes:**
+  - **Test As Specific User:** Simulates the exact user-specific security context, evaluating group memberships, user-scoped record rules (e.g., `AssignedTo = CurrentUser()`), and personal filters.
+  - **Test As Role:** Simulates generic role-based permissions (e.g., Participant, Viewer) without tying to an individual person's identity.
+- **Architectural Safeguards:**
+  - **No Session Hijacking:** The system reuses the real server-side authorization engine directly in-memory; it does NOT log in as the target user or require/expose their credentials.
+  - **Persistent Visual Banner:** A permanent, prominent banner displays across the top of the entire UI ("You are testing as [User/Role]") with a clear "Exit Test Mode" button.
+  - **Audit Attribution:** Access to simulation mode is gated to an explicit administrative capability (`CanTestAsUser`). All queries and actions performed while in Test Mode are logged in the audit trail explicitly naming the real administrator who initiated the test.
+  - **Security Parity:** Action Button permission exceptions, record-level security, and field visibility rules remain strictly active during simulation.
+
 ---
 
 ## TABLES & RELATIONSHIPS
@@ -394,13 +423,25 @@ Default: Restrict for delete, Cascade Update for key changes. Both configurable 
 
 | Type | Description | Notes |
 |------|-------------|-------|
-| Text | Free-form | Unicode, configurable max length |
-| Number | Integer/decimal | No formatting stored |
-| Decimal | High-precision | For financial/calculated values |
-| Boolean | True/False | Stored as 0/1 |
-| Date | Date only | ISO format, no time component |
-| DateTime | Date + time | UTC storage |
-| Phone Number | Smart text | See Phone Handling |
+| Text | Free-form single-line | Unicode, configurable max length |
+| Multi-line Text | Free-form multiline | Unicode, supports line breaks, configurable rows |
+| Rich Text | Formatted text | Markdown/HTML subset for styled notes and descriptions |
+| Number | Integer/decimal | Numeric storage without formatting |
+| Decimal | High-precision | Configurable decimal places, financial/calculated values |
+| Currency | High-precision currency | Configurable currency symbol, symbol position, decimals, thousands separator |
+| Rating | Visual rating | Numeric value presented as stars/scale |
+| Percent | High-precision percent | Numeric value stored as decimal, formatted as percentage |
+| Boolean | Checkbox (True/False) | Stored as 0/1 |
+| Date | Date only | ISO format (YYYY-MM-DD), default Today, `t`/`[`/`]` keyboard shortcuts |
+| DateTime | Date + time | UTC storage, tenant/app timezone display conversion |
+| Time of Day | Time only | HH:MM / HH:MM:SS format |
+| Duration | Time span | Stored as seconds/milliseconds; displayed in named units (days, hours, minutes, seconds) |
+| Phone Number | Smart text | Preserves punctuation; normalized digits for SMS/telephony integration |
+| Email Address | Validated email | RFC format validation, clickable mailto |
+| URL | Web link | Protocol enforcement (http/https), clickable link, iframe display toggle |
+| Formula URL | Dynamic web link | Formula-generated URL with link text and window target |
+| Multiple Choice | Single select from list | Configurable choices list, strict validation |
+| Multi-select | Multi-select from list | List-type field supporting multiple selections and list operators |
 
 All types: UTF-8/Unicode compliant (Hebrew, Gujarati, Hindi, Arabic, etc.)
 
@@ -507,6 +548,13 @@ Any change to field definition automatically recorded: who, when, what changed, 
 Logical fields: Date Range (Start+End), Numeric Range (Min/Max), Age Range, Period Range
 Single logical field; stored as structured values; queryable; usable in formulas/filters
 
+### Snapshot Fields [PB] (Approved Addition)
+A scalar field that captures a one-time copy of a selected lookup or formula value upon record creation:
+- **One-Time Capture:** When a record is first created, the engine reads the source field's current value and copies it into the snapshot scalar column.
+- **Server-Side Read-Only:** Once populated, the field is permanently read-only across UI, API, import, and automations. It does NOT update when the source parent record or formula changes.
+- **Null Safety:** If the source value is blank at creation time, the snapshot field remains blank.
+- **Bulk Re-initialization:** If initial data was incorrect or a structural change requires updating existing records, authorized administrators can trigger an audited, asynchronous background job to re-evaluate and re-populate snapshot values across existing records.
+
 ---
 
 ## REPORTS (M1 table/summary, M3 charts)
@@ -589,6 +637,12 @@ Chart interactions that modify data trigger: form rules, validation logic, check
 - At runtime: reads report link field → extracts source value → filters target table → displays matching records (auto, no reload, per record)
 - Embedded report types: Child list (relationship-based) | Report Link list (field-to-field mapping)
 - Reports tied to tables (not apps); filtering always table-to-table
+
+### Quickbase Form Migration & Rule-Construct Mapping [PB] (M2)
+Quickbase applications contain two distinct, incompatible form architectures: Legacy Forms and New Dynamic Forms.
+- **Mapping Strategy:** Rather than maintaining two separate form engines in PowerBase, the QBL importer performs **rule-construct mapping**.
+- **Unified Translation:** Every recognized legacy rule construct (including legacy field property overrides and legacy field-change triggers) is translated directly into unified PowerBase reactive form rules and value-change triggers.
+- **Reconciliation & Reporting:** Any legacy construct that cannot be cleanly mapped is documented in an import translation report with the form name, field ID, and reason, ensuring zero silent data or rule loss.
 
 ---
 
@@ -869,11 +923,18 @@ All steps happen in a single runtime session without save/refresh.
 | Automations | Record-scoped | Cross-table, bulk, loop, query any table [PB] |
 | Data hosting | Vendor only | Vendor or client's own Azure [PB] |
 | **[NEW]** Master-owned element override | N/A | Child can detach or ignore specific Master updates [PB] |
+| **[NEW]** Action Buttons | Basic rich text links / URL buttons | Native Action Buttons (Signature, File, Prompt, Data) with narrow permission exceptions and in-place reactive updates [PB] |
+| **[NEW]** Snapshot Fields | Workaround via pipelines/webhooks | Native field type; snapshots lookup value at creation, server read-only, bulk re-init [PB] |
+| **[NEW]** Test As Mode | Test role only (basic) | Test As Specific User and Test As Role; reuses real engine; banner + admin audit [PB] |
+| **[NEW]** Sidebar Navigation | Auto-generated tables only | Independently managed navigation module; custom names, groups, report hovers, add-record links [PB] |
+| **[NEW]** Template Imports | Manual CSV import only | Multi-target Excel/CSV templates with virtual formula columns and partial commit error feedback [PB] |
+| **[NEW]** App User Profiles | Separate manual table required | Buildable Users table per app over central immutable Master User identity (Phase 2) [PB] |
+| **[NEW]** Custom Code Pages | Unrestricted or iframe | Session-API authenticated, CSP-secured, Monaco-integrated Code Pages [PB] |
 
 ---
 
 ## SHARED FILTER ENGINE (Core Infrastructure) **[UPDATED]**
-Single filter engine used by: reports, conditional summaries, reference dropdown filtering
+Single filter engine used by: reports, conditional summaries, reference dropdown filtering, table imports, and notifications
 Stored as JSON: groups (AND/OR) + conditions (field/operator/valueSource) + valueSource (constant or "from another field")
 Runtime: Filter JSON → query compiler → SQL
 Supports: nesting, dynamic values from current record/form, cross-table comparisons
@@ -881,3 +942,189 @@ Supports: nesting, dynamic values from current record/form, cross-table comparis
 **[NEW] Type-awareness requirement:** All filter builder surfaces must dynamically filter operator lists and comparable field lists based on the selected field's data type. Incompatible combinations are never shown to the user.
 
 **[NEW] Runtime Variables (planned, post-M2):** Filter conditions will support system-context values (current user, current date, current user's role/group) as value sources. Not in M2 scope. Milestone TBD.
+
+---
+
+## ACTION BUTTONS [PB] (Approved Addition)
+
+Action Buttons allow users to perform targeted, single-click operations that write directly to specific fields, prompt for input, capture signatures, or upload files without navigating through standard form editing flows.
+
+### Four Button Variants
+| Variant | Identifier | Behavior & Data Flow | Target Field Type |
+|---|---|---|---|
+| **Signature Button** | `SIGNATURE` | Opens an interactive signature pad modal; captures signature vector/image, saves to Azure Blob Storage, and writes the secure file URL to the target field. | File / Attachment |
+| **File Button** | `FILE` | Opens a file picker / dropzone dialog; uploads file to Blob Storage with configurable timestamp/naming prefix and writes reference to the target field. | File / Attachment |
+| **Prompt Button** | `PROMPT` | Pops a centered modal dialog prompting the user for one or more inputs (free text, choice dropdown, number, date); writes the entered value(s) into the configured target field(s). | Text, Choice, Number, Date |
+| **Data Button** | `DATA` | Performs an immediate, non-interactive write of a preconfigured static value or formula-evaluated result directly into the target field. | Any compatible scalar field |
+
+### Critical Behavioral Rules
+1. **Rule 1 — Works Without General Edit Permission (Privileged Narrow Write):**
+   - A user who has **View-Only** table permission can still execute a configured Action Button if granted button execution access in their role.
+   - The server authorizes this as a narrow, preconfigured write exclusively to the designated target field(s).
+   - Record-level security still applies: if the record is invisible to the user, they cannot execute the button against it.
+   - All database constraints (e.g. required, unique, type) are enforced server-side.
+2. **Rule 2 — No Page Refresh (In-Place Update):**
+   - Clicking an Action Button updates the record in place reactively via Angular state/signals.
+   - The form and surrounding lists remain uninterrupted; no page reload occurs.
+3. **Rule 3 — Referenceable in Formula Fields (Dynamic & Conditional Buttons):**
+   - Formula fields can generate dynamic Action Buttons using formula functions (e.g., `ActionButton("Approve", "btn_approve_12", "green")`).
+   - Enables conditional button labels, colors, disabled states, and dynamic destination parameters based on in-memory record state.
+
+### Modal & Dialog Save-State Behavior (July 2 Update)
+- All prompt, file, and signature interactions display within a centered, responsive modal dialog.
+- **Unsaved Form State Preservation:** Triggering an Action Button dialog while on an unsaved record form preserves all dirty/unsaved form inputs in client memory.
+- **Navigation Safety:** If an Action Button triggers an external URL or navigation redirect:
+  - If configured to open in a new tab/window (`_blank`), the current form remains unchanged.
+  - If navigating in the same window, a browser confirmation dialog ("You have unsaved changes. Leave without saving?") warns the user before abandoning state.
+
+### External URL Mode (July 2 Update)
+Enables sending an Action Button link to external, unauthenticated third parties (e.g., collecting an external vendor signature or client confirmation via email):
+- **Per-Button Configuration:** Toggle between `PowerBase-Only` (default, session-authenticated) and `External URL-Accessible`.
+- **Public Controller Endpoint:** Generates a secure, tokenized URL (e.g. `https://app.powerbase.com/action?token={secure_hash}`).
+- **Mandatory Password Gate:** When External URL Mode is enabled, a **Password Gate is strictly required** (static passphrase, formula-generated password, or reference to a record field). The external user cannot trigger the write without entering the correct password.
+- **Server-Side Security & Audit:** Write scope remains strictly restricted to the preconfigured target field(s). The audit log attributes the write to an external actor identified by IP address, timestamp, and token identifier.
+
+### Multi-Capture Composition (July 2 Update)
+Allows combining multiple sequential capture steps into a single button click flow rather than forcing builders to create multiple buttons:
+- **Sequence Composition:** Builders configure an ordered list of capture elements (e.g., Step 1: Text Prompt for "Approval Reason" → Step 2: Checkbox Confirmation for "Terms Accepted" → Step 3: Signature Pad for "Signer").
+- **Design-Time Validation:** The system strictly rejects any configuration where two capture elements in the sequence write to the same target field.
+- **Transactional Commit:** All values in the multi-capture sequence commit together in a single atomic server-side write upon completion.
+
+---
+
+## TABLE-TO-TABLE IMPORT [PB] (Approved Addition)
+
+Saved, repeatable import configurations that move and synchronize data between any two accessible tables within the same tenant.
+
+### Core Execution Modes
+| Mode | Behavior | Conflict & Duplicate Handling |
+|---|---|---|
+| **Copy (Append)** | Reads records matching the source filter and inserts them as new records in the destination table. | Generates new system Record IDs; does not check for existing matches unless unique constraints apply. |
+| **Merge (Upsert)** | Compares source records against destination records matching on a designated **Unique Destination Key Field**. | If matching destination key exists → updates configured fields. If no match → inserts new record. If duplicate keys exist in destination → fails before writing. |
+
+### Configuration Capabilities
+- **Source Filtering:** Uses the Shared Filter Engine to restrict which source records are included.
+- **Field Mapping:**
+  - **Dynamic Field Mapping:** Maps source fields to destination fields by Field ID (FID).
+  - **Static Defaults:** Assigns constant fallback or default values to destination fields.
+  - **Virtual Columns (On-the-Fly Formula Mapping):** Builders write PBL formula expressions that evaluate at import time (e.g., combining `FirstName` + `LastName`, or formatting phone numbers) before inserting into the destination table.
+- **Per-Column Import Options:**
+  - `Remove Duplicates`: Deduplicates input records based on the selected column.
+  - `Require Field`: Rejects source records where the specified column is blank.
+  - `Ignore Blanks`: Does not overwrite existing destination values if the source value is blank.
+
+### Operational Resilience & Integrity
+- **Broken Field Detection:** If a mapped source field is later renamed or modified, mapping persists safely by FID. If a mapped field is deleted, the import configuration is automatically flagged as `Needs Attention` before the next run rather than silently corrupting data.
+- **Asynchronous Execution:** Imports run as background jobs managed by Azure Service Bus / background workers, preventing HTTP request timeouts.
+- **Row-Level Commits & Error Feedback:**
+  - Valid rows commit successfully in batches; bad rows do not block good rows.
+  - An interactive downloadable CSV feedback file is generated containing all failed source rows along with exact column-level validation rejection reasons.
+- **Triggers:** Saved imports can be executed manually via UI, scheduled on a recurring cron timer, invoked via Public API, or triggered from an Automation Pipeline step.
+- **Audit Logging:** Every import run logs source file/table references, user identity, row counts, and error summaries.
+
+---
+
+## TEMPLATE-DRIVEN FILE IMPORT (EXCEL / CSV) [PB] (Approved Addition)
+
+A high-performance, reusable file import engine that allows builders to configure, save, and execute standardized spreadsheet uploads.
+
+### Core Features
+- **Multi-Target Table Mapping:** A single Excel workbook (or multi-worksheet file) can map to multiple destination tables in a single import run (e.g., sheet 1 to `Customers`, sheet 2 to `Invoices`).
+- **Worksheet & Header Positioning:** Configurable worksheet name, start row, header row, and column mapping by either header name or positional index (A, B, C...).
+- **Filter Formulas:** Pre-import PBL filter expressions determine whether a row qualifies for processing before database insertion.
+- **Virtual Columns:** Allows on-the-fly formula transformations during CSV/Excel ingestion.
+- **Duplicate & Blank Policy:** Configurable per-column options for handling duplicates (first wins vs. abort) and blank values.
+- **Completion Notifications:** Configurable email notification sent upon background job completion with summary metrics (rows inserted, updated, rejected) and a direct link to download the error feedback report.
+- **Shared Engine:** Built on the exact same core ingestion pipeline as Table-to-Table imports, ensuring identical validation, batching, and error reporting behaviors.
+
+---
+
+## PAGES: DASHBOARD PAGES & CODE PAGES [PB] (M3 / Deferred)
+
+A unified presentation model decoupling custom dashboarding and developer code from raw database tables.
+
+### Unified Pages Architecture
+- All pages are managed in the App Pages registry with metadata: `PageId`, `AppId`, `Title`, `Slug`, `PageType` (`Dashboard` or `CodePage`), `RolePermissions`, `CreatedBy`, `ModifiedBy`.
+- Supports versioning (`PageVersion`), change notes, draft vs. published states, and full audit tracking.
+
+### 1. Dashboard Pages (M3+)
+- Drag-and-drop canvas designed for operational reporting and data visualization.
+- **Widget Ecosystem:**
+  - Embedded Table Reports (with search, quick-peek, and master-detail)
+  - Embedded Chart Reports (Bar, Line, Pie, Gauge, Waterfall)
+  - KPI Metric Cards (single-value aggregates, trends)
+  - Global Page Filters (interactive dropdowns connected to the Shared Filter Engine that filter multiple widgets simultaneously)
+  - Text & Markdown guidance tiles
+
+### 2. Code Pages (Deferred / Requires M5 Public API)
+- Enables developers to write custom web applications (HTML, JavaScript, CSS) hosted directly within the PowerBase application chrome.
+- **Security & Authorization Sandbox:**
+  - **Same-Origin Session API:** Code Pages execute in the browser and interact with PowerBase data exclusively through the same-origin authenticated Public API using the logged-in user's session.
+  - **Server-Side Enforcement:** The backend re-validates all permissions per API call; a Code Page cannot bypass record-level security, table permissions, or field restrictions.
+  - **Content Security Policy (CSP):** Strict script-src and connect-src policies with administrative CDN domain allowlists.
+  - **Sanitization & Quotas:** Enforced code file size limits, HTML sanitization, and global tenant-level enablement toggles.
+- **Developer Experience:** Integrated Monaco code editor with syntax highlighting, live preview, version diffs, and instant rollback.
+
+---
+
+## SIDEBAR NAVIGATION REDESIGN [PB] (Approved Addition)
+
+Replaces automatic table listing with an independently managed, highly customizable navigation structure.
+
+### Navigation Architecture
+- **Dedicated Navigation Editor:** Builders configure the navigation hierarchy in App Settings without altering table schemas.
+- **Supported Navigation Items:**
+  1. **Table Item:** Links to a table default view, with an optional hover dropdown revealing child shared reports.
+  2. **Report Item:** Direct navigation link to a specific shared table, summary, or chart report.
+  3. **Direct Add Record Item:** One-click action item that opens the record creation modal for a designated table.
+  4. **External URL Item:** Links to external portals, documentation, or intranet systems.
+  5. **Expandable Group Item:** Collapsible section header organizing related tables and reports into logical categories.
+- **Advanced Capabilities:**
+  - **Custom Display Names:** Navigation labels can differ completely from underlying database table names.
+  - **Duplicate Table Entries:** The same table can appear multiple times in the sidebar under different groups with different default report/filter configurations.
+  - **Role-Based Visibility:** Each navigation item has role permissions governing which user roles can see it.
+  - **Table Default Visibility:** Backend and lookup tables can remain completely hidden from the sidebar unless explicitly exposed.
+
+---
+
+## NATIVE NOTIFICATIONS & DATE REMINDERS [PB] (Milestone TBD)
+
+An automated messaging and alerting engine built natively into the platform, operating independently of the heavier Automation Pipeline workflow engine.
+
+### Notification Variants
+1. **Custom Emails:** Rich HTML emails sent on record events (create, update, status change) featuring dynamic field tokens (`{{ClientName}}`, `{{InvoiceAmount}}`).
+2. **In-App Notifications:** Real-time bell notifications delivered to users inside the PowerBase web UI.
+3. **Date Reminders:** Time-based scheduled alerts calculated relative to date fields (e.g., "7 days before Due Date", "1 day after Expiration Date").
+
+### Key Engine Rules
+- **Recipient Resolution:** Dynamic recipient targeting based on User fields (e.g. `AssignedTo`), static user lists, or role memberships with CC/BCC support.
+- **Recipient Permission Verification:** The engine verifies that recipients have read access to the underlying record before generating the notification, preventing data leakage.
+- **Trigger Conditions:** Evaluated using the Shared Filter Engine (nested AND/OR logic).
+- **Bulk Notification Policy:** Batches or throttles alerts during mass updates/imports to prevent recipient inbox flooding.
+
+---
+
+## USERS AS A SYSTEM TABLE [PB] (Future Scope Phase 2)
+
+**Status:** Future Scope Phase 2 (Estimated 4 days — excluded from original scope and agreed base contract).
+
+### The Requirement
+In Quickbase, a user has only an authentication identity and assigned roles. To attach richer business data (e.g., Department, Direct Manager, User Type, Office Location, Certifications), builders are forced to manually create and synchronize a duplicate "Employees" table.
+PowerBase solves this by treating the app's Users as a first-class, buildable system table.
+
+### Two-Layer Architecture: Master Identity vs. App User Profile
+To prevent app-level modifications from compromising tenant-wide Single Sign-On, global auditability, and master security, PowerBase decouples identity from profile attributes:
+
+| Layer | Stored In | Managed By | Fields & Contents |
+|---|---|---|---|
+| **Master User Identity** | Tenant Master DB | Platform System | Central, read-only identity: `UserId`, `Email`, `Name`, `Roles`, `Groups`, `Status`. Guaranteed consistent across all apps in the tenant. |
+| **App User Profile** | App Database | App Builder | Buildable table auto-created per app with one row per user who has access to that app, foreign-keyed to Master User via `UserId`. |
+
+### Buildable Capabilities on the Users Table
+- **Add Custom Fields:** Builders can add any standard field type (Text, Choice, Date, File, Formula, etc.) to the app's User Profile layer.
+- **Establish Relationships:** Relate Users to other tables (e.g., `Users` → `Departments`, `Offices` → `Users`).
+- **Enforce Constraints:** Define required fields, unique constraints, and validation rules (e.g., "Department is required when adding a user to this app").
+- **Custom Forms & Reports:** Build customized user profile view forms, employee directories, and filtered staff reports.
+- **Field-Level Role Permissions:** Control which fields are editable (e.g., Managers can assign Departments, but only Admins can set User Types).
+- **Visual Separation:** Appears in the app's navigation under a dedicated "System Tables" section, visually distinguished from standard builder-created tables.
+

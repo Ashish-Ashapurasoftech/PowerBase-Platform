@@ -103,7 +103,13 @@ public class CreateTenantCommandHandler
 
             // Provision the tenant's isolated database (CREATE DB + baseline migrations).
             // This runs outside the control transaction — on failure the tenant row is marked Failed.
-            await _provisioningService.ProvisionAsync(tenantId, command.ServerConfig, ct);
+            await _provisioningService.ProvisionAsync(
+                tenantId,
+                command.ServerConfig,
+                command.ElasticPoolName,
+                command.ServiceObjective,
+                ct);
+
 
             var user = await _userRepo.GetByIdAsync(_queryContext.UserId, ct);
             var token = _jwtService.GenerateToken(user, tenantId, DefaultTenantRoles.Administrator, out var jwtId, out var expiresAt);
