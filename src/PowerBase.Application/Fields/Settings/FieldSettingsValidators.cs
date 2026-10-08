@@ -560,6 +560,23 @@ public sealed class FormulaUserSettingsValidator : FieldSettingsValidatorBase<Fo
     }
 }
 
+public sealed class FormulaListSettingsValidator : FieldSettingsValidatorBase<FormulaListSettings>
+{
+    public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_ListUser", "Formula_MultiSelect"];
+
+    protected override IDictionary<string, string[]> ValidateTyped(FormulaListSettings s)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(s.Expression))
+            AddError(errors, "Settings.Expression", "A formula expression is required.");
+        if (s.DisplayAs is not null && !UserDisplayAsOptions.All.Contains(s.DisplayAs))
+            AddError(errors, "Settings.DisplayAs",
+                $"DisplayAs must be one of: {string.Join(", ", UserDisplayAsOptions.All)}.");
+        ValidateColumnWidth(s.ColumnWidth, errors);
+        return errors;
+    }
+}
+
 public sealed class FormulaRichTextSettingsValidator : FieldSettingsValidatorBase<FormulaRichTextSettings>
 {
     public override IReadOnlyList<string> SupportedTypeCodes => ["Formula_RichText"];

@@ -161,6 +161,22 @@ public class AuthController : ControllerBase
             result.Email, result.Name, result.TenantPublicId, result.TenantName, result.FirstName, result.LastName)));
     }
 
+    /// <summary>Log out: revokes the presented JWT so every later request with it gets 401.</summary>
+    [HttpPost("logout")]
+    [RequireAuth]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<IActionResult> Logout([FromServices] IQueryContext queryContext, [FromServices] IAuditRepository auditRepository, CancellationToken ct)
+    {
+        // User tokens (pb_ut_*) have no JwtId and are managed via the user-tokens endpoints.
+        if (queryContext.JwtId is { } jwtId)
+        {
+            var tenantId = queryContext.TenantId > 0 ? queryContext.TenantId : (long?)null;
+            await auditRepository.RevokeSessionAsync(jwtId, queryContext.UserId, tenantId, "logout", ct);
+        }
+        return NoContent();
+    }
+
     /// <summary>Accept an invitation and complete account setup (name + password). Returns an identity token.</summary>
     [HttpPost("accept-invite")]
     [ProducesResponseType(typeof(ApiResponse<IdentityResponse>), StatusCodes.Status200OK)]

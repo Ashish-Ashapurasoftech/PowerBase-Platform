@@ -292,6 +292,7 @@ builder.Services.AddScoped<IFieldSettingsValidator, FormulaPhoneSettingsValidato
 builder.Services.AddScoped<IFieldSettingsValidator, FormulaEmailSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, FormulaUserSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, FormulaRichTextSettingsValidator>();
+builder.Services.AddScoped<IFieldSettingsValidator, FormulaListSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, ReportLinkSettingsValidator>();
 builder.Services.AddScoped<IFieldSettingsValidator, ActionButtonSettingsValidator>();
 builder.Services.AddScoped<FieldSettingsValidatorRegistry>();

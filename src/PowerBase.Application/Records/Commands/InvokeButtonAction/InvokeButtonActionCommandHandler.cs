@@ -51,7 +51,18 @@ public sealed class InvokeButtonActionCommandHandler
         _messagePublisher = messagePublisher;
     }
 
-    public async Task<InvokeButtonActionResult> HandleAsync(InvokeButtonActionCommand command, CancellationToken ct = default)
+    /// <summary>Pre-flight for a click: runs only the gates that need no captured input (Bool
+    /// Gate, Link Expiration) and throws the same exceptions invoke would. Writes nothing, so
+    /// the client can call it before opening a Signature/File/Prompt/Password dialog and avoid
+    /// collecting input for a button that is already expired. Invoke re-checks regardless.</summary>
+    public async Task CheckAvailabilityAsync(InvokeButtonActionCommand command, CancellationToken ct = default)
+    {
+        var (settings, table, fields, _, row) = await LoadAsync(command, ct);
+        await RunAvailabilityGatesAsync(settings, table, fields, row, ct);
+    }
+
+    private async Task<(ActionButtonSettings Settings, AppTable Table, IReadOnlyList<AppField> Fields, AppField ButtonField, IReadOnlyDictionary<string, object?> Row)>
+        LoadAsync(InvokeButtonActionCommand command, CancellationToken ct)
     {
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
@@ -66,6 +77,12 @@ public sealed class InvokeButtonActionCommandHandler
 
         // Current record row — drives gates, field-kind ValueSources, and confirms the record exists.
         var row = await _recordRepo.GetByPublicIdAsync(table, fields, command.RecordPublicId, ct: ct);
+        return (settings, table, fields, buttonField, row);
+    }
+
+    public async Task<InvokeButtonActionResult> HandleAsync(InvokeButtonActionCommand command, CancellationToken ct = default)
+    {
+        var (settings, table, fields, buttonField, row) = await LoadAsync(command, ct);
 
         await RunGatesAsync(settings, table, fields, row, command, ct);
 
@@ -126,6 +143,33 @@ public sealed class InvokeButtonActionCommandHandler
         InvokeButtonActionCommand command,
         CancellationToken ct)
     {
+        await RunAvailabilityGatesAsync(settings, table, fields, row, ct);
+
+        if (settings.PasswordGate is not null)
+        {
+            var expectedRaw = await _valueResolver.ResolveAsync(settings.PasswordGate, table, fields, row, FormulaType.Text, ct);
+            var expected = expectedRaw?.ToString();
+            // A PasswordGate that resolves to blank/unset is treated as "no gate configured"
+            // — not "the password must be blank". This matters for two reasons: (1) it's
+            // what an admin means by leaving the box empty while wiring up the button, and
+            // (2) it makes the same rule apply uniformly whether PasswordGate is a 'data'
+            // kind (checked client-side too, see ActionButtonComponent.needsCaptureDialog)
+            // or a 'field'/'formula' kind that can only be resolved here.
+            if (!string.IsNullOrEmpty(expected)
+                && !string.Equals(expected, command.Password ?? string.Empty, StringComparison.Ordinal))
+                throw new ActionGateException("Incorrect password.");
+        }
+    }
+
+    /// <summary>The gates that depend only on the record and the clock, not on anything the
+    /// user submits — shared by <see cref="CheckAvailabilityAsync"/> and invoke.</summary>
+    private async Task RunAvailabilityGatesAsync(
+        ActionButtonSettings settings,
+        AppTable table,
+        IReadOnlyList<AppField> fields,
+        IReadOnlyDictionary<string, object?> row,
+        CancellationToken ct)
+    {
         if (settings.BoolGateFid is int boolFid)
         {
             // Same system-field column-naming rule as ActionButtonValueResolver's 'field' case:
@@ -148,21 +192,6 @@ public sealed class InvokeButtonActionCommandHandler
                 throw new LinkExpiredException("This button's expiration start time is not configured correctly.");
             if (DateTime.UtcNow > start.AddMinutes(minutes))
                 throw new LinkExpiredException();
-        }
-
-        if (settings.PasswordGate is not null)
-        {
-            var expectedRaw = await _valueResolver.ResolveAsync(settings.PasswordGate, table, fields, row, FormulaType.Text, ct);
-            var expected = expectedRaw?.ToString();
-            // A PasswordGate that resolves to blank/unset is treated as "no gate configured"
-            // — not "the password must be blank". This matters for two reasons: (1) it's
-            // what an admin means by leaving the box empty while wiring up the button, and
-            // (2) it makes the same rule apply uniformly whether PasswordGate is a 'data'
-            // kind (checked client-side too, see ActionButtonComponent.needsCaptureDialog)
-            // or a 'field'/'formula' kind that can only be resolved here.
-            if (!string.IsNullOrEmpty(expected)
-                && !string.Equals(expected, command.Password ?? string.Empty, StringComparison.Ordinal))
-                throw new ActionGateException("Incorrect password.");
         }
     }
 

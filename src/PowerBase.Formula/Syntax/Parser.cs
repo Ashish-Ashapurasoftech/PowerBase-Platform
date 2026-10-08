@@ -73,7 +73,18 @@ public sealed class Parser
         while (Check(TokenKind.Var))
             declarations.Add(ParseVariableDeclaration());
 
-        var expr = ParseOr();
+        Expr expr;
+        if (declarations.Count > 0 && Check(TokenKind.EndOfFile))
+        {
+            // Declarations alone produce no value - the formula needs a result expression after them.
+            _diags.Add(new FormulaDiagnostic(FormulaErrorCode.ExpectedToken,
+                "A formula must end with a result expression after the var declarations.", Current.Span));
+            expr = new ErrorExpr(Current.Span);
+        }
+        else
+        {
+            expr = ParseOr();
+        }
         if (!Check(TokenKind.EndOfFile))
         {
             _diags.Add(new FormulaDiagnostic(FormulaErrorCode.UnexpectedToken, $"Unexpected '{Current.Text}'.", Current.Span));
@@ -93,8 +104,19 @@ public sealed class Parser
         // The declared type is a plain identifier (text/number/bool/date/…). Recorded but not
         // enforced — see VariableDeclaration.
         var declaredType = string.Empty;
+        var typeSpan = Current.Span;
         if (Check(TokenKind.Identifier))
-            declaredType = Advance().Text;
+        {
+            var typeTok = Advance();
+            declaredType = typeTok.Text;
+            // A hyphenated keyword (list-user) arrives as identifier, '-', identifier.
+            while (Check(TokenKind.Minus) && _pos + 1 < _tokens.Count && _tokens[_pos + 1].Kind == TokenKind.Identifier)
+            {
+                Advance();
+                declaredType += "-" + Advance().Text;
+            }
+            typeSpan = TextSpan.FromBounds(typeTok.Span.Start, _tokens[_pos - 1].Span.End);
+        }
         else
             _diags.Add(new FormulaDiagnostic(FormulaErrorCode.ExpectedToken, "Expected a type after 'var'.", Current.Span));
 
@@ -108,7 +130,7 @@ public sealed class Parser
         var value = ParseOr();
         Expect(TokenKind.Semicolon, ";");
 
-        return new VariableDeclaration(name, declaredType, value, TextSpan.FromBounds(start, value.Span.End));
+        return new VariableDeclaration(name, declaredType, value, TextSpan.FromBounds(start, value.Span.End), typeSpan);
     }
 
     private Expr ParseOr()

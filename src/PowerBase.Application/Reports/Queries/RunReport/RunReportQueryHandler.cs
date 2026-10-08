@@ -1400,7 +1400,7 @@ public class RunReportQueryHandler
         IEnumerable<IReadOnlyDictionary<long, object?>>? computed = null)
     {
         var hasUserFields = fields.Any(f =>
-            f.TypeCode is "User" or "MultiUser" or "File" or "Formula_User" ||
+            f.TypeCode is "User" or "MultiUser" or "File" or "Formula_User" or "Formula_ListUser" ||
             (f.IsSystem && f.PhysicalColumnName is "CreatedBy" or "ModifiedBy"));
 
         if (!hasUserFields) return new Dictionary<long, string>();
@@ -1410,10 +1410,19 @@ public class RunReportQueryHandler
         {
             var formulaUserFids = fields.Where(f => f.TypeCode == "Formula_User" && f.Fid.HasValue)
                 .Select(f => (long)f.Fid!.Value).ToList();
+            var formulaUserListFids = fields.Where(f => f.TypeCode == "Formula_ListUser" && f.Fid.HasValue)
+                .Select(f => (long)f.Fid!.Value).ToList();
             foreach (var values in computed)
+            {
                 foreach (var fid in formulaUserFids)
                     if (values.TryGetValue(fid, out var v) && v is not null && long.TryParse(v.ToString(), out var uid))
                         ids.Add(uid);
+                // A Formula_ListUser evaluates to a list of user ids (see FormulaRawValue.ToRaw).
+                foreach (var fid in formulaUserListFids)
+                    if (values.TryGetValue(fid, out var lv) && lv is IEnumerable<string> listIds)
+                        foreach (var raw in listIds)
+                            if (long.TryParse(raw, out var luid)) ids.Add(luid);
+            }
         }
         foreach (var row in rows)
         {

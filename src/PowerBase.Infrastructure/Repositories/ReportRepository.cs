@@ -32,7 +32,7 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
         WHERE r.PublicId = @publicId
           AND r.IsDeleted = 0
           AND (
-              r.Visibility = 'Shared'
+              r.Visibility IN ('Shared', 'Hidden') -- Hidden: unlisted, but reachable by direct URL/bookmark
               OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
               OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
                   SELECT 1 FROM meta.AppRoleReport arr

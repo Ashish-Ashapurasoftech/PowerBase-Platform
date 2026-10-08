@@ -88,4 +88,49 @@ public class FormulaProjectorTests
 
         NewProjector().Project(fields, rows)[0][1].Should().BeNull();
     }
+
+    [Fact]
+    public void Formula_MultiSelect_projects_a_text_list()
+    {
+        var fields = new List<AppField>
+        {
+            Field(1, "Tags", "Text"),
+            Field(2, "TagList", "Formula_MultiSelect", "{\"expression\":\"Split([Tags], \\\",\\\")\"}"),
+        };
+        var rows = Rows(new Dictionary<string, object?> { [PhysicalNaming.ColumnName(1)] = "red,green,blue" });
+
+        var result = NewProjector().Project(fields, rows);
+
+        result[0][2].Should().BeAssignableTo<IEnumerable<string>>().Which.Should().Equal("red", "green", "blue");
+    }
+
+    [Fact]
+    public void Formula_ListUser_projects_a_list_of_user_ids()
+    {
+        var fields = new List<AppField>
+        {
+            Field(1, "Team", "Text"),
+            Field(2, "Members", "Formula_ListUser", "{\"expression\":\"ToUserList([Team])\"}"),
+        };
+        var rows = Rows(new Dictionary<string, object?> { [PhysicalNaming.ColumnName(1)] = "11,22" });
+
+        var result = NewProjector().Project(fields, rows);
+
+        result[0][2].Should().BeAssignableTo<IEnumerable<string>>().Which.Should().Equal("11", "22");
+    }
+
+    [Fact]
+    public void Formula_MultiSelect_with_a_scalar_expression_projects_null_not_a_wrong_type()
+    {
+        var fields = new List<AppField>
+        {
+            Field(1, "Name", "Text"),
+            Field(2, "Bad", "Formula_MultiSelect", "{\"expression\":\"[Name]\"}"),
+        };
+        var rows = Rows(new Dictionary<string, object?> { [PhysicalNaming.ColumnName(1)] = "x" });
+
+        var result = NewProjector().Project(fields, rows);
+
+        result[0][2].Should().NotBe("x");
+    }
 }

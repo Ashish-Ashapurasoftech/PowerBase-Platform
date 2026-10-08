@@ -10,6 +10,10 @@ public interface IAuditRepository
     Task RecordLoginAttemptAsync(string emailAttempted, string ipAddress, bool wasSuccessful, long? userId = null, string? failureReason = null, CancellationToken ct = default);
     Task CreateSessionAsync(long userId, long tenantId, Guid jwtId, string ipAddress, DateTime expiresOn, IDbTransaction? transaction = null, CancellationToken ct = default);
 
+    /// <summary>Marks the session for this JWT id as revoked (creating the row if it was never recorded, e.g. identity tokens).</summary>
+    Task RevokeSessionAsync(Guid jwtId, long userId, long? tenantId, string reason, CancellationToken ct = default);
+    Task<bool> IsSessionRevokedAsync(Guid jwtId, CancellationToken ct = default);
+
     Task CreateInviteTokenAsync(long userId, long? tenantId, long? tenantRoleId, string tokenHash, DateTime expiresOn, long invitedBy, long? appId = null, long? appRoleId = null, CancellationToken ct = default);
     Task<InviteTokenRecord?> GetInviteTokenByHashAsync(string tokenHash, CancellationToken ct = default);
     Task ConsumeInviteTokenAsync(long tokenId, CancellationToken ct = default);

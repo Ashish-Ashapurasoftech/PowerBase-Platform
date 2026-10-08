@@ -163,6 +163,25 @@ public class RecordsController : ControllerBase
         [FromServices] FileReservationService fileReservationService, CancellationToken ct)
         => Ok(new ApiResponse<string>(await fileReservationService.RestoreRevisionAsync(tableId, id, fid, request.Path, ct)));
 
+    /// <summary>Pre-flight for an Action Button click: returns 204 if the button is currently
+    /// usable, or the same error invoke would give (e.g. 410 when Link Expiration has passed).
+    /// Writes nothing — lets the client avoid opening a capture dialog for an expired button.</summary>
+    [HttpPost("tables/{tableId:guid}/records/{id:guid}/actions/{fid:int}/check")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status410Gone)]
+    [ProducesResponseType(422)]
+    public async Task<IActionResult> CheckButtonAction(Guid tableId, Guid id, int fid, CancellationToken ct)
+    {
+        await _invokeButtonHandler.CheckAvailabilityAsync(
+            new InvokeButtonActionCommand(tableId, id, fid, null, null, null, null, null, null, null), ct);
+        return NoContent();
+    }
+
     /// <summary>Invoke an Action Button field on a record: resolves its configured gates and
     /// writes, applies them under the Rule-1 privileged-write exception (works without normal
     /// field-edit permission for exactly the button's configured targets), and returns the

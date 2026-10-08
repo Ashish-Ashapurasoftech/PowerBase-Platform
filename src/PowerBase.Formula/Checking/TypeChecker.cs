@@ -55,6 +55,11 @@ public sealed class TypeChecker
             // Checked before it is in scope, so a declaration can't refer to itself.
             var valueType = Check(decl.Value);
 
+            // The declared type is enforced: a number variable given text is "Expecting number but found text".
+            // The variable then carries the declared type, so a bad initialiser reports once, not at every use.
+            if (!string.IsNullOrEmpty(decl.DeclaredType))
+                valueType = EnforceDeclaredType(decl, valueType);
+
             if (string.IsNullOrEmpty(decl.Name))
                 continue; // the parser already reported the missing name
 
@@ -66,6 +71,27 @@ public sealed class TypeChecker
         }
 
         return Check(l.Body);
+    }
+
+    private FormulaType EnforceDeclaredType(VariableDeclaration decl, FormulaType valueType)
+    {
+        if (!VariableTypes.TryParse(decl.DeclaredType, out var declared))
+        {
+            _diags.Add(new FormulaDiagnostic(
+                FormulaErrorCode.TypeMismatch,
+                $"Unknown variable type '{decl.DeclaredType}'. Use one of: {VariableTypes.Supported}.",
+                decl.DeclaredTypeSpan));
+            return valueType;
+        }
+
+        // Null means the initialiser already failed (reported elsewhere) - don't pile a second error on it.
+        if (valueType != FormulaType.Null && valueType != declared)
+            _diags.Add(new FormulaDiagnostic(
+                FormulaErrorCode.VariableTypeMismatch,
+                $"Expecting {VariableTypes.Keyword(declared)} but found {VariableTypes.Keyword(valueType)}.",
+                decl.Value.Span));
+
+        return declared;
     }
 
     private FormulaType CheckVariableRef(VariableRefExpr v)

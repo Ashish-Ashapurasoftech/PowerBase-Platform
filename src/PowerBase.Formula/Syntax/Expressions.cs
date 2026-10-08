@@ -128,18 +128,21 @@ public sealed class LetExpr : Expr
     public Expr Body { get; }
 }
 
-/// <summary>One <c>var &lt;type&gt; &lt;name&gt; = &lt;value&gt;;</c>. The declared type is recorded for
-/// diagnostics but the initialiser's own type is what the variable actually carries — Quickbase
-/// is permissive here, and rejecting a mismatch would fail formulas it accepts.</summary>
+/// <summary>One <c>var &lt;type&gt; &lt;name&gt; = &lt;value&gt;;</c>. The declared type is enforced by the
+/// type checker: the initialiser must produce that type ("Expecting number but found text").</summary>
 public sealed class VariableDeclaration
 {
-    public VariableDeclaration(string name, string declaredType, Expr value, TextSpan span)
+    public VariableDeclaration(string name, string declaredType, Expr value, TextSpan span, TextSpan declaredTypeSpan = default)
     {
         Name = name;
         DeclaredType = declaredType;
         Value = value;
         Span = span;
+        DeclaredTypeSpan = declaredTypeSpan;
     }
+
+    /// <summary>Where the type keyword sits, for "unknown type" diagnostics.</summary>
+    public TextSpan DeclaredTypeSpan { get; }
 
     public string Name { get; }
 

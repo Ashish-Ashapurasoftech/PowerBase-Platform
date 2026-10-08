@@ -21,7 +21,7 @@ public class UpdateReportCommandHandler
     private readonly ReportConfigValidatorRegistry _configValidatorRegistry;
     private readonly IFieldReferenceIndexer _refIndexer;
 
-    private static readonly HashSet<string> AllowedVisibilities = ["Personal", "Shared", "MyRole", "SpecificRoles", "RoleScoped"];
+    private static readonly HashSet<string> AllowedVisibilities = ["Personal", "Shared", "MyRole", "SpecificRoles", "RoleScoped", Domain.Enums.ReportVisibility.Hidden];
 
     public UpdateReportCommandHandler(
         IReportRepository reportRepo,

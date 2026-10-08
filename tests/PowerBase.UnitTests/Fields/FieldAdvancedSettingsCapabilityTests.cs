@@ -32,6 +32,8 @@ public class FieldAdvancedSettingsCapabilityTests
     [InlineData("Formula_Number", false, true, true, false, false)]
     [InlineData("Formula_Bool", true, true, true, true, false)]
     [InlineData("Formula_Url", false, false, true, false, false)]
+    [InlineData("Formula_ListUser", true, false, true, true, false)]
+    [InlineData("Formula_MultiSelect", true, false, true, true, false)]
     public void Resolve_FormulaTypedVariants_MatchesMatrix(
         string typeCode, bool searchable, bool sortable, bool reportable, bool filterable, bool auditable)
     {

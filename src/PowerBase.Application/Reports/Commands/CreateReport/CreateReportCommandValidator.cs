@@ -11,7 +11,7 @@ public class CreateReportCommandValidator : AbstractValidator<CreateReportComman
         RuleFor(x => x.Description).MaximumLength(500).When(x => x.Description is not null);
         RuleFor(x => x.Visibility)
             .NotEmpty()
-            .Must(v => Enum.TryParse<Visibility>(v, out _))
-            .WithMessage("Visibility must be one of: " + string.Join(", ", Enum.GetNames<Visibility>()));
+            .Must(ReportVisibility.IsValid)
+            .WithMessage("Visibility must be one of: " + string.Join(", ", ReportVisibility.All));
     }
 }

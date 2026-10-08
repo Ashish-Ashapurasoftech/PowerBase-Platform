@@ -19,7 +19,8 @@ public class JwtMiddleware
         IUserPermissionRepository permissionRepo,
         IUserTokenRepository userTokenRepository,
         IUserRepository userRepository,
-        ITenantRepository tenantRepository)
+        ITenantRepository tenantRepository,
+        IAuditRepository auditRepository)
     {
         // Falls back to a `?token=` query param when there's no Authorization header — needed for
         // Code Pages: the served page is a plain document navigation/new-tab open, not an
@@ -70,9 +71,13 @@ public class JwtMiddleware
                     }
                 }
             }
-            else if (jwtService.ValidateToken(token, out var userId, out var tenantId, out _, out var userName, out var userEmail, out var systemRoleCode, out var tenantRole))
+            else if (jwtService.ValidateToken(token, out var userId, out var tenantId, out var jwtId, out var userName, out var userEmail, out var systemRoleCode, out var tenantRole)
+                     // A logged-out token is still cryptographically valid until `exp`; leaving the context
+                     // unpopulated makes [RequireAuth] answer 401, same as an expired token.
+                     && !await auditRepository.IsSessionRevokedAsync(jwtId, context.RequestAborted))
             {
                 var ctx = (QueryContext)queryContext;
+                ctx.JwtId       = jwtId;
                 ctx.UserId      = userId;
                 ctx.TenantId    = tenantId;
                 ctx.IsSuperAdmin  = systemRoleCode == SystemRoleCodes.SuperAdmin;

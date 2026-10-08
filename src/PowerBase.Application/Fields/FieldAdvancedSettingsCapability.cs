@@ -58,6 +58,8 @@ public static class FieldAdvancedSettingsCapability
         ["Formula_Phone"] = new Defaults(false, false, true, false, false),
         ["Formula_Email"] = new Defaults(true, true, true, true, false),
         ["Formula_User"] = new Defaults(true, true, true, true, false),
+        ["Formula_ListUser"] = new Defaults(true, false, true, true, false),
+        ["Formula_MultiSelect"] = new Defaults(true, false, true, true, false),
         ["Formula_RichText"] = new Defaults(true, false, true, true, false),
         ["Formula_Url"] = new Defaults(false, false, true, false, false),
     };

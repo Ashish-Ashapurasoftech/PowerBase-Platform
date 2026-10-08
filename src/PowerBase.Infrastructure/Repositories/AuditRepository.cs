@@ -1,6 +1,7 @@
 using System.Data;
 using System.Text;
 using Dapper;
+using Microsoft.Extensions.Caching.Memory;
 using PowerBase.Application.Auth;
 using PowerBase.Application.AuditLogs;
 using PowerBase.Application.Common.Interfaces;
@@ -16,6 +17,7 @@ public class AuditRepository : IAuditRepository
     private readonly IControlConnectionFactory _controlFactory;
     private readonly ITenantConnectionFactory _tenantFactory;
     private readonly IQueryContext _queryContext;
+    private readonly IMemoryCache _cache;
 
     private const string InsertLoginAttemptSql = """
         INSERT INTO audit.LoginAttempt (EmailAttempted, IpAddress, WasSuccessful, UserId, FailureReason, AttemptedOn)
@@ -26,6 +28,26 @@ public class AuditRepository : IAuditRepository
         INSERT INTO audit.UserSession (UserId, TenantId, JwtId, IpAddress, ExpiresOn, IssuedOn)
         VALUES (@userId, @tenantId, @jwtId, @ipAddress, @expiresOn, SYSUTCDATETIME())
         """;
+
+    // Identity tokens (pre tenant selection) have no UserSession row, so logout inserts an already-revoked one.
+    // ExpiresOn is only retention bookkeeping there; the JWT's own exp still bounds its validity.
+    private const string RevokeSessionSql = """
+        UPDATE audit.UserSession
+        SET RevokedOn = SYSUTCDATETIME(), RevokedReason = @reason
+        WHERE JwtId = @jwtId AND RevokedOn IS NULL;
+
+        IF @@ROWCOUNT = 0 AND NOT EXISTS (SELECT 1 FROM audit.UserSession WHERE JwtId = @jwtId)
+            INSERT INTO audit.UserSession (UserId, TenantId, JwtId, IssuedOn, ExpiresOn, RevokedOn, RevokedReason)
+            VALUES (@userId, @tenantId, @jwtId, SYSUTCDATETIME(), DATEADD(HOUR, 24, SYSUTCDATETIME()), SYSUTCDATETIME(), @reason);
+        """;
+
+    private const string IsSessionRevokedSql = """
+        SELECT CASE WHEN EXISTS (SELECT 1 FROM audit.UserSession WHERE JwtId = @jwtId AND RevokedOn IS NOT NULL) THEN 1 ELSE 0 END
+        """;
+
+    private static readonly TimeSpan RevokedCacheTtl = TimeSpan.FromHours(24);
+    private static readonly TimeSpan NotRevokedCacheTtl = TimeSpan.FromSeconds(15);
+    private static string RevokedKey(Guid jwtId) => $"jwt-revoked:{jwtId}";
 
     private const string InsertInviteTokenSql = """
         INSERT INTO audit.InviteToken (UserId, TenantId, TenantRoleId, AppId, AppRoleId, TokenHash, InvitedBy, ExpiresOn, CreatedOn)
@@ -50,11 +72,34 @@ public class AuditRepository : IAuditRepository
     public AuditRepository(
         IControlConnectionFactory controlFactory,
         ITenantConnectionFactory tenantFactory,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IMemoryCache cache)
     {
         _controlFactory = controlFactory;
         _tenantFactory = tenantFactory;
         _queryContext = queryContext;
+        _cache = cache;
+    }
+
+    public async Task RevokeSessionAsync(Guid jwtId, long userId, long? tenantId, string reason, CancellationToken ct = default)
+    {
+        await using var connection = _controlFactory.Create();
+        await connection.ExecuteAsync(
+            new CommandDefinition(RevokeSessionSql, new { jwtId, userId, tenantId, reason }, cancellationToken: ct));
+        _cache.Set(RevokedKey(jwtId), true, RevokedCacheTtl);
+    }
+
+    public async Task<bool> IsSessionRevokedAsync(Guid jwtId, CancellationToken ct = default)
+    {
+        if (_cache.TryGetValue(RevokedKey(jwtId), out bool cached))
+            return cached;
+
+        await using var connection = _controlFactory.Create();
+        var revoked = await connection.ExecuteScalarAsync<int>(
+            new CommandDefinition(IsSessionRevokedSql, new { jwtId }, cancellationToken: ct)) == 1;
+        // Revoked is cached long; "not revoked" only briefly so a logout on another instance lands within seconds.
+        _cache.Set(RevokedKey(jwtId), revoked, revoked ? RevokedCacheTtl : NotRevokedCacheTtl);
+        return revoked;
     }
 
     // ── control-scoped: auth audit ───────────────────────────────────────────
