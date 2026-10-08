@@ -503,6 +503,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                             {
                                 var newValuesDict = AsDictionary(newValObj);
                                 recordDisplayName = GetRecordDisplayValue(tableMeta, fields, newValuesDict, recordGuidStr);
+                                // The event only carries the changed/selected values; read the stored record for a readable name.
+                                if (recordDisplayName == recordGuidStr)
+                                    recordDisplayName = GetOrFetchRecordDisplayAsync(tableMeta, fields, rGuid, ct).GetAwaiter().GetResult();
                             }
                             else
                             {
@@ -1546,6 +1549,18 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     return val.ToString()!;
                 }
             }
+        }
+
+        // No display field / Name / Title / Text value: use the first plain stored value (auto-number, number, date, choice…)
+        // so history reads "Order 1042" rather than a GUID. Computed, boolean and structured values are not a name.
+        foreach (var field in fields.Where(f => f.Fid.HasValue && !f.IsDeleted && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode)
+                     && !string.Equals(f.TypeCode, "Boolean", StringComparison.OrdinalIgnoreCase)
+                     && !string.Equals(f.TypeCode, "Reference", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (!fieldValues.TryGetValue($"fid_{field.Fid!.Value}", out var val) || val == null) continue;
+            if (val is System.Collections.IEnumerable and not string) continue;
+            var text = val.ToString();
+            if (!string.IsNullOrWhiteSpace(text) && !Guid.TryParse(text, out _)) return text!;
         }
 
         return recordPublicId;
