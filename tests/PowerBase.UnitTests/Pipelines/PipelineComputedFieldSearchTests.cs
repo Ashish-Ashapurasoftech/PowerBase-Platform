@@ -572,6 +572,23 @@ public class PipelineComputedFieldSearchTests
                 .Returns(new List<IReadOnlyDictionary<string, object?>>());
         }
 
+        public IAppTableRepository TableRepo => tableRepo;
+        public IRecordWriteService WriteService { get; } = Substitute.For<IRecordWriteService>();
+        public IPipelineTriggerInterceptor TriggerInterceptor { get; } = Substitute.For<IPipelineTriggerInterceptor>();
+
+        public async Task<JsonElement> RunStepAsync(PipelineStep step, Dictionary<string, object>? context = null)
+        {
+            var method = typeof(PipelineEngine).GetMethod("ExecuteStepWithServicesAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            var json = await (Task<string>)method.Invoke(Engine, new object[]
+            {
+                step, "{}", context ?? new Dictionary<string, object>(), new List<PipelineStep> { step }, new Dictionary<string, object>(),
+                1L, new PipelineStepRun(), new List<PipelineEngine.RawStepAuditSnapshot>(), "step_1",
+                RecordRepo, tableRepo, fieldRepo, WriteService, TriggerInterceptor, uow, idempotency,
+                Substitute.For<IFileStorageService>(), SearchService, CancellationToken.None
+            })!;
+            return JsonDocument.Parse(json).RootElement;
+        }
+
         public async Task<JsonElement> RunSearchAsync(string field, string op, string value)
         {
             var rules = JsonSerializer.Serialize(new[] { new { Field = field, Operator = op, Value = value } });
@@ -684,5 +701,200 @@ public class PipelineComputedFieldSearchTests
         Assert.Equal(1, root.GetProperty("records").GetArrayLength());
         Assert.True(HasCondition(h.CapturedFilter, ReferenceFid), "an id comparison on a Reference is still matched by SQL");
         h.Projector.DidNotReceiveWithAnyArgs().Project(default!, default!, default, default);
+    }
+
+    // ───────────────────────── a computed-value failure must not fail the step ─────────────────────────
+
+    [Fact]
+    public async Task CreateRecord_WhenComputedValuesCannotBeProjected_StillSucceeds()
+    {
+        // A Lookup/Reference whose settings point at a table this database doesn't have makes the
+        // relational projection throw NotFound — after the record was already created.
+        var h = new EngineHarness(TableFields(Reference(), Summary("Count")));
+        var created = Guid.NewGuid();
+        h.RecordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<SearchIndexMessage>>()).Returns(created);
+        h.RecordRepo.GetActiveRecordIdByPublicIdAsync(Arg.Any<AppTable>(), created, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(19L);
+        h.RecordRepo.GetBulkUpsertRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(),
+                Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { [19L] = Row(19, created) });
+        h.Relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns<Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>>>(_ => throw new PowerBase.Domain.Exceptions.NotFoundException("Table", "1"));
+
+        var step = new PipelineStep { Id = 1, RefId = "ref_create", Type = "action", Subtype = "create-record",
+            ConfigJson = $"{{\"TableId\":\"{Table.PublicId}\",\"FieldMappings\":[{{\"Field\":\"fid_6\",\"Value\":\"Ronak\"}}]}}" };
+
+        var root = await h.RunStepAsync(step, new Dictionary<string, object> { ["_MessageId"] = Guid.NewGuid() });
+
+        Assert.Equal(created.ToString(), root.GetProperty("RecordPublicId").GetString());
+    }
+
+    // ───────────────────────── a relationship field pointing at a missing table ─────────────────────────
+    // After an app is copied to another account / tenant a Summary or Lookup can keep the numeric id of a
+    // table the database doesn't have ("Table '4' was not found"). One such field must not fail the step.
+
+    private static EngineHarness BrokenSummaryHarness()
+    {
+        var h = new EngineHarness(TableFields(Reference(), Summary("Count")));
+        var labels = new Dictionary<long, IReadOnlyDictionary<long, object?>>
+        {
+            [1] = new Dictionary<long, object?> { [ReferenceFid] = "Hardik Patel" },
+            [2] = new Dictionary<long, object?> { [ReferenceFid] = "Lalo Shah" },
+        };
+        // The relational projection throws whenever the broken Summary is part of it.
+        h.Relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<AppField>>(1).Any(f => f.TypeCode == "Summary")
+                ? Task.FromException<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(new PowerBase.Domain.Exceptions.NotFoundException("Table", "4"))
+                : Task.FromResult<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(
+                    ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(2).Select(r => labels[Convert.ToInt64(r["Id"])]).ToList()));
+        h.Projector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(2)
+                ?? ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(1).Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+        return h;
+    }
+
+    [Fact]
+    public async Task SearchRecords_FilterOnAnotherField_IsNotBrokenByAnUnrelatedBrokenSummary()
+    {
+        var h = BrokenSummaryHarness();
+        var hit = Guid.NewGuid();
+        h.SqlReturns(new List<IReadOnlyDictionary<string, object?>> { Row(1, hit, 42), Row(2, Guid.NewGuid(), 43) });
+
+        var root = await h.RunSearchAsync("fid_9", "contains", "Hardik");
+
+        var records = root.GetProperty("records");
+        Assert.Equal(1, records.GetArrayLength());
+        Assert.Equal(hit.ToString(), records[0].GetProperty("RecordPublicId").GetString());
+    }
+
+    [Fact]
+    public async Task SearchRecords_PlainFilter_StillReturnsRecordsWhenASummaryIsBroken()
+    {
+        var h = BrokenSummaryHarness();
+        h.SqlReturns(new List<IReadOnlyDictionary<string, object?>> { Row(1, Guid.NewGuid(), 42), Row(2, Guid.NewGuid(), 43) });
+
+        var root = await h.RunSearchAsync("fid_6", "is", "r1");
+
+        Assert.Equal(2, root.GetProperty("records").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task SearchRecords_FilterOnTheBrokenSummary_FailsClearlyAndWithoutRetry()
+    {
+        var h = BrokenSummaryHarness();
+        h.SqlReturns(new List<IReadOnlyDictionary<string, object?>> { Row(1, Guid.NewGuid(), 42) });
+
+        var ex = await Assert.ThrowsAsync<PowerBase.Domain.Exceptions.PipelineNonRetryableException>(() => h.RunSearchAsync("fid_14", "greater_than", "1"));
+
+        Assert.Contains("Summary", ex.Message);
+        Assert.Contains("not available in this account", ex.Message);
+        Assert.DoesNotContain("was not found", ex.Message);
+    }
+
+    [Fact]
+    public async Task Projection_EveryFieldBroken_ReturnsNoFailureForUnneededFields()
+    {
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(new InvalidOperationException("boom")));
+        var formula = Substitute.For<IFormulaProjector>();
+        formula.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(1).Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+        var fields = TableFields(Reference(), Summary("Count"));
+        var rows = new List<IReadOnlyDictionary<string, object?>> { Row(1, Guid.NewGuid()) };
+
+        var result = await PipelineComputedProjection.ProjectAsync(relational, formula, Table, fields, rows, null, default);
+
+        Assert.NotNull(result);
+        Assert.Contains(SummaryFid, result!.FailedFids);
+        Assert.Contains(ReferenceFid, result.FailedFids);
+        PipelineComputedProjection.ThrowIfNeeded(result, fields, new long[] { NameFid }, "Search Records"); // not needed → no throw
+        Assert.Throws<PowerBase.Domain.Exceptions.PipelineNonRetryableException>(() =>
+            PipelineComputedProjection.ThrowIfNeeded(result, fields, new long[] { ReferenceFid }, "Search Records"));
+    }
+
+    // ───────────────────────── writing a Reference whose parent table is missing ─────────────────────────
+
+    private static AppField StaleReference(long parentTableId = 77) => new()
+    {
+        Id = ReferenceFid, Fid = (int)ReferenceFid, Name = "Related Customer", TypeCode = "Reference",
+        Settings = JsonSerializer.Serialize(new { ParentTableId = parentTableId })
+    };
+
+    private static PipelineStep CreateStepWithReference(string value) => new()
+    {
+        Id = 1, RefId = "ref_create", Type = "action", Subtype = "create-record",
+        ConfigJson = $"{{\"TableId\":\"{Table.PublicId}\",\"FieldMappings\":[{{\"Field\":\"fid_6\",\"Value\":\"Ronak\"}},{{\"Field\":\"fid_9\",\"Value\":\"{value}\"}}]}}"
+    };
+
+    [Fact]
+    public async Task CreateRecord_ReferenceToAMissingTable_FailsOnceWithAClearMessage()
+    {
+        var h = new EngineHarness(TableFields(StaleReference()));
+        h.TableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>())
+            .Returns<AppTable>(_ => throw new PowerBase.Domain.Exceptions.NotFoundException("Table", 77));
+
+        var ex = await Assert.ThrowsAsync<PowerBase.Domain.Exceptions.PipelineNonRetryableException>(
+            () => h.RunStepAsync(CreateStepWithReference("Hardik"), new Dictionary<string, object> { ["_MessageId"] = Guid.NewGuid() }));
+
+        Assert.Contains("Related Customer", ex.Message);
+        Assert.Contains("not available in this account", ex.Message);
+        await h.RecordRepo.DidNotReceiveWithAnyArgs().CreateAsync(default!, default!, default!, default, default, default);
+    }
+
+    [Fact]
+    public async Task UpdateRecord_ReferenceToAMissingTable_FailsOnceWithAClearMessage()
+    {
+        var h = new EngineHarness(TableFields(StaleReference()));
+        h.TableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>())
+            .Returns<AppTable>(_ => throw new PowerBase.Domain.Exceptions.NotFoundException("Table", 77));
+        var target = Guid.NewGuid();
+        var step = new PipelineStep { Id = 1, RefId = "ref_update", Type = "action", Subtype = "update-record",
+            ConfigJson = $"{{\"TableId\":\"{Table.PublicId}\",\"TargetRecordId\":\"{target}\",\"FieldMappings\":[{{\"Field\":\"fid_9\",\"Value\":\"Hardik\"}}]}}" };
+
+        var ex = await Assert.ThrowsAsync<PowerBase.Domain.Exceptions.PipelineNonRetryableException>(
+            () => h.RunStepAsync(step, new Dictionary<string, object> { ["_MessageId"] = Guid.NewGuid() }));
+
+        Assert.Contains("Related Customer", ex.Message);
+        await h.WriteService.DidNotReceiveWithAnyArgs().ApplyAsync(default!, default!, default, default!, default!, default, default, default);
+    }
+
+    [Fact]
+    public async Task EnsureAvailable_OnlyChecksReferencesThatAreBeingWritten()
+    {
+        var tables = Substitute.For<IAppTableRepository>();
+        tables.GetByIdAsync(77, Arg.Any<CancellationToken>())
+            .Returns<AppTable>(_ => throw new PowerBase.Domain.Exceptions.NotFoundException("Table", 77));
+        var fields = TableFields(StaleReference());
+
+        // Reference not written (absent / empty) → nothing to check, no failure.
+        await PipelineReferenceTargets.EnsureAvailableAsync(fields, new Dictionary<long, object?> { [NameFid] = "x" }, tables, default);
+        await PipelineReferenceTargets.EnsureAvailableAsync(fields, new Dictionary<long, object?> { [ReferenceFid] = "" }, tables, default);
+        await PipelineReferenceTargets.EnsureAvailableAsync(fields, new Dictionary<long, object?> { [ReferenceFid] = null }, tables, default);
+        await tables.DidNotReceiveWithAnyArgs().GetByIdAsync(default, default);
+
+        await Assert.ThrowsAsync<PowerBase.Domain.Exceptions.PipelineNonRetryableException>(() =>
+            PipelineReferenceTargets.EnsureAvailableAsync(fields, new Dictionary<long, object?> { [ReferenceFid] = 5L }, tables, default));
+    }
+
+    [Fact]
+    public async Task EnsureAvailable_ExistingParentTable_Passes()
+    {
+        var tables = Substitute.For<IAppTableRepository>();
+        tables.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+
+        await PipelineReferenceTargets.EnsureAvailableAsync(TableFields(StaleReference()),
+            new Dictionary<long, object?> { [ReferenceFid] = "Hardik" }, tables, default);
+    }
+
+    [Fact]
+    public async Task EnsureAvailable_ReferenceWithoutSettings_IsLeftToTheValidator()
+    {
+        var tables = Substitute.For<IAppTableRepository>();
+        await PipelineReferenceTargets.EnsureAvailableAsync(TableFields(Reference()),
+            new Dictionary<long, object?> { [ReferenceFid] = "Hardik" }, tables, default);
+        await tables.DidNotReceiveWithAnyArgs().GetByIdAsync(default, default);
     }
 }

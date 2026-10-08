@@ -42,28 +42,33 @@ public partial class PipelineEngine : IPipelineEngine
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, CancellationToken ct)
     {
         if (rows.Count == 0 || !fields.Any(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))) return null;
-        var formulaProjector = _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector;
-        var relationalProjector = _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector))
-            as PowerBase.Application.Relationships.IRelationalProjector;
-        if (formulaProjector == null) return null;
-        var relational = relationalProjector != null ? await relationalProjector.ProjectAsync(table, fields, rows, ct) : null;
-        return formulaProjector.Project(fields, rows, relational, table);
+        // The computed values only enrich a step's output. A failure to compute them (a Lookup / Summary /
+        // Reference whose settings point at a table this database doesn't have, a broken formula, …) must not
+        // fail the step — for Create / Update Record the write has already been committed, so failing here
+        // would report an error for a record that exists (and a retry would create it again). A broken
+        // relationship field only loses its own value; every other computed value is still returned.
+        var computed = await PipelineComputedProjection.ProjectAsync(
+            _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector,
+            _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector,
+            table, fields, rows, _logger, ct);
+        return computed?.Values;
     }
 
     /// <summary>Like <see cref="ProjectComputedAsync"/> but also projects a Reference's display text, so a
-    /// filter can match what the user sees. Used only to evaluate filters, never to build step output.</summary>
+    /// filter can match what the user sees. Used only to evaluate filters, never to build step output.
+    /// Fails the step, naming the field, when a field the filter reads cannot be computed.</summary>
     private async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>?> ProjectForFilterAsync(
         AppTable table, IReadOnlyList<AppField> fields,
-        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, CancellationToken ct)
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, IEnumerable<long> filterFids, CancellationToken ct)
     {
         if (rows.Count == 0) return null;
         if (!fields.Any(f => f.Fid.HasValue && (PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.TypeCode == "Reference"))) return null;
-        var formulaProjector = _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector;
-        var relationalProjector = _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector))
-            as PowerBase.Application.Relationships.IRelationalProjector;
-        if (formulaProjector == null) return null;
-        var relational = relationalProjector != null ? await relationalProjector.ProjectAsync(table, fields, rows, ct) : null;
-        return formulaProjector.Project(fields, rows, relational, table);
+        var computed = await PipelineComputedProjection.ProjectAsync(
+            _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector,
+            _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector,
+            table, fields, rows, _logger, ct);
+        PipelineComputedProjection.ThrowIfNeeded(computed, fields, filterFids, "Search Records");
+        return computed?.Values;
     }
 
     private static IReadOnlyDictionary<string, object?> MergeComputed(
@@ -2042,7 +2047,7 @@ public partial class PipelineEngine : IPipelineEngine
                     // cap — so nothing is silently dropped before the in-memory conditions are
                     // evaluated below, no matter how many rows match physically.
                     var candidates = await FetchAllAsync(physicalFilterTree);
-                    var computedPerRow = await ProjectForFilterAsync(table, fields, candidates, ct);
+                    var computedPerRow = await ProjectForFilterAsync(table, fields, candidates, PipelineComputedProjection.ReferencedFids(inMemoryFilterTree), ct);
                     var pairs = candidates
                         .Select((r, i) => (Row: r, Computed: computedPerRow != null ? computedPerRow[i] : (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
                         .ToList();
@@ -2161,6 +2166,7 @@ public partial class PipelineEngine : IPipelineEngine
 
             // Resolve Reference field values: translate any human key or PublicId Guid to the
             // parent's physical row Id before persisting — mirrors CreateRecordCommandHandler.
+            await PipelineReferenceTargets.EnsureAvailableAsync(fields, values, tableRepo, ct);
             var refOverrides = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
                 fields, values, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
             foreach (var kvp in refOverrides)
@@ -2297,6 +2303,7 @@ public partial class PipelineEngine : IPipelineEngine
                     return cachedOutput;
                 }
 
+                await PipelineReferenceTargets.EnsureAvailableAsync(fields, values, tableRepo, ct);
                 var persisted = await recordWriteService.ApplyAsync(
                     table, fields, recordPublicId, values, AuditActions.Updated, "Record updated via PowerFlow action step", ct, uow.Transaction);
                 var output = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
@@ -3524,6 +3531,7 @@ public partial class PipelineEngine : IPipelineEngine
                             if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Id] = StepActingUserId; afterValues[bulkModifiedByField.Fid!.Value] = StepActingUserId; }
 
                             // UPDATE in DB on uow.Transaction via recordWriteService (with sanitized row)
+                            await PipelineReferenceTargets.EnsureAvailableAsync(fields, row, tableRepo, ct);
                             await recordWriteService.ApplyAsync(
                                 table,
                                 fields,
@@ -3559,6 +3567,7 @@ public partial class PipelineEngine : IPipelineEngine
                         else
                         {
                             // Resolve Reference fields: translate human key / PublicId Guid to physical row Id.
+                            await PipelineReferenceTargets.EnsureAvailableAsync(fields, row, tableRepo, ct);
                             var insertRefOverrides1 = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
                                 fields, row, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
                             foreach (var kvp in insertRefOverrides1)
@@ -3582,6 +3591,7 @@ public partial class PipelineEngine : IPipelineEngine
                     {
                         // INSERT (Cases 2-insert, 6-insert)
                         // Resolve Reference fields: translate human key / PublicId Guid to physical row Id.
+                        await PipelineReferenceTargets.EnsureAvailableAsync(fields, row, tableRepo, ct);
                         var insertRefOverrides2 = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
                             fields, row, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
                         foreach (var kvp in insertRefOverrides2)

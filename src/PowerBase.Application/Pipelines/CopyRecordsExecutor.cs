@@ -238,8 +238,14 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                     IReadOnlyList<IReadOnlyDictionary<string, object?>> projected = page;
                     if (needsComputed)
                     {
-                        var relational = await services.GetRequiredService<IRelationalProjector>().ProjectAsync(source, sourceFields, page, ct);
-                        var computed = services.GetRequiredService<IFormulaProjector>().Project(sourceFields, page, relational, source);
+                        var projection = await PipelineComputedProjection.ProjectAsync(
+                            services.GetRequiredService<IRelationalProjector>(), services.GetRequiredService<IFormulaProjector>(),
+                            source, sourceFields, page, services.GetService<ILogger<CopyRecordsExecutor>>(), ct);
+                        // A field the copy exports or filters on that cannot be computed fails the copy with its name;
+                        // any other broken field is simply not needed.
+                        PipelineComputedProjection.ThrowIfNeeded(projection, sourceFields,
+                            exported.Select(f => (long)f.Fid!.Value).Concat(PipelineComputedProjection.ReferencedFids(computedFilter)), "Copy Records");
+                        IReadOnlyList<IReadOnlyDictionary<long, object?>> computed = projection?.Values ?? page.Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList();
                         var pairs = page.Select((row, i) => (Row: row, Computed: computed[i])).ToList();
                         if (computedFilter != null) pairs = PipelineComputedFilter.Apply(pairs, computedFilter, sourceFields);
                         projected = pairs.Select(pair =>
@@ -369,6 +375,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                                 if (!values.ContainsKey(field.Fid!.Value) && !string.IsNullOrWhiteSpace(field.DefaultValue))
                                     values[field.Fid.Value] = await DefaultValue(field, queryContext, ct);
                             }
+                            await PipelineReferenceTargets.EnsureAvailableAsync(destinationFields, values, tableRepo, ct);
                             var overrides = await ReferenceWriteValidator.ValidateAsync(destinationFields, values, tableRepo, fieldRepo, records, relRepo, ct);
                             foreach (var pair in overrides) values[pair.Key] = pair.Value;
                             await UserFieldValueResolver.ResolveAsync(services.GetRequiredService<IUserRepository>(), destinationFields, values, ct);
