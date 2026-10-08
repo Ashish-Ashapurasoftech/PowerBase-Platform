@@ -50,8 +50,8 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         Action<AppTable, IReadOnlyList<AppField>, AppTable, IReadOnlyList<AppField>>? onTablesLoaded = null)
     {
         config.ValidateShape();
+        // No time limit: how long a copy takes depends on how many records there are.
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromHours(1));
         var ct = timeout.Token;
         var tableRepo = services.GetRequiredService<IAppTableRepository>();
         var fieldRepo = services.GetRequiredService<IAppFieldRepository>();
@@ -279,9 +279,6 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         else snapshot = JsonSerializer.Deserialize<Snapshot>(manifestJson)!;
         if (snapshot.ConfigurationHash != configurationHash)
             throw new PipelineNonRetryableException("Copy Records configuration changed during this execution. Start a new run instead of replaying the saved snapshot.");
-        var remaining = TimeSpan.FromHours(1) - (DateTime.UtcNow - snapshot.StartedUtc);
-        if (remaining <= TimeSpan.Zero) throw new PipelineNonRetryableException("Copy Records exceeded its one-hour execution limit.");
-        timeout.CancelAfter(remaining);
         long inserted = 0, updated = 0, errors = 0;
         var messages = new List<string>();
         // The merge field stores ciphertext when encrypted, so an "=" SQL lookup per row can

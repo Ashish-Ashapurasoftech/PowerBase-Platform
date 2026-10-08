@@ -32,6 +32,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
     private readonly ITenantConnectionResolver? _tenantResolver;
     private readonly IFormulaProjector? _formulaProjector;
     private readonly IRelationalProjector? _relationalProjector;
+    /// <summary>Reads that do not wait on the lock of the write being intercepted; falls back to the ordinary projector.</summary>
+    private readonly PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector? _writeTimeProjector;
 
     public PipelineTriggerInterceptor(
         IPipelineRepository pipelineRepo,
@@ -44,8 +46,10 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         IOptions<PipelineExecutionOptions>? options = null,
         ITenantConnectionResolver? tenantResolver = null,
         IFormulaProjector? formulaProjector = null,
-        IRelationalProjector? relationalProjector = null)
+        IRelationalProjector? relationalProjector = null,
+        PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector? writeTimeProjector = null)
     {
+        _writeTimeProjector = writeTimeProjector;
         _formulaProjector = formulaProjector;
         _relationalProjector = relationalProjector;
         _tenantResolver = tenantResolver;
@@ -106,6 +110,13 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         await InterceptBulkAsync(table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
     }
 
+    private bool RequiresComputedValuesNow(IReadOnlyList<TriggerSubscription> subscriptions, IReadOnlyList<AppField> fields) =>
+        PowerBase.Application.Pipelines.PipelineEventComputedValues.Required(
+            subscriptions.Select(sub => new PowerBase.Application.Pipelines.PipelineEventListener(
+                sub.TriggerSubtype == "new-bulk-event", sub.TriggerOnDeleted, sub.OwnerTenantId != _queryContext.TenantId,
+                new[] { sub.FiltersJson, sub.FilterGroupsJson, sub.AdvancedQuery })),
+            fields);
+
     /// <summary>Fids of the Reference fields at least one listening trigger filters on (by field name, fid_N
     /// token or advanced-query {N.…} id) — only those need their display text projected.</summary>
     private static IReadOnlyCollection<long> FilterReferenceFids(IReadOnlyList<TriggerSubscription> subscriptions, IReadOnlyList<AppField> fields)
@@ -155,10 +166,11 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         IReadOnlyList<AppField> fields,
         IReadOnlyList<PipelineRecordChange> changes,
         CancellationToken ct,
-        IReadOnlyCollection<long>? filterReferenceFids = null)
+        IReadOnlyCollection<long>? filterReferenceFids = null,
+        bool includeComputed = true)
     {
         if (_formulaProjector == null || _uow.Transaction == null) return changes;
-        var hasComputed = fields.Any(f => f.Fid.HasValue && !f.IsDeleted && PhysicalNaming.IsComputedTypeCode(f.TypeCode));
+        var hasComputed = includeComputed && fields.Any(f => f.Fid.HasValue && !f.IsDeleted && PhysicalNaming.IsComputedTypeCode(f.TypeCode));
         // A Reference a trigger filter matches by display text needs its label projected too (it is
         // only used to evaluate the filter — the event values keep the stored Record ID#).
         var referenceFids = filterReferenceFids ?? Array.Empty<long>();
@@ -180,9 +192,12 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                 // Read on other connections, these can wait behind the lock of the write being intercepted (see
                 // PipelineComputedProjection.RelationshipBudget): give up after the budget instead of SQL's 30 s timeout.
                 using var projectionBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                projectionBudget.CancelAfter(PowerBase.Application.Pipelines.PipelineComputedProjection.InTransactionBudget);
-                var seed = _relationalProjector != null
-                    ? await _relationalProjector.ProjectAsync(table, fields, rows, projectionBudget.Token)
+                projectionBudget.CancelAfter(_writeTimeProjector != null
+                    ? PowerBase.Application.Pipelines.PipelineComputedProjection.WriteTimeBudget
+                    : PowerBase.Application.Pipelines.PipelineComputedProjection.InTransactionBudget);
+                var relationalForWrite = (IRelationalProjector?)_writeTimeProjector ?? _relationalProjector;
+                var seed = relationalForWrite != null
+                    ? await relationalForWrite.ProjectAsync(table, fields, rows, projectionBudget.Token)
                     : null;
                 var computed = rows.Count > 0 ? _formulaProjector.Project(fields, rows, seed, table) : [];
 
@@ -406,7 +421,14 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
             // Formula fields are compute-on-read; put their values in the events (see
             // WithComputedValuesAsync) now that we know at least one pipeline is listening.
-            recordChanges = await WithComputedValuesAsync(table, fields, recordChanges, ct, FilterReferenceFids(subscriptions, fields));
+            // Computing Lookup / Summary / Formula values costs several queries per written record, so it is only done
+            // when something listening needs them AT EVENT TIME: a filter on a computed field, a bulk event (its staged
+            // records carry the values), or a delete (the record is gone by run time). Everything else gets the values
+            // re-read when the PowerFlow runs (PipelineTriggerRefresh), so a table's writes no longer pay for them.
+            var computedNeededNow = RequiresComputedValuesNow(subscriptions, fields);
+            var referenceFids = FilterReferenceFids(subscriptions, fields);
+            if (computedNeededNow || referenceFids.Count > 0)
+                recordChanges = await WithComputedValuesAsync(table, fields, recordChanges, ct, referenceFids, computedNeededNow);
 
             foreach (var sub in subscriptions)
             {

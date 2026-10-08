@@ -16,8 +16,12 @@ public class PipelineExecutionOptions
     public int PerInstanceTenantConcurrencyLimit { get; set; } = 5;
     public int BulkEventPageSize { get; set; } = 500;
     public int SearchRecordsPageSize { get; set; } = 500;
-    public int MaxMaterializedSearchRecords { get; set; } = 10000;
-    public int MaxStepOutputBytes { get; set; } = 5242880;
+    /// <summary>NOT a limit. A Search Records result larger than this that is consumed by exactly one Loop is streamed
+    /// (paged, staged, checkpointed) instead of being held in memory; every other search simply returns all of its
+    /// records, however many there are. It only chooses the strategy — nothing is ever refused for being too big.</summary>
+    public int StreamSearchAboveRecords { get; set; } = 10000;
+    /// <summary>Optional cap on the size of a Search Records output. 0 (the default) means unlimited.</summary>
+    public int MaxStepOutputBytes { get; set; }
     public bool EnableLoopBatches { get; set; }
     public int LoopBatchSize { get; set; } = 100;
     // In automatic mode the two concurrency values below are ceilings, not fixed counts.

@@ -47,11 +47,19 @@ public partial class PipelineEngine : IPipelineEngine
         // fail the step — for Create / Update Record the write has already been committed, so failing here
         // would report an error for a record that exists (and a retry would create it again). A broken
         // relationship field only loses its own value; every other computed value is still returned.
+        // Inside the step's own write transaction the ordinary projector's reads would wait on that transaction's
+        // lock (30 s each); the write-time projector reads without waiting and sees the step's uncommitted write.
+        var writeTimeProjector = inWriteTransaction
+            ? _serviceProvider.GetService(typeof(IPipelineWriteTimeRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector
+            : null;
+        var relationalProjector = writeTimeProjector
+            ?? _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector;
         var computed = await PipelineComputedProjection.ProjectAsync(
-            _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector,
+            relationalProjector,
             _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector,
             table, fields, rows, _logger, ct,
-            inWriteTransaction ? PipelineComputedProjection.InTransactionBudget : null);
+            // Reads that cannot block get the long budget; the ordinary projector inside the transaction only the short one.
+            !inWriteTransaction ? null : writeTimeProjector != null ? PipelineComputedProjection.WriteTimeBudget : PipelineComputedProjection.InTransactionBudget);
         return computed?.Values;
     }
 
@@ -1885,8 +1893,17 @@ public partial class PipelineEngine : IPipelineEngine
             var canStreamFilter = inMemoryFilterFids.Count == 0 ||
                 !FormulaFilterSorter.TreeContainsFormulaField(filterTree, inMemoryFilterFids);
 
-            var requiresChunkedSearch = !limit.HasValue || limit.Value > _options.MaxMaterializedSearchRecords;
-            if (requiresChunkedSearch && loopConsumerCount == 1 && canStreamFilter && recordSearchService.SupportsKeysetPaging &&
+            // A condition on a Formula / Lookup / Summary field, or on a Reference by its display text, cannot be
+            // matched in SQL. Rather than refusing a search that is too large to hold in memory, the streamed search
+            // pages the rows that match the SQL half, evaluates the in-memory half on each page (projecting only
+            // that page), and stages the matches — so memory use is one page, however many millions of rows there are.
+            FilterGroup? streamSqlTree = filterTree;
+            FilterGroup? streamMemoryTree = null;
+            if (!canStreamFilter)
+                (streamSqlTree, streamMemoryTree) = FormulaFilterSorter.SplitFilterTree(filterTree, inMemoryFilterFids);
+
+            var requiresChunkedSearch = !limit.HasValue || limit.Value > _options.StreamSearchAboveRecords;
+            if (requiresChunkedSearch && loopConsumerCount == 1 && recordSearchService.SupportsKeysetPaging &&
                 recordSearchService is IKeysetPipelineRecordSearchService keysetSearch && messageGuid != Guid.Empty)
             {
                 var worksetId = CreateDeterministicWorksetId(messageGuid, step.RefId);
@@ -1899,17 +1916,37 @@ public partial class PipelineEngine : IPipelineEngine
                     if (!limit.HasValue || ordinal < limit.Value)
                     {
                         await foreach (var pageRows in keysetSearch.SearchPagesAsync(
-                            table, fields, _options.SearchRecordsPageSize, filterTree, workset.LastRecordId,
+                            table, fields, _options.SearchRecordsPageSize, streamSqlTree, workset.LastRecordId,
                             workset.SnapshotMaxRecordId, ct))
                         {
                             var remaining = limit.HasValue ? limit.Value - ordinal : int.MaxValue;
-                            var recordsToStage = pageRows.Take(remaining).ToList();
-                            if (recordsToStage.Count == 0) break;
-                            // Formula fields have no stored value: project them so loop items
-                            // ({{steps.<loop>.item.fid_N}}) carry them like the non-chunked search does.
-                            var stagedComputed = await ProjectComputedAsync(table, fields, recordsToStage, ct);
-                            if (stagedComputed != null)
-                                recordsToStage = recordsToStage.Select((r, i) => MergeComputed(r, stagedComputed[i])).ToList();
+                            if (remaining <= 0) break;
+                            var scannedUpTo = Convert.ToInt64(pageRows[^1]["Id"], CultureInfo.InvariantCulture);
+                            List<IReadOnlyDictionary<string, object?>> recordsToStage;
+                            var matchedCount = pageRows.Count;
+                            if (streamMemoryTree != null)
+                            {
+                                var pageComputed = await ProjectForFilterAsync(table, fields, pageRows,
+                                    PipelineComputedProjection.ReferencedFids(streamMemoryTree), ct);
+                                var pagePairs = pageRows
+                                    .Select((r, i) => (Row: r, Computed: pageComputed != null ? pageComputed[i] : (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
+                                    .ToList();
+                                pagePairs = PipelineComputedFilter.Apply(pagePairs, streamMemoryTree, fields);
+                                matchedCount = pagePairs.Count;
+                                // The Reference display text was projected only to evaluate the filter (see the non-streamed search).
+                                recordsToStage = pagePairs
+                                    .Select(p => computedFieldFids.Count == 0 ? p.Row : MergeComputed(p.Row, p.Computed))
+                                    .Take(remaining).ToList();
+                            }
+                            else
+                            {
+                                recordsToStage = pageRows.Take(remaining).ToList();
+                                // Formula fields have no stored value: project them so loop items
+                                // ({{steps.<loop>.item.fid_N}}) carry them like the non-chunked search does.
+                                var stagedComputed = await ProjectComputedAsync(table, fields, recordsToStage, ct);
+                                if (stagedComputed != null)
+                                    recordsToStage = recordsToStage.Select((r, i) => MergeComputed(r, stagedComputed[i])).ToList();
+                            }
                             var staged = new List<PipelineBulkEventRecord>(recordsToStage.Count);
                             long lastRecordId = workset.LastRecordId;
                             foreach (var record in recordsToStage)
@@ -1931,6 +1968,9 @@ public partial class PipelineEngine : IPipelineEngine
                                     CreatedOn = DateTime.UtcNow
                                 });
                             }
+                            // The checkpoint moves past every row scanned on this page — including the ones the in-memory
+                            // condition rejected — unless the limit cut the page short of its own matches.
+                            if (matchedCount <= remaining) lastRecordId = scannedUpTo;
                             await _pipelineRepo.AppendSearchWorksetPageAsync(workset, staged, lastRecordId, ct);
                             workset.LastRecordId = lastRecordId;
                             workset.DiscoveredCount = ordinal;
@@ -1971,25 +2011,28 @@ public partial class PipelineEngine : IPipelineEngine
             const int sqlIdChunkSize = 2000;
             int pageSize = _options.SearchRecordsPageSize;
 
-            // Materializes only up to the configured compatibility ceiling. The production search
-            // service asks SQL for one extra row so an oversized result fails predictably instead
-            // of consuming unbounded memory. The repository fallback enforces the same ceiling.
+            // Every matching row is returned — there is no ceiling on how many a search may match. A result too large to
+            // hold comfortably is streamed (see the chunked branch above) when a single Loop consumes it; otherwise it is
+            // read page by page (keyset, so the cost of a page does not grow with how far into the table it is) and
+            // returned whole. StreamSearchAboveRecords only chooses between those two strategies.
             async Task<List<IReadOnlyDictionary<string, object?>>> FetchAllAsync(FilterGroup? tree)
             {
+                var all = new List<IReadOnlyDictionary<string, object?>>();
+                if (recordSearchService is IKeysetPipelineRecordSearchService pager && recordSearchService.SupportsKeysetPaging)
+                {
+                    await foreach (var pageRows in pager.SearchPagesAsync(table, fields, pageSize, tree, 0, long.MaxValue, ct))
+                        all.AddRange(pageRows);
+                    return all;
+                }
                 if (recordSearchService != null)
                 {
                     var rows = await recordSearchService.SearchAsync(table, fields, null, tree, ct);
-                    if (rows.Count > _options.MaxMaterializedSearchRecords)
-                        throw new PipelineNonRetryableException($"Search Records matched more than the configured materialization limit ({_options.MaxMaterializedSearchRecords}). Use a bounded MaxResults value or a bulk-event pipeline for large datasets.");
                     return rows.ToList();
                 }
-                var all = new List<IReadOnlyDictionary<string, object?>>();
                 for (var page = 1; ; page++)
                 {
                     var pageRows = await recordRepo.ListAsync(table, fields, page, pageSize, filterTree: tree, ct: ct);
                     if (pageRows.Count == 0) break;
-                    if (all.Count + pageRows.Count > _options.MaxMaterializedSearchRecords)
-                        throw new PipelineNonRetryableException($"Search Records matched more than the configured materialization limit ({_options.MaxMaterializedSearchRecords}). Use a bounded MaxResults value or a bulk-event pipeline for large datasets.");
                     all.AddRange(pageRows);
                     if (pageRows.Count < pageSize) break;
                 }
@@ -2073,9 +2116,6 @@ public partial class PipelineEngine : IPipelineEngine
                         ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
                         : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit.Value, filterTree: filterTree, ct: ct);
                     resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
-                    if (limit.Value > _options.MaxMaterializedSearchRecords &&
-                        resultsList.Count > _options.MaxMaterializedSearchRecords)
-                        throw new PipelineNonRetryableException($"Search Records cannot materialize more than {_options.MaxMaterializedSearchRecords} records without exactly one Loop consumer. Connect this Search step to one Loop so the records can be processed in durable pages.");
                 }
                 else
                 {
@@ -2127,7 +2167,8 @@ public partial class PipelineEngine : IPipelineEngine
             }
 
             var stepOutput = JsonSerializer.Serialize(new { records = normalizedResults });
-            if (System.Text.Encoding.UTF8.GetByteCount(stepOutput) > _options.MaxStepOutputBytes)
+            // No size cap unless one is configured (MaxStepOutputBytes > 0).
+            if (_options.MaxStepOutputBytes > 0 && System.Text.Encoding.UTF8.GetByteCount(stepOutput) > _options.MaxStepOutputBytes)
                 throw new PipelineNonRetryableException($"Search Records output exceeds the configured maximum of {_options.MaxStepOutputBytes} bytes. Reduce MaxResults or use a bulk-event pipeline.");
             return stepOutput;
         }
@@ -2636,6 +2677,7 @@ public partial class PipelineEngine : IPipelineEngine
 
                 stepsDict.TryGetValue(step.RefId, out var previousLoopScope);
                 int processedCount = 0;
+                var failedBulkCount = 0;
 
                 while (true)
                 {
@@ -2656,25 +2698,32 @@ public partial class PipelineEngine : IPipelineEngine
 
                         stepsDict[step.RefId] = loopScope;
 
+                        var interrupted = false;
                         try
                         {
                             await ExecuteSiblingStepsAsync(runId, allSteps, step.Id, "children", contextDict, stepsDict, snapshots, $"{executionPath}/loop_index_{r.Ordinal}", ct);
                         }
                         catch (Exception ex)
                         {
+                            var carryOn = !IsControlFlowOrInfrastructureException(ex);
                             try
                             {
-                                // Mark item Processed = 2 (Failed) in database using source tenant repository / fresh connection
-                                await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 2, transaction: null, ct);
+                                // A record whose own actions failed is marked failed-and-skipped (3) so it is not retried and the
+                                // records after it are still processed; an interruption (stop / pause / cancellation / deadlock)
+                                // leaves it retryable (2) and ends the attempt, resuming from this item.
+                                await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, carryOn ? LoopItemFailedAndSkipped : (byte)2, transaction: null, ct);
                             }
                             catch (Exception markEx)
                             {
-                                _logger.LogError(markEx, "Failed to update bulk event record status to Processed=2 for record {RecordId}", r.Id);
+                                _logger.LogError(markEx, "Failed to update bulk event record status for record {RecordId}", r.Id);
                             }
 
                             _logger.LogError(ex, "Iteration failed for Ordinal {Ordinal} in bulk event Loop step {StepId}", r.Ordinal, step.Id);
-                            throw; // Re-throw to cause pipeline execution to enter crash retry state, resuming from failure item
+                            if (!carryOn) throw;
+                            interrupted = true;
+                            failedBulkCount++;
                         }
+                        if (interrupted) continue;
 
                         // Mark item Processed = 1 (Success) in database using source tenant repository / fresh connection
                         await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(new List<long> { r.Id }, 1, transaction: null, ct);
@@ -2691,7 +2740,7 @@ public partial class PipelineEngine : IPipelineEngine
                     stepsDict.Remove(step.RefId);
                 }
 
-                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = processedCount, BulkLoop = true });
+                return JsonSerializer.Serialize(new { LoopCompleted = true, IterationCount = processedCount, FailedIterationCount = failedBulkCount, BulkLoop = true });
             }
             else
             {
@@ -2703,6 +2752,7 @@ public partial class PipelineEngine : IPipelineEngine
                         WorksetId = searchWorksetId, TotalCount = searchTotal
                     });
                     var processedCount = 0;
+                    var failedWorksetCount = 0;
                     stepsDict.TryGetValue(step.RefId, out var chunkedPreviousLoopScope);
                     while (true)
                     {
@@ -2729,11 +2779,15 @@ public partial class PipelineEngine : IPipelineEngine
                                     searchWorksetId, [row.Id], 1, ct);
                                 processedCount++;
                             }
-                            catch
+                            catch (Exception ex)
                             {
+                                // Same rule as the bulk loop: a failed record is skipped (3), an interruption stays retryable (2).
+                                var carryOn = !IsControlFlowOrInfrastructureException(ex);
                                 await _pipelineRepo.MarkSearchWorksetRecordsProcessedAsync(
-                                    searchWorksetId, [row.Id], 2, ct);
-                                throw;
+                                    searchWorksetId, [row.Id], carryOn ? LoopItemFailedAndSkipped : (byte)2, ct);
+                                if (!carryOn) throw;
+                                _logger.LogError(ex, "Iteration failed for Ordinal {Ordinal} in chunked-search Loop step {StepId}", row.Ordinal, step.Id);
+                                failedWorksetCount++;
                             }
                         }
                     }
@@ -2741,7 +2795,7 @@ public partial class PipelineEngine : IPipelineEngine
                     else stepsDict.Remove(step.RefId);
                     return JsonSerializer.Serialize(new {
                         LoopCompleted = true, IterationCount = searchTotal,
-                        ProcessedThisAttempt = processedCount, TotalCount = searchTotal, ChunkedSearch = true
+                        ProcessedThisAttempt = processedCount, FailedIterationCount = failedWorksetCount, TotalCount = searchTotal, ChunkedSearch = true
                     });
                 }
                 var items = GetLoopCollection(listObj);
@@ -5516,6 +5570,11 @@ public partial class PipelineEngine : IPipelineEngine
     {
         public string? FallbackAction { get; set; }
     }
+
+    /// <summary>meta.PipelineBulkEventRecord.Processed for a loop item whose own actions failed and that is skipped (not retried):
+    /// 0 pending, 1 succeeded, 2 failed and still to be retried (an attempt interrupted by control flow / infrastructure),
+    /// 3 failed and skipped. Pending reads only take 0 and 2, so a skipped record never blocks the ones after it.</summary>
+    private const byte LoopItemFailedAndSkipped = 3;
 
     private static bool IsControlFlowOrInfrastructureException(Exception ex)
     {

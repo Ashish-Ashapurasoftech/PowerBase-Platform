@@ -1112,7 +1112,7 @@ public class PipelineEngineTests
     [InlineData(true)]
     public async Task ExecuteAsync_LargeSearchLoop_StagesAndCheckpointsBoundedWorkset(bool hasExplicitLargeLimit)
     {
-        if (hasExplicitLargeLimit) _execOptions.MaxMaterializedSearchRecords = 2;
+        if (hasExplicitLargeLimit) _execOptions.StreamSearchAboveRecords = 2;
         var messageId = Guid.NewGuid();
         var tableId = Guid.NewGuid();
         var publicIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };

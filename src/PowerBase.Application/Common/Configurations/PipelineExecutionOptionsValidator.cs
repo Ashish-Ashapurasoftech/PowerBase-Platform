@@ -76,9 +76,8 @@ public static class PipelineExecutionOptionsValidator
             throw new InvalidOperationException("PipelineExecution database queue polling, batch, retry, and cleanup values are invalid.");
         }
 
-        if (options.SearchRecordsPageSize <= 0 || options.MaxMaterializedSearchRecords < options.SearchRecordsPageSize ||
-            options.MaxMaterializedSearchRecords == int.MaxValue ||
-            options.MaxStepOutputBytes <= 0 || options.BulkEventPageSize <= 0)
+        if (options.SearchRecordsPageSize <= 0 || options.StreamSearchAboveRecords < options.SearchRecordsPageSize ||
+            options.MaxStepOutputBytes < 0 || options.BulkEventPageSize <= 0)
         {
             throw new InvalidOperationException("PipelineExecution search paging limits are invalid.");
         }

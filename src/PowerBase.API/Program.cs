@@ -256,6 +256,7 @@ builder.Services.AddScoped<PowerBase.Application.Records.IFileRecordWriteService
 builder.Services.AddScoped<PowerBase.Application.Records.FileReservationService>();
 builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineTriggerInterceptor, PowerBase.Infrastructure.Pipelines.PipelineTriggerInterceptor>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector, PowerBase.Infrastructure.Pipelines.PipelineWriteTimeRelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineAuditFormatter, PowerBase.Application.Pipelines.PipelineAuditFormatter>();
 builder.Services.AddScoped<IAzureSearchService, AzureSearchService>();
 builder.Services.AddSingleton<IEncryptionService, AesEncryptionService>();

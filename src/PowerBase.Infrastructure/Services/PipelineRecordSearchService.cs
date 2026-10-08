@@ -56,13 +56,14 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
 
         var orderBy = "Id";
 
-        // Null historically meant unlimited. Keep the API contract while bounding the SQL result
-        // to one row beyond the engine ceiling so it can fail cleanly instead of exhausting memory.
-        var materializationProbeSize = checked(_options.MaxMaterializedSearchRecords + 1);
-        var boundedPageSize = Math.Min(maxResults ?? materializationProbeSize, materializationProbeSize);
-        parameters.Add("offset", (Math.Max(1, page) - 1) * boundedPageSize);
-        parameters.Add("pageSize", boundedPageSize);
-        const string paginationClause = "\nOFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY";
+        // No maxResults means unlimited: every matching row is returned. With one, exactly that many (from `page`).
+        var paginationClause = "";
+        if (maxResults.HasValue)
+        {
+            parameters.Add("offset", (long)(Math.Max(1, page) - 1) * maxResults.Value);
+            parameters.Add("pageSize", maxResults.Value);
+            paginationClause = "\nOFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY";
+        }
 
         var sql = $"""
             SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
@@ -73,7 +74,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
 
         await using var connection = await _connectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
-        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
 
         var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
 
@@ -110,7 +111,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
                 WHERE IsDeleted = 0 AND Id > @afterId AND Id <= @maxId{filterWhere}
                 ORDER BY Id
                 """;
-            var rows = (await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct)))
+            var rows = (await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct)))
                 .Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
             if (rows.Count == 0) yield break;
             afterId = Convert.ToInt64(rows[^1]["Id"]);
@@ -123,7 +124,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
     {
         var sql = $"SELECT ISNULL(MAX(Id), 0) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0";
         await using var connection = await _connectionFactory.CreateAsync(ct);
-        return await connection.QuerySingleAsync<long>(new CommandDefinition(sql, cancellationToken: ct));
+        return await connection.QuerySingleAsync<long>(new CommandDefinition(sql, commandTimeout: 0, cancellationToken: ct));
     }
 
     private static IReadOnlyDictionary<string, object?> ToDictionary(dynamic row)
@@ -156,7 +157,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
                 PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{columns}
             INTO #CopyRecordsSnapshot FROM {PhysicalNaming.FullTableName(table.Id)};
             CREATE UNIQUE CLUSTERED INDEX IX_CopyRecordsSnapshot ON #CopyRecordsSnapshot(Id);
-            """, cancellationToken: ct));
+            """, commandTimeout: 0, cancellationToken: ct));
         // Use a table-scoped serializable lock without leaving SERIALIZABLE on the pooled
         // session, which would break READPAST in the pipeline outbox relay.
         using (var transaction = connection.BeginTransaction(System.Data.IsolationLevel.ReadCommitted))
@@ -166,7 +167,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
                 SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{columns}
                 FROM {PhysicalNaming.FullTableName(table.Id)} WITH (HOLDLOCK)
                 WHERE IsDeleted = 0{where};
-                """, parameters, transaction, commandTimeout: 3600, cancellationToken: ct));
+                """, parameters, transaction, commandTimeout: 0, cancellationToken: ct));
             transaction.Commit();
         }
         var enc = await FieldEncryptionContext.ResolveAsync(connection, table.AppId, _queryContext.TenantId, _encryptionService, null, ct);
@@ -176,7 +177,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
             ct.ThrowIfCancellationRequested();
             var rows = (await connection.QueryAsync(new CommandDefinition(
                 "SELECT TOP (250) * FROM #CopyRecordsSnapshot WHERE Id > @afterId ORDER BY Id",
-                new { afterId }, cancellationToken: ct))).Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
+                new { afterId }, commandTimeout: 0, cancellationToken: ct))).Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
             if (rows.Count == 0) yield break;
             afterId = Convert.ToInt64(rows[^1]["Id"]);
             await enc.DecryptRowsAsync(rows, fields, ct);
