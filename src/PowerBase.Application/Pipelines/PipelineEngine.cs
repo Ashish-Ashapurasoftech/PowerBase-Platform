@@ -5326,11 +5326,21 @@ public partial class PipelineEngine : IPipelineEngine
         }
         if (new[] { "DATE", "DATE_TIME", "DATETIME", "TIMESTAMP" }.Contains(normalizedCode))
         {
-            var canonicalFormats = normalizedCode == "DATE"
-                ? new[] { "yyyy-MM-dd" }
-                : new[] { "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd" };
+            // A record's Date Created / Modified (and any DateTime) reaches a mapping as the JSON text of a
+            // DateTime: ISO 8601 with up to seven fractional-second digits ("2026-10-08T05:57:12.3366667"),
+            // which the whole-second formats alone rejected — so mapping a record's own timestamp into a
+            // Date & Time field failed whenever the stored time had a fraction.
+            var isoFormats = new[]
+            {
+                "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss.FFFFFFF",
+                "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"
+            };
+            var canonicalFormats = normalizedCode == "DATE" ? new[] { "yyyy-MM-dd" } : isoFormats;
             if (DateTime.TryParseExact(valueStr.Trim(), canonicalFormats, CultureInfo.InvariantCulture,
                 DateTimeStyles.AllowWhiteSpaces, out var dtVal)) return dtVal;
+            // A Date field fed a full timestamp keeps its calendar day.
+            if (normalizedCode == "DATE" && DateTime.TryParseExact(valueStr.Trim(), isoFormats, CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces, out var dateFromTimestamp)) return dateFromTimestamp.Date;
 
             var dotNetDateFormat = dateFormat?.ToUpperInvariant() switch
             {
@@ -5351,12 +5361,22 @@ public partial class PipelineEngine : IPipelineEngine
                 };
             if (DateTime.TryParseExact(valueStr.Trim(), localizedFormats, CultureInfo.InvariantCulture,
                 DateTimeStyles.AllowWhiteSpaces, out dtVal)) return dtVal;
+            // The text of a DateTime formatted by the host ("10/8/2026 5:57:12 AM" — single-digit month/day,
+            // which the fixed MM/dd patterns above reject). Tried last so the configured format always wins.
+            if (DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out dtVal))
+                return normalizedCode == "DATE" ? dtVal.Date : dtVal;
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
         if (normalizedCode is "TIME" or "TIME_OF_DAY")
         {
             if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm", "HH:mm:ss", "h:mm tt", "h:mm:ss tt" },
                 CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeVal)) return timeVal;
+            // A time with fractional seconds, or a full timestamp (a record's Date Created mapped into a Time
+            // field): keep the time of day.
+            if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm:ss.FFFFFFF", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss" },
+                CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeFromStamp) ||
+                DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out timeFromStamp))
+                return DateTime.Today.Add(timeFromStamp.TimeOfDay);
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
 

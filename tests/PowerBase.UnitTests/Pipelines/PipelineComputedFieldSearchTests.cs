@@ -191,6 +191,62 @@ public class PipelineComputedFieldSearchTests
         Assert.Equal(expected, Evaluate("fid_14", op, operand, values, Summary("Sum")));
     }
 
+    // ───────────────────────── date/time mapping (Date Created → Log Time) ─────────────────────────
+
+    private static object? ParseMapped(string value, string typeCode)
+    {
+        var engine = new EngineHarness(TableFields()).Engine;
+        var method = typeof(PipelineEngine).GetMethod("ParseValueTypeWithFormat", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        try { return method.Invoke(engine, new object?[] { value, typeCode, "Log Time", null }); }
+        catch (TargetInvocationException ex) when (ex.InnerException is FormatException) { throw ex.InnerException; }
+    }
+
+    [Theory]
+    [InlineData("2026-10-08T05:57:12.3366667")]      // JSON text of a stored DateTime (fractional seconds)
+    [InlineData("2026-10-08T05:57:12.33")]
+    [InlineData("2026-10-08T05:57:12.3366667Z")]
+    [InlineData("2026-10-08T05:57:12")]
+    [InlineData("2026-10-08 05:57:12.3366667")]
+    [InlineData("10/8/2026 5:57:12 AM")]            // host-formatted DateTime, single-digit month/day
+    public void MapDateTime_AcceptsAStoredTimestampInEveryCommonShape(string text)
+    {
+        var parsed = Assert.IsType<DateTime>(ParseMapped(text, "DateTime"));
+        Assert.Equal(new DateTime(2026, 10, 8).Date, parsed.Date == default ? default : new DateTime(parsed.Year, parsed.Month, parsed.Day));
+    }
+
+    [Fact]
+    public void MapDate_FromATimestamp_KeepsTheCalendarDay()
+    {
+        var parsed = Assert.IsType<DateTime>(ParseMapped("2026-10-08T05:57:12.3366667", "Date"));
+        Assert.Equal(new DateTime(2026, 10, 8), parsed);
+    }
+
+    [Theory]
+    [InlineData("05:57")]
+    [InlineData("05:57:12")]
+    [InlineData("05:57:12.3366667")]
+    [InlineData("5:57 AM")]
+    [InlineData("2026-10-08T05:57:12.3366667")]
+    [InlineData("10/8/2026 5:57:12 AM")]
+    public void MapTime_KeepsTheTimeOfDay(string text)
+    {
+        var parsed = Assert.IsType<DateTime>(ParseMapped(text, "Time"));
+        Assert.Equal(5, parsed.Hour);
+        Assert.Equal(57, parsed.Minute);
+    }
+
+    [Theory]
+    [InlineData("25:99", "Time")]
+    [InlineData("soon", "Time")]
+    public void MapTime_StillRejectsText(string text, string typeCode) =>
+        Assert.Throws<FormatException>(() => ParseMapped(text, typeCode));
+
+    [Theory]
+    [InlineData("not a date", "DateTime")]
+    [InlineData("hello", "Date")]
+    public void MapDateTime_StillRejectsText(string text, string typeCode) =>
+        Assert.Throws<FormatException>(() => ParseMapped(text, typeCode));
+
     // ───────────────────────── in-memory evaluator (Search Records / Copy Records) ─────────────────────────
 
     private static List<(IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed)> Pairs(params (long Id, long? RefId, object? Summary, object? Label)[] rows) =>
