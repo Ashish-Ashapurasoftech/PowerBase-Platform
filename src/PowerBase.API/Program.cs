@@ -558,6 +558,7 @@ builder.Services.AddScoped<GetDefaultReportSettingsQueryHandler>();
 builder.Services.AddScoped<ListReportsQueryHandler>();
 builder.Services.AddScoped<ListReportsByTableQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Queries.ListReportsByTablePaged.ListReportsByTablePagedQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Queries.ListReportPicker.ListReportPickerQueryHandler>();
 builder.Services.AddScoped<ResolveDefaultReportQueryHandler>();
 builder.Services.AddScoped<RunReportQueryHandler>();
 builder.Services.AddScoped<ExportReportQueryHandler>();

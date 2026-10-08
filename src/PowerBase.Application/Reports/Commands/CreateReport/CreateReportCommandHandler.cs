@@ -172,6 +172,7 @@ public class CreateReportCommandHandler
             Definition = JsonSerializer.Serialize(definition),
             IsDefault = false,
             DisplayOrder = 0,
+            RelationshipPublicId = command.RelationshipPublicId,
         };
 
         var (reportId, publicId) = await _reportRepo.CreateAsync(report, ct);

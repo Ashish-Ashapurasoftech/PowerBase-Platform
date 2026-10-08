@@ -11,6 +11,10 @@ public class CreateReportRequest
     public string ColumnsMode { get; set; } = "Custom";
     public List<Guid>? VisibleToRoleIds { get; set; }
 
+    /// <summary>Set by the relationship wizard when creating the hidden "Embedded for {Parent}" report,
+    /// so the report is removed together with the relationship.</summary>
+    public Guid? RelationshipId { get; set; }
+
     /// <summary>Legacy — never actually applied to Summary/Chart reports (RunSummaryAsync never
     /// receives it). Kept only so old JSON deserializes without data loss; Summary's real sort is
     /// SummarySortFields below.</summary>

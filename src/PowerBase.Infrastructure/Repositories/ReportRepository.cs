@@ -197,11 +197,40 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
     private const string InsertSql = """
         INSERT INTO meta.Report
             (AppTableId, OwnerId, Name, Description, ReportType, Visibility,
-             Definition, IsDefault, IsDefaultSettingsRecord, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
+             Definition, IsDefault, IsDefaultSettingsRecord, DisplayOrder, IsDeleted, CreatedOn, CreatedBy, RelationshipId)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES
             (@appTableId, @ownerId, @name, @description, @reportType, @visibility,
-             @definition, @isDefault, @isDefaultSettingsRecord, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
+             @definition, @isDefault, @isDefaultSettingsRecord, @displayOrder, 0, SYSUTCDATETIME(), @createdBy,
+             (SELECT Id FROM meta.Relationship WHERE PublicId = @relationshipPublicId AND IsDeleted = 0))
+        """;
+
+    // Form-designer picker: same role-based predicate as the lists, plus Hidden (the point of the
+    // picker is that a hidden report can still be chosen/embedded).
+    private const string ListPickerByTableSql = """
+        SELECT r.PublicId AS Id, r.Name, r.ReportType, r.Visibility, rel.PublicId AS RelationshipId
+        FROM meta.Report r
+        LEFT JOIN meta.Relationship rel ON rel.Id = r.RelationshipId
+        WHERE r.AppTableId = (SELECT Id FROM meta.AppTable WHERE PublicId = @tablePublicId AND IsDeleted = 0)
+          AND r.IsDeleted = 0
+          AND r.IsDefaultSettingsRecord = 0
+          AND (
+              r.Visibility IN ('Shared', 'Hidden')
+              OR (r.Visibility = 'Personal' AND r.OwnerId = @userId)
+              OR (r.Visibility IN ('MyRole', 'SpecificRoles', 'Role') AND EXISTS (
+                  SELECT 1 FROM meta.AppRoleReport arr
+                  JOIN meta.AppUser au ON au.AppRoleId = arr.AppRoleId
+                  WHERE arr.ReportId = r.Id AND au.UserId = @userId AND au.IsDeleted = 0
+              ))
+          )
+        ORDER BY r.Name
+        """;
+
+    private const string ListPublicIdsByRelationshipSql = """
+        SELECT r.PublicId
+        FROM meta.Report r
+        JOIN meta.Relationship rel ON rel.Id = r.RelationshipId
+        WHERE rel.PublicId = @relationshipPublicId AND r.IsDeleted = 0
         """;
 
     private const string UpdateReportSql = """
@@ -389,8 +418,25 @@ public class ReportRepository : TenantRepositoryBase, IReportRepository
                 isDefaultSettingsRecord = report.IsDefaultSettingsRecord,
                 displayOrder = report.DisplayOrder,
                 createdBy = QueryContext.UserId,
+                relationshipPublicId = report.RelationshipPublicId,
             }, cancellationToken: ct));
         return ((long)row.Id, (Guid)row.PublicId);
+    }
+
+    public async Task<IReadOnlyList<ReportPickerItemDto>> ListPickerByTableAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<ReportPickerItemDto>(
+            new CommandDefinition(ListPickerByTableSql, new { tablePublicId, userId = QueryContext.UserId }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<IReadOnlyList<Guid>> ListPublicIdsByRelationshipAsync(Guid relationshipPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var ids = await connection.QueryAsync<Guid>(
+            new CommandDefinition(ListPublicIdsByRelationshipSql, new { relationshipPublicId }, cancellationToken: ct));
+        return ids.AsList();
     }
 
     public async Task<int> UpdateAsync(Guid publicId, string name, string? description,
