@@ -8,8 +8,8 @@ namespace PowerBase.Application.Relationships;
 
 /// <summary>
 /// What a Summary field's matching criteria may contain: the same rules as a report's filter
-/// (known operators, at most <see cref="CommonReportValidationHelpers.MaxFilterTreeDepth"/> levels
-/// of groups), over the child table's fields that have a column to filter on — so no calculated
+/// (known operators; groups may nest to any depth, unlike a report's
+/// <see cref="CommonReportValidationHelpers.MaxFilterTreeDepth"/> levels), over the child table's fields that have a column to filter on — so no calculated
 /// (Formula/Summary) fields; a Lookup is filtered on the parent column it pulls down (see
 /// <see cref="SummaryLookupSources"/>), except a range, whose end has no single value. Two report features have no meaning for a summary and are
 /// refused: "&lt;ask the user&gt;" (there is no one to ask). "is the current user" is allowed and
@@ -38,7 +38,7 @@ public static class SummaryCriteriaValidator
         var parentFieldsByFid = ByFid(parentFields);
         var errors = new Dictionary<string, string[]>();
         CommonReportValidationHelpers.ValidateFilterGroup(criteria, fieldsByFid.Keys.ToHashSet(), errors,
-            validParentFieldIds: parentFieldsByFid.Keys.ToHashSet());
+            validParentFieldIds: parentFieldsByFid.Keys.ToHashSet(), unlimitedDepth: true);
         if (errors.Count > 0) return errors.Values.SelectMany(messages => messages).First();
 
         return FindUnsupported(criteria, fieldsByFid, parentFieldsByFid, lookupSources);

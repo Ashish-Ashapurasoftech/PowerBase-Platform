@@ -18,4 +18,13 @@ public interface ISchemaEngineService
     /// risks the data truncation a DECIMAL-to-INT narrowing would.
     /// </summary>
     Task WidenIntColumnToDecimalIfNeededAsync(AppTable table, AppField field, CancellationToken ct = default);
+
+    /// <summary>
+    /// Rescales every stored value of a numeric field by a factor of 100 — multiplies when
+    /// <paramref name="toPercent"/> is true, divides otherwise. Used by the Number/Currency/
+    /// Percent/Rating "Display As" type switch so that a fraction (1.15) becomes a whole
+    /// percentage (115) when the field turns into Percent, and back again when it leaves Percent.
+    /// NULLs are left alone; the physical column type is unchanged.
+    /// </summary>
+    Task ScaleNumericColumnForPercentAsync(AppTable table, AppField field, bool toPercent, CancellationToken ct = default);
 }

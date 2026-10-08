@@ -35,6 +35,10 @@ public class PagedReportRunResult
     /// <summary>Gauge charts only, and only when Chart.GaugeGoalType is "DataValue" — see
     /// ReportRunResponse.ResolvedGaugeGoalValue for the full contract.</summary>
     public decimal? ResolvedGaugeGoalValue { get; init; }
+    /// <summary>Table reports only: grand-total aggregates per column (keyed by field id) over EVERY
+    /// record matching the report's filters, not just this page. Only columns that opted into a
+    /// total/average row appear here; empty when the report hides totals.</summary>
+    public IReadOnlyDictionary<string, ColumnTotal> Totals { get; init; } = new Dictionary<string, ColumnTotal>();
 }
 
 public class RunReportQueryHandler
@@ -475,6 +479,11 @@ public class RunReportQueryHandler
 
         IReadOnlyList<RecordResult> items;
         int total;
+        var totals = new Dictionary<string, ColumnTotal>();
+        // Columns that opted into a Total/Average row — aggregated over ALL matching records below.
+        var totalCols = definition.HideTotals || isMaskedPreview
+            ? new List<AppField>()
+            : selectedFields.Where(WantsTotals).ToList();
 
         if (hasFormulaFilters || hasFormulaSorts)
         {
@@ -504,6 +513,10 @@ public class RunReportQueryHandler
 
             total = pairs.Count;
 
+            // Every matching row is already in memory here, so aggregate them directly.
+            if (totalCols.Count > 0)
+                totals = AggregateInMemory(pairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, null, p.Computed)).ToList(), totalCols);
+
             // Paginate in memory.
             var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
             var userNames = await ResolveUserNamesAsync(pagePairs.Select(p => p.Row), allFields, _userRepo, ct, pagePairs.Select(p => p.Computed));
@@ -521,6 +534,32 @@ public class RunReportQueryHandler
             var computed = _formulaProjector.Project(allFields, rows, relational, table);
             var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
+
+            if (totalCols.Count > 0)
+            {
+                // Plain stored columns: one SQL aggregate with the same WHERE as the page query.
+                var physicalCols = totalCols.Where(c => !PhysicalNaming.IsComputedTypeCode(c.TypeCode) && !c.IsEncrypted).ToList();
+                if (physicalCols.Count > 0)
+                {
+                    foreach (var kv in await _recordRepo.AggregateColumnsAsync(table, allFields, physicalCols, filterTree,
+                                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct))
+                        totals[kv.Key.ToString()] = kv.Value;
+                }
+
+                // Formula / encrypted columns have no SQL-aggregatable value, so evaluate them over
+                // every matching record in memory (same cap as the formula-filter path above).
+                var memoryCols = totalCols.Except(physicalCols).ToList();
+                if (memoryCols.Count > 0)
+                {
+                    var everyRow = await _recordRepo.ListAsync(table, allFields, 1, TotalsMaxRows, filterTree, [],
+                        restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+                    var everyRelational = await _relationalProjector.ProjectAsync(table, allFields, everyRow, ct);
+                    var everyComputed = _formulaProjector.Project(allFields, everyRow, everyRelational, table);
+                    var everyResult = everyRow.Select((r, i) => RecordResult.FromRow(r, selectedFields, null, everyComputed[i])).ToList();
+                    foreach (var kv in AggregateInMemory(everyResult, memoryCols))
+                        totals[kv.Key] = kv.Value;
+                }
+            }
         }
 
         if (isMaskedPreview)
@@ -542,7 +581,69 @@ public class RunReportQueryHandler
             Page = page,
             PageSize = pageSize,
             IsDataMasked = isMaskedPreview,
+            Totals = totals,
         };
+    }
+
+    /// <summary>Upper bound on records evaluated in memory for a formula/encrypted column's grand total.</summary>
+    private const int TotalsMaxRows = 50_000;
+
+    /// <summary>True when this column opted into a Total/Average row (numeric family, Duration and
+    /// their formula variants) or a checked-count row (checkbox) — the same opt-ins the grid reads.</summary>
+    private static bool WantsTotals(AppField f)
+    {
+        var isBool = f.TypeCode is "Boolean" or "Formula_Bool";
+        var isNumeric = f.TypeCode is "Number" or "Currency" or "Percent" or "Rating" or "Duration"
+            or "Formula_Number" or "Formula_Duration";
+        if ((!isBool && !isNumeric) || string.IsNullOrWhiteSpace(f.Settings)) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(f.Settings);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            foreach (var p in doc.RootElement.EnumerateObject())
+            {
+                if (p.Value.ValueKind != JsonValueKind.True) continue;
+                if (isBool
+                        ? p.Name.Equals("showTotalsRow", StringComparison.OrdinalIgnoreCase)
+                        : p.Name.Equals("showTotalInReports", StringComparison.OrdinalIgnoreCase)
+                          || p.Name.Equals("showAverageInReports", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch (JsonException) { }
+        return false;
+    }
+
+    /// <summary>Same aggregates as <see cref="IRecordRepository.AggregateColumnsAsync"/>, computed over
+    /// already-materialised rows — for formula / encrypted columns that SQL can't sum. Mirrors the
+    /// grid's old per-page maths: a non-numeric value counts as 0, a checkbox counts when checked.</summary>
+    private static Dictionary<string, ColumnTotal> AggregateInMemory(IReadOnlyList<RecordResult> rows, IReadOnlyList<AppField> columns)
+    {
+        var result = new Dictionary<string, ColumnTotal>();
+        foreach (var col in columns)
+        {
+            var key = (col.Fid ?? col.Id).ToString();
+            var isBool = col.TypeCode is "Boolean" or "Formula_Bool";
+            decimal sum = 0;
+            long nonBlank = 0;
+            foreach (var row in rows)
+            {
+                if (!row.Fields.TryGetValue(key, out var raw) || raw is null || (raw is string s && s.Length == 0)) continue;
+                nonBlank++;
+                if (isBool)
+                {
+                    var truthy = raw is bool b ? b
+                        : raw is string str ? str.Equals("true", StringComparison.OrdinalIgnoreCase) || str == "1" || str.Equals("yes", StringComparison.OrdinalIgnoreCase)
+                        : decimal.TryParse(Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var bn) && bn == 1;
+                    if (truthy) sum += 1;
+                }
+                else if (decimal.TryParse(Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture),
+                             System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var n))
+                    sum += n;
+            }
+            result[key] = new ColumnTotal { Sum = sum, NonBlankCount = nonBlank, RowCount = rows.Count };
+        }
+        return result;
     }
 
     private async Task<FilterGroup?> BuildAiIdFilterAsync(AppTable table, IReadOnlyList<Guid> aiMatches, FilterGroup? existingFilter, CancellationToken ct)
