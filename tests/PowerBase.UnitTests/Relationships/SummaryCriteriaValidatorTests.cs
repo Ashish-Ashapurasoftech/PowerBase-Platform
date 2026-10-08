@@ -46,10 +46,10 @@ public class SummaryCriteriaValidatorTests
             ChildFields, ParentFields).Should().BeNull();
 
     [Fact]
-    public void FindProblem_FourLevelsOfGroups_IsRefused() =>
+    public void FindProblem_GroupsNestedMoreThanThreeLevels_AreAllowed() =>
         SummaryCriteriaValidator.FindProblem(
-            Group("and", Nested("or", Nested("and", Nested("or", Cond(6, "eq"))))),
-            ChildFields, ParentFields).Should().Contain("nested at most 3 levels");
+            Group("and", Nested("or", Nested("and", Nested("or", Nested("and", Cond(6, "eq")))))),
+            ChildFields, ParentFields).Should().BeNull();
 
     [Fact]
     public void FindProblem_FieldFromAnotherTable_IsRefused() =>

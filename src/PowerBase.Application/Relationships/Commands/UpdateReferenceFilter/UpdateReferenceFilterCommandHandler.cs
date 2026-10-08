@@ -140,7 +140,7 @@ public class UpdateReferenceFilterCommandHandler
         var formFids = StoredFids(childFields.Where(f => f.Id != referenceField.Id));
 
         var errors = new Dictionary<string, string[]>();
-        CommonReportValidationHelpers.ValidateFilterGroup(tree, parentFids, errors, validParentFieldIds: formFids);
+        CommonReportValidationHelpers.ValidateFilterGroup(tree, parentFids, errors, validParentFieldIds: formFids, unlimitedDepth: true);
         if (errors.Count > 0)
             throw Invalid("filterTree", errors.Values.SelectMany(m => m).First());
 
