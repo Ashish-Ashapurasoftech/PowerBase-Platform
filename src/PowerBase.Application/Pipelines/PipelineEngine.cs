@@ -35,6 +35,52 @@ public partial class PipelineEngine : IPipelineEngine
     /// have no compute-on-read (formula) fields — only encrypted-field in-memory filtering.</summary>
     private static readonly Dictionary<long, object?> EmptyComputedValues = new();
 
+    /// <summary>Computes Formula/Lookup/Summary values for rows read by a step (they have no stored
+    /// column). Returns null when the table has none or the projectors are unavailable.</summary>
+    private async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>?> ProjectComputedAsync(
+        AppTable table, IReadOnlyList<AppField> fields,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, CancellationToken ct, bool inWriteTransaction = false)
+    {
+        if (rows.Count == 0 || !fields.Any(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))) return null;
+        // The computed values only enrich a step's output. A failure to compute them (a Lookup / Summary /
+        // Reference whose settings point at a table this database doesn't have, a broken formula, …) must not
+        // fail the step — for Create / Update Record the write has already been committed, so failing here
+        // would report an error for a record that exists (and a retry would create it again). A broken
+        // relationship field only loses its own value; every other computed value is still returned.
+        var computed = await PipelineComputedProjection.ProjectAsync(
+            _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector,
+            _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector,
+            table, fields, rows, _logger, ct,
+            inWriteTransaction ? PipelineComputedProjection.InTransactionBudget : null);
+        return computed?.Values;
+    }
+
+    /// <summary>Like <see cref="ProjectComputedAsync"/> but also projects a Reference's display text, so a
+    /// filter can match what the user sees. Used only to evaluate filters, never to build step output.
+    /// Fails the step, naming the field, when a field the filter reads cannot be computed.</summary>
+    private async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>?> ProjectForFilterAsync(
+        AppTable table, IReadOnlyList<AppField> fields,
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, IEnumerable<long> filterFids, CancellationToken ct)
+    {
+        if (rows.Count == 0) return null;
+        if (!fields.Any(f => f.Fid.HasValue && (PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.TypeCode == "Reference"))) return null;
+        var computed = await PipelineComputedProjection.ProjectAsync(
+            _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector,
+            _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector,
+            table, fields, rows, _logger, ct);
+        PipelineComputedProjection.ThrowIfNeeded(computed, fields, filterFids, "Search Records");
+        return computed?.Values;
+    }
+
+    private static IReadOnlyDictionary<string, object?> MergeComputed(
+        IReadOnlyDictionary<string, object?> row, IReadOnlyDictionary<long, object?> computed)
+    {
+        if (computed.Count == 0) return row;
+        var merged = new Dictionary<string, object?>(row);
+        foreach (var kvp in computed) merged[PhysicalNaming.ColumnName((int)kvp.Key)] = kvp.Value;
+        return merged;
+    }
+
     internal static Dictionary<string, object?> BuildBulkEventRecord(PipelineBulkEventRecord record)
     {
         var valuesJson = string.Equals(record.EventType, "Deleted", StringComparison.OrdinalIgnoreCase)
@@ -562,6 +608,12 @@ public partial class PipelineEngine : IPipelineEngine
                         var triggerData = JsonSerializer.Deserialize<Dictionary<string, object>>(task.TriggerPayloadJson);
                         if (triggerData != null)
                         {
+                            // The event captured Lookup / Summary / Formula values at write time; read them again now
+                            // that the write (and whatever was saved with it) is committed.
+                            await PipelineTriggerRefresh.RefreshAsync(triggerData, _tableRepo, _fieldRepo, _recordRepo,
+                                _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector,
+                                _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector, _logger, ct);
+
                             contextDict["trigger"] = triggerData;
                             foreach (var kvp in triggerData)
                             {
@@ -1818,10 +1870,20 @@ public partial class PipelineEngine : IPipelineEngine
                 }
                 catch { return false; }
             });
-            var encryptedFilterFidsForStreaming = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
+            // Formula/Lookup/Summary fields have no physical column, and encrypted fields hold
+            // ciphertext: neither can be matched by the SQL filter, so conditions on them are
+            // evaluated in memory against candidate rows instead.
+            var computedFieldFids = fields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))
                 .Select(f => (long)f.Fid!.Value).ToHashSet();
-            var canStreamFilter = encryptedFilterFidsForStreaming.Count == 0 ||
-                !FormulaFilterSorter.TreeContainsFormulaField(filterTree, encryptedFilterFidsForStreaming);
+            var inMemoryFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
+                .Select(f => (long)f.Fid!.Value).ToHashSet();
+            inMemoryFilterFids.UnionWith(computedFieldFids);
+            // A Reference searched by its display text ("contains Hardik") can't be matched in SQL — the
+            // column holds the parent's Record ID#. Id-style conditions on a Reference stay in SQL.
+            var labelReferenceFids = PipelineComputedFilter.LabelStyleReferenceFids(fields, filterTree);
+            inMemoryFilterFids.UnionWith(labelReferenceFids);
+            var canStreamFilter = inMemoryFilterFids.Count == 0 ||
+                !FormulaFilterSorter.TreeContainsFormulaField(filterTree, inMemoryFilterFids);
 
             var requiresChunkedSearch = !limit.HasValue || limit.Value > _options.MaxMaterializedSearchRecords;
             if (requiresChunkedSearch && loopConsumerCount == 1 && canStreamFilter && recordSearchService.SupportsKeysetPaging &&
@@ -1843,6 +1905,11 @@ public partial class PipelineEngine : IPipelineEngine
                             var remaining = limit.HasValue ? limit.Value - ordinal : int.MaxValue;
                             var recordsToStage = pageRows.Take(remaining).ToList();
                             if (recordsToStage.Count == 0) break;
+                            // Formula fields have no stored value: project them so loop items
+                            // ({{steps.<loop>.item.fid_N}}) carry them like the non-chunked search does.
+                            var stagedComputed = await ProjectComputedAsync(table, fields, recordsToStage, ct);
+                            if (stagedComputed != null)
+                                recordsToStage = recordsToStage.Select((r, i) => MergeComputed(r, stagedComputed[i])).ToList();
                             var staged = new List<PipelineBulkEventRecord>(recordsToStage.Count);
                             long lastRecordId = workset.LastRecordId;
                             foreach (var record in recordsToStage)
@@ -1938,6 +2005,8 @@ public partial class PipelineEngine : IPipelineEngine
             // to the SQL path (which has its own encrypted-field handling) on any failure.
             List<IReadOnlyDictionary<string, object?>>? aiSearchRows = null;
             if (_azureSearchService != null && _azureSearchService.IsGridSearchEnabled && filterTree != null
+                && !FormulaFilterSorter.TreeContainsFormulaField(filterTree, computedFieldFids)
+                && !FormulaFilterSorter.TreeContainsFormulaField(filterTree, labelReferenceFids)
                 && fields.Any(f => f.IsSearchable || f.IsFilterable) && await _azureSearchService.IsHealthyAsync(ct))
             {
                 var odata = ODataFilterBuilder.Build(filterTree, fields);
@@ -1967,6 +2036,7 @@ public partial class PipelineEngine : IPipelineEngine
             }
 
             List<IReadOnlyDictionary<string, object?>> resultsList;
+            var computedMerged = false;
             if (aiSearchRows != null)
             {
                 resultsList = (limit.HasValue ? aiSearchRows.Take(limit.Value) : aiSearchRows).ToList();
@@ -1977,22 +2047,25 @@ public partial class PipelineEngine : IPipelineEngine
                 // condition against them can never match. Split those conditions out of the SQL
                 // tree and evaluate them in memory against decrypted candidate rows instead —
                 // mirrors RunReportQueryHandler's handling of formula (compute-on-read) fields.
-                var encryptedFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
-                    .Select(f => (long)f.Fid!.Value).ToHashSet();
-                if (encryptedFilterFids.Count > 0 && FormulaFilterSorter.TreeContainsFormulaField(filterTree, encryptedFilterFids))
+                if (inMemoryFilterFids.Count > 0 && FormulaFilterSorter.TreeContainsFormulaField(filterTree, inMemoryFilterFids))
                 {
-                    var (physicalFilterTree, encryptedFilterTree) = FormulaFilterSorter.SplitFilterTree(filterTree, encryptedFilterFids);
+                    var (physicalFilterTree, inMemoryFilterTree) = FormulaFilterSorter.SplitFilterTree(filterTree, inMemoryFilterFids);
                     // Fetch EVERY physical-filter-matching candidate via pagination — no fixed
-                    // cap — so nothing is silently dropped before the encrypted conditions are
-                    // evaluated in memory below, no matter how many rows match physically.
+                    // cap — so nothing is silently dropped before the in-memory conditions are
+                    // evaluated below, no matter how many rows match physically.
                     var candidates = await FetchAllAsync(physicalFilterTree);
+                    var computedPerRow = await ProjectForFilterAsync(table, fields, candidates, PipelineComputedProjection.ReferencedFids(inMemoryFilterTree), ct);
                     var pairs = candidates
-                        .Select(r => (Row: r, Computed: (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
+                        .Select((r, i) => (Row: r, Computed: computedPerRow != null ? computedPerRow[i] : (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
                         .ToList();
-                    if (encryptedFilterTree != null)
-                        pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, encryptedFilterTree, fields);
-                    IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p => p.Row);
+                    if (inMemoryFilterTree != null)
+                        pairs = PipelineComputedFilter.Apply(pairs, inMemoryFilterTree, fields);
+                    // The Reference display text was projected only to evaluate the filter: a table with no
+                    // computed fields keeps returning the stored Record ID# in the step output.
+                    IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p =>
+                        computedFieldFids.Count == 0 ? p.Row : MergeComputed(p.Row, p.Computed));
                     resultsList = (limit.HasValue ? filtered.Take(limit.Value) : filtered).ToList();
+                    computedMerged = true;
                 }
                 else if (limit.HasValue)
                 {
@@ -2009,6 +2082,14 @@ public partial class PipelineEngine : IPipelineEngine
                     // No user-configured MaxResults — fetch every matching row via pagination.
                     resultsList = await FetchAllAsync(filterTree);
                 }
+            }
+            // Formula fields are compute-on-read, so expose their values in the step output too
+            // (e.g. {{steps.x.CustomerNumber}}) when the filter branch above didn't already.
+            if (!computedMerged && computedFieldFids.Count > 0 && resultsList.Count > 0)
+            {
+                var outputComputed = await ProjectComputedAsync(table, fields, resultsList, ct);
+                if (outputComputed != null)
+                    resultsList = resultsList.Select((r, i) => MergeComputed(r, outputComputed[i])).ToList();
             }
             _logger.LogInformation("Search Records step {StepId} matched {Count} records.", step.Id, resultsList.Count);
 
@@ -2092,6 +2173,7 @@ public partial class PipelineEngine : IPipelineEngine
 
             // Resolve Reference field values: translate any human key or PublicId Guid to the
             // parent's physical row Id before persisting — mirrors CreateRecordCommandHandler.
+            await PipelineReferenceTargets.EnsureAvailableAsync(fields, values, tableRepo, ct);
             var refOverrides = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
                 fields, values, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
             foreach (var kvp in refOverrides)
@@ -2129,6 +2211,13 @@ public partial class PipelineEngine : IPipelineEngine
                     var persistedRows = await recordRepo.GetBulkUpsertRowsByIdsAsync(
                         table, fields, [recordId], uow.Transaction, ct);
                     persistedRows?.TryGetValue(recordId, out persistedRecord);
+                }
+                // Formula fields are compute-on-read: add their values so {{steps.<create>.fid_N}}
+                // (and the record-added event published below) carry them.
+                if (persistedRecord is not null)
+                {
+                    var createdComputed = await ProjectComputedAsync(table, fields, [persistedRecord], ct, inWriteTransaction: true);
+                    if (createdComputed != null) persistedRecord = MergeComputed(persistedRecord, createdComputed[0]);
                 }
                 var output = BuildCreatedRecordOutput(recordPublicId, recordId, fields, values, persistedRecord);
                 // Publish the same complete snapshot exposed by this step, including persisted
@@ -2221,6 +2310,7 @@ public partial class PipelineEngine : IPipelineEngine
                     return cachedOutput;
                 }
 
+                await PipelineReferenceTargets.EnsureAvailableAsync(fields, values, tableRepo, ct);
                 var persisted = await recordWriteService.ApplyAsync(
                     table, fields, recordPublicId, values, AuditActions.Updated, "Record updated via PowerFlow action step", ct, uow.Transaction);
                 var output = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
@@ -2232,6 +2322,20 @@ public partial class PipelineEngine : IPipelineEngine
                 };
                 foreach (var fieldValue in persisted)
                     output[$"fid_{fieldValue.Key}"] = fieldValue.Value;
+                // Formula fields are compute-on-read: read the updated row back in this
+                // transaction so {{steps.<update>.fid_N}} also exposes their current values.
+                if (uow.Transaction is not null)
+                {
+                    var updatedId = await recordRepo.GetActiveRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
+                    var updatedRows = await recordRepo.GetBulkUpsertRowsByIdsAsync(table, fields, [updatedId], uow.Transaction, ct);
+                    if (updatedRows.TryGetValue(updatedId, out var updatedRow))
+                    {
+                        var updatedComputed = await ProjectComputedAsync(table, fields, [updatedRow], ct, inWriteTransaction: true);
+                        if (updatedComputed != null)
+                            foreach (var computedValue in updatedComputed[0])
+                                output[$"fid_{computedValue.Key}"] = computedValue.Value;
+                    }
+                }
                 var outputJson = JsonSerializer.Serialize(output);
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
@@ -3434,6 +3538,7 @@ public partial class PipelineEngine : IPipelineEngine
                             if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Id] = StepActingUserId; afterValues[bulkModifiedByField.Fid!.Value] = StepActingUserId; }
 
                             // UPDATE in DB on uow.Transaction via recordWriteService (with sanitized row)
+                            await PipelineReferenceTargets.EnsureAvailableAsync(fields, row, tableRepo, ct);
                             await recordWriteService.ApplyAsync(
                                 table,
                                 fields,
@@ -3469,6 +3574,7 @@ public partial class PipelineEngine : IPipelineEngine
                         else
                         {
                             // Resolve Reference fields: translate human key / PublicId Guid to physical row Id.
+                            await PipelineReferenceTargets.EnsureAvailableAsync(fields, row, tableRepo, ct);
                             var insertRefOverrides1 = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
                                 fields, row, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
                             foreach (var kvp in insertRefOverrides1)
@@ -3492,6 +3598,7 @@ public partial class PipelineEngine : IPipelineEngine
                     {
                         // INSERT (Cases 2-insert, 6-insert)
                         // Resolve Reference fields: translate human key / PublicId Guid to physical row Id.
+                        await PipelineReferenceTargets.EnsureAvailableAsync(fields, row, tableRepo, ct);
                         var insertRefOverrides2 = await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
                             fields, row, tableRepo, fieldRepo, recordRepo, _relRepo, ct);
                         foreach (var kvp in insertRefOverrides2)
@@ -4402,7 +4509,7 @@ public partial class PipelineEngine : IPipelineEngine
                 throw new PipelineStepException($"Field metadata for token '{token}' (field '{fieldRef}') could not be resolved.");
             }
 
-            return PipelineFilterEvaluator.GetTypeCategory(matchedField.TypeCode);
+            return PipelineFilterEvaluator.GetTypeCategory(matchedField);
         }
         finally
         {
@@ -5236,11 +5343,21 @@ public partial class PipelineEngine : IPipelineEngine
         }
         if (new[] { "DATE", "DATE_TIME", "DATETIME", "TIMESTAMP" }.Contains(normalizedCode))
         {
-            var canonicalFormats = normalizedCode == "DATE"
-                ? new[] { "yyyy-MM-dd" }
-                : new[] { "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd" };
+            // A record's Date Created / Modified (and any DateTime) reaches a mapping as the JSON text of a
+            // DateTime: ISO 8601 with up to seven fractional-second digits ("2026-10-08T05:57:12.3366667"),
+            // which the whole-second formats alone rejected — so mapping a record's own timestamp into a
+            // Date & Time field failed whenever the stored time had a fraction.
+            var isoFormats = new[]
+            {
+                "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss.FFFFFFF",
+                "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"
+            };
+            var canonicalFormats = normalizedCode == "DATE" ? new[] { "yyyy-MM-dd" } : isoFormats;
             if (DateTime.TryParseExact(valueStr.Trim(), canonicalFormats, CultureInfo.InvariantCulture,
                 DateTimeStyles.AllowWhiteSpaces, out var dtVal)) return dtVal;
+            // A Date field fed a full timestamp keeps its calendar day.
+            if (normalizedCode == "DATE" && DateTime.TryParseExact(valueStr.Trim(), isoFormats, CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces, out var dateFromTimestamp)) return dateFromTimestamp.Date;
 
             var dotNetDateFormat = dateFormat?.ToUpperInvariant() switch
             {
@@ -5261,12 +5378,22 @@ public partial class PipelineEngine : IPipelineEngine
                 };
             if (DateTime.TryParseExact(valueStr.Trim(), localizedFormats, CultureInfo.InvariantCulture,
                 DateTimeStyles.AllowWhiteSpaces, out dtVal)) return dtVal;
+            // The text of a DateTime formatted by the host ("10/8/2026 5:57:12 AM" — single-digit month/day,
+            // which the fixed MM/dd patterns above reject). Tried last so the configured format always wins.
+            if (DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out dtVal))
+                return normalizedCode == "DATE" ? dtVal.Date : dtVal;
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
         if (normalizedCode is "TIME" or "TIME_OF_DAY")
         {
             if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm", "HH:mm:ss", "h:mm tt", "h:mm:ss tt" },
                 CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeVal)) return timeVal;
+            // A time with fractional seconds, or a full timestamp (a record's Date Created mapped into a Time
+            // field): keep the time of day.
+            if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm:ss.FFFFFFF", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss" },
+                CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeFromStamp) ||
+                DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out timeFromStamp))
+                return DateTime.Today.Add(timeFromStamp.TimeOfDay);
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
 
@@ -5735,7 +5862,7 @@ public partial class PipelineEngine : IPipelineEngine
                 {
                     var rawValue = rule.Value;
                     var dbOp = MapUiOperatorToDbOperator(rule.Operator);
-                    var fieldCategory = PipelineFilterEvaluator.GetTypeCategory(field.TypeCode);
+                    var fieldCategory = PipelineFilterEvaluator.GetTypeCategory(field);
                     if (fieldCategory == "DATE")
                     {
                         dbOp = dbOp switch

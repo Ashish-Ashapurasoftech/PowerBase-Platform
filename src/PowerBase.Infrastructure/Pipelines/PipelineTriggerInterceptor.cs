@@ -10,6 +10,9 @@ using Microsoft.Extensions.Options;
 using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
+using PowerBase.Application.Formulas;
+using PowerBase.Application.Relationships;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Enums;
 using PowerBase.Infrastructure.Persistence;
@@ -27,6 +30,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
     private readonly ILogger<PipelineTriggerInterceptor> _logger;
     private readonly PipelineExecutionOptions _options;
     private readonly ITenantConnectionResolver? _tenantResolver;
+    private readonly IFormulaProjector? _formulaProjector;
+    private readonly IRelationalProjector? _relationalProjector;
 
     public PipelineTriggerInterceptor(
         IPipelineRepository pipelineRepo,
@@ -37,8 +42,12 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         IMainPipelineQueueRepository mainQueueRepo,
         ILogger<PipelineTriggerInterceptor> logger,
         IOptions<PipelineExecutionOptions>? options = null,
-        ITenantConnectionResolver? tenantResolver = null)
+        ITenantConnectionResolver? tenantResolver = null,
+        IFormulaProjector? formulaProjector = null,
+        IRelationalProjector? relationalProjector = null)
     {
+        _formulaProjector = formulaProjector;
+        _relationalProjector = relationalProjector;
         _tenantResolver = tenantResolver;
         _pipelineRepo = pipelineRepo;
         _recordRepo = recordRepo;
@@ -95,6 +104,124 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         );
 
         await InterceptBulkAsync(table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
+    }
+
+    /// <summary>Fids of the Reference fields at least one listening trigger filters on (by field name, fid_N
+    /// token or advanced-query {N.…} id) — only those need their display text projected.</summary>
+    private static IReadOnlyCollection<long> FilterReferenceFids(IReadOnlyList<TriggerSubscription> subscriptions, IReadOnlyList<AppField> fields)
+    {
+        var result = new List<long>();
+        foreach (var field in fields.Where(f => f.Fid.HasValue && !f.IsDeleted && f.TypeCode == "Reference"))
+        {
+            var fid = field.Fid!.Value;
+            var used = subscriptions.Any(s => new[] { s.FiltersJson, s.FilterGroupsJson, s.AdvancedQuery }.Any(text =>
+                !string.IsNullOrEmpty(text) &&
+                (text.Contains($"fid_{fid}", StringComparison.OrdinalIgnoreCase) ||
+                 text.Contains($"fid_{field.Id}", StringComparison.OrdinalIgnoreCase) ||
+                 text.Contains($"{{{fid}.", StringComparison.Ordinal) ||
+                 text.Contains($"\"{field.Name}\"", StringComparison.OrdinalIgnoreCase))));
+            if (used) result.Add(fid);
+        }
+        return result;
+    }
+
+    /// <summary>The values a trigger filter reads: the event values, with each Reference replaced by its
+    /// display text (the user-visible value) and the stored Record ID# kept under the negated Fid so an
+    /// exact-match condition on the id still matches.</summary>
+    private static IReadOnlyDictionary<long, object?> FilterValues(PipelineRecordChange change, IReadOnlyDictionary<long, object?> values)
+    {
+        if (change.ReferenceLabels is not { Count: > 0 } labels) return values;
+        var merged = new Dictionary<long, object?>(values);
+        foreach (var (fid, label) in labels)
+        {
+            if (merged.TryGetValue(fid, out var stored) && stored is not null && stored is not string)
+                merged[-fid] = stored;
+            else if (merged.TryGetValue(fid, out var storedText) && storedText is string s && long.TryParse(s, out _))
+                merged[-fid] = storedText;
+            merged[fid] = label;
+        }
+        return merged;
+    }
+
+    /// <summary>Formula (compute-on-read) fields have no stored value, so the written values never
+    /// contain them and an event filter / pipeline condition on one (e.g. CustomerNumber) would see
+    /// blank. Re-reads the affected rows inside the open transaction (in chunks, to stay under SQL
+    /// Server's parameter limit) and projects formula fields into each change's values — After for
+    /// added/modified, Before for deleted (delete events fire before the row is removed). Every
+    /// single and bulk write funnels through here. Best-effort: on any failure the changes are
+    /// returned untouched.</summary>
+    private async Task<IReadOnlyList<PipelineRecordChange>> WithComputedValuesAsync(
+        AppTable table,
+        IReadOnlyList<AppField> fields,
+        IReadOnlyList<PipelineRecordChange> changes,
+        CancellationToken ct,
+        IReadOnlyCollection<long>? filterReferenceFids = null)
+    {
+        if (_formulaProjector == null || _uow.Transaction == null) return changes;
+        var hasComputed = fields.Any(f => f.Fid.HasValue && !f.IsDeleted && PhysicalNaming.IsComputedTypeCode(f.TypeCode));
+        // A Reference a trigger filter matches by display text needs its label projected too (it is
+        // only used to evaluate the filter — the event values keep the stored Record ID#).
+        var referenceFids = filterReferenceFids ?? Array.Empty<long>();
+        if (!hasComputed && referenceFids.Count == 0) return changes;
+
+        try
+        {
+            var result = new List<PipelineRecordChange>(changes.Count);
+            const int chunkSize = 1000;
+            foreach (var chunk in changes.Chunk(chunkSize))
+            {
+                var idMap = await _recordRepo.GetRecordIdsByPublicIdsAsync(
+                    table, chunk.Select(c => c.RecordPublicId).ToList(), _uow.Transaction, ct);
+                var rowsById = await _recordRepo.GetBulkUpsertRowsByIdsAsync(
+                    table, fields, idMap.Values.ToList(), _uow.Transaction, ct);
+
+                var present = chunk.Where(c => idMap.TryGetValue(c.RecordPublicId, out var id) && rowsById.ContainsKey(id)).ToList();
+                var rows = present.Select(c => rowsById[idMap[c.RecordPublicId]]).ToList();
+                // Read on other connections, these can wait behind the lock of the write being intercepted (see
+                // PipelineComputedProjection.RelationshipBudget): give up after the budget instead of SQL's 30 s timeout.
+                using var projectionBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                projectionBudget.CancelAfter(PowerBase.Application.Pipelines.PipelineComputedProjection.InTransactionBudget);
+                var seed = _relationalProjector != null
+                    ? await _relationalProjector.ProjectAsync(table, fields, rows, projectionBudget.Token)
+                    : null;
+                var computed = rows.Count > 0 ? _formulaProjector.Project(fields, rows, seed, table) : [];
+
+                var computedByRecord = new Dictionary<Guid, IReadOnlyDictionary<long, object?>>();
+                for (var i = 0; i < present.Count; i++) computedByRecord[present[i].RecordPublicId] = computed[i];
+
+                foreach (var change in chunk)
+                {
+                    if (!computedByRecord.TryGetValue(change.RecordPublicId, out var values))
+                    {
+                        result.Add(change);
+                        continue;
+                    }
+                    var labels = referenceFids
+                        .Where(fid => values.TryGetValue(fid, out var label) && label is not null)
+                        .ToDictionary(fid => fid, fid => values[fid]);
+                    var withLabels = change with { ReferenceLabels = labels.Count > 0 ? labels : null };
+                    if (!hasComputed)
+                        result.Add(withLabels);
+                    else if (change.EventType == PipelineRecordEventType.Deleted)
+                        result.Add(withLabels with { BeforeValues = Merge(change.BeforeValues, values) });
+                    else
+                        result.Add(withLabels with { AfterValues = Merge(change.AfterValues, values) });
+                }
+            }
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not project formula fields into the bulk pipeline events; continuing without them.");
+            return changes;
+        }
+
+        static IReadOnlyDictionary<long, object?> Merge(IReadOnlyDictionary<long, object?> source, IReadOnlyDictionary<long, object?> computed)
+        {
+            var merged = new Dictionary<long, object?>(source);
+            foreach (var kvp in computed) merged[kvp.Key] = kvp.Value;
+            return merged;
+        }
     }
 
     /// <summary>Writes bulk-event staging rows into another tenant's database, on its own connection.</summary>
@@ -277,6 +404,10 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
             }
             if (subscriptions.Count == 0) return;
 
+            // Formula fields are compute-on-read; put their values in the events (see
+            // WithComputedValuesAsync) now that we know at least one pipeline is listening.
+            recordChanges = await WithComputedValuesAsync(table, fields, recordChanges, ct, FilterReferenceFids(subscriptions, fields));
+
             foreach (var sub in subscriptions)
             {
                 // Prevent cyclic dependency loops
@@ -335,7 +466,7 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
 
                         if (isCandidate)
                         {
-                            var valuesSource = change.EventType == PipelineRecordEventType.Deleted ? change.BeforeValues : change.AfterValues;
+                            var valuesSource = FilterValues(change, change.EventType == PipelineRecordEventType.Deleted ? change.BeforeValues : change.AfterValues);
                             bool filtersMatch = true;
 
                             if (!sub.IsSimpleFilter && !string.IsNullOrWhiteSpace(sub.AdvancedQuery))
