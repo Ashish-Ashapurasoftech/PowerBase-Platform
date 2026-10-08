@@ -362,6 +362,48 @@ public class PipelineAuditFormatterTests
         return _formatter.FormatStepRun(step, raw, null, "Success", "c", DateTime.UtcNow, DateTime.UtcNow).LogMessage;
     }
 
+    private async Task<string> RecordStepMessageAsync(string subtype, object input, object output, Dictionary<string, object?>? storedRow = null, Guid? recordId = null)
+    {
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, Name = "P", AppId = 10L, PublicId = Guid.NewGuid() });
+        var tableGuid = (Guid)input.GetType().GetProperty("TableGuid")!.GetValue(input)!;
+        var fields = new List<AppField> { new() { Id = 2, Fid = 6, Name = "Name", TypeCode = "Text" } };
+        var table = new AppTable { Id = 20, Name = "Order", PublicId = tableGuid };
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+        if (storedRow != null) _recordRepo.GetByPublicIdAsync(table, fields, recordId!.Value, default).ReturnsForAnyArgs(storedRow);
+        await _formatter.InitializeAsync(1, 0, CancellationToken.None);
+        var step = new PipelineStep { Id = 100, Type = "action", Subtype = subtype, RefId = "s", ConfigJson = "{}" };
+        return _formatter.FormatStepRun(step, JsonSerializer.Serialize(input), JsonSerializer.Serialize(output), "Success", "c", DateTime.UtcNow, DateTime.UtcNow).LogMessage;
+    }
+
+    [Fact]
+    public async Task DeleteHistory_UsesTheNameCapturedBeforeTheDelete_NotTheGuid()
+    {
+        var t = Guid.NewGuid(); var r = Guid.NewGuid();
+        var message = await RecordStepMessageAsync("delete-record",
+            new { TableGuid = t, TableId = t.ToString(), TargetRecordId = r.ToString() },
+            new { DeletedRecordPublicId = r.ToString(), DeletedRecordName = "Acme order" });
+        message.Should().Contain("\"Acme order\"").And.NotContain(r.ToString());
+    }
+
+    [Fact]
+    public async Task LookupHistory_NamesTheRecord_NotTheGuid()
+    {
+        var t = Guid.NewGuid(); var r = Guid.NewGuid();
+        var message = await RecordStepMessageAsync("look-up-record",
+            new { TableGuid = t, TablePublicId = t.ToString(), RecordId = r.ToString() }, new { },
+            new Dictionary<string, object?> { ["f_6"] = "Acme order" }, r);
+        message.Should().Contain("\"Acme order\"").And.NotContain(r.ToString());
+    }
+
+    [Fact]
+    public void RecordDisplayName_SkipsGuidLikeValues_AndFallsBackToTheIdOnlyWhenNothingIsReadable()
+    {
+        var id = Guid.NewGuid().ToString();
+        var fields = new List<AppField> { new() { Id = 1, Fid = 5, Name = "Ref", TypeCode = "Text" } };
+        PipelineRecordDisplayName.Resolve(new AppTable(), fields, new Dictionary<string, object?> { ["fid_5"] = "  " }, id).Should().Be(id);
+    }
+
     [Fact]
     public async Task NewEventHistory_NamesTheRecordByItsFirstPlainValue_NotByItsGuid()
     {

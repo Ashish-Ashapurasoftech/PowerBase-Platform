@@ -2451,7 +2451,11 @@ public partial class PipelineEngine : IPipelineEngine
                 await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, oldValuesDict, "record-deleted", ct);
                 await recordRepo.DeleteAsync(table, recordPublicId, uow.Transaction, ct);
 
-                var outputJson = JsonSerializer.Serialize(new { DeletedRecordPublicId = recordPublicId.ToString() });
+                var deletedValues = oldValuesDict.ToDictionary(kv => $"fid_{kv.Key}", kv => kv.Value);
+                var outputJson = JsonSerializer.Serialize(new {
+                    DeletedRecordPublicId = recordPublicId.ToString(),
+                    DeletedRecordName = PipelineRecordDisplayName.Resolve(table, fields, deletedValues, recordPublicId.ToString())
+                });
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
                 {

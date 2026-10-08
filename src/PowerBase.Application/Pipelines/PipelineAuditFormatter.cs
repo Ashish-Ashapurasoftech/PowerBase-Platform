@@ -721,6 +721,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 var compareLocalTime = inputDict.TryGetValue("CompareLocalTime", out var cltObj) ? cltObj?.ToString() : "No";
 
                 string tableName = "Table";
+                string recordLabel = recordId ?? "—";
                 List<AppField> fields = new();
                 if (!string.IsNullOrEmpty(tableGuidStr) && Guid.TryParse(tableGuidStr, out var tGuid))
                 {
@@ -729,11 +730,14 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     {
                         tableName = meta.Value.Table.Name;
                         fields = meta.Value.Fields;
+                        // A record id is a GUID: show the record's name, as the other record steps do.
+                        if (Guid.TryParse(recordId, out var lookedUpGuid))
+                            recordLabel = GetOrFetchRecordDisplayAsync(meta.Value.Table, fields, lookedUpGuid, ct).GetAwaiter().GetResult();
                     }
                 }
 
                 friendlyInput["Table"] = tableName;
-                friendlyInput["Lookup Value"] = $"Record ID equals {recordId}";
+                friendlyInput["Lookup Value"] = $"Record equals {recordLabel}";
                 friendlyInput["Compare with app local time"] = compareLocalTime;
 
                 friendlyOutput["Record"] = MapFieldValuesToUserFriendly(fields, outputDict);
@@ -742,7 +746,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
-                logMessage = $"Looked up record ID {recordId} in {tableName}.";
+                logMessage = $"Looked up record \"{recordLabel}\" in {tableName}.";
             }
             else if (subtype == "create-record")
             {
@@ -839,6 +843,9 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 string tableName = "Table";
                 string recordDisplayName = targetRecordGuidStr ?? "Record";
+                // The record is gone by the time history is formatted; the engine captured its name before deleting.
+                if (outputDict.TryGetValue("DeletedRecordName", out var deletedNameObj) && !string.IsNullOrWhiteSpace(deletedNameObj?.ToString()))
+                    recordDisplayName = deletedNameObj!.ToString()!;
                 
                 if (!string.IsNullOrEmpty(tableGuidStr) && Guid.TryParse(tableGuidStr, out var tGuid))
                 {
@@ -860,6 +867,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyInput["Record"] = recordDisplayName;
 
                 friendlyOutput["Status"] = "Deleted";
+                friendlyOutput["Record"] = recordDisplayName;
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["TargetRecordPublicId"] = targetRecordGuidStr;
@@ -1511,60 +1519,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
         List<AppField> fields, 
         Dictionary<string, object?> fieldValues, 
         string recordPublicId)
-    {
-        if (table.DisplayFieldId.HasValue)
-        {
-            var displayField = fields.FirstOrDefault(f => f.Id == table.DisplayFieldId.Value);
-            if (displayField != null && displayField.Fid.HasValue)
-            {
-                var fidKey = $"fid_{displayField.Fid.Value}";
-                if (fieldValues.TryGetValue(fidKey, out var val) && val != null && !string.IsNullOrWhiteSpace(val.ToString()))
-                {
-                    return val.ToString()!;
-                }
-            }
-        }
-        
-        var fallbackField = fields.FirstOrDefault(f => 
-            f.Name.Equals("Name", StringComparison.OrdinalIgnoreCase) || 
-            f.Name.Equals("Title", StringComparison.OrdinalIgnoreCase) || 
-            (f.Label != null && (f.Label.Equals("Name", StringComparison.OrdinalIgnoreCase) || f.Label.Equals("Title", StringComparison.OrdinalIgnoreCase))));
-            
-        if (fallbackField != null && fallbackField.Fid.HasValue)
-        {
-            var fidKey = $"fid_{fallbackField.Fid.Value}";
-            if (fieldValues.TryGetValue(fidKey, out var val) && val != null && !string.IsNullOrWhiteSpace(val.ToString()))
-            {
-                return val.ToString()!;
-            }
-        }
-        
-        foreach (var field in fields)
-        {
-            if (field.Fid.HasValue && field.TypeCode.ToUpperInvariant() == "TEXT")
-            {
-                var fidKey = $"fid_{field.Fid.Value}";
-                if (fieldValues.TryGetValue(fidKey, out var val) && val != null && !string.IsNullOrWhiteSpace(val.ToString()))
-                {
-                    return val.ToString()!;
-                }
-            }
-        }
-
-        // No display field / Name / Title / Text value: use the first plain stored value (auto-number, number, date, choice…)
-        // so history reads "Order 1042" rather than a GUID. Computed, boolean and structured values are not a name.
-        foreach (var field in fields.Where(f => f.Fid.HasValue && !f.IsDeleted && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode)
-                     && !string.Equals(f.TypeCode, "Boolean", StringComparison.OrdinalIgnoreCase)
-                     && !string.Equals(f.TypeCode, "Reference", StringComparison.OrdinalIgnoreCase)))
-        {
-            if (!fieldValues.TryGetValue($"fid_{field.Fid!.Value}", out var val) || val == null) continue;
-            if (val is System.Collections.IEnumerable and not string) continue;
-            var text = val.ToString();
-            if (!string.IsNullOrWhiteSpace(text) && !Guid.TryParse(text, out _)) return text!;
-        }
-
-        return recordPublicId;
-    }
+        => PipelineRecordDisplayName.Resolve(table, fields, fieldValues, recordPublicId);
 
     private Dictionary<string, object?> DeserializeJsonToDict(string? json)
     {
