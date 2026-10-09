@@ -59,6 +59,12 @@ public class TenantUnitOfWork : ITenantUnitOfWork
         {
             if (!_committed) await _transaction.RollbackAsync(ct);
         }
+        catch (InvalidOperationException)
+        {
+            // The transaction is already over: the connection broke (network drop, failover, killed session) or the server rolled it
+            // back, so there is nothing left to roll back. Throwing "This SqlTransaction has completed" here would replace the real
+            // error the caller is handling (rollback is called from catch blocks) with a message that says nothing about the cause.
+        }
         finally
         {
             await ReleaseAsync();
@@ -71,8 +77,9 @@ public class TenantUnitOfWork : ITenantUnitOfWork
         var connection = _connection;
         _transaction = null;
         _connection = null;
-        if (transaction is not null) await transaction.DisposeAsync();
-        if (connection is not null) await connection.DisposeAsync();
+        // Cleanup of an already broken connection must not throw over the error being handled.
+        try { if (transaction is not null) await transaction.DisposeAsync(); } catch (InvalidOperationException) { }
+        try { if (connection is not null) await connection.DisposeAsync(); } catch (InvalidOperationException) { }
     }
 
     public void Dispose()
