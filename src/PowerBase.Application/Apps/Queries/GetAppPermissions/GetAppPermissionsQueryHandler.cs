@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 
 namespace PowerBase.Application.Apps.Queries.GetAppPermissions;
@@ -13,7 +14,8 @@ public record AppGranularTablePermission(
 public record AppGranularFieldPermission(Guid TablePublicId, Guid FieldPublicId, string Access);
 
 public record AppGranularRecordFilter(
-    Guid TablePublicId, string Conjunction, IReadOnlyList<RoleRecordFilterCondition> Conditions);
+    Guid TablePublicId, string Conjunction, IReadOnlyList<RoleRecordFilterCondition> Conditions,
+    FilterGroup? Group = null);
 
 public record AppPermissionsResult(
     string? RoleName,
@@ -167,9 +169,13 @@ public class GetAppPermissionsQueryHandler
             var list = group.ToList();
             foreach (var filterRow in list)
             {
-                List<RoleRecordFilterCondition> conditions;
-                try { conditions = string.IsNullOrWhiteSpace(filterRow.FilterJson) ? new() : JsonSerializer.Deserialize<List<RoleRecordFilterCondition>>(filterRow.FilterJson) ?? new(); }
-                catch { conditions = new(); }
+                var filterGroup = RoleRecordFilterJson.ParseGroup(filterRow.FilterJson);
+                if (RoleRecordFilterJson.CountConditions(filterGroup) > 0)
+                {
+                    mergedFilters.Add(new AppGranularRecordFilter(group.Key, filterRow.Conjunction, new List<RoleRecordFilterCondition>(), filterGroup));
+                    continue;
+                }
+                var conditions = RoleRecordFilterJson.ParseLegacyConditions(filterRow.FilterJson);
                 if (conditions.Count > 0)
                 {
                     mergedFilters.Add(new AppGranularRecordFilter(group.Key, filterRow.Conjunction, conditions));
