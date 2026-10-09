@@ -126,7 +126,11 @@ public partial class PipelineEngine
                     }
                     processed += completed.Count(done => done);
                     failed += errors.Count(error => error != null);
-                    batchRun.Status = errors.Any(error => error != null) || completed.Any(done => !done) ? "Failed" : "Success";
+                    // A Pause that releases the job is not a failure: the batch is simply waiting to continue.
+                    var batchWaiting = errors.Any(error => error is PowerBase.Domain.Exceptions.PipelineWaitException);
+                    var batchFailed = errors.Any(error => error != null && error is not PowerBase.Domain.Exceptions.PipelineWaitException);
+                    batchRun.Status = batchFailed ? "Failed" : batchWaiting ? "Waiting"
+                        : completed.Any(done => !done) ? "Failed" : "Success";
                     batchRun.CompletedOn = DateTime.UtcNow;
                     batchRun.OutputContext = JsonSerializer.Serialize(new {
                         Batch = batchNumber, RecordCount = items.Count, Succeeded = completed.Count(done => done),

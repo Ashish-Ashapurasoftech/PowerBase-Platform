@@ -1648,6 +1648,8 @@ public partial class PipelineEngine : IPipelineEngine
                     }
                     else
                     {
+                        if (await TryWaitOutPauseInlineAsync(resumeDate, ct))
+                            return JsonSerializer.Serialize(new { Status = "Success" });
                         _logger.LogInformation("Pause step {StepPublicId} still waiting until {ResumeDate}.", step.PublicId, resumeDate);
                         throw new PowerBase.Domain.Exceptions.PipelineWaitException(resumeDate);
                     }
@@ -1670,6 +1672,9 @@ public partial class PipelineEngine : IPipelineEngine
                 OutputJson = outputJson
             }, null, ct);
 
+            // The receipt above already holds the resume date, so a crash while waiting here resumes correctly on replay.
+            if (await TryWaitOutPauseInlineAsync(calculatedResumeDate, ct))
+                return JsonSerializer.Serialize(new { Status = "Success" });
             throw new PowerBase.Domain.Exceptions.PipelineWaitException(calculatedResumeDate);
         }
 
@@ -5678,6 +5683,22 @@ public partial class PipelineEngine : IPipelineEngine
     /// 0 pending, 1 succeeded, 2 failed and still to be retried (an attempt interrupted by control flow / infrastructure),
     /// 3 failed and skipped. Pending reads only take 0 and 2, so a skipped record never blocks the ones after it.</summary>
     private const byte LoopItemFailedAndSkipped = 3;
+
+    private TimeSpan _inlinePauseSpent = TimeSpan.Zero;
+
+    /// <summary>Waits out a short pause inside the running job (see <see cref="PipelineExecutionOptions.PauseInlineMaxSeconds"/>).
+    /// False — nothing waited — when the pause is too long or this attempt's inline budget is spent; the caller then releases
+    /// the job to the queue to resume when due.</summary>
+    private async Task<bool> TryWaitOutPauseInlineAsync(DateTime resumeDateUtc, CancellationToken ct)
+    {
+        var remaining = resumeDateUtc.ToUniversalTime() - DateTime.UtcNow;
+        if (remaining <= TimeSpan.Zero) return true;
+        if (_options.PauseInlineMaxSeconds <= 0 || remaining > TimeSpan.FromSeconds(_options.PauseInlineMaxSeconds) ||
+            _inlinePauseSpent + remaining > TimeSpan.FromSeconds(_options.PauseInlineBudgetSeconds)) return false;
+        _inlinePauseSpent += remaining;
+        await Task.Delay(remaining, ct);
+        return true;
+    }
 
     private static bool IsControlFlowOrInfrastructureException(Exception ex)
     {

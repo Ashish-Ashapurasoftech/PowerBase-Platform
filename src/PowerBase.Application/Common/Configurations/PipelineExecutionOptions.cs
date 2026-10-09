@@ -19,6 +19,13 @@ public class PipelineExecutionOptions
     /// <summary>Seconds a single Search Records SQL command may run. It was unlimited (0), so one bad scan over millions of
     /// rows left the run "Running" forever; a timeout now fails the attempt and lets the queue retry it.</summary>
     public int SearchCommandTimeoutSeconds { get; set; } = 600;
+    /// <summary>A Pause of at most this many seconds is waited out inside the running job instead of releasing it to the queue
+    /// and replaying the whole run when it is due. Releasing costs a queue poll (seconds) plus a replay of every step already
+    /// done, so a loop of N short pauses took ~2.5 s per item and replayed O(N²) steps. Longer pauses still release the job. 0 disables.</summary>
+    public int PauseInlineMaxSeconds { get; set; } = 30;
+    /// <summary>Total seconds one execution attempt may spend waiting out pauses inline, so a long loop of short pauses cannot hold a
+    /// worker slot for hours; once spent, the next pause releases the job to the queue as before.</summary>
+    public int PauseInlineBudgetSeconds { get; set; } = 120;
     /// <summary>NOT a limit. A Search Records result larger than this that is consumed by exactly one Loop is streamed
     /// (paged, staged, checkpointed) instead of being held in memory; every other search simply returns all of its
     /// records, however many there are. It only chooses the strategy — nothing is ever refused for being too big.</summary>
