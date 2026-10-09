@@ -1,3 +1,4 @@
+using System.Data;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -339,6 +340,91 @@ public class PipelineAuditFormatterTests
         // Assert
         await _pipelineRepo.Received(1).GetByIdAsync(pipelineId, Arg.Any<CancellationToken>());
         await _userRepo.Received(1).GetByIdAsync(userId, Arg.Any<CancellationToken>());
+    }
+
+    private async Task<string> NewEventMessageAsync(List<AppField> fields, Dictionary<string, object> newValues, Guid recordId,
+        Dictionary<string, object?>? storedRow = null)
+    {
+        var pipeline = new Pipeline { Id = 1, Name = "P", AppId = 10L, PublicId = Guid.NewGuid() };
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(pipeline);
+        var tableGuid = Guid.NewGuid();
+        var table = new AppTable { Id = 20, Name = "Order", PublicId = tableGuid };
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+        if (storedRow != null)
+            _recordRepo.GetByPublicIdAsync(table, fields, recordId, Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>()).ReturnsForAnyArgs(storedRow);
+        var step = new PipelineStep { Id = 100, Type = "trigger", Subtype = "new-event", RefId = "t",
+            ConfigJson = JsonSerializer.Serialize(new { TriggerOnAdded = true }) };
+        var raw = JsonSerializer.Serialize(new { MessageId = Guid.NewGuid().ToString(), PipelineId = 1, EventType = "Added",
+            TablePublicId = tableGuid.ToString(), RecordPublicId = recordId.ToString(), NewValues = newValues,
+            EventTimestamp = "2026-08-14T14:30:49Z" });
+        await _formatter.InitializeAsync(1, 0, CancellationToken.None);
+        return _formatter.FormatStepRun(step, raw, null, "Success", "c", DateTime.UtcNow, DateTime.UtcNow).LogMessage;
+    }
+
+    private async Task<string> RecordStepMessageAsync(string subtype, object input, object output, Dictionary<string, object?>? storedRow = null, Guid? recordId = null)
+    {
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, Name = "P", AppId = 10L, PublicId = Guid.NewGuid() });
+        var tableGuid = (Guid)input.GetType().GetProperty("TableGuid")!.GetValue(input)!;
+        var fields = new List<AppField> { new() { Id = 2, Fid = 6, Name = "Name", TypeCode = "Text" } };
+        var table = new AppTable { Id = 20, Name = "Order", PublicId = tableGuid };
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+        if (storedRow != null) _recordRepo.GetByPublicIdAsync(table, fields, recordId!.Value, default).ReturnsForAnyArgs(storedRow);
+        await _formatter.InitializeAsync(1, 0, CancellationToken.None);
+        var step = new PipelineStep { Id = 100, Type = "action", Subtype = subtype, RefId = "s", ConfigJson = "{}" };
+        return _formatter.FormatStepRun(step, JsonSerializer.Serialize(input), JsonSerializer.Serialize(output), "Success", "c", DateTime.UtcNow, DateTime.UtcNow).LogMessage;
+    }
+
+    [Fact]
+    public async Task DeleteHistory_UsesTheNameCapturedBeforeTheDelete_NotTheGuid()
+    {
+        var t = Guid.NewGuid(); var r = Guid.NewGuid();
+        var message = await RecordStepMessageAsync("delete-record",
+            new { TableGuid = t, TableId = t.ToString(), TargetRecordId = r.ToString() },
+            new { DeletedRecordPublicId = r.ToString(), DeletedRecordName = "Acme order" });
+        message.Should().Contain("\"Acme order\"").And.NotContain(r.ToString());
+    }
+
+    [Fact]
+    public async Task LookupHistory_NamesTheRecord_NotTheGuid()
+    {
+        var t = Guid.NewGuid(); var r = Guid.NewGuid();
+        var message = await RecordStepMessageAsync("look-up-record",
+            new { TableGuid = t, TablePublicId = t.ToString(), RecordId = r.ToString() }, new { },
+            new Dictionary<string, object?> { ["f_6"] = "Acme order" }, r);
+        message.Should().Contain("\"Acme order\"").And.NotContain(r.ToString());
+    }
+
+    [Fact]
+    public void RecordDisplayName_SkipsGuidLikeValues_AndFallsBackToTheIdOnlyWhenNothingIsReadable()
+    {
+        var id = Guid.NewGuid().ToString();
+        var fields = new List<AppField> { new() { Id = 1, Fid = 5, Name = "Ref", TypeCode = "Text" } };
+        PipelineRecordDisplayName.Resolve(new AppTable(), fields, new Dictionary<string, object?> { ["fid_5"] = "  " }, id).Should().Be(id);
+    }
+
+    [Fact]
+    public async Task NewEventHistory_NamesTheRecordByItsFirstPlainValue_NotByItsGuid()
+    {
+        var id = Guid.NewGuid();
+        var fields = new List<AppField> {
+            new() { Id = 1, Fid = 5, Name = "Sum of Amount", TypeCode = "Summary" },
+            new() { Id = 2, Fid = 6, Name = "Order No", TypeCode = "AutoNumber" } };
+        var message = await NewEventMessageAsync(fields, new() { ["fid_5"] = 1800, ["fid_6"] = "ORD-1042" }, id);
+        message.Should().Contain("\"ORD-1042\"").And.NotContain(id.ToString());
+    }
+
+    [Fact]
+    public async Task NewEventHistory_ReadsTheStoredRecord_WhenTheEventCarriesNoUsableName()
+    {
+        var id = Guid.NewGuid();
+        var fields = new List<AppField> {
+            new() { Id = 1, Fid = 5, Name = "Sum of Amount", TypeCode = "Summary" },
+            new() { Id = 2, Fid = 6, Name = "Name", TypeCode = "Text" } };
+        var message = await NewEventMessageAsync(fields, new() { ["fid_5"] = 1800 }, id,
+            new Dictionary<string, object?> { ["f_6"] = "Acme order" });
+        message.Should().Contain("\"Acme order\"").And.NotContain(id.ToString());
     }
 
     [Fact]

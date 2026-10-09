@@ -25,18 +25,32 @@ public sealed record PipelineComputedValues(
 /// </summary>
 public static class PipelineComputedProjection
 {
+    /// <summary>A command timeout from the database (SqlClient's "Execution Timeout Expired", Win32 error 258) or a TimeoutException,
+    /// anywhere in the exception chain.</summary>
+    private static bool IsTimeout(Exception? ex)
+    {
+        for (var e = ex; e != null; e = e.InnerException)
+        {
+            if (e is TimeoutException) return true;
+            if (e is System.ComponentModel.Win32Exception { NativeErrorCode: 258 }) return true;
+            if (e.Message.Contains("Execution Timeout Expired", StringComparison.OrdinalIgnoreCase) ||
+                e.Message.Contains("Timeout expired", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
     private static bool IsRelationship(AppField f) => f.Fid.HasValue && f.TypeCode is "Lookup" or "Summary" or "Reference";
 
-    /// <summary>The longest the relationship reads (Lookup / Summary / Reference) may take. These reads run on their
-    /// own connections, so inside a step that has just written the same record they can sit behind that step's own
-    /// uncommitted lock until SQL Server's 30 s command timeout — three of those (the all-at-once read, then one per
-    /// field) made a single Update Record take 90 s. A read that has not finished by then is given up on, once,
-    /// and the values it would have supplied are simply left out.</summary>
-    public static readonly TimeSpan RelationshipBudget = TimeSpan.FromSeconds(10);
-
-    /// <summary>The same limit for reads made while the step's own write transaction is still open (Create / Update
-    /// Record output, trigger interception): there the lock is certain to be the step's own, so waiting longer cannot help.</summary>
-    public static readonly TimeSpan InTransactionBudget = TimeSpan.FromSeconds(3);
+    /// <summary>No fixed time limit on the relationship reads (Lookup / Summary / Reference). The data sets here can be
+    /// huge (a Summary over millions of child rows), so how long a read takes is up to the data, never to a number of
+    /// seconds picked here. The budgets stay as named values so a caller can still pass a limit explicitly
+    /// (<c>relationshipBudget</c>), but by default they are <see cref="Timeout.InfiniteTimeSpan"/>.
+    ///
+    /// What does cut a stuck read short is not a clock: reads made while the step's own write transaction is open use the
+    /// write-time projector (<see cref="IPipelineWriteTimeRelationalProjector"/>), which does not wait on locks at all.</summary>
+    public static readonly TimeSpan RelationshipBudget = Timeout.InfiniteTimeSpan;
+    public static readonly TimeSpan InTransactionBudget = Timeout.InfiniteTimeSpan;
+    public static readonly TimeSpan WriteTimeBudget = Timeout.InfiniteTimeSpan;
 
     public static async Task<PipelineComputedValues?> ProjectAsync(
         IRelationalProjector? relationalProjector,
@@ -64,8 +78,16 @@ public static class PipelineComputedProjection
             catch (Exception) when (budget.IsCancellationRequested && !ct.IsCancellationRequested)
             {
                 // Out of time: do not start the per-field retries, they would wait on the same lock one by one.
-                logger?.LogWarning("Relationship projection for table {TableId} did not finish within {Seconds}s (likely waiting on a lock held by this step's own write); its Lookup / Summary / Reference values are left out.",
-                    table.Id, limit.TotalSeconds);
+                logger?.LogWarning("Relationship projection for table {TableId} did not finish within its limit of {Limit}; its Lookup / Summary / Reference values are left out.",
+                    table.Id, limit);
+                foreach (var field in fields.Where(IsRelationship)) failed.Add(field.Fid!.Value);
+                relational = rows.Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList();
+            }
+            catch (Exception ex) when (IsTimeout(ex) && !ct.IsCancellationRequested)
+            {
+                // The database itself gave up on a read (a command timeout). Retrying field by field would wait the same
+                // way once per field, so give up once and leave the relationship values out.
+                logger?.LogWarning(ex, "A relationship read for table {TableId} timed out; its Lookup / Summary / Reference values are left out.", table.Id);
                 foreach (var field in fields.Where(IsRelationship)) failed.Add(field.Fid!.Value);
                 relational = rows.Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList();
             }

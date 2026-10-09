@@ -50,8 +50,8 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         Action<AppTable, IReadOnlyList<AppField>, AppTable, IReadOnlyList<AppField>>? onTablesLoaded = null)
     {
         config.ValidateShape();
+        // No time limit: how long a copy takes depends on how many records there are.
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromHours(1));
         var ct = timeout.Token;
         var tableRepo = services.GetRequiredService<IAppTableRepository>();
         var fieldRepo = services.GetRequiredService<IAppFieldRepository>();
@@ -103,39 +103,40 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         // cutoff from the copy; chunking fetches every one of them, just across more queries.
         const int sqlIdChunkSize = 2000;
 
-        // Performance: when Azure AI Search grid-search is enabled (same UseAzureAiForGridSearch
-        // flag Reports and pipeline Search Records use), resolve the source-side filter through
-        // the search index instead of scanning the source table. Read-only and pre-transaction —
-        // this only narrows which rows the snapshot read below selects, it never guards a write.
-        // The index stores decrypted plaintext for encrypted fields, so this also naturally
-        // handles encrypted-field conditions in `query` without the in-memory split further down.
-        // Falls back to the SQL path (which has its own encrypted-field handling) on any failure.
-        // Result: a list of Id-only filters, one per SQL parameter chunk (usually just one).
-        List<FilterGroup?>? aiSearchIdFilterChunks = null;
+        // Performance: when Azure AI Search grid-search is enabled (same UseAzureAiForGridSearch flag Reports and pipeline
+        // Search Records use), find the candidate source records through the search index instead of scanning the source
+        // table — but only when the index can answer the filter exactly (every condition on a plain-text physical field that
+        // is both searchable and filterable; see PipelineAiSearchPlanner). Anything else is read from SQL. Every candidate id
+        // is paged out of the index (no ceiling), and the candidates are then read from SQL with the COMPLETE filter applied
+        // below, so only records SQL itself matches are copied. When the index finds nothing, or fails, the source is read
+        // from SQL. Read-only and pre-transaction: this only narrows which rows the snapshot read selects, it never guards a write.
+        List<long>? aiCandidateIds = null;
         var azureSearch = services.GetService<IAzureSearchService>();
-        if (azureSearch != null && azureSearch.IsGridSearchEnabled && effectiveFilter.Nodes.Count > 0
-            && sourceFields.Any(f => f.IsSearchable || f.IsFilterable) && await azureSearch.IsHealthyAsync(ct))
+        var copyLogger = services.GetService<ILogger<CopyRecordsExecutor>>();
+        if (azureSearch != null && azureSearch.IsGridSearchEnabled)
         {
-            var odata = PowerBase.Application.Reports.Queries.RunReport.OData.ODataFilterBuilder.Build(effectiveFilter, sourceFields);
-            if (!string.IsNullOrWhiteSpace(odata))
+            var aiPlan = PipelineAiSearchPlanner.Evaluate(effectiveFilter, sourceFields);
+            if (!aiPlan.UseAiSearch)
+                copyLogger?.LogInformation("[CopyRecords] Source table {TableId} is read from SQL, not Azure AI Search: {Reason}.", source.Id, aiPlan.SqlReason);
+            else if (await azureSearch.IsHealthyAsync(ct))
             {
                 try
                 {
-                    var aiMatches = await azureSearch.SearchRecordsByFilterAsync(queryContext.TenantId, source.Id, odata, ct);
-                    var matchedIds = new List<long>();
-                    foreach (var publicIdChunk in aiMatches.Chunk(sqlIdChunkSize))
-                        matchedIds.AddRange(await records.GetIdsByPublicIdsAsync(source, publicIdChunk, ct));
-
-                    aiSearchIdFilterChunks = matchedIds.Count == 0
-                        ? new List<FilterGroup?> { new FilterGroup { Logic = "and", Nodes = [new() { Condition = new() { FieldId = 3, Operator = "eq", Value = "-1" } }] } }
-                        : matchedIds.Chunk(sqlIdChunkSize)
-                            .Select(idChunk => (FilterGroup?)new FilterGroup { Logic = "and", Nodes = [new() { Condition = new() { FieldId = 3, Operator = "in", Value = JsonSerializer.Serialize(idChunk) } }] })
-                            .ToList();
+                    var found = new List<long>();
+                    await foreach (var page in azureSearch.SearchRecordIdsByFilterPagedAsync(queryContext.TenantId, source.Id, aiPlan.ODataFilter!, null, ct))
+                        foreach (var publicIdChunk in page.Ids.Chunk(sqlIdChunkSize))
+                            found.AddRange(await records.GetIdsByPublicIdsAsync(source, publicIdChunk, ct));
+                    if (found.Count == 0)
+                        copyLogger?.LogInformation("[CopyRecords] Azure AI Search found no matching record for table {TableId}; checking SQL.", source.Id);
+                    else
+                    {
+                        found.Sort();   // the same order a SQL read would give
+                        aiCandidateIds = found;
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    services.GetService<ILogger<CopyRecordsExecutor>>()?
-                        .LogWarning(ex, "[CopyRecords] Azure AI Search unavailable for table {TableId}. Falling back to SQL.", source.Id);
+                    copyLogger?.LogWarning(ex, "[CopyRecords] Azure AI Search unavailable for table {TableId}. Falling back to SQL.", source.Id);
                 }
             }
         }
@@ -153,23 +154,16 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         // parent's Record ID#); id-style conditions on it stay in SQL.
         inMemoryFilterFids.UnionWith(PipelineComputedFilter.LabelStyleReferenceFids(sourceFields, effectiveFilter));
         var referenceFids = sourceFields.Where(f => f.Fid.HasValue && f.TypeCode == "Reference").Select(f => (long)f.Fid!.Value).ToHashSet();
-        // AI Search already fully resolved the filter (including any encrypted-field
-        // conditions, against its plaintext index) — the resulting Id filter chunks need no
-        // further in-memory pass. Otherwise, split as before: physical conditions to SQL,
-        // computed/encrypted conditions evaluated in memory against decrypted candidate rows.
-        List<FilterGroup?> physicalFilterChunks;
+        // Physical conditions go to SQL; computed/encrypted conditions are evaluated in memory against the decrypted /
+        // projected rows. That is the same whether the rows come from a full scan or only from the candidates AI Search
+        // found: the candidates are just one more SQL restriction (one chunk of ids at a time, so no row is dropped and
+        // none copied twice) — their conditions are still applied in full.
+        FilterGroup? physicalFilter;
         FilterGroup? computedFilter;
-        if (aiSearchIdFilterChunks != null)
-        {
-            physicalFilterChunks = aiSearchIdFilterChunks;
-            computedFilter = null;
-        }
-        else
-        {
-            FilterGroup? physicalFilter;
-            (physicalFilter, computedFilter) = FormulaFilterSorter.SplitFilterTree(effectiveFilter, inMemoryFilterFids);
-            physicalFilterChunks = new List<FilterGroup?> { physicalFilter };
-        }
+        (physicalFilter, computedFilter) = FormulaFilterSorter.SplitFilterTree(effectiveFilter, inMemoryFilterFids);
+        List<FilterGroup?> physicalFilterChunks = aiCandidateIds == null
+            ? new List<FilterGroup?> { physicalFilter }
+            : aiCandidateIds.Chunk(PipelineEngine.AiCandidateRecordIdChunkSize).Select(idChunk => (FilterGroup?)PipelineEngine.WithIdRestriction(physicalFilter, idChunk, null)).ToList();
 
         // Each receipt namespace belongs to one logical step execution, including loop path.
         var prefix = executionPath + "/copy";
@@ -279,9 +273,6 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         else snapshot = JsonSerializer.Deserialize<Snapshot>(manifestJson)!;
         if (snapshot.ConfigurationHash != configurationHash)
             throw new PipelineNonRetryableException("Copy Records configuration changed during this execution. Start a new run instead of replaying the saved snapshot.");
-        var remaining = TimeSpan.FromHours(1) - (DateTime.UtcNow - snapshot.StartedUtc);
-        if (remaining <= TimeSpan.Zero) throw new PipelineNonRetryableException("Copy Records exceeded its one-hour execution limit.");
-        timeout.CancelAfter(remaining);
         long inserted = 0, updated = 0, errors = 0;
         var messages = new List<string>();
         // The merge field stores ciphertext when encrypted, so an "=" SQL lookup per row can

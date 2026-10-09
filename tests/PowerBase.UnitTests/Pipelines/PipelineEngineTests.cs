@@ -117,6 +117,8 @@ public class PipelineEngineTests
     [Fact]
     public async Task ExecuteAsync_PauseThenResume_ContinuesAtFollowingStep()
     {
+        // This test is about releasing the job to the queue and resuming it; short pauses are otherwise waited out inline.
+        _execOptions.PauseInlineMaxSeconds = 0;
         var messageId = Guid.NewGuid();
         PipelineRun? storedRun = null;
         var savedOutputs = new Dictionary<Guid, string>();
@@ -167,6 +169,56 @@ public class PipelineEngineTests
         await _engine.ExecuteAsync(task, CancellationToken.None);
         storedRun.Status.Should().Be("Success");
         await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 3), Arg.Any<CancellationToken>());
+        await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 2), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ShortPause_IsWaitedOutInlineAndRunCompletesInOneAttempt()
+    {
+        var messageId = Guid.NewGuid();
+        PipelineRun? storedRun = null;
+        var savedOutputs = new Dictionary<Guid, string>();
+        var task = new PipelineExecutionTask
+        {
+            PipelineId = 1, TenantId = 1, TriggerEvent = "manual", TriggerPayloadJson = "{}",
+            MessageId = messageId.ToString(), WorkerId = "pause-test-worker"
+        };
+        var preceding = new PipelineStep
+        {
+            Id = 3, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "preceding",
+            Type = "trigger", Subtype = "schedule"
+        };
+        var pause = new PipelineStep
+        {
+            Id = 1, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "pause",
+            Type = "action", Subtype = "pause", DisplayOrder = 1, ConfigJson = "{\"duration\":1,\"unit\":\"seconds\"}"
+        };
+        var following = new PipelineStep
+        {
+            Id = 2, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "following",
+            Type = "trigger", Subtype = "schedule", DisplayOrder = 2
+        };
+        _pipelineRepo.GetRunByMessageIdAsync(messageId, Arg.Any<CancellationToken>()).Returns(_ => storedRun);
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>())
+            .Returns(call => { storedRun = call.Arg<PipelineRun>(); return (Guid.NewGuid(), 1L); });
+        _pipelineRepo.ClaimWaitingRunAsync(messageId, "pause-test-worker", Arg.Any<CancellationToken>())
+            .Returns(_ => { storedRun!.LockedBy = "pause-test-worker"; storedRun.Status = "Running"; return true; });
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>())
+            .Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false });
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>())
+            .Returns(new List<PipelineStep> { preceding, pause, following });
+        _pipelineRepo.CreateRunAttemptAsync(Arg.Any<PipelineRunAttempt>(), Arg.Any<CancellationToken>()).Returns(1L);
+        _pipelineRepo.CreateStepRunAsync(Arg.Any<PipelineStepRun>(), Arg.Any<CancellationToken>()).Returns(1L);
+        _idempotencyRepo.GetByExecutionKeyAsync(messageId, Arg.Any<Guid>(), Arg.Any<byte[]>(), null, Arg.Any<CancellationToken>())
+            .Returns(call => savedOutputs.GetValueOrDefault(call.ArgAt<Guid>(1)));
+        _idempotencyRepo.When(x => x.InsertAsync(Arg.Any<PipelineStepIdempotencyLog>(), null, Arg.Any<CancellationToken>()))
+            .Do(call => { var entry = call.Arg<PipelineStepIdempotencyLog>(); savedOutputs[entry.StepPublicId] = entry.OutputJson; });
+
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        await _engine.ExecuteAsync(task, CancellationToken.None);   // no PipelineWaitException: the 1 s pause is waited out in place
+
+        timer.Elapsed.Should().BeGreaterThan(TimeSpan.FromMilliseconds(900));
+        storedRun!.Status.Should().Be("Success");
         await _pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(x => x.StepId == 2), Arg.Any<CancellationToken>());
     }
 
@@ -1112,7 +1164,7 @@ public class PipelineEngineTests
     [InlineData(true)]
     public async Task ExecuteAsync_LargeSearchLoop_StagesAndCheckpointsBoundedWorkset(bool hasExplicitLargeLimit)
     {
-        if (hasExplicitLargeLimit) _execOptions.MaxMaterializedSearchRecords = 2;
+        if (hasExplicitLargeLimit) _execOptions.StreamSearchAboveRecords = 2;
         var messageId = Guid.NewGuid();
         var tableId = Guid.NewGuid();
         var publicIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };

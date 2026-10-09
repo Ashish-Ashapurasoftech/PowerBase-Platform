@@ -253,13 +253,13 @@ public class AppRolesController : ControllerBase
             RolePublicId = rolePublicId,
             Filters = rows.Select(r =>
             {
-                var conditions = string.IsNullOrWhiteSpace(r.FilterJson)
-                    ? new List<RoleRecordFilterCondition>()
-                    : JsonSerializer.Deserialize<List<RoleRecordFilterCondition>>(r.FilterJson) ?? new();
+                var group = RoleRecordFilterJson.ParseGroup(r.FilterJson);
+                var conditions = RoleRecordFilterJson.ParseLegacyConditions(r.FilterJson);
                 return new RecordLevelFilterDto
                 {
                     TablePublicId = r.TablePublicId,
                     Conjunction = r.Conjunction,
+                    Group = group,
                     Conditions = conditions.Select(c => new RecordFilterConditionDto
                     {
                         FieldPublicId = c.FieldPublicId,
@@ -285,7 +285,8 @@ public class AppRolesController : ControllerBase
             f.TablePublicId,
             f.Conjunction,
             (f.Conditions ?? Array.Empty<RecordFilterConditionDto>())
-                .Select(c => new RoleRecordFilterCondition(c.FieldPublicId, c.Operator, c.Value, c.UseCurrentUser)).ToList()
+                .Select(c => new RoleRecordFilterCondition(c.FieldPublicId, c.Operator, c.Value, c.UseCurrentUser)).ToList(),
+            f.Group
         )).ToList();
         await _updateRecordFiltersHandler.HandleAsync(new UpdateRecordFiltersCommand(rolePublicId, inputs), ct);
         return NoContent();

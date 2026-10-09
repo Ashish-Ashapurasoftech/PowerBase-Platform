@@ -247,7 +247,18 @@ else
 {
     builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 }
-builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineRecordSearchService, PowerBase.Infrastructure.Services.PipelineRecordSearchService>();
+// Pipeline search decrypts millions of values in a row, so it uses the DEK-caching service (same cipher and keys as
+// AesEncryptionService, which stays the registered IEncryptionService everywhere else).
+builder.Services.AddSingleton<PowerBase.Infrastructure.Services.CachedDekEncryptionService>(sp =>
+    new PowerBase.Infrastructure.Services.CachedDekEncryptionService(
+        sp.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>(),
+        sp.GetRequiredService<PowerBase.Application.Common.Interfaces.IEncryptionService>()));
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineRecordSearchService>(sp =>
+    new PowerBase.Infrastructure.Services.PipelineRecordSearchService(
+        sp.GetRequiredService<PowerBase.Infrastructure.Persistence.ITenantConnectionFactory>(),
+        sp.GetRequiredService<PowerBase.Application.Common.Interfaces.IQueryContext>(),
+        sp.GetRequiredService<PowerBase.Infrastructure.Services.CachedDekEncryptionService>(),
+        sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<PowerBase.Application.Common.Configurations.PipelineExecutionOptions>>()));
 builder.Services.AddSingleton<IAzureSearchService, PowerBase.Infrastructure.Services.AzureSearchService>();
 builder.Services.AddScoped<PowerBase.Application.Records.RecordWriteService>();
 builder.Services.AddScoped<PowerBase.Application.Records.FileRecordWriteService>();
@@ -256,6 +267,7 @@ builder.Services.AddScoped<PowerBase.Application.Records.IFileRecordWriteService
 builder.Services.AddScoped<PowerBase.Application.Records.FileReservationService>();
 builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineTriggerInterceptor, PowerBase.Infrastructure.Pipelines.PipelineTriggerInterceptor>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector, PowerBase.Infrastructure.Pipelines.PipelineWriteTimeRelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineAuditFormatter, PowerBase.Application.Pipelines.PipelineAuditFormatter>();
 builder.Services.AddScoped<IAzureSearchService, AzureSearchService>();
 builder.Services.AddSingleton<IEncryptionService, AesEncryptionService>();
@@ -551,6 +563,7 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetChildR
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler>();
 builder.Services.AddScoped<CreateReportCommandHandler>();
 builder.Services.AddScoped<UpdateReportCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Commands.DeleteReportRecords.DeleteReportRecordsCommandHandler>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();
 builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();

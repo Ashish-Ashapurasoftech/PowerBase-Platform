@@ -48,8 +48,8 @@ public class BulkDeleteRecordsCommandHandler
     {
         if (command.RecordPublicIds.Count == 0)
             throw new ValidationException(new Dictionary<string, string[]> { ["ids"] = ["At least one record ID is required."] });
-        if (command.RecordPublicIds.Count > 500)
-            throw new ValidationException(new Dictionary<string, string[]> { ["ids"] = ["Cannot delete more than 500 records at once."] });
+        if (command.RecordPublicIds.Count > command.MaxRecords)
+            throw new ValidationException(new Dictionary<string, string[]> { ["ids"] = [$"Cannot delete more than {command.MaxRecords} records at once."] });
 
         var uniqueRecordPublicIds = command.RecordPublicIds.Distinct().ToList();
 

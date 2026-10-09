@@ -1938,8 +1938,8 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             IF NOT EXISTS (SELECT 1 FROM meta.PipelineSearchWorkset WITH (UPDLOCK, HOLDLOCK) WHERE WorksetId = @worksetId)
                 INSERT INTO meta.PipelineSearchWorkset (WorksetId, RunMessageId, StepRefId, SnapshotMaxRecordId)
                 VALUES (@worksetId, @runMessageId, @stepRefId, @snapshotMaxRecordId);
-            SELECT WorksetId, RunMessageId, StepRefId, Status, LastRecordId, SnapshotMaxRecordId,
-                DiscoveredCount, CreatedOn, DiscoveryCompletedOn
+            SELECT WorksetId, RunMessageId, StepRefId, Status, LastRecordId, DiscoverySource, LastSearchCursor,
+                SnapshotMaxRecordId, DiscoveredCount, CreatedOn, DiscoveryCompletedOn
             FROM meta.PipelineSearchWorkset WHERE WorksetId = @worksetId;
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -1972,6 +1972,62 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                     worksetId = workset.WorksetId }, transaction, cancellationToken: ct));
             if (updated != 1)
                 throw new InvalidOperationException($"Search workset {workset.WorksetId} checkpoint changed concurrently.");
+            if (records.Count > 0)
+                await connection.ExecuteAsync(new CommandDefinition(insertSql, records, transaction, cancellationToken: ct));
+            await transaction.CommitAsync(ct);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
+    }
+
+    public async Task BeginAiSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineSearchWorkset SET DiscoverySource = 'Ai'
+            WHERE WorksetId = @worksetId AND Status = 'Discovering' AND DiscoveredCount = 0 AND LastRecordId = 0;
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { worksetId }, cancellationToken: ct));
+    }
+
+    public async Task UseSqlForSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE meta.PipelineSearchWorkset SET DiscoverySource = 'Sql', LastSearchCursor = NULL, LastRecordId = 0
+            WHERE WorksetId = @worksetId AND Status = 'Discovering' AND DiscoveredCount = 0;
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(sql, new { worksetId }, cancellationToken: ct));
+    }
+
+    public async Task AppendSearchWorksetAiPageAsync(
+        PipelineSearchWorkset workset, List<PipelineBulkEventRecord> records, string nextCursor, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        const string insertSql = """
+            INSERT INTO meta.PipelineBulkEventRecord
+                (BulkEventId, SearchWorksetId, Ordinal, RecordPublicId, EventType, AfterValuesJson, Processed, CreatedOn)
+            VALUES (@BulkEventId, @SearchWorksetId, @Ordinal, @RecordPublicId, 'Search', @AfterValuesJson, 0, @CreatedOn);
+            """;
+        const string updateSql = """
+            UPDATE meta.PipelineSearchWorkset
+            SET LastSearchCursor = @nextCursor,
+                DiscoveredCount = DiscoveredCount + @count
+            WHERE WorksetId = @worksetId AND Status = 'Discovering' AND DiscoverySource = 'Ai'
+              AND ISNULL(LastSearchCursor, '') = @expectedCursor AND @nextCursor <> ISNULL(LastSearchCursor, '');
+            """;
+        try
+        {
+            var updated = await connection.ExecuteAsync(new CommandDefinition(updateSql,
+                new { nextCursor, expectedCursor = workset.LastSearchCursor ?? string.Empty, count = records.Count,
+                    worksetId = workset.WorksetId }, transaction, cancellationToken: ct));
+            if (updated != 1)
+                throw new InvalidOperationException($"Search workset {workset.WorksetId} AI cursor changed concurrently.");
             if (records.Count > 0)
                 await connection.ExecuteAsync(new CommandDefinition(insertSql, records, transaction, cancellationToken: ct));
             await transaction.CommitAsync(ct);
