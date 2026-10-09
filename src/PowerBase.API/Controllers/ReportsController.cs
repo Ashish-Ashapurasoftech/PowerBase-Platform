@@ -19,6 +19,7 @@ using PowerBase.Application.Reports.Queries.ListReportsByTablePaged;
 using PowerBase.Application.Reports.Queries.ExportReport;
 using PowerBase.Application.Reports.Queries.ResolveDefaultReport;
 using PowerBase.Application.Reports.Queries.RunReport;
+using PowerBase.Application.Reports.Commands.DeleteReportRecords;
 using PowerBase.Application.Reports.Commands.UpdateReportFormOverrides;
 using PowerBase.Application.Reports.Queries.GetReportGridEditRules;
 using PowerBase.Application.Reports.Queries.GetGridEditFormRules;
@@ -56,6 +57,7 @@ public class ReportsController : ControllerBase
     private readonly UpdateReportGridEditRulesCommandHandler _updateGridEditRulesHandler;
     private readonly GetGridEditFormRulesQueryHandler _getGridEditFormRulesHandler;
     private readonly GetReportGridEditRuntimeQueryHandler _getGridEditRuntimeHandler;
+    private readonly DeleteReportRecordsCommandHandler _deleteReportRecordsHandler;
 
     public ReportsController(
         CreateReportCommandHandler createHandler,
@@ -79,8 +81,10 @@ public class ReportsController : ControllerBase
         GetReportGridEditRulesQueryHandler getGridEditRulesHandler,
         UpdateReportGridEditRulesCommandHandler updateGridEditRulesHandler,
         GetGridEditFormRulesQueryHandler getGridEditFormRulesHandler,
-        GetReportGridEditRuntimeQueryHandler getGridEditRuntimeHandler)
+        GetReportGridEditRuntimeQueryHandler getGridEditRuntimeHandler,
+        DeleteReportRecordsCommandHandler deleteReportRecordsHandler)
     {
+        _deleteReportRecordsHandler = deleteReportRecordsHandler;
         _createHandler = createHandler;
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
@@ -536,6 +540,48 @@ public class ReportsController : ControllerBase
             request.ClearGrouping,
             request.AskAnswers), ct);
         return Ok(new ApiResponse<ReportRunResponse>(ToRunResponse(result)));
+    }
+
+    /// <summary>
+    /// "Delete these records": deletes every record the report matches for the given runtime filters
+    /// (not just one page). Two-step — call with Confirm=false to get the live matching count (nothing
+    /// is deleted), then with Confirm=true and ExpectedCount=that count. If the count changed in
+    /// between, nothing is deleted (409). Capped per call (see MaxRecords in the response).
+    /// </summary>
+    [HttpPost("reports/{publicId:guid}/records/delete-matching")]
+    [RequireAppMember(AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(typeof(ApiResponse<DeleteReportRecordsResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> DeleteMatchingRecords(Guid publicId, [FromBody] DeleteReportRecordsRequest request, CancellationToken ct = default)
+    {
+        var run = request.Run ?? new RunReportRequest();
+        var query = new RunReportQuery(
+            publicId,
+            1,
+            200,
+            ParseDynamicFilters(run.DynamicFilters),
+            run.QuickSearch,
+            run.SearchFieldIds,
+            run.ExactMatch,
+            MapFilterGroup(run.FilterTree),
+            null,
+            false,
+            null,
+            false,
+            true,
+            run.AskAnswers);
+        var result = await _deleteReportRecordsHandler.HandleAsync(new DeleteReportRecordsCommand(query, request.Confirm, request.ExpectedCount), ct);
+        return Ok(new ApiResponse<DeleteReportRecordsResponse>(new DeleteReportRecordsResponse
+        {
+            MatchingCount = result.MatchingCount,
+            MaxRecords = result.MaxRecords,
+            ExceedsLimit = result.ExceedsLimit,
+            Deleted = result.Deleted,
+            DeletedCount = result.DeletedCount,
+        }));
     }
 
     private static ReportRunResponse ToRunResponse(PagedReportRunResult result) => new()

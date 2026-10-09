@@ -778,7 +778,7 @@ public class RunReportQueryHandler
     /// ResolveDuringCondition). This is transparent to every downstream consumer of the resolved
     /// tree (the SQL builder, ODataFilterBuilder) since by the time they see it, "during"/
     /// "notDuring" no longer exist — only the gt/gte/lt/lte operators they already support.</summary>
-    internal static FilterGroup? ResolveDateValueModeConditions(FilterGroup? group)
+    public static FilterGroup? ResolveDateValueModeConditions(FilterGroup? group)
     {
         if (group is null) return null;
         var today = DateTime.UtcNow.Date;
@@ -912,7 +912,7 @@ public class RunReportQueryHandler
 
     // Static (the user repository passed in) so a summary field's matching criteria resolve exactly
     // like a report's filter — see RelationalProjector.ResolveCriteriaValuesAsync.
-    internal static async Task<FilterGroup?> ResolveUserFieldValuesAsync(
+    public static async Task<FilterGroup?> ResolveUserFieldValuesAsync(
         FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
         Dictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct)
     {

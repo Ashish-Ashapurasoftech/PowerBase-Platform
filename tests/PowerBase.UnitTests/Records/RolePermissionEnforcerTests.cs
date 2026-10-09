@@ -3,6 +3,7 @@ using FluentAssertions;
 using NSubstitute;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Infrastructure.Services;
@@ -16,6 +17,7 @@ public class RolePermissionEnforcerTests
     private readonly IAppUserRepository _appUserRepo = Substitute.For<IAppUserRepository>();
     private readonly IAppRolePermissionRepository _permRepo = Substitute.For<IAppRolePermissionRepository>();
     private readonly IRecordRepository _recordRepo = Substitute.For<IRecordRepository>();
+    private readonly IUserRepository _userRepo = Substitute.For<IUserRepository>();
 
     public RolePermissionEnforcerTests()
     {
@@ -23,7 +25,7 @@ public class RolePermissionEnforcerTests
         _queryContext.IsSuperAdmin.Returns(false);
     }
 
-    private RolePermissionEnforcer CreateSut() => new(_queryContext, _appUserRepo, _permRepo, _recordRepo);
+    private RolePermissionEnforcer CreateSut() => new(_queryContext, _appUserRepo, _permRepo, _recordRepo, _userRepo);
 
     private static AppTable MakeTable(long id = 5, long appId = 10) => new() { Id = id, AppId = appId, PublicId = Guid.NewGuid() };
 
@@ -297,5 +299,105 @@ public class RolePermissionEnforcerTests
         var result = await sut.GetTableAccessAsync(table, new[] { field }, CancellationToken.None);
 
         result.ViewFilter!.Nodes[0].Condition!.FieldId.Should().Be(777);
+    }
+
+    // ── Nested FilterGroup format (Custom Rules popup) ───────────────────────────────────────
+
+    private static AppRoleRecordFilter MakeGroupFilter(long roleId, long tableId, FilterGroup group) => new()
+    {
+        AppRoleId = roleId,
+        AppTableId = tableId,
+        Conjunction = group.Logic == "or" ? "OR" : "AND",
+        FilterJson = RoleRecordFilterJson.SerializeGroup(group),
+    };
+
+    private async Task<FilterGroup?> RunWithGroupAsync(FilterGroup group, params AppField[] fields)
+    {
+        var table = MakeTable();
+        _appUserRepo.GetUserAppRoleIdsAsync(table.AppId, 100L, Arg.Any<CancellationToken>()).Returns(new long[] { 1 });
+        _appUserRepo.GetByAppAndUserAsync(table.AppId, 100L, Arg.Any<CancellationToken>()).Returns(new AppUser { UserPublicId = Guid.NewGuid() });
+        StubRole(table.AppId, 1, table, MakeGroupFilter(1, table.Id, group));
+        var result = await CreateSut().GetTableAccessAsync(table, fields, CancellationToken.None);
+        return result.ViewFilter;
+    }
+
+    [Fact]
+    public async Task GetTableAccessAsync_GroupFormat_KeepsNestedStructureAndLogic()
+    {
+        var f1 = MakeField(1, Guid.NewGuid(), fid: 10);
+        var f2 = MakeField(2, Guid.NewGuid(), fid: 20);
+        var group = new FilterGroup
+        {
+            Logic = "or",
+            Nodes =
+            [
+                new() { Condition = new() { FieldId = 10, Operator = "contains", Value = "x" } },
+                new() { Group = new FilterGroup { Logic = "and", Nodes = [new() { Condition = new() { FieldId = 20, Operator = "gt", Value = "5" } }] } },
+            ],
+        };
+
+        var vf = await RunWithGroupAsync(group, f1, f2);
+
+        vf.Should().NotBeNull();
+        vf!.Logic.Should().Be("or");
+        vf.Nodes.Should().HaveCount(2);
+        vf.Nodes[0].Condition!.Operator.Should().Be("contains");
+        vf.Nodes[1].Group!.Nodes.Should().ContainSingle().Which.Condition!.FieldId.Should().Be(20);
+    }
+
+    [Fact]
+    public async Task GetTableAccessAsync_GroupFormat_DropsUnknownFieldAndAskModeConditions()
+    {
+        var f1 = MakeField(1, Guid.NewGuid(), fid: 10);
+        var group = new FilterGroup
+        {
+            Logic = "and",
+            Nodes =
+            [
+                new() { Condition = new() { FieldId = 10, Operator = "eq", Value = "keep" } },
+                new() { Condition = new() { FieldId = 999, Operator = "eq", Value = "deleted-field" } },
+                new() { Condition = new() { FieldId = 10, Operator = "eq", ValueMode = "ask" } },
+                new() { Group = new FilterGroup { Logic = "or", Nodes = [new() { Condition = new() { FieldId = 999, Operator = "eq", Value = "x" } }] } },
+            ],
+        };
+
+        var vf = await RunWithGroupAsync(group, f1);
+
+        vf!.Nodes.Should().ContainSingle().Which.Condition!.Value.Should().Be("keep");
+    }
+
+    [Fact]
+    public async Task GetTableAccessAsync_GroupFormat_AllConditionsUnusable_ViewFilterIsNull()
+    {
+        var f1 = MakeField(1, Guid.NewGuid(), fid: 10);
+        var group = new FilterGroup { Logic = "and", Nodes = [new() { Condition = new() { FieldId = 999, Operator = "eq", Value = "x" } }] };
+
+        (await RunWithGroupAsync(group, f1)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task GetTableAccessAsync_GroupFormat_IsCurrentUserBecomesEqAgainstCallerId()
+    {
+        var f1 = MakeField(1, Guid.NewGuid(), fid: 10);
+        var group = new FilterGroup { Logic = "and", Nodes = [new() { Condition = new() { FieldId = 10, Operator = "isCurrentUser" } }] };
+
+        var vf = await RunWithGroupAsync(group, f1);
+
+        var c = vf!.Nodes[0].Condition!;
+        c.Operator.Should().Be("eq");
+        c.Value.Should().Be("100");
+    }
+
+    [Fact]
+    public async Task GetTableAccessAsync_GroupFormat_RelativeDateTierResolvesToLiteral()
+    {
+        var f1 = MakeField(1, Guid.NewGuid(), fid: 10);
+        var group = new FilterGroup { Logic = "and", Nodes = [new() { Condition = new() { FieldId = 10, Operator = "gte", ValueMode = "today" } }] };
+
+        var vf = await RunWithGroupAsync(group, f1);
+
+        var c = vf!.Nodes[0].Condition!;
+        c.ValueMode.Should().Be("literal");
+        c.Value.Should().Be(DateTime.UtcNow.Date.ToString("yyyy-MM-dd"));
     }
 }

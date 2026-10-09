@@ -2,6 +2,7 @@ using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Common.Models;
 using PowerBase.Application.Reports;
+using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -14,17 +15,20 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
     private readonly IAppUserRepository _appUserRepo;
     private readonly IAppRolePermissionRepository _permRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IUserRepository _userRepo;
 
     public RolePermissionEnforcer(
         IQueryContext queryContext,
         IAppUserRepository appUserRepo,
         IAppRolePermissionRepository permRepo,
-        IRecordRepository recordRepo)
+        IRecordRepository recordRepo,
+        IUserRepository userRepo)
     {
         _queryContext = queryContext;
         _appUserRepo = appUserRepo;
         _permRepo = permRepo;
         _recordRepo = recordRepo;
+        _userRepo = userRepo;
     }
 
     public async Task<TableAccessContext> GetTableAccessAsync(AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default)
@@ -166,6 +170,13 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             var stored = await _permRepo.GetRecordFilterAsync(rId, table.Id, ct);
             if (stored is null || string.IsNullOrWhiteSpace(stored.FilterJson)) continue;
 
+            if (RoleRecordFilterJson.IsGroupFormat(stored.FilterJson))
+            {
+                var treeFilter = await BuildGroupFilterAsync(stored.FilterJson, fields, ct);
+                if (treeFilter is not null) childGroups.Add(treeFilter);
+                continue;
+            }
+
             List<RoleRecordFilterCondition>? conditions;
             try { conditions = JsonSerializer.Deserialize<List<RoleRecordFilterCondition>>(stored.FilterJson); }
             catch { continue; }
@@ -200,6 +211,55 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             Logic = "or",
             Nodes = childGroups.Select(cg => new FilterNode { Group = cg }).ToList()
         };
+    }
+
+    /// <summary>
+    /// Builds the enforced filter from a stored nested <see cref="FilterGroup"/> (the report filter
+    /// model). Resolved here, once per request, so every consumer of ViewFilter (reports, record
+    /// lists, GetRecord, export, pipelines, imports) sees plain literal conditions — only the report
+    /// path ever resolved relative dates / "current user", and a role filter must behave the same
+    /// everywhere. Conditions on fields that no longer exist are dropped, as in the legacy path.
+    /// </summary>
+    private async Task<FilterGroup?> BuildGroupFilterAsync(
+        string filterJson, IReadOnlyList<AppField> fields, CancellationToken ct)
+    {
+        var stored = RoleRecordFilterJson.ParseGroup(filterJson);
+        if (stored is null) return null;
+
+        var byFieldId = new Dictionary<long, AppField>();
+        foreach (var f in fields) byFieldId[f.Fid.HasValue ? (long)f.Fid.Value : f.Id] = f;
+
+        var pruned = PruneGroup(stored, byFieldId);
+        if (pruned is null) return null;
+
+        var resolved = RunReportQueryHandler.ResolveDateValueModeConditions(pruned);
+        return await RunReportQueryHandler.ResolveUserFieldValuesAsync(
+            resolved, byFieldId, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct);
+    }
+
+    /// <summary>Drops unusable conditions ("ask the user" / parent-field tiers have no meaning for a
+    /// role filter; unknown fields) and any group left empty. Null when nothing remains.</summary>
+    private static FilterGroup? PruneGroup(FilterGroup group, IReadOnlyDictionary<long, AppField> byFieldId)
+    {
+        var nodes = new List<FilterNode>();
+        foreach (var n in group.Nodes)
+        {
+            if (n.Condition is { } c)
+            {
+                if (!byFieldId.ContainsKey(c.FieldId)) continue;
+                if (string.Equals(c.ValueMode, "ask", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.ValueMode, "parentField", StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase)
+                    && !(c.ValueFieldId.HasValue && byFieldId.ContainsKey(c.ValueFieldId.Value))) continue;
+                nodes.Add(new FilterNode { Condition = c });
+            }
+            else if (n.Group is { } g)
+            {
+                var child = PruneGroup(g, byFieldId);
+                if (child is not null) nodes.Add(new FilterNode { Group = child });
+            }
+        }
+        return nodes.Count == 0 ? null : new FilterGroup { Logic = group.Logic, Nodes = nodes };
     }
 
     private static TableAccessContext Unrestricted(IReadOnlyList<AppField> fields) => new()

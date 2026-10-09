@@ -1,3 +1,5 @@
+using PowerBase.Application.Reports;
+
 namespace PowerBase.API.Models.Apps;
 
 // ── Table-level ───────────────────────────────────────────────────────────────
@@ -55,7 +57,11 @@ public class RecordLevelFilterDto
 {
     public Guid TablePublicId { get; init; }
     public string Conjunction { get; init; } = "AND";
+    /// <summary>Legacy flat list — only populated for rows saved before nested filters existed.</summary>
     public IReadOnlyList<RecordFilterConditionDto> Conditions { get; init; } = Array.Empty<RecordFilterConditionDto>();
+    /// <summary>Nested ALL/ANY tree (fields by Fid, same model as report static filters).
+    /// On save, takes precedence over <see cref="Conditions"/> when it holds a condition.</summary>
+    public FilterGroup? Group { get; init; }
 }
 
 public class RecordLevelFiltersResponse

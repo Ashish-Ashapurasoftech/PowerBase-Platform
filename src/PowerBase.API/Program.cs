@@ -563,6 +563,7 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetChildR
 builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCommandHandler>();
 builder.Services.AddScoped<CreateReportCommandHandler>();
 builder.Services.AddScoped<UpdateReportCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.Commands.DeleteReportRecords.DeleteReportRecordsCommandHandler>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();
 builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();
