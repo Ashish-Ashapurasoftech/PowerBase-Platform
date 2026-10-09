@@ -83,6 +83,13 @@ public interface IPipelineRepository
     Task DeleteExpiredBulkEventRecordsAsync(DateTime createdBefore, CancellationToken ct = default);
     Task<PipelineSearchWorkset> GetOrCreateSearchWorksetAsync(Guid worksetId, Guid runMessageId, string stepRefId, long snapshotMaxRecordId, CancellationToken ct = default);
     Task AppendSearchWorksetPageAsync(PipelineSearchWorkset workset, List<PipelineBulkEventRecord> records, long lastRecordId, CancellationToken ct = default);
+    /// <summary>Marks a workset that has staged nothing yet as being filled from Azure AI Search.</summary>
+    Task BeginAiSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default);
+    /// <summary>Puts a workset that has staged nothing back to being filled from SQL (AI Search found nothing or was unavailable).</summary>
+    Task UseSqlForSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default);
+    /// <summary>Stages one page of AI-found records and moves the AI cursor past it, atomically (the cursor must still be
+    /// <see cref="PipelineSearchWorkset.LastSearchCursor"/>). An empty page still advances the cursor.</summary>
+    Task AppendSearchWorksetAiPageAsync(PipelineSearchWorkset workset, List<PipelineBulkEventRecord> records, string nextCursor, CancellationToken ct = default);
     Task CompleteSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineBulkEventRecord>> GetPendingSearchWorksetPageAsync(Guid worksetId, int pageSize, CancellationToken ct = default);
     Task MarkSearchWorksetRecordsProcessedAsync(Guid worksetId, List<long> ids, byte processedStatus, CancellationToken ct = default);
