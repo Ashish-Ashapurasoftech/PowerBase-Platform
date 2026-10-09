@@ -35,10 +35,14 @@ public class RecordResult
                 var cfid = (field.Fid ?? field.Id).ToString();
                 var computed = computedValues != null && field.Fid.HasValue
                     && computedValues.TryGetValue(field.Fid.Value, out var cv) ? cv : null;
-                // A Formula_User evaluates to a bare user id — show the name, like a stored User field.
-                fieldData[cfid] = field.TypeCode == "Formula_User" && userNames != null
-                    ? ResolveUserValue(computed, userNames)
-                    : computed;
+                // A Formula_User evaluates to a bare user id and a Formula_ListUser to a list of
+                // them — show the name(s), like a stored User/MultiUser field.
+                fieldData[cfid] = userNames == null ? computed : field.TypeCode switch
+                {
+                    "Formula_User" => ResolveUserValue(computed, userNames),
+                    "Formula_ListUser" => ResolveUserIdList(computed, userNames),
+                    _ => computed,
+                };
                 continue;
             }
 
@@ -146,6 +150,21 @@ public class RecordResult
         if (long.TryParse(str, out var uid))
             return userNames.TryGetValue(uid, out var name) ? name : val;
         return val;
+    }
+
+    /// <summary>Resolves a Formula_ListUser's evaluated list of user ids to display names
+    /// (an id with no known name is kept as-is).</summary>
+    private static object? ResolveUserIdList(object? val, IReadOnlyDictionary<long, string> userNames)
+    {
+        if (val is null or string || val is not System.Collections.IEnumerable items) return val;
+        var names = new List<string>();
+        foreach (var item in items)
+        {
+            var s = item?.ToString();
+            if (string.IsNullOrEmpty(s)) continue;
+            names.Add(long.TryParse(s, out var id) && userNames.TryGetValue(id, out var name) ? name : s);
+        }
+        return names;
     }
 
     /// <summary>Mirrors <see cref="ResolveUserValue"/>, but resolves to the userPublicId Guid

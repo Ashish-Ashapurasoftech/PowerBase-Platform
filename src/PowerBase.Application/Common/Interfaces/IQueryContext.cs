@@ -15,6 +15,8 @@ public interface IQueryContext
     string TenantRole { get; }
     bool IsTenantAdmin { get; }
     bool IsUserToken { get; }
+    /// <summary>The `jti` of the JWT this request authenticated with; null for user tokens / anonymous.</summary>
+    Guid? JwtId { get; }
     bool TokenAccessAllApps { get; }
     IReadOnlySet<long> AllowedAppIds { get; }
     void SetTenantId(long tenantId);

@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Formulas;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -13,14 +14,20 @@ public class DeleteRelationshipCommandHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IAuditRepository _auditRepo;
+    private readonly IReportRepository? _reportRepo;
+    private readonly IFieldReferenceIndexer _refIndexer;
 
     public DeleteRelationshipCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRelationshipRepository relRepo,
         IRecordRepository recordRepo,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IReportRepository? reportRepo = null,
+        IFieldReferenceIndexer? refIndexer = null)
     {
+        _reportRepo = reportRepo;
+        _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _relRepo = relRepo;
@@ -73,6 +80,16 @@ public class DeleteRelationshipCommandHandler
         foreach (var f in parentFields.Where(f => f.TypeCode == "ReportLink"
             && FormulaTypeMap.ParseReportLinkSettings(f.Settings)?.RelationshipId == rel.Id))
             await _fieldRepo.DeleteAsync(f.PublicId, parent.Id, ct);
+
+        // The hidden "Embedded for {Parent}" report(s) the wizard created for this relationship go with it.
+        if (_reportRepo is not null)
+        {
+            foreach (var reportId in await _reportRepo.ListPublicIdsByRelationshipAsync(rel.PublicId, ct))
+            {
+                await _reportRepo.DeleteAsync(reportId, ct);
+                await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Report, reportId, ct);
+            }
+        }
 
         await _relRepo.SoftDeleteAsync(rel.PublicId, ct);
 

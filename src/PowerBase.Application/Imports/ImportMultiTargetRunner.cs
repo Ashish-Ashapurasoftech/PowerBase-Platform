@@ -42,23 +42,27 @@ public sealed class ImportMultiTargetRunner(
     /// <summary>What one table got in a pass.</summary>
     private sealed class Tally
     {
-        public long Inserted, Updated, Skipped, Errored;
+        public long Inserted, Updated, Unchanged, Skipped, Errored;
+        /// <summary>The source rows this table was given: all of them, or those its own filter let through.</summary>
+        public long Matched;
         public long Imported => Inserted + Updated;
     }
 
-    private sealed class Pass(ImportFeedbackWriter feedback, int targets) : IAsyncDisposable
+    private sealed class Pass(ImportDetailsWriter[] details) : IAsyncDisposable
     {
-        public ImportFeedbackWriter Feedback { get; } = feedback;
-        public Tally[] Tallies { get; } = Enumerable.Range(0, targets).Select(_ => new Tally()).ToArray();
+        /// <summary>One details file per table, in the order of the tables.</summary>
+        public ImportDetailsWriter[] Details { get; } = details;
+        public Tally[] Tallies { get; } = Enumerable.Range(0, details.Length).Select(_ => new Tally()).ToArray();
         public List<ImportRunIssue> BufferedIssues { get; } = new();
         public long RowsRead, Cursor;
         public bool Cancelled { get; set; }
         public long Inserted => Tallies.Sum(t => t.Inserted);
         public long Updated => Tallies.Sum(t => t.Updated);
+        public long Unchanged => Tallies.Sum(t => t.Unchanged);
         public long Skipped => Tallies.Sum(t => t.Skipped);
         public long Errored => Tallies.Sum(t => t.Errored);
         public long Imported => Inserted + Updated;
-        public ValueTask DisposeAsync() => Feedback.DisposeAsync();
+        public async ValueTask DisposeAsync() { foreach (var d in Details) await d.DisposeAsync(); }
     }
 
     public async Task RunAsync(ImportRun run, ImportRunSnapshot snapshot, EndRun end, CancellationToken ct)
@@ -132,8 +136,11 @@ public sealed class ImportMultiTargetRunner(
         }
     }
 
-    private async Task<IImportChunkReader> OpenSourceAsync(ImportPlan readPlan, CancellationToken ct) =>
-        readPlan.File is null ? reader : await fileAccess.OpenChunkReaderAsync(readPlan, ct);
+    private async Task<IImportChunkReader> OpenSourceAsync(ImportPlan readPlan, CancellationToken ct)
+    {
+        IImportChunkReader source = readPlan.File is null ? reader : await fileAccess.OpenChunkReaderAsync(readPlan, ct);
+        return readPlan.Virtuals.Count == 0 ? source : new ImportVirtualColumnReader(source, readPlan, formulaEngine);
+    }
 
     /// <summary>Reads the source once and, for every table, learns which unique values occur more than once, so the writing pass can leave
     /// out each such group entirely. Writes nothing. Null when the run was stopped.</summary>
@@ -150,7 +157,7 @@ public sealed class ImportMultiTargetRunner(
             ct.ThrowIfCancellationRequested();
             var chunk = await source.ReadChunkAsync(readPlan, cursor, maxId, ct);
             if (chunk.Exhausted) break;
-            foreach (var writer in writers) writer.CollectDuplicateGroups(chunk.Rows);
+            for (var i = 0; i < writers.Count; i++) writers[i].CollectDuplicateGroups(RowsFor(targets[i], chunk.Rows));
             cursor = chunk.LastId;
             if (await runs.AdvanceAsync(run.Id, new ImportChunkResult(0, 0, 0, 0, 0, 0), Progress(progressFrom, progressTo, cursor, maxId), ct))
                 return null;
@@ -168,7 +175,7 @@ public sealed class ImportMultiTargetRunner(
         var writers = targets.Select((t, i) => new ImportChunkWriter(t.Plan, store, records, t.Gate, formulaEngine, run.TriggeredByUserId, mode,
             new ImportDuplicateTracker(groups?[i]), t.Label)).ToList();
         foreach (var writer in writers) await writer.PrepareAsync(ct);
-        var pass = new Pass(new ImportFeedbackWriter(["Values"], new Dictionary<int, string>(), includeTable: true), targets.Count);
+        var pass = new Pass(targets.Select(t => ImportRunProcessor.NewDetailsWriter(t.Plan)).ToArray());
         await using var source = await OpenSourceAsync(readPlan, ct);
         try
         {
@@ -179,21 +186,26 @@ public sealed class ImportMultiTargetRunner(
                 if (chunk.Exhausted) break;
                 pass.Cursor = chunk.LastId;
                 pass.RowsRead += chunk.Rows.Count;
-                long chunkInserted = 0, chunkUpdated = 0, chunkSkipped = 0, chunkErrored = 0;
+                long chunkInserted = 0, chunkUpdated = 0, chunkUnchanged = 0, chunkSkipped = 0, chunkErrored = 0;
 
                 for (var i = 0; i < targets.Count; i++)
                 {
-                    var outcome = chunk.Rows.Count == 0 ? ImportChunkOutcome.None : await writers[i].ProcessAsync(chunk.Rows, ct);
+                    // A table with its own filter is given only the rows that pass it; the others are neither imported, skipped nor reported for it.
+                    var rows = RowsFor(targets[i], chunk.Rows);
+                    var outcome = rows.Count == 0 ? ImportChunkOutcome.None : await writers[i].ProcessAsync(rows, ct);
                     var tally = pass.Tallies[i];
-                    tally.Inserted += outcome.Inserted; tally.Updated += outcome.Updated; tally.Skipped += outcome.Skipped; tally.Errored += outcome.Errored;
-                    chunkInserted += outcome.Inserted; chunkUpdated += outcome.Updated; chunkSkipped += outcome.Skipped; chunkErrored += outcome.Errored;
-                    await pass.Feedback.AppendAsync(outcome.Feedback, ct);
+                    tally.Matched += rows.Count;
+                    tally.Inserted += outcome.Inserted; tally.Updated += outcome.Updated; tally.Unchanged += outcome.Unchanged;
+                    tally.Skipped += outcome.Skipped; tally.Errored += outcome.Errored;
+                    chunkInserted += outcome.Inserted; chunkUpdated += outcome.Updated; chunkUnchanged += outcome.Unchanged;
+                    chunkSkipped += outcome.Skipped; chunkErrored += outcome.Errored;
+                    await pass.Details[i].AppendAsync(outcome.Feedback, outcome.Written, ct);
 
                     if (mode == ImportPassMode.Write)
                     {
                         if (outcome.Inserted > 0) await store.AddRecordCountAsync(targets[i].Plan.Destination.Id, (int)outcome.Inserted, ct);
                         if (outcome.Feedback.Count > 0) await runs.AddIssuesAsync(run.Id, outcome.Feedback.Select(f => f.Issue).ToList(), IssueCap, ct);
-                        await runs.AddTargetCountsAsync(run.Id, [new ImportTargetCounts((byte)i, outcome.Inserted, outcome.Updated, outcome.Skipped, outcome.Errored)], ct);
+                        await runs.AddTargetCountsAsync(run.Id, [new ImportTargetCounts((byte)i, outcome.Inserted, outcome.Updated, outcome.Skipped, outcome.Errored, outcome.Unchanged)], ct);
                     }
                     else
                     {
@@ -204,7 +216,7 @@ public sealed class ImportMultiTargetRunner(
 
                 var progress = Progress(progressFrom, progressTo, pass.Cursor, maxId);
                 var stop = mode == ImportPassMode.Write
-                    ? await runs.AdvanceAsync(run.Id, new ImportChunkResult(pass.Cursor, chunk.Rows.Count, chunkInserted, chunkUpdated, chunkSkipped, chunkErrored), progress, ct)
+                    ? await runs.AdvanceAsync(run.Id, new ImportChunkResult(pass.Cursor, chunk.Rows.Count, chunkInserted, chunkUpdated, chunkSkipped, chunkErrored, chunkUnchanged), progress, ct)
                     : await runs.AdvanceAsync(run.Id, new ImportChunkResult(0, 0, 0, 0, 0, 0), progress, ct);
                 if (stop)
                 {
@@ -232,7 +244,7 @@ public sealed class ImportMultiTargetRunner(
         }
         await runs.AdvanceAsync(run.Id, new ImportChunkResult(check.Cursor, check.RowsRead, 0, 0, check.Skipped, check.Errored), 100, ct);
         var detail = $"Nothing was imported. {check.Errored:N0} rows have problems, and this import is set to stop when any row does. The details file lists them.";
-        var (path, note) = await SaveFeedbackAsync(check.Feedback, run, ct);
+        var (path, note) = await SaveDetailsAsync(check, run, ct);
         await FinishAsync(run, snapshot, home, ImportRunStatus.Failed, note is null ? detail : $"{detail} {note}", path, end, ct);
     }
 
@@ -241,12 +253,12 @@ public sealed class ImportMultiTargetRunner(
         for (var i = 0; i < targets.Count; i++)
         {
             var t = final.Tallies[i];
-            if (final.RowsRead != t.Imported + t.Skipped + t.Errored)
-                logger.LogError("Import run {RunId} does not reconcile for table {Table}: read {Read}, imported {Imported}, skipped {Skipped}, errored {Errored}.",
-                    run.PublicId, targets[i].Label, final.RowsRead, t.Imported, t.Skipped, t.Errored);
+            if (t.Matched != t.Imported + t.Unchanged + t.Skipped + t.Errored)
+                logger.LogError("Import run {RunId} does not reconcile for table {Table}: matched {Matched} of {Read} rows, imported {Imported}, skipped {Skipped}, errored {Errored}.",
+                    run.PublicId, targets[i].Label, t.Matched, final.RowsRead, t.Imported, t.Skipped, t.Errored);
         }
 
-        var (path, note) = await SaveFeedbackAsync(final.Feedback, run, ct);
+        var (path, note) = await SaveDetailsAsync(final, run, ct);
         if (final.Cancelled)
         {
             var detail = final.Imported == 0
@@ -257,7 +269,7 @@ public sealed class ImportMultiTargetRunner(
         }
 
         // Rows left out by a rule are not failures; the run is "partial" whenever any row was not imported into some table.
-        var status = final.Errored > 0 && final.Imported == 0 ? ImportRunStatus.Failed
+        var status = final.Errored > 0 && final.Imported + final.Unchanged == 0 ? ImportRunStatus.Failed
             : final.Errored + final.Skipped > 0 ? ImportRunStatus.Partial
             : ImportRunStatus.Success;
         await FinishAsync(run, snapshot, home, status, note, path, end, ct);
@@ -271,14 +283,37 @@ public sealed class ImportMultiTargetRunner(
         await end(run, snapshot, plan, status, detail, feedbackPath, ct);
     }
 
-    private async Task<(string? Path, string? Note)> SaveFeedbackAsync(ImportFeedbackWriter feedback, ImportRun run, CancellationToken ct)
+    /// <summary>Uploads every table's details file (each run has one per table, even when nothing was imported into it) and records where each
+    /// is kept. Returns the first table's path, which is the run's own file, and a note when a file could not be saved: a storage problem
+    /// must not undo an import that has otherwise finished.</summary>
+    private async Task<(string? Path, string? Note)> SaveDetailsAsync(Pass pass, ImportRun run, CancellationToken ct)
     {
-        try { return (await feedback.SaveAsync(storage, run.PublicId, ct), null); }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        string? first = null;
+        var failed = false;
+        for (var i = 0; i < pass.Details.Length; i++)
         {
-            logger.LogWarning(ex, "Could not save the feedback file for import run {RunId}.", run.PublicId);
-            return (null, "The details file could not be saved; the rows that were not imported are listed on this page.");
+            try
+            {
+                var path = await pass.Details[i].SaveAsync(storage, run.PublicId, i, ct);
+                if (i == 0) first = path;
+                await runs.SetTargetDetailsAsync(run.Id, (byte)i, path, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Could not save the details file of table {Table} for import run {RunId}.", i, run.PublicId);
+                failed = true;
+            }
         }
+        return (first, failed ? "A details file could not be saved; the rows that were not imported are listed on this page." : null);
+    }
+
+    /// <summary>The rows of a chunk this table is given: all of them, or those that pass its own filter.</summary>
+    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> RowsFor(Target target, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        if (target.Plan.TableFilter is not { } filter) return rows;
+        var kept = new List<IReadOnlyDictionary<string, object?>>(rows.Count);
+        foreach (var row in rows) if (filter.Matches(row)) kept.Add(row);
+        return kept;
     }
 
     private static byte Progress(int from, int to, long cursor, long maxId) =>

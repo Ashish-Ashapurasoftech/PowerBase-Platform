@@ -51,6 +51,8 @@ internal static class FormulaTypeMap
         "Formula_Duration" => FormulaType.Duration,
         "Formula_Bool" => FormulaType.Bool,
         "Formula_User" => FormulaType.User,
+        "Formula_ListUser" => FormulaType.UserList,
+        "Formula_MultiSelect" => FormulaType.TextList,
         _ => FormulaType.Text,
     };
 
@@ -171,6 +173,8 @@ internal static class FormulaTypeMap
         "Formula_Phone" => FromExpr<FormulaPhoneSettings>(settingsJson, s => s.Expression, FormulaType.Text),
         "Formula_Email" => FromExpr<FormulaEmailSettings>(settingsJson, s => s.Expression, FormulaType.Text),
         "Formula_User" => FromExpr<FormulaUserSettings>(settingsJson, s => s.Expression, FormulaType.User),
+        "Formula_ListUser" => FromExpr<FormulaListSettings>(settingsJson, s => s.Expression, FormulaType.UserList),
+        "Formula_MultiSelect" => FromExpr<FormulaListSettings>(settingsJson, s => s.Expression, FormulaType.TextList),
         "Formula_RichText" => FromExpr<FormulaRichTextSettings>(settingsJson, s => s.Expression, FormulaType.Text),
         _ => null,
     };

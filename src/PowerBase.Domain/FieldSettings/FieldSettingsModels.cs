@@ -518,6 +518,18 @@ public sealed class FormulaUserSettings
     public int? ColumnWidth { get; set; }
 }
 
+/// <summary>Settings for Formula_ListUser (formula returns a User List) and Formula_MultiSelect
+/// (formula returns a Text List). <see cref="DisplayAs"/> applies to Formula_ListUser only.</summary>
+public sealed class FormulaListSettings
+{
+    public string? Expression { get; set; }
+    /// <summary>One of <see cref="UserDisplayAsOptions"/> (Formula_ListUser only).</summary>
+    public string? DisplayAs { get; set; }
+    public bool? DisplayBold { get; set; }
+    public bool? NoWrap { get; set; }
+    public int? ColumnWidth { get; set; }
+}
+
 public sealed class FormulaRichTextSettings
 {
     public string? Expression { get; set; }

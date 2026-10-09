@@ -111,6 +111,7 @@ public static class ImportFileRemap
         {
             var position = (int)fid - ImportFileColumns.FidBase; // 1-based place in the saved list
             if (fid == 3) return 3;                               // the row number stays the row number
+            if (ImportVirtual.IsVirtualFid(fid)) return (int)fid; // a virtual column belongs to the import, not to the file
             if (position < 1) return null;
             if (!byName) return position <= file.Columns.Count ? ImportFileColumns.FidOf(position) : Missing($"column {position}");
             if (position > saved.Count) return Missing($"column {position}");
@@ -132,6 +133,8 @@ public static class ImportFileRemap
             return copy;
         }).ToList();
         var conditions = Remap(cfg.Conditions, Translate);
+        var tableConditions = Remap(cfg.TableConditions, Translate);
+        var targetConditions = cfg.AdditionalTargets.Select(t => Remap(t.Conditions, Translate)).ToList();
 
         if (missing.Count > 0)
             throw Invalid(byName
@@ -141,6 +144,8 @@ public static class ImportFileRemap
         var clone = ImportJson.Deserialize<ImportDefinitionConfig>(ImportJson.Serialize(cfg))!;
         clone.Mappings = mappings;
         clone.Conditions = conditions;
+        clone.TableConditions = tableConditions;
+        for (var i = 0; i < clone.AdditionalTargets.Count; i++) clone.AdditionalTargets[i].Conditions = targetConditions[i];
         return clone;
     }
 

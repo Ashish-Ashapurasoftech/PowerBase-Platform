@@ -42,6 +42,7 @@ public class ReportsController : ControllerBase
     private readonly ListReportsQueryHandler _listHandler;
     private readonly ListReportsByTableQueryHandler _listByTableHandler;
     private readonly ListReportsByTablePagedQueryHandler _listByTablePagedHandler;
+    private readonly PowerBase.Application.Reports.Queries.ListReportPicker.ListReportPickerQueryHandler _listPickerHandler;
     private readonly RunReportQueryHandler _runHandler;
     private readonly ExportReportQueryHandler _exportHandler;
     private readonly GetDefaultReportSettingsQueryHandler _getDefaultSettingsHandler;
@@ -65,6 +66,7 @@ public class ReportsController : ControllerBase
         ListReportsQueryHandler listHandler,
         ListReportsByTableQueryHandler listByTableHandler,
         ListReportsByTablePagedQueryHandler listByTablePagedHandler,
+        PowerBase.Application.Reports.Queries.ListReportPicker.ListReportPickerQueryHandler listPickerHandler,
         RunReportQueryHandler runHandler,
         ExportReportQueryHandler exportHandler,
         GetDefaultReportSettingsQueryHandler getDefaultSettingsHandler,
@@ -87,6 +89,7 @@ public class ReportsController : ControllerBase
         _listHandler = listHandler;
         _listByTableHandler = listByTableHandler;
         _listByTablePagedHandler = listByTablePagedHandler;
+        _listPickerHandler = listPickerHandler;
         _runHandler = runHandler;
         _exportHandler = exportHandler;
         _getDefaultSettingsHandler = getDefaultSettingsHandler;
@@ -136,7 +139,8 @@ public class ReportsController : ControllerBase
             request.TableSortGroup.Select(l => new SortGroupLevelCommand(l.FieldId, l.Desc, l.IsGroup, l.GroupByMode)).ToList(),
             MapOptions(request.Options),
             request.RowGroupLevels.Select(l => new RowGroupLevelCommand(l.FieldId, l.GroupByMode)).ToList(),
-            request.SummarySortFields.Select(s => new SummarySortFieldCommand(s.Target, s.LevelIndex, s.AggregationFieldId, s.AggregationFunction, s.Desc)).ToList());
+            request.SummarySortFields.Select(s => new SummarySortFieldCommand(s.Target, s.LevelIndex, s.AggregationFieldId, s.AggregationFunction, s.Desc)).ToList(),
+            request.RelationshipId);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ReportResponse>(MapToResponse(result)));
     }
@@ -163,6 +167,21 @@ public class ReportsController : ControllerBase
         var result = await _listByTablePagedHandler.HandleAsync(new ListReportsByTablePagedQuery(tableId, page, pageSize, search, sortBy, sortDesc), ct);
         var items = result.Items.Select(MapToListItemResponse).ToList();
         return Ok(new ApiListResponse<ReportListItemResponse>(items, result.Total, result.Page, result.PageSize));
+    }
+
+    /// <summary>Every report on the table the caller may embed, INCLUDING Hidden ones — feeds the form
+    /// designer's "Choose a report" dropdown for an embedded report. Not used by end-user lists.</summary>
+    [HttpGet("tables/{tableId:guid}/reports/picker")]
+    [RequireAppPermission(PermissionCodes.ReportsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<ReportPickerItemResponse>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListPicker(Guid tableId, CancellationToken ct)
+    {
+        var rows = await _listPickerHandler.HandleAsync(new PowerBase.Application.Reports.Queries.ListReportPicker.ListReportPickerQuery(tableId), ct);
+        IReadOnlyList<ReportPickerItemResponse> items = rows.Select(r => new ReportPickerItemResponse
+        {
+            Id = r.Id, Name = r.Name, ReportType = r.ReportType, Visibility = r.Visibility, RelationshipId = r.RelationshipId,
+        }).ToList();
+        return Ok(new ApiResponse<IReadOnlyList<ReportPickerItemResponse>>(items));
     }
 
     /// <summary>Reports (visible to the caller) on this table that pin one of the given forms as

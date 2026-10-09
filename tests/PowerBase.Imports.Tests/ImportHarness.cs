@@ -48,13 +48,19 @@ public sealed class FakeStore : IImportDataStore
         return Task.FromResult(found);
     }
 
-    public Task InsertAsync(AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows, long createdBy, CancellationToken ct = default)
+    /// <summary>The Record ID# the next inserted record gets, per table (above every record the table started with).</summary>
+    private readonly Dictionary<long, long> _nextId = new();
+
+    public Task<IReadOnlyList<long>> InsertAsync(AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows, long createdBy, CancellationToken ct = default)
     {
         if (rows.Any(Rejects)) throw new ImportRowRejectedException("boom");
         Inserted.AddRange(rows);
         if (!InsertedByTable.TryGetValue(table.Id, out var list)) InsertedByTable[table.Id] = list = new();
         list.AddRange(rows);
-        return Task.CompletedTask;
+        var next = _nextId.GetValueOrDefault(table.Id, 100_000);
+        var ids = rows.Select(_ => (long)next++).ToList();
+        _nextId[table.Id] = next;
+        return Task.FromResult<IReadOnlyList<long>>(ids);
     }
 
     public Task UpdateAsync(AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<ImportUpdateRow> rows, long modifiedBy, CancellationToken ct = default)
@@ -90,6 +96,8 @@ public sealed class HarnessOptions
     public Func<long, IReadOnlyDictionary<string, object?>>? Row { get; set; }
     public FilterGroup? Conditions { get; set; }
     public bool EncryptedSourceName { get; set; }
+    /// <summary>What a matched destination record holds already (a merge's "is anything changing?" check), by Record ID#: column name → value.</summary>
+    public Func<long, IReadOnlyDictionary<string, object?>>? StoredRecords { get; set; }
     public bool SameTable { get; set; }
     public bool LimitedDestination { get; set; }
     public bool DuplicateKeyValues { get; set; }
@@ -131,7 +139,11 @@ public sealed class ImportHarness
     public (long Read, long Inserted, long Updated, long Skipped, long Errored) Counters { get; private set; }
     public (string Status, string? Detail, string? FeedbackPath)? Completion { get; private set; }
     /// <summary>The feedback file as it was uploaded, or null when none was.</summary>
+    /// <summary>The first details file a run saved (the first table's); <see cref="DetailsFiles"/> has them all, in the order saved.</summary>
     public string? FeedbackCsv { get; private set; }
+    public List<string> DetailsFiles { get; } = new();
+    /// <summary>Rows the run left alone because the matched record already held every value.</summary>
+    public long Unchanged { get; private set; }
     /// <summary>Every completion notification the run sent, with the run as it was at that moment.</summary>
     public List<(ImportRun Run, ImportRunSnapshot Snapshot)> Notifications { get; } = new();
     /// <summary>File imports: the storage the uploaded file was read from, and the record of the upload.</summary>
@@ -222,6 +234,9 @@ public sealed class ImportHarness
                 return (IReadOnlyList<IReadOnlyDictionary<string, object?>>)page;
             });
         records.HasDuplicatesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<CancellationToken>()).Returns(options.DuplicateKeyValues);
+        if (options.StoredRecords is { } stored)
+            records.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+                .Returns(call => (IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>)call.ArgAt<IReadOnlyCollection<long>>(2).ToDictionary(id => id, stored));
 
         var config = definition ?? new ImportDefinitionConfig
         {
@@ -263,6 +278,7 @@ public sealed class ImportHarness
             new ImportMultiTargetRunner(runs, planBuilder, new ImportSourceReader(records, Substitute.For<IRelationalProjector>(), Substitute.For<IFormulaProjector>()),
                 store, records, tables, fields, engine, Substitute.For<IAuditRepository>(), storage, fileAccess ?? Substitute.For<PowerBase.Application.Imports.Files.IImportFileAccess>(),
                 NullLogger<ImportMultiTargetRunner>.Instance),
+            Microsoft.Extensions.Options.Options.Create(new PowerBase.Application.Common.Configurations.ImportOptions()),
             NullLogger<ImportRunProcessor>.Instance);
 
         var harness = new ImportHarness(processor, store, runs, run, notifier) { PlanBuilder = planBuilder, FileStorage = fileStorage, FileRepository = fileRepository };
@@ -281,6 +297,7 @@ public sealed class ImportHarness
                 var c = call.ArgAt<ImportChunkResult>(1);
                 Counters = (Counters.Read + c.RowsRead, Counters.Inserted + c.Inserted, Counters.Updated + c.Updated, Counters.Skipped + c.Skipped,
                     Counters.Errored + c.Errored);
+                Unchanged += c.Unchanged;
                 Advances++;
                 return options.CancelAtAdvance is { } at && Advances >= at; // a user's cancel is reported by the same call that records the chunk
             });
@@ -304,12 +321,14 @@ public sealed class ImportHarness
     {
         using var memory = new MemoryStream();
         await content.CopyToAsync(memory);
-        FeedbackCsv = Encoding.UTF8.GetString(memory.ToArray()).TrimStart('﻿');
+        var text = Encoding.UTF8.GetString(memory.ToArray()).TrimStart('﻿');
+        DetailsFiles.Add(text);
+        FeedbackCsv ??= text;
         return new StoredFile { Path = "/files/feedback.csv", Size = memory.Length, ContentType = "text/csv" };
     }
 
     public Task RunAsync() => Processor.RunAsync(Run.PublicId, CancellationToken.None);
 
     /// <summary>Every source row must end up in exactly one outcome.</summary>
-    public long Accounted => Counters.Inserted + Counters.Updated + Counters.Skipped + Counters.Errored;
+    public long Accounted => Counters.Inserted + Counters.Updated + Unchanged + Counters.Skipped + Counters.Errored;
 }

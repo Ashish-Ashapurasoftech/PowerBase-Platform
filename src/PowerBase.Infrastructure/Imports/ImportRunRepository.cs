@@ -53,7 +53,7 @@ public sealed class ImportRunRepository(ITenantConnectionFactory connections, IQ
     public async Task<IReadOnlyList<ImportRunListItem>> ListByDefinitionAsync(long definitionId, int take, CancellationToken ct = default)
     {
         const string sql = """
-            SELECT TOP (@take) PublicId, TriggeredBy, Status, Progress, RowsRead, Inserted, Updated, Skipped, Errored, StartedOn, CompletedOn
+            SELECT TOP (@take) PublicId, TriggeredBy, Status, Progress, RowsRead, Inserted, Updated, Skipped, Errored, StartedOn, CompletedOn, Unchanged
             FROM meta.ImportRun WHERE ImportDefinitionId = @definitionId ORDER BY Id DESC
             """;
         await using var conn = await ConnectionFactory.CreateAsync(ct);
@@ -87,10 +87,10 @@ public sealed class ImportRunRepository(ITenantConnectionFactory connections, IQ
         return await conn.ExecuteScalarAsync<bool>(new CommandDefinition("""
             UPDATE meta.ImportRun
             SET RowsRead = RowsRead + @RowsRead, Inserted = Inserted + @Inserted, Updated = Updated + @Updated,
-                Skipped = Skipped + @Skipped, Errored = Errored + @Errored, LastCommittedSourceId = @LastSourceId, Progress = @progress
+                Skipped = Skipped + @Skipped, Errored = Errored + @Errored, Unchanged = Unchanged + @Unchanged, LastCommittedSourceId = @LastSourceId, Progress = @progress
             OUTPUT inserted.CancelRequested
             WHERE Id = @runId
-            """, new { runId, progress, c.RowsRead, c.Inserted, c.Updated, c.Skipped, c.Errored, c.LastSourceId }, cancellationToken: ct));
+            """, new { runId, progress, c.RowsRead, c.Inserted, c.Updated, c.Skipped, c.Errored, c.Unchanged, c.LastSourceId }, cancellationToken: ct));
     }
 
     public async Task<ImportCancelOutcome> RequestCancelAsync(long runId, CancellationToken ct = default)
@@ -155,28 +155,121 @@ public sealed class ImportRunRepository(ITenantConnectionFactory connections, IQ
         if (counts.Count == 0) return;
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
-            "UPDATE meta.ImportRunTarget SET Inserted = Inserted + @Inserted, Updated = Updated + @Updated, Skipped = Skipped + @Skipped, Errored = Errored + @Errored " +
+            "UPDATE meta.ImportRunTarget SET Inserted = Inserted + @Inserted, Updated = Updated + @Updated, Skipped = Skipped + @Skipped, Errored = Errored + @Errored, Unchanged = Unchanged + @Unchanged " +
             "WHERE ImportRunId = @runId AND TargetIndex = @Index",
-            counts.Select(c => new { runId, c.Index, c.Inserted, c.Updated, c.Skipped, c.Errored }).ToList(), cancellationToken: ct));
+            counts.Select(c => new { runId, c.Index, c.Inserted, c.Updated, c.Skipped, c.Errored, c.Unchanged }).ToList(), cancellationToken: ct));
     }
 
     public async Task SyncTotalsFromTargetsAsync(long runId, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition("""
-            UPDATE r SET Inserted = t.Inserted, Updated = t.Updated, Skipped = t.Skipped, Errored = t.Errored
+            UPDATE r SET Inserted = t.Inserted, Updated = t.Updated, Skipped = t.Skipped, Errored = t.Errored, Unchanged = t.Unchanged
             FROM meta.ImportRun r
-            CROSS APPLY (SELECT SUM(Inserted) AS Inserted, SUM(Updated) AS Updated, SUM(Skipped) AS Skipped, SUM(Errored) AS Errored
+            CROSS APPLY (SELECT SUM(Inserted) AS Inserted, SUM(Updated) AS Updated, SUM(Skipped) AS Skipped, SUM(Errored) AS Errored, SUM(Unchanged) AS Unchanged
                          FROM meta.ImportRunTarget WHERE ImportRunId = r.Id HAVING COUNT(*) > 0) t
             WHERE r.Id = @runId
             """, new { runId }, cancellationToken: ct));
+    }
+
+    public async Task<IReadOnlyList<ImportHistoryRow>> ListHistoryAsync(ImportHistoryQuery q, CancellationToken ct = default)
+    {
+        // A run that filled several tables is a row per table (from its target rows); a run into one table is one row from the run itself.
+        // The columns of both halves are the same, in the order ImportHistoryRow takes them.
+        const string sql = """
+            WITH base AS (
+                SELECT r.Id AS RunDbId, r.PublicId AS RunId, d.PublicId AS ImportId, d.Name AS ImportName, d.SourceKind, d.DestinationTableId,
+                       JSON_VALUE(r.DefinitionSnapshotJson, '$.file.fileName') AS SourceFileName,
+                       r.Status, r.TriggeredBy AS [Trigger], r.TriggeredByUserId, r.CreatedOn, r.StartedOn, r.CompletedOn, r.ErrorDetail,
+                       r.FeedbackFileUrl, r.FilesExpiredOn, r.RowsRead, r.Inserted, r.Updated, r.Unchanged, r.Skipped, r.Errored
+                FROM meta.ImportRun r
+                JOIN meta.ImportDefinition d ON d.Id = r.ImportDefinitionId
+                WHERE d.AppId = @appId AND r.CreatedOn >= @from AND (@to IS NULL OR r.CreatedOn < @to)
+                  AND (@importId IS NULL OR d.PublicId = @importId) AND (@status IS NULL OR r.Status = @status) AND (@trigger IS NULL OR r.TriggeredBy = @trigger)
+            ),
+            hist AS (
+                SELECT b.RunId, b.ImportId, b.ImportName, t.PublicId AS TableId, t.Name AS TableName,
+                       (SELECT COUNT(*) FROM meta.ImportRunTarget x WHERE x.ImportRunId = b.RunDbId) AS TableCount,
+                       b.SourceKind, b.SourceFileName, b.Status, b.[Trigger], b.TriggeredByUserId, b.CreatedOn, b.StartedOn, b.CompletedOn,
+                       b.RowsRead, rt.Inserted, rt.Updated, rt.Unchanged, rt.Skipped, rt.Errored, b.ErrorDetail,
+                       CAST(CASE WHEN rt.DetailsFilePath IS NULL THEN 0 ELSE 1 END AS BIT) AS HasDetails, b.FilesExpiredOn,
+                       b.RunDbId, rt.TargetIndex
+                FROM base b
+                JOIN meta.ImportRunTarget rt ON rt.ImportRunId = b.RunDbId
+                JOIN meta.AppTable t ON t.Id = rt.DestinationTableId
+                UNION ALL
+                SELECT b.RunId, b.ImportId, b.ImportName, t.PublicId, t.Name, 1,
+                       b.SourceKind, b.SourceFileName, b.Status, b.[Trigger], b.TriggeredByUserId, b.CreatedOn, b.StartedOn, b.CompletedOn,
+                       b.RowsRead, b.Inserted, b.Updated, b.Unchanged, b.Skipped, b.Errored, b.ErrorDetail,
+                       CAST(CASE WHEN b.FeedbackFileUrl IS NULL THEN 0 ELSE 1 END AS BIT), b.FilesExpiredOn,
+                       b.RunDbId, 0
+                FROM base b
+                JOIN meta.AppTable t ON t.Id = b.DestinationTableId
+                WHERE NOT EXISTS (SELECT 1 FROM meta.ImportRunTarget x WHERE x.ImportRunId = b.RunDbId)
+            )
+            SELECT RunId, ImportId, ImportName, TableId, TableName, TableCount, SourceKind, SourceFileName, Status, [Trigger], TriggeredByUserId,
+                   CreatedOn, StartedOn, CompletedOn, RowsRead, Inserted, Updated, Unchanged, Skipped, Errored, ErrorDetail, HasDetails, FilesExpiredOn,
+                   COUNT(*) OVER() AS Total
+            FROM hist
+            WHERE @tableId IS NULL OR TableId = @tableId
+            ORDER BY CreatedOn DESC, RunDbId DESC, TargetIndex
+            OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY
+            """;
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        return (await conn.QueryAsync<ImportHistoryRow>(new CommandDefinition(sql,
+            new { appId = q.AppId, from = q.From, to = q.To, importId = q.ImportId, tableId = q.TableId, status = q.Status, trigger = q.Trigger, skip = q.Skip, take = q.Take },
+            cancellationToken: ct))).AsList();
+    }
+
+    public async Task<(string Path, string TableName)?> GetTargetDetailsAsync(long runId, Guid tablePublicId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        var row = await conn.QuerySingleOrDefaultAsync<(string Path, string TableName)?>(new CommandDefinition("""
+            SELECT rt.DetailsFilePath, t.Name FROM meta.ImportRunTarget rt JOIN meta.AppTable t ON t.Id = rt.DestinationTableId
+            WHERE rt.ImportRunId = @runId AND t.PublicId = @tablePublicId AND rt.DetailsFilePath IS NOT NULL
+            """, new { runId, tablePublicId }, cancellationToken: ct));
+        return row;
+    }
+
+    public async Task<IReadOnlyList<ImportExpiredFiles>> ListWithExpiredFilesAsync(DateTime cutoff, int take, CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT TOP (@take) Id AS RunId, FeedbackFileUrl, DefinitionSnapshotJson
+            FROM meta.ImportRun
+            WHERE FilesExpiredOn IS NULL AND CompletedOn IS NOT NULL AND CompletedOn < @cutoff
+            ORDER BY CompletedOn;
+            """;
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        var runs = (await conn.QueryAsync<(long RunId, string? FeedbackFileUrl, string DefinitionSnapshotJson)>(
+            new CommandDefinition(sql, new { take, cutoff }, cancellationToken: ct))).AsList();
+        if (runs.Count == 0) return [];
+        var targets = (await conn.QueryAsync<(long RunId, string Path)>(new CommandDefinition(
+            "SELECT ImportRunId, DetailsFilePath FROM meta.ImportRunTarget WHERE ImportRunId IN @ids AND DetailsFilePath IS NOT NULL",
+            new { ids = runs.Select(r => r.RunId).ToList() }, cancellationToken: ct))).ToLookup(t => t.RunId, t => t.Path);
+        return runs.Select(r => new ImportExpiredFiles(r.RunId, r.FeedbackFileUrl, r.DefinitionSnapshotJson, targets[r.RunId].ToList())).ToList();
+    }
+
+    public async Task MarkFilesExpiredAsync(long runId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition("UPDATE meta.ImportRun SET FilesExpiredOn = SYSUTCDATETIME() WHERE Id = @runId",
+            new { runId }, cancellationToken: ct));
+    }
+
+    public async Task SetTargetDetailsAsync(long runId, byte targetIndex, string path, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE meta.ImportRunTarget SET DetailsFilePath = @path WHERE ImportRunId = @runId AND TargetIndex = @targetIndex",
+            new { runId, targetIndex, path }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<ImportRunTargetItem>> ListTargetsAsync(long runId, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         return (await conn.QueryAsync<ImportRunTargetItem>(new CommandDefinition("""
-            SELECT t.PublicId AS TableId, t.Name AS TableName, rt.Inserted, rt.Updated, rt.Skipped, rt.Errored
+            SELECT t.PublicId AS TableId, t.Name AS TableName, rt.Inserted, rt.Updated, rt.Skipped, rt.Errored, rt.Unchanged,
+                   CAST(CASE WHEN rt.DetailsFilePath IS NULL THEN 0 ELSE 1 END AS BIT) AS HasDetails
             FROM meta.ImportRunTarget rt JOIN meta.AppTable t ON t.Id = rt.DestinationTableId
             WHERE rt.ImportRunId = @runId ORDER BY rt.TargetIndex
             """, new { runId }, cancellationToken: ct))).AsList();

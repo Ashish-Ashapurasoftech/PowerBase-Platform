@@ -14,7 +14,7 @@ public sealed class ImportDefinitionRepository(ITenantConnectionFactory connecti
     private sealed record ListRow(
         Guid PublicId, string Name, string ImportType, Guid? SourceTableId, string? SourceTableName, int MappingCount,
         bool NeedsAttention, string? AttentionReason, string? LastRunStatus, DateTime? LastRunOn, string? NotifyEmailsJson,
-        string? ScheduleJson, DateTime? NextRunOn, string SourceKind, int TableCount);
+        string? ScheduleJson, DateTime? NextRunOn, string SourceKind, int TableCount, Guid DestinationTableId, string DestinationTableName);
 
     public async Task<ImportDefinition?> GetByPublicIdAsync(Guid publicId, CancellationToken ct = default)
     {
@@ -23,29 +23,45 @@ public sealed class ImportDefinitionRepository(ITenantConnectionFactory connecti
             "SELECT * FROM meta.ImportDefinition WHERE PublicId = @publicId AND IsDeleted = 0", new { publicId }, cancellationToken: ct));
     }
 
-    public async Task<IReadOnlyList<ImportDefinitionListItem>> ListByDestinationAsync(long destinationTableId, CancellationToken ct = default)
+    public Task<IReadOnlyList<ImportDefinitionListItem>> ListByDestinationAsync(long destinationTableId, CancellationToken ct = default)
+        => ListAsync("d.DestinationTableId = @id", destinationTableId, ct);
+
+    public Task<IReadOnlyList<ImportDefinitionListItem>> ListByAppAsync(long appId, CancellationToken ct = default)
+        => ListAsync("d.AppId = @id", appId, ct);
+
+    // The columns after TableCount are appended at the END: ListRow is a positional record, so its order must match this SELECT.
+    private async Task<IReadOnlyList<ImportDefinitionListItem>> ListAsync(string where, long id, CancellationToken ct)
     {
-        const string sql = """
+        var sql = $"""
             SELECT d.PublicId, d.Name, d.ImportType, s.PublicId AS SourceTableId, s.Name AS SourceTableName,
                    (SELECT COUNT(*) FROM OPENJSON(d.FieldMappingJson)
                      WHERE ISNULL(JSON_VALUE([value], '$.doNotImport'), 'false') <> 'true') AS MappingCount,
                    d.NeedsAttention, d.AttentionReason, lr.Status AS LastRunStatus, lr.RunOn AS LastRunOn,
                    JSON_QUERY(d.OptionsJson, '$.notifyEmails') AS NotifyEmailsJson,
                    d.ScheduleJson, d.NextRunOn, d.SourceKind,
-                   1 + (SELECT COUNT(*) FROM OPENJSON(d.OptionsJson, '$.additionalTargets')) AS TableCount
+                   1 + (SELECT COUNT(*) FROM OPENJSON(d.OptionsJson, '$.additionalTargets')) AS TableCount,
+                   dt.PublicId AS DestinationTableId, dt.Name AS DestinationTableName
             FROM meta.ImportDefinition d
+            JOIN meta.AppTable dt ON dt.Id = d.DestinationTableId
             LEFT JOIN meta.AppTable s ON s.Id = d.SourceTableId
             OUTER APPLY (SELECT TOP 1 r.Status, COALESCE(r.CompletedOn, r.StartedOn, r.CreatedOn) AS RunOn
                          FROM meta.ImportRun r WHERE r.ImportDefinitionId = d.Id ORDER BY r.Id DESC) lr
-            WHERE d.DestinationTableId = @destinationTableId AND d.IsDeleted = 0
+            WHERE {where} AND d.IsDeleted = 0
             ORDER BY d.Name
             """;
         await using var conn = await ConnectionFactory.CreateAsync(ct);
-        var rows = await conn.QueryAsync<ListRow>(new CommandDefinition(sql, new { destinationTableId }, cancellationToken: ct));
+        var rows = await conn.QueryAsync<ListRow>(new CommandDefinition(sql, new { id }, cancellationToken: ct));
         return rows.Select(r => new ImportDefinitionListItem(r.PublicId, r.Name, r.ImportType, r.SourceTableId ?? Guid.Empty, r.SourceTableName ?? "An uploaded file", r.MappingCount,
             r.NeedsAttention, r.AttentionReason, r.LastRunStatus, r.LastRunOn, ImportJson.Deserialize<List<string>>(r.NotifyEmailsJson) ?? [],
             ImportJson.Deserialize<ImportSchedule>(r.ScheduleJson) is { } s ? ImportScheduling.Describe(s) + (s.Enabled ? "" : " (paused)") : null,
-            r.NextRunOn, r.SourceKind, r.TableCount)).ToList();
+            r.NextRunOn, r.SourceKind, r.TableCount, r.DestinationTableId, r.DestinationTableName)).ToList();
+    }
+
+    public async Task<IReadOnlyList<ImportDefinition>> ListEntitiesByAppAsync(long appId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        return (await conn.QueryAsync<ImportDefinition>(new CommandDefinition(
+            "SELECT * FROM meta.ImportDefinition WHERE AppId = @appId AND IsDeleted = 0", new { appId }, cancellationToken: ct))).AsList();
     }
 
     public async Task<IReadOnlyList<ImportDefinition>> ListEntitiesByDestinationAsync(long destinationTableId, CancellationToken ct = default)
@@ -92,6 +108,15 @@ public sealed class ImportDefinitionRepository(ITenantConnectionFactory connecti
         await conn.ExecuteAsync(new CommandDefinition(
             "UPDATE meta.ImportDefinition SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @deletedBy WHERE Id = @id",
             new { id, deletedBy }, cancellationToken: ct));
+    }
+
+    public async Task DeleteManyAsync(IReadOnlyCollection<long> ids, long deletedBy, CancellationToken ct = default)
+    {
+        if (ids.Count == 0) return;
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE meta.ImportDefinition SET IsDeleted = 1, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @deletedBy WHERE Id IN @ids AND IsDeleted = 0",
+            new { ids, deletedBy }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<ImportDefinition>> ListDueAsync(DateTime nowUtc, int take, CancellationToken ct = default)

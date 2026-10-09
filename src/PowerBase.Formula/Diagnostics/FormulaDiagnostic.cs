@@ -25,6 +25,7 @@ public enum FormulaErrorCode
     UnknownFunction,
     WrongArgumentCount,
     TypeMismatch,
+    VariableTypeMismatch,
     ResultTypeMismatch,
     // Evaluation (runtime)
     DivisionByZero,

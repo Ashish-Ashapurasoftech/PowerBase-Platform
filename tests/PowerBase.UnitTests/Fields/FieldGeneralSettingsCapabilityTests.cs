@@ -37,6 +37,8 @@ public class FieldGeneralSettingsCapabilityTests
     [Theory]
     [InlineData("Formula_Bool")]
     [InlineData("Formula_User")]
+    [InlineData("Formula_ListUser")]
+    [InlineData("Formula_MultiSelect")]
     public void Resolve_FormulaBoolOrUserResultTypes_NoneAllowed(string typeCode)
     {
         var cap = FieldGeneralSettingsCapability.Resolve(typeCode, settingsJson: null);

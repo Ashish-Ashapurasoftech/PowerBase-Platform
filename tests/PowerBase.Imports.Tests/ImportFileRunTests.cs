@@ -53,25 +53,28 @@ public class ImportFileRunTests
     }
 
     [Fact]
-    public async Task The_uploaded_file_is_deleted_when_the_run_ends()
+    public async Task The_uploaded_file_is_kept_for_the_retention_when_the_run_ends_so_the_history_can_show_it()
     {
         var h = Harness("Name,Qty,Note\nPen,1,a\n");
+        var before = DateTime.UtcNow;
 
         await h.RunAsync();
 
-        await h.FileStorage!.Received(1).DeleteAsync("/files/upload.csv", Arg.Any<CancellationToken>());
-        await h.FileRepository!.Received(1).DeleteAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>());
+        await h.FileStorage!.DidNotReceiveWithAnyArgs().DeleteAsync(default!, default);
+        await h.FileRepository!.DidNotReceiveWithAnyArgs().DeleteAsync(default, default);
+        await h.FileRepository!.Received(1).RetainAsync(Arg.Any<Guid>(), Arg.Is<DateTime>(d => d > before.AddDays(29) && d < before.AddDays(31)), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task The_file_is_deleted_even_when_the_run_fails()
+    public async Task The_file_is_kept_even_when_the_run_fails()
     {
         var h = Harness("Name,Qty,Note\nPen,1,a\n", Config(c => c.Mappings.Add(new() { DestFid = 99, SourceFid = Note })));
 
         await h.RunAsync();
 
         h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
-        await h.FileStorage!.Received(1).DeleteAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await h.FileStorage!.DidNotReceiveWithAnyArgs().DeleteAsync(default!, default);
+        await h.FileRepository!.Received(1).RetainAsync(Arg.Any<Guid>(), Arg.Any<DateTime>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

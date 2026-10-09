@@ -28,4 +28,9 @@ public class Report
     public byte[] RowVersion { get; set; } = Array.Empty<byte>();
     public long? ViewEditFormId { get; set; }
     public Guid? ViewEditFormPublicId { get; set; }
+    /// <summary>The relationship that auto-created this report (the hidden "Embedded for {Parent}"
+    /// copy); the report is removed with it. NULL for ordinary reports.</summary>
+    public long? RelationshipId { get; set; }
+    /// <summary>Write-only helper for creation — resolved to <see cref="RelationshipId"/> by the insert.</summary>
+    public Guid? RelationshipPublicId { get; set; }
 }

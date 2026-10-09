@@ -70,12 +70,28 @@ public class FormulaQueryHandlerTests
     public async Task Evaluate_computes_value_from_supplied_values()
     {
         var tableId = SetupTable(Field(1, "Qty", "Number"));
-        var sut = new EvaluateFormulaQueryHandler(_tableRepo, _fieldRepo, _engine, _queryContext, _runtime, _recordRepo, _appRepo);
+        var sut = new EvaluateFormulaQueryHandler(_tableRepo, _fieldRepo, _engine, _queryContext, _runtime, _recordRepo, _appRepo, Substitute.For<IUserRepository>());
         var values = new Dictionary<long, object?> { [1] = 7m };
 
         var result = await sut.HandleAsync(new EvaluateFormulaQuery(tableId, "[Qty] * 3", "Number", values));
 
         result.Valid.Should().BeTrue();
         result.Value.Should().Be(21m);
+    }
+
+    [Fact]
+    public async Task Evaluate_user_list_result_shows_names_not_ids()
+    {
+        var tableId = SetupTable(Field(1, "Qty", "Number"));
+        _queryContext.UserId.Returns(5L);
+        var userRepo = Substitute.For<IUserRepository>();
+        userRepo.GetNamesByIdsAsync(Arg.Any<IEnumerable<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, string> { [5] = "Hasim M" });
+        var sut = new EvaluateFormulaQueryHandler(_tableRepo, _fieldRepo, _engine, _queryContext, _runtime, _recordRepo, _appRepo, userRepo);
+
+        var result = await sut.HandleAsync(new EvaluateFormulaQuery(tableId, "ToUserList(User())", "UserList", new Dictionary<long, object?>()));
+
+        result.Valid.Should().BeTrue();
+        result.Value.Should().BeAssignableTo<IEnumerable<string>>().Which.Should().Equal("Hasim M");
     }
 }

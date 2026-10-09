@@ -388,6 +388,10 @@ public class ExportReportQueryHandler
             return $"{start ?? "…"} – {end ?? "…"}";
         }
 
+        // Multi-value fields (MultiUser, Formula_ListUser, Formula_MultiSelect) arrive as a list of items.
+        if (value is System.Collections.IEnumerable items and not string)
+            return string.Join(", ", items.Cast<object?>().Select(i => i?.ToString()));
+
         return value.ToString();
     }
 

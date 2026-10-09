@@ -52,13 +52,21 @@ public sealed class RunSqlFixture : IAsyncLifetime
                 ImportRunId BIGINT NOT NULL, TargetIndex TINYINT NOT NULL, DestinationTableId BIGINT NOT NULL,
                 Inserted BIGINT NOT NULL DEFAULT 0, Updated BIGINT NOT NULL DEFAULT 0, Skipped BIGINT NOT NULL DEFAULT 0, Errored BIGINT NOT NULL DEFAULT 0,
                 CONSTRAINT PK_ImportRunTarget PRIMARY KEY (ImportRunId, TargetIndex));
+            IF COL_LENGTH('meta.ImportDefinition', 'PublicId') IS NULL ALTER TABLE meta.ImportDefinition ADD PublicId UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID();
+            IF COL_LENGTH('meta.ImportDefinition', 'AppId') IS NULL ALTER TABLE meta.ImportDefinition ADD AppId BIGINT NOT NULL DEFAULT 0;
+            IF COL_LENGTH('meta.ImportDefinition', 'SourceKind') IS NULL ALTER TABLE meta.ImportDefinition ADD SourceKind NVARCHAR(10) NOT NULL DEFAULT 'table';
+            IF COL_LENGTH('meta.ImportRun', 'Unchanged') IS NULL ALTER TABLE meta.ImportRun ADD Unchanged BIGINT NOT NULL DEFAULT 0;
+            IF COL_LENGTH('meta.ImportRun', 'FilesExpiredOn') IS NULL ALTER TABLE meta.ImportRun ADD FilesExpiredOn DATETIME2(3) NULL;
+            IF COL_LENGTH('meta.ImportRunTarget', 'Unchanged') IS NULL ALTER TABLE meta.ImportRunTarget ADD Unchanged BIGINT NOT NULL DEFAULT 0;
+            IF COL_LENGTH('meta.ImportRunTarget', 'DetailsFilePath') IS NULL ALTER TABLE meta.ImportRunTarget ADD DetailsFilePath NVARCHAR(500) NULL;
             """);
         // Explicit ids from a range no real tenant uses: the tables may already exist from the data store tests without identity columns.
         _appId = 800_000_000L + Random.Shared.Next(99_000_000);
         _tableId = 800_000_000L + Random.Shared.Next(99_000_000);
         await c.ExecuteAsync("INSERT INTO meta.App (Id, PublicId) VALUES (@id, @p)", new { id = _appId, p = AppPublicId });
         await c.ExecuteAsync("INSERT INTO meta.AppTable (Id, PublicId, AppId, Name) VALUES (@id, @p, @a, 'Nightly home')", new { id = _tableId, p = TablePublicId, a = _appId });
-        DefinitionId = await c.ExecuteScalarAsync<long>("INSERT INTO meta.ImportDefinition (Name, DestinationTableId) OUTPUT INSERTED.Id VALUES ('Nightly sync', @t)", new { t = _tableId });
+        DefinitionId = await c.ExecuteScalarAsync<long>("INSERT INTO meta.ImportDefinition (Name, DestinationTableId, AppId) OUTPUT INSERTED.Id VALUES ('Nightly sync', @t, @a)", new { t = _tableId, a = _appId });
+        AppDbId = _appId;
         var context = Substitute.For<IQueryContext>();
         context.TenantId.Returns(1);
         Runs = new ImportRunRepository(new Factory(), context);
@@ -92,6 +100,35 @@ public sealed class RunSqlFixture : IAsyncLifetime
     }
 
     public long HomeTableId => _tableId;
+    /// <summary>The database id of this fixture's app (history is read per app).</summary>
+    public long AppDbId { get; private set; }
+
+    /// <summary>A run of an import in some other app, to prove the history keeps to one app.</summary>
+    public async Task AddOtherAppRunAsync()
+    {
+        await using var c = new SqlConnection(SqlFixture.ConnectionString);
+        var definition = await c.ExecuteScalarAsync<long>("INSERT INTO meta.ImportDefinition (Name, DestinationTableId, AppId) OUTPUT INSERTED.Id VALUES ('Other app', @t, @a)", new { t = _tableId, a = _appId + 1 });
+        _otherDefinitions.Add(definition);
+        await c.ExecuteAsync("INSERT INTO meta.ImportRun (ImportDefinitionId, TriggeredByUserId, Status) VALUES (@d, 5, 'success')", new { d = definition });
+    }
+    private readonly List<long> _otherDefinitions = new();
+
+    /// <summary>A run of this fixture's import, with the details the history shows.</summary>
+    public async Task<(long Id, Guid PublicId)> AddHistoryRunAsync(string status, DateTime createdOn, string trigger = "manual", string? snapshot = null, string? feedback = null,
+        long rowsRead = 0, long inserted = 0, long updated = 0, long unchanged = 0, long skipped = 0, long errored = 0)
+    {
+        await using var c = new SqlConnection(SqlFixture.ConnectionString);
+        var publicId = Guid.NewGuid();
+        var id = await c.ExecuteScalarAsync<long>("""
+            INSERT INTO meta.ImportRun (PublicId, ImportDefinitionId, TriggeredBy, TriggeredByUserId, Status, CreatedOn, StartedOn, CompletedOn, DefinitionSnapshotJson, FeedbackFileUrl,
+                                        RowsRead, Inserted, Updated, Unchanged, Skipped, Errored)
+            OUTPUT INSERTED.Id
+            VALUES (@publicId, @d, @trigger, 5, @status, @createdOn, @createdOn, DATEADD(SECOND, 90, @createdOn), COALESCE(@snapshot, '{}'), @feedback,
+                    @rowsRead, @inserted, @updated, @unchanged, @skipped, @errored)
+            """, new { publicId, d = DefinitionId, trigger, status, createdOn, snapshot, feedback, rowsRead, inserted, updated, unchanged, skipped, errored });
+        _runIds.Add(id);
+        return (id, publicId);
+    }
     private readonly List<long> _extraTables = new();
 
     public async Task DisposeAsync()
@@ -100,6 +137,7 @@ public sealed class RunSqlFixture : IAsyncLifetime
         await c.OpenAsync();
         await c.ExecuteAsync("DELETE FROM meta.ImportRunTarget WHERE ImportRunId IN (SELECT Id FROM meta.ImportRun WHERE ImportDefinitionId = @d)", new { d = DefinitionId });
         foreach (var t in _extraTables) await c.ExecuteAsync("DELETE FROM meta.AppTable WHERE Id = @t", new { t });
+        foreach (var other in _otherDefinitions) await c.ExecuteAsync("DELETE FROM meta.ImportRun WHERE ImportDefinitionId = @other; DELETE FROM meta.ImportDefinition WHERE Id = @other", new { other });
         await c.ExecuteAsync("DELETE FROM meta.ImportRun WHERE ImportDefinitionId = @d; DELETE FROM meta.ImportDefinition WHERE Id = @d; DELETE FROM meta.AppTable WHERE Id = @t; DELETE FROM meta.App WHERE Id = @a;",
             new { d = DefinitionId, t = _tableId, a = _appId });
     }
@@ -276,5 +314,161 @@ public class ImportRunRepositorySqlTests : IClassFixture<RunSqlFixture>
 
         await _db.Runs.AppendDetailAsync(id, new string('x', 5000));
         ((string)(await _db.RowAsync(id)).ErrorDetail).Length.Should().Be(1000);
+    }
+
+    // ---- history: unchanged counts, details files, retention ----
+
+    [SqlFact]
+    public async Task Unchanged_records_are_counted_per_table_and_in_the_runs_total()
+    {
+        var id = await _db.AddRunAsync("running");
+        var (second, _) = await _db.AddTableAsync("Contacts");
+        await _db.Runs.InitTargetsAsync(id, [_db.HomeTableId, second]);
+
+        await _db.Runs.AddTargetCountsAsync(id, [new ImportTargetCounts(0, 1, 2, 0, 0, Unchanged: 4), new ImportTargetCounts(1, 0, 0, 0, 0, Unchanged: 6)]);
+        await _db.Runs.AdvanceAsync(id, new ImportChunkResult(5, 5, 1, 2, 0, 0, Unchanged: 2), 10);
+        await _db.Runs.SyncTotalsFromTargetsAsync(id);
+
+        var targets = await _db.Runs.ListTargetsAsync(id);
+        targets.Select(t => t.Unchanged).Should().Equal(4L, 6L);
+        await using var c = new SqlConnection(SqlFixture.ConnectionString);
+        (await c.ExecuteScalarAsync<long>("SELECT Unchanged FROM meta.ImportRun WHERE Id = @id", new { id })).Should().Be(10, "the run's total is its tables' counts added up");
+    }
+
+    [SqlFact]
+    public async Task A_tables_details_file_is_recorded_and_shown_only_as_there_being_one()
+    {
+        var id = await _db.AddRunAsync("running");
+        await _db.Runs.InitTargetsAsync(id, [_db.HomeTableId]);
+        (await _db.Runs.ListTargetsAsync(id)).Single().HasDetails.Should().BeFalse();
+
+        await _db.Runs.SetTargetDetailsAsync(id, 0, "/details/a.csv");
+
+        (await _db.Runs.ListTargetsAsync(id)).Single().HasDetails.Should().BeTrue();
+    }
+
+    [SqlFact]
+    public async Task Runs_past_the_retention_are_listed_with_every_file_they_kept_until_they_are_marked()
+    {
+        var old = await _db.AddRunAsync("success", completedOn: DateTime.UtcNow.AddDays(-40));
+        var recent = await _db.AddRunAsync("success", completedOn: DateTime.UtcNow.AddDays(-2));
+        await _db.Runs.InitTargetsAsync(old, [_db.HomeTableId]);
+        await _db.Runs.SetTargetDetailsAsync(old, 0, "/details/old-0.csv");
+        await using (var c = new SqlConnection(SqlFixture.ConnectionString))
+            await c.ExecuteAsync("UPDATE meta.ImportRun SET FeedbackFileUrl = '/details/old-0.csv' WHERE Id = @old", new { old });
+
+        var due = await _db.Runs.ListWithExpiredFilesAsync(DateTime.UtcNow.AddDays(-30), 50);
+
+        var mine = due.Single(r => r.RunId == old);
+        mine.FeedbackFileUrl.Should().Be("/details/old-0.csv");
+        mine.TargetPaths.Should().Equal("/details/old-0.csv");
+        due.Should().NotContain(r => r.RunId == recent, "it is inside the retention");
+
+        await _db.Runs.MarkFilesExpiredAsync(old);
+
+        (await _db.Runs.ListWithExpiredFilesAsync(DateTime.UtcNow.AddDays(-30), 50)).Should().NotContain(r => r.RunId == old);
+    }
+
+    [SqlFact]
+    public async Task A_run_that_has_not_ended_is_never_cleaned_up()
+    {
+        var running = await _db.AddRunAsync("running");
+
+        (await _db.Runs.ListWithExpiredFilesAsync(DateTime.UtcNow.AddDays(1), 50)).Should().NotContain(r => r.RunId == running);
+    }
+
+    // ---- the history query ----
+
+    private Task<IReadOnlyList<ImportHistoryRow>> History(DateTime? from = null, DateTime? to = null, string? status = null, string? trigger = null,
+        Guid? importId = null, Guid? tableId = null, int skip = 0, int take = 50)
+        => _db.Runs.ListHistoryAsync(new ImportHistoryQuery(_db.AppDbId, from ?? DateTime.UtcNow.AddDays(-30), to, importId, tableId, status, trigger, skip, take));
+
+    [SqlFact]
+    public async Task A_run_into_one_table_is_one_row_with_the_runs_own_counts()
+    {
+        var run = await _db.AddHistoryRunAsync("partial", DateTime.UtcNow.AddHours(-1), feedback: "/d/x.csv", rowsRead: 100, inserted: 80, updated: 10, unchanged: 4, skipped: 3, errored: 3,
+            snapshot: """{"file":{"fileName":"students.xlsx","storagePath":"/s"}}""");
+
+        var row = (await History()).Single(r => r.RunId == run.PublicId);
+
+        row.TableName.Should().Be("Nightly home");
+        row.TableId.Should().Be(_db.TablePublicId);
+        row.TableCount.Should().Be(1);
+        (row.RowsRead, row.Inserted, row.Updated, row.Unchanged, row.Skipped, row.Errored).Should().Be((100L, 80L, 10L, 4L, 3L, 3L));
+        row.ImportName.Should().Be("Nightly sync");
+        row.Status.Should().Be("partial");
+        row.Trigger.Should().Be("manual");
+        row.HasDetails.Should().BeTrue();
+        row.SourceFileName.Should().Be("students.xlsx");
+        (row.CompletedOn - row.StartedOn).Should().Be(TimeSpan.FromSeconds(90));
+    }
+
+    [SqlFact]
+    public async Task A_run_into_several_tables_is_a_row_per_table_with_each_tables_counts_in_order()
+    {
+        var run = await _db.AddHistoryRunAsync("success", DateTime.UtcNow.AddHours(-2), rowsRead: 50, inserted: 60);
+        var (second, secondPublic) = await _db.AddTableAsync("Contacts");
+        await _db.Runs.InitTargetsAsync(run.Id, [_db.HomeTableId, second]);
+        await _db.Runs.AddTargetCountsAsync(run.Id, [new ImportTargetCounts(0, 40, 0, 0, 0, 2), new ImportTargetCounts(1, 20, 5, 1, 0)]);
+        await _db.Runs.SetTargetDetailsAsync(run.Id, 1, "/d/contacts.csv");
+
+        var rows = (await History()).Where(r => r.RunId == run.PublicId).ToList();
+
+        rows.Select(r => r.TableName).Should().Equal("Nightly home", "Contacts");
+        rows.Should().OnlyContain(r => r.TableCount == 2 && r.RowsRead == 50, "the source rows read are the run's, once");
+        rows.Select(r => (r.Inserted, r.Updated, r.Unchanged, r.Skipped)).Should().Equal((40L, 0L, 2L, 0L), (20L, 5L, 0L, 1L));
+        rows.Select(r => r.HasDetails).Should().Equal(false, true);
+        rows[1].TableId.Should().Be(secondPublic);
+    }
+
+    [SqlFact]
+    public async Task Newest_come_first_and_only_the_period_asked_for_is_read()
+    {
+        var recent = await _db.AddHistoryRunAsync("success", DateTime.UtcNow.AddDays(-1));
+        var older = await _db.AddHistoryRunAsync("success", DateTime.UtcNow.AddDays(-10));
+        var ancient = await _db.AddHistoryRunAsync("success", DateTime.UtcNow.AddDays(-45));
+
+        var thirty = (await History()).Select(r => r.RunId).ToList();
+        var wide = (await History(from: DateTime.UtcNow.AddDays(-60))).Select(r => r.RunId).ToList();
+        var between = (await History(from: DateTime.UtcNow.AddDays(-20), to: DateTime.UtcNow.AddDays(-5))).Select(r => r.RunId).ToList();
+
+        thirty.Should().Contain([recent.PublicId, older.PublicId]).And.NotContain(ancient.PublicId);
+        thirty.IndexOf(recent.PublicId).Should().BeLessThan(thirty.IndexOf(older.PublicId));
+        wide.Should().Contain(ancient.PublicId);
+        between.Should().Contain(older.PublicId).And.NotContain([recent.PublicId, ancient.PublicId]);
+    }
+
+    [SqlFact]
+    public async Task Status_trigger_and_table_filters_narrow_the_rows()
+    {
+        var failed = await _db.AddHistoryRunAsync("failed", DateTime.UtcNow.AddMinutes(-5), trigger: "schedule");
+        var ok = await _db.AddHistoryRunAsync("success", DateTime.UtcNow.AddMinutes(-4), trigger: "manual");
+
+        (await History(status: "failed")).Select(r => r.RunId).Should().Contain(failed.PublicId).And.NotContain(ok.PublicId);
+        (await History(trigger: "manual")).Select(r => r.RunId).Should().Contain(ok.PublicId).And.NotContain(failed.PublicId);
+        (await History(tableId: _db.TablePublicId)).Select(r => r.RunId).Should().Contain([failed.PublicId, ok.PublicId]);
+        (await History(tableId: Guid.NewGuid())).Should().BeEmpty();
+    }
+
+    [SqlFact]
+    public async Task Paging_reads_a_page_at_a_time_and_every_row_knows_the_total()
+    {
+        for (var i = 1; i <= 5; i++) await _db.AddHistoryRunAsync("success", DateTime.UtcNow.AddMinutes(-i));
+
+        var first = await History(skip: 0, take: 2);
+        var third = await History(skip: 4, take: 2);
+
+        first.Should().HaveCount(2);
+        first.Should().OnlyContain(r => r.Total >= 5);
+        third.Should().NotBeEmpty();
+        first.Select(r => r.RunId).Should().NotIntersectWith(third.Select(r => r.RunId));
+    }
+
+    [SqlFact]
+    public async Task Another_apps_runs_are_never_in_the_history()
+    {
+        await _db.AddOtherAppRunAsync();
+
+        (await History()).Should().NotContain(r => r.ImportName == "Other app");
     }
 }

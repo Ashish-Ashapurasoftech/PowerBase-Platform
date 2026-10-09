@@ -214,6 +214,12 @@ public static class FormulaFilterSorter
             p.Row.TryGetValue(colName, out val);
         }
 
+        // A list-valued formula (Formula_ListUser / Formula_MultiSelect) is matched as its
+        // ", "-joined text, so contains/startsWith/isEmpty behave on the items rather than on
+        // the collection's type name.
+        if (val is System.Collections.IEnumerable and not string)
+            val = string.Join(", ", ((System.Collections.IEnumerable)val).Cast<object?>().Select(i => i?.ToString()));
+
         return c.Operator switch
         {
             "isEmpty"       => val is null || val.ToString() == string.Empty,

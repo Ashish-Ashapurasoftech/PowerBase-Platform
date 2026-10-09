@@ -40,6 +40,10 @@ public class UpdateReportVisibilityMatrixCommandHandler
 
         foreach (var update in command.Updates)
         {
+            if (!Domain.Enums.ReportVisibility.IsValid(update.Visibility))
+                throw new PowerBase.Domain.Exceptions.ValidationException(new Dictionary<string, string[]>
+                    { ["Visibility"] = [$"Visibility must be one of: {string.Join(", ", Domain.Enums.ReportVisibility.All)}"] });
+
             var report = await _reportRepo.GetByPublicIdAsync(update.ReportPublicId, ct);
             
             // Only update visibility if it actually changed or roles changed

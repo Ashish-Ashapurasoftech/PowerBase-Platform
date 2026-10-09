@@ -13,4 +13,7 @@ public class ImportFile
     public string Format { get; set; } = "csv";
     public long SizeBytes { get; set; }
     public DateTime CreatedOn { get; set; }
+    /// <summary>Set when a run has used the file: it is kept until then (so the run's history can show it) instead of being deleted when the
+    /// run ends. Null for a file nobody has imported, which is not kept past a day.</summary>
+    public DateTime? RetainedUntil { get; set; }
 }

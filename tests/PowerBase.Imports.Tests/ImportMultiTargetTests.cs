@@ -113,9 +113,12 @@ public class ImportMultiTargetTests
 
         h.Issues.Should().Contain(i => i.Message.StartsWith("Dst:"));
         h.Issues.Should().Contain(i => i.Message.StartsWith("Contacts:"));
-        h.FeedbackCsv.Should().StartWith("Table,Source row,Result,Reason,Column,Details,Existing record,Values");
-        h.FeedbackCsv.Should().Contain("Contacts,").And.Contain("Dst,");
-        h.FeedbackCsv.Should().Contain("Code=n6", "the carried values are listed by field name");
+        // One details file per table, each with that table's own headings.
+        h.DetailsFiles.Should().HaveCount(2);
+        h.DetailsFiles[0].Should().StartWith("Source row,Result,Record ID#,Reason,Column,Details,Existing record,Name,Qty");
+        h.DetailsFiles[1].Should().StartWith("Source row,Result,Record ID#,Reason,Column,Details,Existing record,Title,Code");
+        h.DetailsFiles[1].Should().Contain("Duplicate in this import").And.Contain("n6");
+        h.DetailsFiles[0].Should().Contain("Invalid value").And.Contain("many");
     }
 
     [Fact]
@@ -283,7 +286,8 @@ public class ImportMultiTargetTests
 
         h.Store.InsertedByTable.Keys.Should().Equal(11L);
         h.TargetCounters.Should().BeEmpty("a single-table run keeps no per-table counts");
-        h.FeedbackCsv.Should().BeNull("nothing was rejected");
+        h.FeedbackCsv.Should().NotBeNull("every run has a details file, even when nothing was rejected");
+        h.DetailsFiles.Should().HaveCount(1);
     }
 
     [Fact]
@@ -293,7 +297,7 @@ public class ImportMultiTargetTests
 
         await h.RunAsync();
 
-        h.FeedbackCsv.Should().StartWith("Source row,Result,Reason,Column,Details,Existing record,Name,Qty");
+        h.FeedbackCsv.Should().StartWith("Source row,Result,Record ID#,Reason,Column,Details,Existing record,Name,Qty");
     }
 
     [Fact]

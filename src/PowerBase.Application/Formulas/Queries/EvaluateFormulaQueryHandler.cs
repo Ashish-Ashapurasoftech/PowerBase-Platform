@@ -34,6 +34,7 @@ public sealed class EvaluateFormulaQueryHandler
     private readonly IFormulaRuntimeContext _runtime;
     private readonly IRecordRepository _recordRepo;
     private readonly IAppRepository _appRepo;
+    private readonly IUserRepository _userRepo;
 
     public EvaluateFormulaQueryHandler(
         IAppTableRepository tableRepo,
@@ -42,7 +43,8 @@ public sealed class EvaluateFormulaQueryHandler
         IQueryContext queryContext,
         IFormulaRuntimeContext runtime,
         IRecordRepository recordRepo,
-        IAppRepository appRepo)
+        IAppRepository appRepo,
+        IUserRepository userRepo)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -51,6 +53,7 @@ public sealed class EvaluateFormulaQueryHandler
         _runtime = runtime;
         _recordRepo = recordRepo;
         _appRepo = appRepo;
+        _userRepo = userRepo;
     }
 
     public async Task<EvaluateFormulaResult> HandleAsync(EvaluateFormulaQuery query, CancellationToken ct = default)
@@ -85,6 +88,33 @@ public sealed class EvaluateFormulaQueryHandler
         try { value = FormulaRawValue.ToRaw(_engine.Evaluate(compiled, context, options)); }
         catch (FormulaEvaluationException) { value = null; }
 
+        // A User / User List result evaluates to bare user ids — show names in the live preview,
+        // the same as a saved Formula_User / Formula_ListUser record read does.
+        if (compiled.ResultType is FormulaType.User or FormulaType.UserList)
+            value = await ResolveUserNamesAsync(value, ct);
+
         return new EvaluateFormulaResult { Valid = true, ResultType = compiled.ResultType.ToString(), Value = value, Diagnostics = diagnostics };
+    }
+
+    /// <summary>Replaces numeric user ids in a User/User List value with display names. Ids that
+    /// aren't numeric (e.g. a picker's userPublicId Guid) or have no known name are left as-is.</summary>
+    private async Task<object?> ResolveUserNamesAsync(object? value, CancellationToken ct)
+    {
+        var raw = value switch
+        {
+            string s => new[] { s },
+            IEnumerable<string> list => list.ToArray(),
+            _ => null,
+        };
+        if (raw is null) return value;
+
+        var ids = raw.Select(r => long.TryParse(r, out var id) ? id : (long?)null)
+            .Where(id => id.HasValue).Select(id => id!.Value).Distinct().ToList();
+        if (ids.Count == 0) return value;
+
+        var names = await _userRepo.GetNamesByIdsAsync(ids, ct);
+        string Resolve(string r) => long.TryParse(r, out var id) && names.TryGetValue(id, out var n) ? n : r;
+
+        return value is string single ? Resolve(single) : raw.Select(Resolve).ToList();
     }
 }

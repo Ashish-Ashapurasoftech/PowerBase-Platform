@@ -47,7 +47,7 @@ public static class FieldGeneralSettingsCapability
         new(StringComparer.OrdinalIgnoreCase) { "Text", "Number", "Date", "DateTime", "Duration", "Time", "Phone", "Email", "RichText", "Url" };
 
     private static readonly HashSet<string> FormulaNoneResultTypes =
-        new(StringComparer.OrdinalIgnoreCase) { "Bool", "User" };
+        new(StringComparer.OrdinalIgnoreCase) { "Bool", "User", "ListUser", "MultiSelect" };
 
     /// <summary>Resolves the capability set for a field, or null if the type isn't covered by the
     /// matrix — callers should treat null as "unrestricted".</summary>

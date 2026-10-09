@@ -264,4 +264,36 @@ public class ImportDefinitionCheckerTests
 
         order.Should().Equal("check", "list");
     }
+
+    [Fact]
+    public async Task The_app_list_is_checked_then_read_for_the_whole_app()
+    {
+        var appId = Guid.NewGuid();
+        var checker = Substitute.For<IImportDefinitionChecker>();
+        var access = Substitute.For<IAppAccessService>();
+        var apps = Substitute.For<IAppRepository>();
+        apps.GetIdByPublicIdAsync(appId, Arg.Any<CancellationToken>()).Returns(7L);
+        var order = new List<string>();
+        _definitions.ListEntitiesByAppAsync(7, Arg.Any<CancellationToken>()).Returns(new List<ImportDefinition> { Def() });
+        checker.When(c => c.RefreshAsync(Arg.Any<IEnumerable<ImportDefinition>>(), Arg.Any<CancellationToken>())).Do(_ => order.Add("check"));
+        _definitions.When(d => d.ListByAppAsync(7, Arg.Any<CancellationToken>())).Do(_ => order.Add("list"));
+
+        await new ListAppImportDefinitionsHandler(apps, access, _definitions, checker).HandleAsync(appId, default);
+
+        order.Should().Equal("check", "list");
+        await access.Received(1).RequireMembershipByAppPublicIdAsync(appId, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Someone_outside_the_app_gets_no_list_of_its_imports()
+    {
+        var appId = Guid.NewGuid();
+        var access = Substitute.For<IAppAccessService>();
+        access.RequireMembershipByAppPublicIdAsync(appId, Arg.Any<CancellationToken>()).Returns<Task>(_ => throw new PowerBase.Domain.Exceptions.UnauthorizedActionException("see this app"));
+
+        var act = () => new ListAppImportDefinitionsHandler(Substitute.For<IAppRepository>(), access, _definitions, Substitute.For<IImportDefinitionChecker>()).HandleAsync(appId, default);
+
+        await act.Should().ThrowAsync<PowerBase.Domain.Exceptions.UnauthorizedActionException>();
+        await _definitions.DidNotReceiveWithAnyArgs().ListByAppAsync(default, default);
+    }
 }
