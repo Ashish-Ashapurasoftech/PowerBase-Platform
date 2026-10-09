@@ -100,7 +100,7 @@ public partial class PipelineEngine
                 try
                 {
                     await ExecuteLoopBatchItemsAsync(step, allSteps, items, total, runId, context, steps,
-                        snapshots, concurrency, bulk || workset, completed, errors, ct);
+                        snapshots, concurrency, false, completed, errors, ct);
                 }
                 finally
                 {
@@ -113,9 +113,24 @@ public partial class PipelineEngine
                         if (bulk) await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(successfulIds, 1, null, ct);
                         else if (workset) await _pipelineRepo.MarkSearchWorksetRecordsProcessedAsync(worksetId, successfulIds, 1, ct);
                     }
+                    // A record whose own actions failed (a bad value, a rule that rejected it, …) is recorded as failed and
+                    // SKIPPED: it stays in the history as a failed step, and the records after it are still processed. It is
+                    // not retried — a retry would hit the same record first, every time, and block everything behind it.
+                    // Only control flow / infrastructure errors (stop, pause, cancellation, deadlock) are left pending.
+                    var failedIds = items.Where((_, i) => errors[i] != null && !IsControlFlowOrInfrastructureException(errors[i]!))
+                        .Select(i => i.StagingId).Where(id => id.HasValue).Select(id => id!.Value).ToList();
+                    if (failedIds.Count > 0)
+                    {
+                        if (bulk) await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(failedIds, LoopItemFailedAndSkipped, null, ct);
+                        else if (workset) await _pipelineRepo.MarkSearchWorksetRecordsProcessedAsync(worksetId, failedIds, LoopItemFailedAndSkipped, ct);
+                    }
                     processed += completed.Count(done => done);
                     failed += errors.Count(error => error != null);
-                    batchRun.Status = errors.Any(error => error != null) || completed.Any(done => !done) ? "Failed" : "Success";
+                    // A Pause that releases the job is not a failure: the batch is simply waiting to continue.
+                    var batchWaiting = errors.Any(error => error is PowerBase.Domain.Exceptions.PipelineWaitException);
+                    var batchFailed = errors.Any(error => error != null && error is not PowerBase.Domain.Exceptions.PipelineWaitException);
+                    batchRun.Status = batchFailed ? "Failed" : batchWaiting ? "Waiting"
+                        : completed.Any(done => !done) ? "Failed" : "Success";
                     batchRun.CompletedOn = DateTime.UtcNow;
                     batchRun.OutputContext = JsonSerializer.Serialize(new {
                         Batch = batchNumber, RecordCount = items.Count, Succeeded = completed.Count(done => done),
@@ -128,7 +143,9 @@ public partial class PipelineEngine
                 }
                 var firstError = errors.FirstOrDefault(error => error != null && IsControlFlowOrInfrastructureException(error))
                     ?? errors.FirstOrDefault(error => error != null);
-                if (firstError != null && (bulk || workset || IsControlFlowOrInfrastructureException(firstError)))
+                // Ordinary record failures were recorded above and do not stop the loop; only control flow /
+                // infrastructure errors (always preferred as `firstError`) end the attempt.
+                if (firstError != null && IsControlFlowOrInfrastructureException(firstError))
                     ExceptionDispatchInfo.Capture(firstError).Throw();
             }
         }

@@ -17,13 +17,13 @@ namespace PowerBase.Application.Pipelines;
 /// Order's "Sum of Amount" Summary is blank in the payload because the details were written a moment
 /// later, although the PowerFlow runs after they exist. A Condition on <c>Sum of Amount &gt; 100</c> then read a
 /// blank and took the "not met" branch. The run reads them again here, outside any write transaction, and
-/// overlays only the computed fields that are already part of the trigger's field values; stored fields
-/// keep the values of the event, and nothing is added that the event did not already expose.
+/// supplies the computed fields of the trigger record (adding them when the event, which no longer pays for
+/// computing them at write time, does not carry them); stored fields keep the values of the event.
 /// </summary>
 public static class PipelineTriggerRefresh
 {
-    /// <summary>How long the re-read may take before the event's own values are used as they are.</summary>
-    public static readonly TimeSpan Budget = TimeSpan.FromSeconds(10);
+    /// <summary>No fixed limit on the re-read: it takes as long as the data needs (an unlimited <see cref="Timeout.InfiniteTimeSpan"/>).</summary>
+    public static readonly TimeSpan Budget = Timeout.InfiniteTimeSpan;
 
     private static readonly string[] ValueSections = ["SelectedFieldValues", "NewValues"];
 
@@ -63,10 +63,9 @@ public static class PipelineTriggerRefresh
             var table = await tableRepo.GetByPublicIdAsync(tableId, budget.Token);
             var fields = await fieldRepo.ListByTableAsync(table.Id, budget.Token);
 
-            // The computed fields the trigger already carries a value slot for.
-            var wanted = fields.Where(IsRefreshable)
-                .Where(f => sections.Values.Any(s => s.TryGetProperty($"fid_{f.Fid}", out _)))
-                .ToList();
+            // Every computed field of the table: the event only carries the ones it was able to compute while the write
+            // was still open, and since the write no longer pays for computing them at all they are normally absent.
+            var wanted = fields.Where(IsRefreshable).ToList();
             if (wanted.Count == 0) return false;
 
             var ids = await recordRepo.GetRecordIdsByPublicIdsAsync(table, [recordId], null, budget.Token);
@@ -92,8 +91,7 @@ public static class PipelineTriggerRefresh
             {
                 var merged = new Dictionary<string, object?>();
                 foreach (var property in section.EnumerateObject()) merged[property.Name] = property.Value.Clone();
-                foreach (var (key, value) in fresh)
-                    if (merged.ContainsKey(key)) merged[key] = value;
+                foreach (var (key, value) in fresh) merged[key] = value;
                 triggerData[name] = JsonSerializer.SerializeToElement(merged);
             }
             return true;

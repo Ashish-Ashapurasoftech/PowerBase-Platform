@@ -105,7 +105,25 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
             Services = services.BuildServiceProvider();
         }
 
-        public async Task RunAsync(int count, string? mapping = null, CancellationToken ct = default, int? maxConcurrency = null)
+        // Staged source (a streamed Search Records workset): rows live in a fake table, statuses 0 pending / 1 done / 2 retry / 3 skipped.
+        public readonly ConcurrentDictionary<long, byte> Status = new();
+        public Exception? InfrastructureFailure;
+
+        private void StageWorkset(Guid worksetId, int count)
+        {
+            var rows = Enumerable.Range(1, count).Select(i => new PipelineBulkEventRecord {
+                Id = i, BulkEventId = worksetId, SearchWorksetId = worksetId, Ordinal = i, RecordPublicId = Guid.NewGuid(),
+                EventType = "Added", AfterValuesJson = JsonSerializer.Serialize(new Dictionary<string, object> { ["value"] = (i - 1).ToString() })
+            }).ToList();
+            foreach (var r in rows) Status[r.Id] = 0;
+            Repository.GetPendingSearchWorksetPageAsync(worksetId, Arg.Any<int>(), Arg.Any<CancellationToken>())
+                .Returns(call => Task.FromResult<IReadOnlyList<PipelineBulkEventRecord>>(
+                    rows.Where(r => Status[r.Id] is 0 or 2).Take(call.ArgAt<int>(1)).ToList()));
+            Repository.MarkSearchWorksetRecordsProcessedAsync(worksetId, Arg.Any<List<long>>(), Arg.Any<byte>(), Arg.Any<CancellationToken>())
+                .Returns(call => { foreach (var id in call.ArgAt<List<long>>(1)) Status[id] = call.ArgAt<byte>(2); return Task.CompletedTask; });
+        }
+
+        public async Task RunAsync(int count, string? mapping = null, CancellationToken ct = default, int? maxConcurrency = null, bool staged = false)
         {
             using var scope = Services.CreateScope();
             var engine = scope.ServiceProvider.GetRequiredService<IPipelineEngine>();
@@ -117,6 +135,12 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
                 }) };
             var steps = new Dictionary<string, object> { ["a"] = Enumerable.Range(0, count)
                 .Select(i => new Dictionary<string, object> { ["value"] = i.ToString() }).ToList() };
+            if (staged)
+            {
+                var worksetId = Guid.NewGuid();
+                StageWorkset(worksetId, count);
+                steps["a"] = JsonSerializer.Serialize(new { mode = "chunked-search", worksetId, count });
+            }
             var context = new Dictionary<string, object> { ["steps"] = steps, ["_MessageId"] = Guid.NewGuid(), ["_CreatedBy"] = 7L };
             await (Task)typeof(PipelineEngine).GetMethod("ExecuteSiblingStepsAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .Invoke(engine, new object?[] { 1L, new List<PipelineStep> { loop, child }, null, null, context, steps,
@@ -211,6 +235,36 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
         Assert.Equal(104, h.Written.Count);
         Assert.Equal(0, h.Active);
         Assert.Single(h.History, row => row.StepSubtypeSnapshot == "loop-batch" && row.Status == "Failed");
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task StagedRecordFailure_IsSkipped_AndEveryOtherRecordIsStillProcessed(int workers)
+    {
+        // 1000 staged records, #205 (value "204") fails: the other 999 are written, 205 is marked failed-and-skipped (3),
+        // nothing is left pending and the run completes instead of stopping or retrying forever.
+        using var h = new Harness(concurrency: workers) { FailAt = 204 };
+        await h.RunAsync(1000, staged: true);
+
+        Assert.Equal(999, h.Written.Count);
+        Assert.DoesNotContain("204", h.Written);
+        Assert.Equal(999, h.Status.Count(kv => kv.Value == 1));
+        Assert.Equal((byte)3, h.Status[205]);
+        Assert.DoesNotContain(h.Status.Values, v => v is 0 or 2);
+        Assert.Contains(h.History, row => row.StepSubtypeSnapshot == "loop-batch" && row.Status == "Failed");
+    }
+
+    [Fact]
+    public async Task StagedInfrastructureFailure_StillStopsTheLoop_AndLeavesTheRecordRetryable()
+    {
+        using var h = new Harness(concurrency: 1) { FailAt = -1, InfrastructureFailure = new OperationCanceledException() };
+        using var cancel = new CancellationTokenSource(60);
+        h.DelayMs = 30;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => h.RunAsync(1000, staged: true, ct: cancel.Token));
+
+        Assert.DoesNotContain(h.Status.Values, v => v == 3);
+        Assert.Contains(h.Status.Values, v => v == 0);
     }
 
     [Fact]

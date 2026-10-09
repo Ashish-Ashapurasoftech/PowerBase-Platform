@@ -197,6 +197,27 @@ public sealed class FormulaProjector : IFormulaProjector
         return output;
     }
 
+    public IReadOnlySet<long>? GetFormulaDependencies(IReadOnlyList<AppField> fields, IEnumerable<long> formulaFids)
+    {
+        var schema = new AppFieldSchema(fields);
+        var formulaByFid = fields
+            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))
+            .ToDictionary(f => (long)f.Fid!.Value);
+        var result = new HashSet<long>();
+        var pending = new Stack<long>(formulaFids);
+        while (pending.Count > 0)
+        {
+            var fid = pending.Pop();
+            if (!result.Add(fid) || !formulaByFid.TryGetValue(fid, out var field)) continue;
+            var exprAndType = FormulaTypeMap.ExpressionAndType(field.TypeCode, field.Settings);
+            if (exprAndType is not { } et) return null;
+            var compiled = _engine.Compile(et.Expression, schema, et.Type);
+            if (compiled.HasErrors) return null;
+            foreach (var dep in compiled.ReferencedFieldIds) pending.Push(dep);
+        }
+        return result;
+    }
+
     private EvaluationOptions BuildOptions(AppTable? table) => new()
     {
         UtcNow = DateTime.UtcNow,

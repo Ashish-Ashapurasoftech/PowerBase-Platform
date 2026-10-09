@@ -27,4 +27,12 @@ public interface IFormulaProjector
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows,
         IReadOnlyList<IReadOnlyDictionary<long, object?>>? seed = null,
         AppTable? table = null);
+
+    /// <summary>
+    /// The Fids the given Formula fields read, transitively: the formulas themselves, every field they reference, and the
+    /// fields those formulas (if computed) reference in turn. Lets a caller that only needs some formulas' values (a filter)
+    /// know whether they depend on a Lookup / Summary / Reference, or other formulas, before paying to project those.
+    /// Null when the dependencies cannot be determined — the caller must then project everything.
+    /// </summary>
+    IReadOnlySet<long>? GetFormulaDependencies(IReadOnlyList<AppField> fields, IEnumerable<long> formulaFids) => null;
 }

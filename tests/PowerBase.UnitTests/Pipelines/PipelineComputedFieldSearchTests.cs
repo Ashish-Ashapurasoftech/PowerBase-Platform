@@ -366,23 +366,25 @@ public class PipelineComputedFieldSearchTests
         public List<PipelineOutboxItem> Outbox { get; } = new();
         public PipelineTriggerInterceptor Interceptor { get; }
 
-        public InterceptorHarness(string field, string op, string operand)
+        public IPipelineWriteTimeRelationalProjector WriteTime { get; } = Substitute.For<IPipelineWriteTimeRelationalProjector>();
+
+        public InterceptorHarness(string field, string op, string operand, bool useWriteTime = false, bool onDeleted = false, string subtype = "new-event")
         {
             var uow = Substitute.For<ITenantUnitOfWork>();
             uow.Transaction.Returns(Substitute.For<IDbTransaction>());
             PipelineRepo.ListAllActiveAsync(Arg.Any<CancellationToken>()).Returns(new List<Pipeline> { new() { Id = 101, IsActive = true } });
             PipelineRepo.GetStepsByPipelineIdAsync(101, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>
             {
-                new() { Type = "trigger", Subtype = "new-event", ConfigJson = JsonSerializer.Serialize(new
+                new() { Type = "trigger", Subtype = subtype, ConfigJson = JsonSerializer.Serialize(new
                 {
                     TablePublicId = Table.PublicId.ToString(), TriggerOnAdded = true, TriggerOnModified = true,
-                    TriggerOnAnyField = true,
+                    TriggerOnDeleted = onDeleted, TriggerOnAnyField = true,
                     Filters = new[] { new { Field = field, Operator = op, Value = operand } }
                 }) }
             });
             PipelineRepo.CreateOutboxItemAsync(Arg.Do<PipelineOutboxItem>(Outbox.Add), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
             Interceptor = new PipelineTriggerInterceptor(PipelineRepo, RecordRepo, Substitute.For<IQueryContext>(), uow, null!, null!,
-                Substitute.For<ILogger<PipelineTriggerInterceptor>>(), null, null, Projector, Relational);
+                Substitute.For<ILogger<PipelineTriggerInterceptor>>(), null, null, Projector, Relational, useWriteTime ? WriteTime : null);
         }
 
         /// <summary>The re-read row and what the relational / formula projectors compute for it.</summary>
@@ -512,6 +514,7 @@ public class PipelineComputedFieldSearchTests
         public IPipelineRecordSearchService SearchService { get; } = Substitute.For<IPipelineRecordSearchService>();
         public IFormulaProjector Projector { get; } = Substitute.For<IFormulaProjector>();
         public IRelationalProjector Relational { get; } = Substitute.For<IRelationalProjector>();
+        public IPipelineWriteTimeRelationalProjector WriteTime { get; } = Substitute.For<IPipelineWriteTimeRelationalProjector>();
         public PipelineEngine Engine { get; }
         public FilterGroup? CapturedFilter { get; private set; }
 
@@ -532,6 +535,7 @@ public class PipelineComputedFieldSearchTests
             serviceProvider.GetService(typeof(IPipelineApiRequestDispatcher)).Returns(Substitute.For<IPipelineApiRequestDispatcher>());
             serviceProvider.GetService(typeof(IFormulaProjector)).Returns(Projector);
             serviceProvider.GetService(typeof(IRelationalProjector)).Returns(Relational);
+            serviceProvider.GetService(typeof(IPipelineWriteTimeRelationalProjector)).Returns(WriteTime);
 
             Engine = new PipelineEngine(
                 Substitute.For<IPipelineRepository>(), RecordRepo, Substitute.For<IRecordWriteService>(), tableRepo, fieldRepo,
@@ -968,18 +972,23 @@ public class PipelineComputedFieldSearchTests
     }
 
     [Fact]
-    public async Task TriggerRefresh_DoesNotAddValuesTheEventDidNotCarry()
+    public async Task TriggerRefresh_AddsTheComputedFieldsTheEventDidNotCarry_ButNeverStoredOnes()
     {
-        var payload = EventPayload(null);
-        var extra = new AppField { Id = 15, Fid = 15, Name = "Other", TypeCode = "Formula_Number", Settings = "{\"expression\":\"1\"}" };
-        var h = new RefreshHarness(1000m, extra);
-        h.Formula.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
-                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
-            .Returns(new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?> { [SummaryFid] = 1000m, [15] = 7m } });
+        // The event no longer computes them at write time, so the keys are absent altogether.
+        var payload = JsonSerializer.Deserialize<Dictionary<string, object>>(JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["EventType"] = "Added", ["TablePublicId"] = Table.PublicId.ToString(), ["RecordPublicId"] = TriggerRecord.ToString(),
+            ["SelectedFieldValues"] = new Dictionary<string, object?> { ["fid_6"] = "ORD0003" },
+            ["NewValues"] = new Dictionary<string, object?> { ["fid_6"] = "ORD0003" },
+        }))!;
 
-        await h.Run(payload);
+        var changed = await new RefreshHarness(1000m).Run(payload);
 
-        Assert.False(Section(payload, "SelectedFieldValues").TryGetProperty("fid_15", out _));
+        Assert.True(changed);
+        Assert.Equal(1000m, Section(payload, "SelectedFieldValues").GetProperty("fid_14").GetDecimal());
+        Assert.Equal(1000m, Section(payload, "NewValues").GetProperty("fid_14").GetDecimal());
+        Assert.Equal("ORD0003", Section(payload, "SelectedFieldValues").GetProperty("fid_6").GetString());
+        Assert.False(Section(payload, "SelectedFieldValues").TryGetProperty("fid_9", out _), "a Reference is not a computed value and is not added");
     }
 
     [Theory]
@@ -1006,14 +1015,11 @@ public class PipelineComputedFieldSearchTests
     }
 
     [Fact]
-    public async Task TriggerRefresh_NoComputedFieldInTheEvent_ReadsNothing()
+    public async Task TriggerRefresh_TableWithoutComputedFields_ReadsNothing()
     {
-        var payload = JsonSerializer.Deserialize<Dictionary<string, object>>(JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["EventType"] = "Added", ["TablePublicId"] = Table.PublicId.ToString(), ["RecordPublicId"] = TriggerRecord.ToString(),
-            ["SelectedFieldValues"] = new Dictionary<string, object?> { ["fid_6"] = "ORD0003" },
-        }))!;
+        var payload = EventPayload(null);
         var h = new RefreshHarness(1000m);
+        h.FieldRepo.ListByTableAsync(Table.Id, Arg.Any<CancellationToken>()).Returns(TableFields(Reference()));
 
         Assert.False(await h.Run(payload));
         await h.Records.DidNotReceiveWithAnyArgs().GetRowsByIdsAsync(default!, default!, default!, default);
@@ -1083,8 +1089,62 @@ public class PipelineComputedFieldSearchTests
     }
 
     [Fact]
-    public void Budgets_InsideAWriteTransactionIsShorterThanOutside() =>
-        Assert.True(PipelineComputedProjection.InTransactionBudget < PipelineComputedProjection.RelationshipBudget);
+    public void NoFixedTimeLimit_ByDefault_EverywhereAReadCanTakeAsLongAsTheDataNeeds()
+    {
+        // 90 million rows: how long a Summary takes is up to the data, never to a number of seconds chosen in code.
+        Assert.Equal(Timeout.InfiniteTimeSpan, PipelineComputedProjection.RelationshipBudget);
+        Assert.Equal(Timeout.InfiniteTimeSpan, PipelineComputedProjection.InTransactionBudget);
+        Assert.Equal(Timeout.InfiniteTimeSpan, PipelineComputedProjection.WriteTimeBudget);
+        Assert.Equal(Timeout.InfiniteTimeSpan, PipelineTriggerRefresh.Budget);
+    }
+
+    [Fact]
+    public async Task Projection_ASlowButFinishingRead_IsNeverCutOff()
+    {
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(async ci =>
+            {
+                await Task.Delay(1500, ci.ArgAt<CancellationToken>(3));      // slow, then completes
+                return (IReadOnlyList<IReadOnlyDictionary<long, object?>>)new List<IReadOnlyDictionary<long, object?>>
+                    { new Dictionary<long, object?> { [SummaryFid] = 8000m } };
+            });
+        var formula = Substitute.For<IFormulaProjector>();
+        formula.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(2)!);
+
+        var result = await PipelineComputedProjection.ProjectAsync(relational, formula, Table, TableFields(Summary("Sum")),
+            new List<IReadOnlyDictionary<string, object?>> { Row(1, Guid.NewGuid()) }, null, default);
+
+        Assert.Empty(result!.FailedFids);
+        Assert.Equal(8000m, result.Values[0][SummaryFid]);
+    }
+
+    [Theory]
+    [InlineData("timeout")]
+    [InlineData("sql")]
+    [InlineData("inner")]
+    public async Task Projection_ADatabaseCommandTimeout_IsGivenUpOnOnce_NotRetriedPerField(string kind)
+    {
+        var calls = 0;
+        Exception Timeout() => kind switch
+        {
+            "timeout" => new TimeoutException("boom"),
+            "sql" => new InvalidOperationException("Execution Timeout Expired.  The timeout period elapsed prior to completion of the operation."),
+            _ => new InvalidOperationException("wrapper", new System.ComponentModel.Win32Exception(258)),
+        };
+        var relational = Substitute.For<IRelationalProjector>();
+        relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(_ => { Interlocked.Increment(ref calls); return Task.FromException<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(Timeout()); });
+
+        var result = await PipelineComputedProjection.ProjectAsync(relational, EmptyFormulaProjector(), Table,
+            TableFields(Reference(), Summary("Count")), new List<IReadOnlyDictionary<string, object?>> { Row(1, Guid.NewGuid()) }, null, default);
+
+        Assert.Equal(1, calls);
+        Assert.Contains(SummaryFid, result!.FailedFids);
+        Assert.Contains(ReferenceFid, result.FailedFids);
+    }
 
     [Fact]
     public async Task Projection_ACancelledCaller_StillCancels()
@@ -1102,5 +1162,103 @@ public class PipelineComputedFieldSearchTests
         cts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+    }
+
+    // ───────────────────────── write-time cost: only compute what is needed, never wait on our own lock ─────────────────────────
+
+    [Fact]
+    public async Task Event_NothingNeedsComputedValuesNow_NoProjectionIsDone()
+    {
+        // Filter on a stored field, table has a Summary: the values are re-read when the PowerFlow runs instead.
+        var fields = TableFields(Summary("Sum"));
+        var h = new InterceptorHarness("fid_6", "is", "row");
+        var id = Guid.NewGuid();
+
+        await h.Interceptor.InterceptAsync(Table, fields, id, new Dictionary<long, object?> { [NameFid] = "row" }, "record-added");
+
+        Assert.Single(h.Outbox);
+        h.Projector.DidNotReceiveWithAnyArgs().Project(default!, default!, default, default);
+        await h.Relational.DidNotReceiveWithAnyArgs().ProjectAsync(default!, default!, default!, default);
+        await h.RecordRepo.DidNotReceiveWithAnyArgs().GetBulkUpsertRowsByIdsAsync(default!, default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task Event_FilterOnAComputedField_StillProjectsAtEventTime()
+    {
+        var fields = TableFields(Summary("Sum"));
+        var h = new InterceptorHarness("fid_14", "greater_than", "100");
+        var id = Guid.NewGuid();
+        h.Computes(id, new Dictionary<long, object?> { [SummaryFid] = 1000m });
+
+        await h.Interceptor.InterceptAsync(Table, fields, id, new Dictionary<long, object?> { [NameFid] = "row" }, "record-added");
+
+        Assert.Single(h.Outbox);
+        Assert.Equal(1000m, h.Payload().GetProperty("NewValues").GetProperty("fid_14").GetDecimal());
+    }
+
+    [Theory]
+    [InlineData(false, "new-bulk-event")]
+    [InlineData(true, "new-event")]
+    public async Task Event_BulkOrDeleteTriggers_StillProjectAtEventTime(bool onDeleted, string subtype)
+    {
+        var fields = TableFields(Summary("Sum"));
+        var h = new InterceptorHarness("fid_6", "is", "row", onDeleted: onDeleted, subtype: subtype);
+        var id = Guid.NewGuid();
+        h.Computes(id, new Dictionary<long, object?> { [SummaryFid] = 1000m });
+
+        await h.Interceptor.InterceptAsync(Table, fields, id, new Dictionary<long, object?> { [NameFid] = "row" }, onDeleted ? "record-deleted" : "record-added");
+
+        await h.Relational.ReceivedWithAnyArgs().ProjectAsync(default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task Event_WithAWriteTimeProjector_ReadsThroughItInsteadOfTheLockedOne()
+    {
+        var fields = TableFields(Summary("Sum"));
+        var h = new InterceptorHarness("fid_14", "greater_than", "100", useWriteTime: true);
+        var id = Guid.NewGuid();
+        h.Computes(id, new Dictionary<long, object?> { [SummaryFid] = 1000m });
+        h.WriteTime.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(new List<IReadOnlyDictionary<long, object?>>
+                { new Dictionary<long, object?> { [SummaryFid] = 1000m } }));
+
+        await h.Interceptor.InterceptAsync(Table, fields, id, new Dictionary<long, object?> { [NameFid] = "row" }, "record-added");
+
+        Assert.Single(h.Outbox);
+        await h.WriteTime.ReceivedWithAnyArgs(1).ProjectAsync(default!, default!, default!, default);
+        await h.Relational.DidNotReceiveWithAnyArgs().ProjectAsync(default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task UpdateRecord_OutputIsProjectedThroughTheWriteTimeProjector()
+    {
+        var h = new EngineHarness(TableFields(Summary("Count")));
+        var target = Guid.NewGuid();
+        h.WriteService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), target, Arg.Any<IReadOnlyDictionary<long, object?>>(),
+                Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>())
+            .Returns(new Dictionary<long, object?> { [NameFid] = "changed" });
+        h.RecordRepo.GetActiveRecordIdByPublicIdAsync(Arg.Any<AppTable>(), target, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(7L);
+        h.RecordRepo.GetBulkUpsertRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(),
+                Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { [7L] = Row(7, target) });
+        // The ordinary projector would wait on the step's own lock: make it fail if it were used.
+        h.Relational.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(new TimeoutException("blocked by our own lock")));
+        h.WriteTime.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(new List<IReadOnlyDictionary<long, object?>>
+                { new Dictionary<long, object?> { [SummaryFid] = 1000m } }));
+        h.Projector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(2)!);
+
+        var step = new PipelineStep { Id = 1, RefId = "ref_update", Type = "action", Subtype = "update-record",
+            ConfigJson = $"{{\"TableId\":\"{Table.PublicId}\",\"TargetRecordId\":\"{target}\",\"FieldMappings\":[{{\"Field\":\"fid_6\",\"Value\":\"changed\"}}]}}" };
+        var started = DateTime.UtcNow;
+
+        var root = await h.RunStepAsync(step, new Dictionary<string, object> { ["_MessageId"] = Guid.NewGuid() });
+
+        Assert.Equal(1000m, root.GetProperty("fid_14").GetDecimal());
+        await h.Relational.DidNotReceiveWithAnyArgs().ProjectAsync(default!, default!, default!, default);
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(2));
     }
 }
