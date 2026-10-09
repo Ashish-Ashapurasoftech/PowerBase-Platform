@@ -486,22 +486,37 @@ public class CopyRecordsTests
             Arg.Is<FilterGroup?>(f => f != null), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
     }
 
-    // ── Azure AI Search performance routing for Copy Records' source filter ─────────────────
-    // Mirrors the same UseAzureAiForGridSearch-gated routing added to the pipeline Search
-    // Records step and to RunReportQueryHandler: when enabled and the index is healthy, resolve
-    // the `query` filter through Azure AI Search and read the source snapshot by Id instead of
-    // scanning the source table with the original condition.
+    // ── Azure AI Search routing for Copy Records' source filter ─────────────────────────────
+    // Same rules as the pipeline Search Records step: when UseAzureAiForGridSearch is on and the index is healthy, a filter
+    // whose every condition is an "is"/"in" on a plain-text physical field that is both searchable and filterable is
+    // answered by the index, which only proposes candidate record ids (all of them, paged). The snapshot read then takes
+    // those candidates from SQL with the complete filter still applied. Everything else - and an index that finds nothing
+    // or fails - reads the source from SQL.
 
-    [Fact]
-    public async Task Copy_GridSearchEnabled_HealthyIndex_ResolvesQueryThroughAzureSearchToIdFilter()
+    private static async IAsyncEnumerable<AiSearchIdPage> AiPages(params AiSearchIdPage[] pages)
     {
-        using var harness = new Harness();
+        foreach (var page in pages) { yield return page; await Task.Yield(); }
+    }
+
+    private static void IndexSource(Harness harness)
+    {
         harness.SourceFields[0].IsSearchable = true;
+        harness.SourceFields[0].IsFilterable = true;
         harness.AzureSearch.IsGridSearchEnabled.Returns(true);
         harness.AzureSearch.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+    }
+
+    private static FilterCondition IdRestriction(FilterGroup? filter) =>
+        filter!.Nodes.Select(n => n.Condition).First(c => c is { FieldId: 3 })!;
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_HealthyIndex_ReadsCandidatesFromSqlWithTheFullFilterStillApplied()
+    {
+        using var harness = new Harness();
+        IndexSource(harness);
         var matchedPublicId = Guid.NewGuid();
-        harness.AzureSearch.SearchRecordsByFilterAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(new List<Guid> { matchedPublicId });
+        harness.AzureSearch.SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => AiPages(new AiSearchIdPage([matchedPublicId], "~")));
         harness.Records.GetIdsByPublicIdsAsync(harness.Source, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(new List<long> { 7 });
 
@@ -509,34 +524,60 @@ public class CopyRecordsTests
         harness.Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(ci => { capturedFilter = ci.ArgAt<FilterGroup?>(2); return harness.EmptyPage(); });
 
-        await harness.Run("{6.CT.'none'}");
+        await harness.Run("{6.EX.'none'}");
 
-        await harness.AzureSearch.Received(1).SearchRecordsByFilterAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<CancellationToken>());
+        harness.AzureSearch.Received(1).SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id,
+            Arg.Is<string>(odata => odata.Contains("search.ismatch('\"none\"', 'f_6', 'full', 'any')")), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+        await harness.AzureSearch.DidNotReceive().SearchRecordsByFilterAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
         Assert.NotNull(capturedFilter);
-        Assert.Equal(3, capturedFilter!.Nodes[0].Condition!.FieldId);
-        Assert.Equal("in", capturedFilter.Nodes[0].Condition!.Operator);
+        Assert.Equal("in", IdRestriction(capturedFilter).Operator);
+        // The original condition is still there: the index proposes candidates, SQL decides.
+        Assert.NotNull(capturedFilter!.Nodes[0].Group);
     }
 
     [Fact]
     public async Task Copy_GridSearchEnabled_AiSearchThrows_FallsBackToOriginalSqlFilter()
     {
         using var harness = new Harness();
-        harness.SourceFields[0].IsSearchable = true;
-        harness.AzureSearch.IsGridSearchEnabled.Returns(true);
-        harness.AzureSearch.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
-        harness.AzureSearch.SearchRecordsByFilterAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns<Task<IReadOnlyList<Guid>>>(_ => throw new InvalidOperationException("Azure Search unavailable"));
+        IndexSource(harness);
+        harness.AzureSearch.SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => ThrowingPages());
 
         FilterGroup? capturedFilter = null;
         harness.Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(ci => { capturedFilter = ci.ArgAt<FilterGroup?>(2); return harness.EmptyPage(); });
 
-        var result = JsonDocument.Parse(await harness.Run("{6.CT.'none'}")).RootElement;
+        var result = JsonDocument.Parse(await harness.Run("{6.EX.'none'}")).RootElement;
 
         Assert.Equal(0, result.GetProperty("ErrorCount").GetInt32());
         Assert.NotNull(capturedFilter);
-        // Fell back to the original "contains" condition on field 6, not an Id filter.
+        // Fell back to the original condition on field 6, with no Id restriction.
         Assert.Equal(6, capturedFilter!.Nodes[0].Group!.Nodes[0].Group!.Nodes[0].Condition!.FieldId);
+        Assert.DoesNotContain(capturedFilter.Nodes, n => n.Condition is { FieldId: 3 });
+
+        static async IAsyncEnumerable<AiSearchIdPage> ThrowingPages()
+        {
+            await Task.Yield();
+            throw new InvalidOperationException("Azure Search unavailable");
+#pragma warning disable CS0162
+            yield break;
+#pragma warning restore CS0162
+        }
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_NoAiMatches_ReadsTheSourceFromSqlInsteadOfCopyingNothing()
+    {
+        using var harness = new Harness();
+        IndexSource(harness);
+        harness.AzureSearch.SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => AiPages());   // not indexed (yet)
+
+        var result = JsonDocument.Parse(await harness.Run("{6.EX.'none'}")).RootElement;
+
+        Assert.Equal(1, result.GetProperty("InsertedCount").GetInt32());   // the SQL snapshot still has its row
+        harness.Search.Received(1).ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Is<FilterGroup?>(f => f != null && !f.Nodes.Any(n => n.Condition != null && n.Condition.FieldId == 3)), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -545,50 +586,130 @@ public class CopyRecordsTests
         using var harness = new Harness();
         harness.AzureSearch.IsGridSearchEnabled.Returns(false);
 
-        await harness.Run("{6.CT.'none'}");
+        await harness.Run("{6.EX.'none'}");
 
-        await harness.AzureSearch.DidNotReceive().SearchRecordsByFilterAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+        harness.AzureSearch.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData("{6.CT.'none'}", "Text", true, true)]        // contains: the index cannot answer it exactly
+    [InlineData("{6.EX.'none'}", "Text", false, true)]       // not searchable
+    [InlineData("{6.EX.'none'}", "Text", true, false)]       // not filterable
+    [InlineData("{6.EX.'none'}", "Number", true, true)]      // numbers are compared as text in the index
+    [InlineData("{6.EX.'none'}", "Formula_Text", true, true)]  // no column
+    [InlineData("{6.EX.'none'}", "Lookup", true, true)]
+    [InlineData("{6.EX.'none'}", "Reference", true, true)]
+    public async Task Copy_GridSearchEnabled_IneligibleQuery_ReadsFromSqlAndNeverTouchesTheIndex(string query, string type, bool searchable, bool filterable)
+    {
+        using var harness = new Harness();
+        IndexSource(harness);
+        harness.SourceFields[0].TypeCode = type;
+        harness.SourceFields[0].IsSearchable = searchable;
+        harness.SourceFields[0].IsFilterable = filterable;
+
+        // Some of these combinations are rejected by Copy Records itself (an unsupported operator or mismatched field types); the
+        // point is only that the index is never consulted for a search it cannot answer exactly.
+        try { await harness.Run(query); } catch (Exception ex) when (ex is ValidationException or PipelineNonRetryableException) { }
+
+        harness.AzureSearch.DidNotReceive().SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task Copy_GridSearchEnabled_MoreMatchesThanOneSqlChunk_CopiesAllOfThemWithoutTruncating()
+    public async Task Copy_GridSearchEnabled_EncryptedField_CandidatesAreStillCheckedInMemoryAgainstTheDecryptedValue()
     {
-        // Regression: an earlier version capped AI Search matches at a fixed 2000 and silently
-        // dropped the rest from the copy. Matches must now all be fetched via chunked queries.
+        // The index proposes a candidate; the encrypted source value does not actually equal the query, so it is dropped.
         using var harness = new Harness();
-        harness.SourceFields[0].IsSearchable = true;
-        harness.AzureSearch.IsGridSearchEnabled.Returns(true);
-        harness.AzureSearch.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
-        const int totalMatches = 5000; // > one 2000-id SQL chunk, needs 3 chunks (verified against 20,000 manually too)
-        var publicIds = Enumerable.Range(0, totalMatches).Select(_ => Guid.NewGuid()).ToList();
-        harness.AzureSearch.SearchRecordsByFilterAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(publicIds);
+        IndexSource(harness);
+        harness.SourceFields[0].IsEncrypted = true;
+        harness.SourceValues.Clear();
+        harness.SourceValues.AddRange(new[] { "Someone Else" });
+        harness.AzureSearch.SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => AiPages(new AiSearchIdPage([Guid.NewGuid()], "~")));
         harness.Records.GetIdsByPublicIdsAsync(harness.Source, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
-            .Returns(ci => ci.ArgAt<IReadOnlyCollection<Guid>>(1).Select((_, i) => (long)i).ToList());
+            .Returns(new List<long> { 7 });
+
+        var result = JsonDocument.Parse(await harness.Run("{6.EX.'none'}")).RootElement;
+
+        Assert.Equal(0, result.GetProperty("InsertedCount").GetInt32());
+        Assert.DoesNotContain(harness.Records.ReceivedCalls(), c => c.GetMethodInfo().Name == "CreateAsync");
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_MoreMatchesThanOnePageOrSqlChunk_CopiesAllOfThemWithoutTruncating()
+    {
+        // Regression: an earlier version capped AI Search matches (50,000 in the service, 2,000 here) and silently dropped
+        // the rest from the copy. Every page must be read and every candidate copied, via chunked reads.
+        using var harness = new Harness();
+        IndexSource(harness);
+        const int pageCount = 5, perPage = 1000;   // 5,000 candidates: three 2,000-id SQL chunks
+        harness.AzureSearch.SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => AiPages(Enumerable.Range(0, pageCount)
+                .Select(_ => new AiSearchIdPage(Enumerable.Range(0, perPage).Select(_ => Guid.NewGuid()).ToList(), "x")).ToArray()));
+        long nextId = 0;
+        harness.Records.GetIdsByPublicIdsAsync(harness.Source, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => ci.ArgAt<IReadOnlyCollection<Guid>>(1).Select(_ => Interlocked.Increment(ref nextId)).ToList());
 
         var snapshotCallCount = 0;
+        long idsRequested = 0;
         harness.Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(ci =>
             {
                 snapshotCallCount++;
-                var chunkIds = JsonSerializer.Deserialize<long[]>(ci.ArgAt<FilterGroup?>(2)!.Nodes[0].Condition!.Value!)!;
+                var chunkIds = JsonSerializer.Deserialize<long[]>(IdRestriction(ci.ArgAt<FilterGroup?>(2)).Value!)!;
+                idsRequested += chunkIds.Length;
                 return ChunkPage(chunkIds.Length);
             });
 
-        var result = JsonDocument.Parse(await harness.Run("{6.CT.'none'}")).RootElement;
+        var result = JsonDocument.Parse(await harness.Run("{6.EX.'none'}")).RootElement;
 
-        Assert.True(snapshotCallCount >= 3, $"Expected at least 3 chunked snapshot reads for {totalMatches} matches, got {snapshotCallCount}.");
-        Assert.Equal(totalMatches, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(pageCount * perPage, idsRequested);
+        Assert.Equal(5, snapshotCallCount);   // 5,000 candidates in chunks of 1,000: room under SQL Server's 2,100 parameters for the filter
+        Assert.Equal(pageCount * perPage, result.GetProperty("InsertedCount").GetInt32());
 
         static async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ChunkPage(int count)
         {
             await Task.CompletedTask;
             yield return Enumerable.Range(0, count).Select(i => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
             {
-                ["f_6"] = $"row-{Guid.NewGuid()}",
+                ["f_6"] = "none",
                 ["PublicId"] = Guid.NewGuid()
             }).ToList();
         }
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_MoreThanFiftyThousandCandidates_AllReachTheSqlReadInOrder()
+    {
+        // 60,000 candidates: past the 50,000 the old search method silently stopped at. Nothing is copied here; the point is
+        // that every candidate id is handed to the SQL snapshot read, in ascending id order, in 1,000-id chunks.
+        using var harness = new Harness();
+        IndexSource(harness);
+        const int pageCount = 60, perPage = 1000;
+        harness.AzureSearch.SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => AiPages(Enumerable.Range(0, pageCount)
+                .Select(_ => new AiSearchIdPage(Enumerable.Range(0, perPage).Select(_ => Guid.NewGuid()).ToList(), "x")).ToArray()));
+        long nextId = pageCount * perPage + 1;   // handed out descending, so the executor must sort them
+        harness.Records.GetIdsByPublicIdsAsync(harness.Source, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => ci.ArgAt<IReadOnlyCollection<Guid>>(1).Select(_ => Interlocked.Decrement(ref nextId)).ToList());
+
+        var requested = new List<long>();
+        var chunkSizes = new List<int>();
+        harness.Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                var chunk = JsonSerializer.Deserialize<long[]>(IdRestriction(ci.ArgAt<FilterGroup?>(2)).Value!)!;
+                chunkSizes.Add(chunk.Length);
+                requested.AddRange(chunk);
+                return harness.EmptyPage();
+            });
+
+        await harness.Run("{6.EX.'none'}");
+
+        Assert.Equal(pageCount * perPage, requested.Count);
+        Assert.Equal(requested.OrderBy(i => i), requested);
+        Assert.Equal(pageCount * perPage / PipelineEngine.AiCandidateRecordIdChunkSize, chunkSizes.Count);
+        Assert.All(chunkSizes, size => Assert.True(size <= PipelineEngine.AiCandidateRecordIdChunkSize));
+        Assert.Equal(pageCount * perPage, requested.Distinct().Count());
     }
 
     [Theory]

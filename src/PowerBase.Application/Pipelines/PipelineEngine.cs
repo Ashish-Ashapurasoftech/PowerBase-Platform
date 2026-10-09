@@ -1953,8 +1953,50 @@ public partial class PipelineEngine : IPipelineEngine
                     worksetId, messageGuid, step.RefId, snapshotMaxRecordId, ct);
                 if (workset.Status == "Discovering")
                 {
+                    // Azure AI Search fills the workset where the index can answer the search exactly (see PipelineAiSearchPlanner),
+                    // paging all of its candidate ids; SQL fills it everywhere else, and when AI Search finds nothing or fails
+                    // before staging anything. A workset keeps the source it started with: switching half way would stage
+                    // records twice or skip some.
+                    var aiFilled = false;
+                    // An AI read that already reached the end of the index (or its MaxResults) before the step was interrupted needs
+                    // nothing more from the index: it is complete as it stands — or, with nothing staged, simply read from SQL.
+                    var aiReadComplete = workset.DiscoverySource == "Ai" &&
+                        (workset.LastSearchCursor == AiSearchIdPage.EndCursor || (limit.HasValue && workset.DiscoveredCount >= limit.Value));
+                    var streamAiPlan = aiReadComplete
+                        ? new PipelineAiSearchPlan(null, "the index was already read")
+                        : workset.DiscoverySource == "Ai" || (workset.DiscoveredCount == 0 && workset.LastRecordId == 0)
+                            ? await PlanAiSearchAsync(table, fields, filterTree, ct)
+                            : new PipelineAiSearchPlan(null, "the search already started in SQL");
+                    if (aiReadComplete && workset.DiscoveredCount > 0)
+                    {
+                        aiFilled = true;
+                    }
+                    else if (workset.DiscoverySource == "Ai" && !streamAiPlan.UseAiSearch)
+                    {
+                        if (workset.DiscoveredCount > 0)
+                            throw new InvalidOperationException(
+                                $"Search workset {worksetId} is being read from Azure AI Search, which cannot resume it now ({streamAiPlan.SqlReason}).");
+                        await _pipelineRepo.UseSqlForSearchWorksetDiscoveryAsync(worksetId, ct);
+                        workset.DiscoverySource = "Sql"; workset.LastSearchCursor = null; workset.LastRecordId = 0;
+                    }
+                    else if (streamAiPlan.UseAiSearch)
+                    {
+                        if (workset.DiscoverySource != "Ai")
+                        {
+                            await _pipelineRepo.BeginAiSearchWorksetDiscoveryAsync(worksetId, ct);
+                            workset.DiscoverySource = "Ai";
+                        }
+                        aiFilled = await DiscoverFromAiSearchAsync(table, fields, filterTree, streamAiPlan.ODataFilter!, workset, worksetId, limit,
+                            snapshotMaxRecordId, readableFids, inMemoryFilterFids, computedFieldFids, recordSearchService, recordRepo, ct);
+                        if (!aiFilled)
+                        {
+                            await _pipelineRepo.UseSqlForSearchWorksetDiscoveryAsync(worksetId, ct);
+                            workset.DiscoverySource = "Sql"; workset.LastSearchCursor = null; workset.LastRecordId = 0;
+                        }
+                    }
+
                     var ordinal = workset.DiscoveredCount;
-                    if (!limit.HasValue || ordinal < limit.Value)
+                    if (!aiFilled && (!limit.HasValue || ordinal < limit.Value))
                     {
                         // Slim scan: when the in-memory half of the filter reads only stored fields (typically encrypted
                         // ones), the scan reads and decrypts just those columns — plus what the SQL half compares — instead
@@ -2084,7 +2126,7 @@ public partial class PipelineEngine : IPipelineEngine
                 }
 
                 stepRun.InputContext = SerializeAndSanitizeAudit(new {
-                    TableId = config.TableId, Mode = "Chunked", WorksetId = worksetId,
+                    TableId = config.TableId, Mode = "Chunked", Source = workset.DiscoverySource, WorksetId = worksetId,
                     DiscoveredCount = workset.DiscoveredCount,
                     Metadata = BuildAuditFieldMetadata(table, fields)
                 });
@@ -2107,126 +2149,41 @@ public partial class PipelineEngine : IPipelineEngine
                 Metadata = BuildAuditFieldMetadata(table, fields)
             });
 
-            // SQL Server accepts at most ~2100 parameters per query, so any Id-list lookup this
-            // step does (AI Search match resolution, chunked candidate fetches) must be batched
-            // in chunks this size — never trimmed to it. A trimmed cap would silently drop
-            // records past the cutoff; chunking fetches every one of them, just in more queries.
-            const int sqlIdChunkSize = 2000;
             int pageSize = _options.SearchRecordsPageSize;
 
-            // Every matching row is returned — there is no ceiling on how many a search may match. A result too large to
-            // hold comfortably is streamed (see the chunked branch above) when a single Loop consumes it; otherwise it is
-            // read page by page (keyset, so the cost of a page does not grow with how far into the table it is) and
-            // returned whole. StreamSearchAboveRecords only chooses between those two strategies.
-            async Task<List<IReadOnlyDictionary<string, object?>>> FetchAllAsync(FilterGroup? tree)
-            {
-                var all = new List<IReadOnlyDictionary<string, object?>>();
-                if (recordSearchService is IKeysetPipelineRecordSearchService pager && recordSearchService.SupportsKeysetPaging)
-                {
-                    await foreach (var pageRows in pager.SearchPagesAsync(table, fields, pageSize, tree, 0, long.MaxValue, ct))
-                        all.AddRange(pageRows);
-                    return all;
-                }
-                if (recordSearchService != null)
-                {
-                    var rows = await recordSearchService.SearchAsync(table, fields, null, tree, ct);
-                    return rows.ToList();
-                }
-                for (var page = 1; ; page++)
-                {
-                    var pageRows = await recordRepo.ListAsync(table, fields, page, pageSize, filterTree: tree, ct: ct);
-                    if (pageRows.Count == 0) break;
-                    all.AddRange(pageRows);
-                    if (pageRows.Count < pageSize) break;
-                }
-                return all;
-            }
-
-            // Performance: when Azure AI Search grid-search is enabled (same
-            // UseAzureAiForGridSearch flag Reports uses), route filtering through the search
-            // index instead of a SQL scan. The index stores decrypted plaintext for encrypted
-            // fields (RecordRepository.GetSearchableFieldsAsync decrypts before indexing), so
-            // this also naturally handles encrypted-field conditions without the in-memory
-            // split below — mirrors RunReportQueryHandler's OData/AI Search routing. Falls back
-            // to the SQL path (which has its own encrypted-field handling) on any failure.
-            List<IReadOnlyDictionary<string, object?>>? aiSearchRows = null;
-            if (_azureSearchService != null && _azureSearchService.IsGridSearchEnabled && filterTree != null
-                && !FormulaFilterSorter.TreeContainsFormulaField(filterTree, computedFieldFids)
-                && !FormulaFilterSorter.TreeContainsFormulaField(filterTree, labelReferenceFids)
-                && fields.Any(f => f.IsSearchable || f.IsFilterable) && await _azureSearchService.IsHealthyAsync(ct))
-            {
-                var odata = ODataFilterBuilder.Build(filterTree, fields);
-                if (!string.IsNullOrWhiteSpace(odata))
-                {
-                    try
-                    {
-                        var aiMatches = await _azureSearchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
-                        var matchedIds = new List<long>();
-                        foreach (var publicIdChunk in aiMatches.Chunk(sqlIdChunkSize))
-                            matchedIds.AddRange(await recordRepo.GetIdsByPublicIdsAsync(table, publicIdChunk, ct));
-
-                        var rows = new List<IReadOnlyDictionary<string, object?>>();
-                        foreach (var idChunk in matchedIds.Chunk(sqlIdChunkSize))
-                        {
-                            var chunkFilter = new FilterGroup { Logic = "and", Nodes = new List<FilterNode> { new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "in", Value = JsonSerializer.Serialize(idChunk) } } } };
-                            rows.AddRange(await FetchAllAsync(chunkFilter));
-                            if (limit.HasValue && rows.Count >= limit.Value) break; // a user-configured cap, not a silent one
-                        }
-                        aiSearchRows = rows;
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogWarning(ex, "[Pipeline SearchRecords] Azure AI Search unavailable for table {TableId}. Falling back to SQL.", table.Id);
-                    }
-                }
-            }
-
+            // Azure AI Search answers the search only when the index can answer it exactly (every condition on a plain-text
+            // physical field that is searchable and filterable — see PipelineAiSearchPlanner); a Formula / Lookup / Summary /
+            // relationship condition, or any other field or operator, is read from SQL. AI Search only finds candidate ids
+            // (all of them, paged — no ceiling); each candidate is read from SQL with the complete filter applied. When it finds
+            // nothing, or fails, the search is run in SQL.
             List<IReadOnlyDictionary<string, object?>> resultsList;
             var computedMerged = false;
+            List<IReadOnlyDictionary<string, object?>>? aiSearchRows = null;
+            var aiPlan = await PlanAiSearchAsync(table, fields, filterTree, ct);
+            if (aiPlan.UseAiSearch)
+            {
+                try
+                {
+                    aiSearchRows = await ReadAiSearchRowsAsync(table, fields, filterTree, aiPlan.ODataFilter!, limit,
+                        inMemoryFilterFids, computedFieldFids, recordSearchService, recordRepo, pageSize, ct);
+                    if (aiSearchRows.Count == 0)
+                    {
+                        _logger.LogInformation("[Pipeline SearchRecords] Azure AI Search found no matching record for table {TableId}; checking SQL.", table.Id);
+                        aiSearchRows = null;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "[Pipeline SearchRecords] Azure AI Search unavailable for table {TableId}. Falling back to SQL.", table.Id);
+                    aiSearchRows = null;
+                }
+            }
+
             if (aiSearchRows != null)
-            {
-                resultsList = (limit.HasValue ? aiSearchRows.Take(limit.Value) : aiSearchRows).ToList();
-            }
+                resultsList = limit.HasValue ? aiSearchRows.Take(limit.Value).ToList() : aiSearchRows;
             else
-            {
-                // Encrypted fields store ciphertext in their physical column, so a SQL LIKE/=
-                // condition against them can never match. Split those conditions out of the SQL
-                // tree and evaluate them in memory against decrypted candidate rows instead —
-                // mirrors RunReportQueryHandler's handling of formula (compute-on-read) fields.
-                if (inMemoryFilterFids.Count > 0 && FormulaFilterSorter.TreeContainsFormulaField(filterTree, inMemoryFilterFids))
-                {
-                    var (physicalFilterTree, inMemoryFilterTree) = FormulaFilterSorter.SplitFilterTree(filterTree, inMemoryFilterFids);
-                    // Fetch EVERY physical-filter-matching candidate via pagination — no fixed
-                    // cap — so nothing is silently dropped before the in-memory conditions are
-                    // evaluated below, no matter how many rows match physically.
-                    var candidates = await FetchAllAsync(physicalFilterTree);
-                    var (computedPerRow, rowsNarrowed) = await ProjectForFilterAsync(table, fields, candidates, PipelineComputedProjection.ReferencedFids(inMemoryFilterTree), ct);
-                    var pairs = candidates
-                        .Select((r, i) => (Row: r, Computed: computedPerRow != null ? computedPerRow[i] : (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
-                        .ToList();
-                    if (inMemoryFilterTree != null)
-                        pairs = PipelineComputedFilter.Apply(pairs, inMemoryFilterTree, fields);
-                    // The Reference display text was projected only to evaluate the filter: a table with no
-                    // computed fields keeps returning the stored Record ID# in the step output.
-                    IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p =>
-                        computedFieldFids.Count == 0 || rowsNarrowed ? p.Row : MergeComputed(p.Row, p.Computed));
-                    resultsList = (limit.HasValue ? filtered.Take(limit.Value) : filtered).ToList();
-                    // No projection ran when the filter read only stored fields: the matched rows get theirs below.
-                    computedMerged = computedPerRow != null && !rowsNarrowed;
-                }
-                else if (limit.HasValue)
-                {
-                    var records = recordSearchService != null
-                        ? await recordSearchService.SearchAsync(table, fields, maxResults: limit, filterTree: filterTree, ct: ct)
-                        : await recordRepo.ListAsync(table, fields, page: 1, pageSize: limit.Value, filterTree: filterTree, ct: ct);
-                    resultsList = records?.ToList() ?? new List<IReadOnlyDictionary<string, object?>>();
-                }
-                else
-                {
-                    // No user-configured MaxResults — fetch every matching row via pagination.
-                    resultsList = await FetchAllAsync(filterTree);
-                }
-            }
+                (resultsList, computedMerged) = await SearchSqlAsync(table, fields, filterTree, limit,
+                    inMemoryFilterFids, computedFieldFids, recordSearchService, recordRepo, pageSize, ct);
             // Formula fields are compute-on-read, so expose their values in the step output too
             // (e.g. {{steps.x.CustomerNumber}}) when the filter branch above didn't already.
             if (!computedMerged && computedFieldFids.Count > 0 && resultsList.Count > 0)

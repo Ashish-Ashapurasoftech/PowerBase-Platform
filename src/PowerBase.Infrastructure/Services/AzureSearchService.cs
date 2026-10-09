@@ -368,6 +368,46 @@ public class AzureSearchService : IAzureSearchService
         }
     }
 
+    public async IAsyncEnumerable<AiSearchIdPage> SearchRecordIdsByFilterPagedAsync(
+        long tenantId, long tableId, string odataFilter, string? afterCursor = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (!_isEnabled || string.IsNullOrWhiteSpace(odataFilter)) yield break;
+
+        var indexName = GetIndexNameForTenant(tenantId);
+        var searchClient = GetSearchClient(indexName);
+        var baseFilter = $"tenantId eq '{tenantId}' and tableId eq {tableId} and ({odataFilter})";
+
+        async Task<(IReadOnlyList<Guid> Ids, long Total)> QueryAsync(string filter, int size, CancellationToken token)
+        {
+            var options = new SearchOptions
+            {
+                Filter = filter,
+                Size = size,
+                IncludeTotalCount = true,
+                QueryType = SearchQueryType.Full
+            };
+            options.Select.Add("id");
+            try
+            {
+                var response = await searchClient.SearchAsync<SearchDocument>("*", options, cancellationToken: token);
+                var ids = new List<Guid>();
+                await foreach (var result in response.Value.GetResultsAsync().WithCancellation(token))
+                {
+                    if (Guid.TryParse(result.Document["id"]?.ToString(), out var id)) ids.Add(id);
+                }
+                return (ids, response.Value.TotalCount ?? -1);
+            }
+            catch (RequestFailedException ex)
+            {
+                throw new InvalidOperationException($"Failed to search record ids by filter for table {tableId} in Azure AI Search (Index: {indexName}).", ex);
+            }
+        }
+
+        await foreach (var page in AiIdRangePager.PageAsync(baseFilter, afterCursor, QueryAsync, ct))
+            yield return page;
+    }
+
     public async Task<(IReadOnlyList<GlobalSearchResult> Items, long? TotalCount)> SearchGlobalAsync(long tenantId, string searchText, long? appId = null, int page = 1, int pageSize = 50, CancellationToken ct = default)
     {
         if (!_isEnabled || string.IsNullOrWhiteSpace(searchText)) return ([], 0);
