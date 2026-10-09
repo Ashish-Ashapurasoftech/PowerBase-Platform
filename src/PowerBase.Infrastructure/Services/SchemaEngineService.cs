@@ -110,6 +110,12 @@ public class SchemaEngineService : ISchemaEngineService
 
         await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
 
+        // A Reference column is what every Summary ("child rows where f_X IN parents"), Lookup parent-delete guard and
+        // child listing filters on. Without an index each of those scans the whole child table — minutes at millions of rows.
+        // Reference is encryption-exempt (plain BIGINT), so it is always indexable.
+        if (field.TypeCode == "Reference")
+            await EnsureReferenceIndexAsync(connection, physicalTable, tableName, physicalColumn, ct);
+
         // Range fields get a second column for the end/max value
         if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
         {
@@ -128,6 +134,20 @@ public class SchemaEngineService : ISchemaEngineService
                 """;
             await connection.ExecuteAsync(new CommandDefinition(endSql, cancellationToken: ct));
         }
+    }
+
+    /// <summary>Filtered to live rows so it matches the <c>IsDeleted = 0 AND f_X IN (...)</c> predicate every relationship read uses.
+    /// Idempotent. The column is new here, so the build only scans the table once to find it all NULL.</summary>
+    private static Task EnsureReferenceIndexAsync(
+        System.Data.Common.DbConnection connection, string physicalTable, string tableName, string physicalColumn, CancellationToken ct)
+    {
+        var indexName = $"IX_{tableName}_{physicalColumn}";
+        return connection.ExecuteAsync(new CommandDefinition($"""
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID('{physicalTable}') AND name = '{indexName}')
+                CREATE NONCLUSTERED INDEX {indexName}
+                    ON {physicalTable}({physicalColumn})
+                    WHERE IsDeleted = 0;
+            """, commandTimeout: 600, cancellationToken: ct));
     }
 
     public async Task SetUniqueAsync(AppTable table, AppField field, bool enable, CancellationToken ct = default)

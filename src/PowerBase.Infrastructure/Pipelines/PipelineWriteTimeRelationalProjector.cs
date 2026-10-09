@@ -21,8 +21,9 @@ public sealed class ReadUncommittedTenantConnectionFactory(ITenantConnectionFact
         var template = await inner.CreateAsync(ct);
         var builder = new SqlConnectionStringBuilder(template.ConnectionString)
         {
-            // No command timeout either: how long a read takes is up to the data (millions of child rows), not to a clock.
-            CommandTimeout = 0,
+            // Bounded: this runs inside the step's open write transaction, so an unindexed scan over millions of
+            // child rows must fail (the projector then leaves those values out) instead of holding the transaction open forever.
+            CommandTimeout = 300,
             ApplicationName = $"{(string.IsNullOrWhiteSpace(new SqlConnectionStringBuilder(template.ConnectionString).ApplicationName) ? "PowerBase" : new SqlConnectionStringBuilder(template.ConnectionString).ApplicationName)}.WriteTimeReads"
         };
         await template.DisposeAsync();

@@ -16,6 +16,9 @@ public class PipelineExecutionOptions
     public int PerInstanceTenantConcurrencyLimit { get; set; } = 5;
     public int BulkEventPageSize { get; set; } = 500;
     public int SearchRecordsPageSize { get; set; } = 500;
+    /// <summary>Seconds a single Search Records SQL command may run. It was unlimited (0), so one bad scan over millions of
+    /// rows left the run "Running" forever; a timeout now fails the attempt and lets the queue retry it.</summary>
+    public int SearchCommandTimeoutSeconds { get; set; } = 600;
     /// <summary>NOT a limit. A Search Records result larger than this that is consumed by exactly one Loop is streamed
     /// (paged, staged, checkpointed) instead of being held in memory; every other search simply returns all of its
     /// records, however many there are. It only chooses the strategy — nothing is ever refused for being too big.</summary>

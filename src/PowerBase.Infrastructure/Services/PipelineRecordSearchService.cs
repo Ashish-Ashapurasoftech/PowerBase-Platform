@@ -22,6 +22,9 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
 {
     public bool SupportsKeysetPaging => true;
 
+    // 0 keeps its SQL meaning (no limit); a negative value is treated as unset.
+    private int CommandTimeoutSeconds => Math.Max(0, _options.SearchCommandTimeoutSeconds);
+
     private readonly ITenantConnectionFactory _connectionFactory;
     private readonly IQueryContext _queryContext;
     private readonly IEncryptionService _encryptionService;
@@ -74,7 +77,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
 
         await using var connection = await _connectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
-        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
 
         var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
 
@@ -111,7 +114,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
                 WHERE IsDeleted = 0 AND Id > @afterId AND Id <= @maxId{filterWhere}
                 ORDER BY Id
                 """;
-            var rows = (await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct)))
+            var rows = (await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)))
                 .Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
             if (rows.Count == 0) yield break;
             afterId = Convert.ToInt64(rows[^1]["Id"]);
@@ -124,7 +127,7 @@ public class PipelineRecordSearchService : IPipelineRecordSearchService, IKeyset
     {
         var sql = $"SELECT ISNULL(MAX(Id), 0) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0";
         await using var connection = await _connectionFactory.CreateAsync(ct);
-        return await connection.QuerySingleAsync<long>(new CommandDefinition(sql, commandTimeout: 0, cancellationToken: ct));
+        return await connection.QuerySingleAsync<long>(new CommandDefinition(sql, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
     }
 
     private static IReadOnlyDictionary<string, object?> ToDictionary(dynamic row)

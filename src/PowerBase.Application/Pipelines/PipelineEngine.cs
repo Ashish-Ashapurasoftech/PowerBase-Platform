@@ -66,18 +66,53 @@ public partial class PipelineEngine : IPipelineEngine
     /// <summary>Like <see cref="ProjectComputedAsync"/> but also projects a Reference's display text, so a
     /// filter can match what the user sees. Used only to evaluate filters, never to build step output.
     /// Fails the step, naming the field, when a field the filter reads cannot be computed.</summary>
-    private async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>?> ProjectForFilterAsync(
+    /// <returns>The per-row values, and whether they were <c>Narrowed</c> to just the filter's own formulas — in which
+    /// case they are good for evaluating the filter only, and the matched rows still need their full projection.</returns>
+    private async Task<(IReadOnlyList<IReadOnlyDictionary<long, object?>>? Values, bool Narrowed)> ProjectForFilterAsync(
         AppTable table, IReadOnlyList<AppField> fields,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, IEnumerable<long> filterFids, CancellationToken ct)
     {
-        if (rows.Count == 0) return null;
-        if (!fields.Any(f => f.Fid.HasValue && (PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.TypeCode == "Reference"))) return null;
+        if (rows.Count == 0) return (null, false);
+        if (!fields.Any(f => f.Fid.HasValue && (PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.TypeCode == "Reference"))) return (null, false);
+        // A filter on stored (e.g. encrypted) fields reads the decrypted rows directly. Projecting every Formula / Lookup /
+        // Summary of the table for each page just to throw the result away costs queries per page — at millions of rows,
+        // hours. Project only when a field the filter reads really is computed (or a Reference matched by its label).
+        var filterFidSet = filterFids as ISet<long> ?? filterFids.ToHashSet();
+        if (!fields.Any(f => f.Fid.HasValue && filterFidSet.Contains(f.Fid.Value) &&
+                             (PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.TypeCode == "Reference"))) return (null, false);
+
+        // A filter on a plain Formula (e.g. "ORD000" & ToText([Record ID#])) needs that formula's value, not the table's
+        // Lookups / Summaries / other formulas: those cost queries per page. When the formulas the filter reads depend only
+        // on stored fields, evaluate just them, with no relationship projection at all.
+        var formulaProjector = _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector;
+        var filterFields = fields.Where(f => f.Fid.HasValue && filterFidSet.Contains(f.Fid.Value)).ToList();
+        if (formulaProjector != null && filterFields.All(f => FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)))
+        {
+            var filterFormulaFids = filterFields.Select(f => (long)f.Fid!.Value).ToList();
+            var dependencies = formulaProjector.GetFormulaDependencies(fields, filterFormulaFids);
+            if (dependencies != null && filterFormulaFids.All(dependencies.Contains))
+            {
+                var fieldsByFid = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+                var dependsOnComputed = dependencies.Any(fid => !filterFormulaFids.Contains(fid) &&
+                    fieldsByFid.TryGetValue(fid, out var dep) && (PhysicalNaming.IsComputedTypeCode(dep.TypeCode) || dep.TypeCode == "Reference"));
+                if (!dependsOnComputed)
+                {
+                    var narrowFields = fields.Where(f => f.Fid.HasValue &&
+                        (!(PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.TypeCode == "Reference") || filterFormulaFids.Contains(f.Fid.Value))).ToList();
+                    var narrow = await PipelineComputedProjection.ProjectAsync(
+                        null, formulaProjector, table, narrowFields, rows, _logger, ct);
+                    PipelineComputedProjection.ThrowIfNeeded(narrow, fields, filterFids, "Search Records");
+                    return (narrow?.Values, narrow != null);
+                }
+            }
+        }
+
         var computed = await PipelineComputedProjection.ProjectAsync(
             _serviceProvider.GetService(typeof(PowerBase.Application.Relationships.IRelationalProjector)) as PowerBase.Application.Relationships.IRelationalProjector,
             _serviceProvider.GetService(typeof(IFormulaProjector)) as IFormulaProjector,
             table, fields, rows, _logger, ct);
         PipelineComputedProjection.ThrowIfNeeded(computed, fields, filterFids, "Search Records");
-        return computed?.Values;
+        return (computed?.Values, false);
     }
 
     private static IReadOnlyDictionary<string, object?> MergeComputed(
@@ -1906,6 +1941,7 @@ public partial class PipelineEngine : IPipelineEngine
             if (requiresChunkedSearch && loopConsumerCount == 1 && recordSearchService.SupportsKeysetPaging &&
                 recordSearchService is IKeysetPipelineRecordSearchService keysetSearch && messageGuid != Guid.Empty)
             {
+                const int sqlIdChunkSizeForSlim = 2000;
                 var worksetId = CreateDeterministicWorksetId(messageGuid, step.RefId);
                 var snapshotMaxRecordId = await keysetSearch.GetMaxRecordIdAsync(table, ct);
                 var workset = await _pipelineRepo.GetOrCreateSearchWorksetAsync(
@@ -1915,8 +1951,49 @@ public partial class PipelineEngine : IPipelineEngine
                     var ordinal = workset.DiscoveredCount;
                     if (!limit.HasValue || ordinal < limit.Value)
                     {
+                        // Slim scan: when the in-memory half of the filter reads only stored fields (typically encrypted
+                        // ones), the scan reads and decrypts just those columns — plus what the SQL half compares — instead
+                        // of every column of every row, and the full rows are fetched for the matches only. Over millions of
+                        // rows that is most of the cost of a filter on an encrypted field.
+                        var memoryFids = streamMemoryTree != null ? PipelineComputedProjection.ReferencedFids(streamMemoryTree) : null;
+                        // The columns the in-memory half needs: its own stored fields, and — for a Formula it filters on —
+                        // the stored fields that formula reads (e.g. Record ID#). Null when it also needs a Lookup / Summary /
+                        // Reference / a Formula that reads one: those need every column, so no slim scan.
+                        HashSet<long>? slimFids = null;
+                        if (memoryFids != null)
+                        {
+                            var memoryComputed = fields.Where(f => f.Fid.HasValue && memoryFids.Contains(f.Fid.Value) &&
+                                (PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.TypeCode == "Reference")).ToList();
+                            if (memoryComputed.Count == 0)
+                                slimFids = new HashSet<long>(memoryFids);
+                            else if (memoryComputed.All(f => FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings)) &&
+                                     _serviceProvider.GetService(typeof(IFormulaProjector)) is IFormulaProjector slimFormulas)
+                            {
+                                var memoryComputedFids = memoryComputed.Select(f => (long)f.Fid!.Value).ToList();
+                                var deps = slimFormulas.GetFormulaDependencies(fields, memoryComputedFids);
+                                var byFid = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+                                if (deps != null && memoryComputedFids.All(deps.Contains) &&
+                                    !deps.Any(fid => !memoryComputedFids.Contains(fid) && byFid.TryGetValue(fid, out var dep) &&
+                                        (PhysicalNaming.IsComputedTypeCode(dep.TypeCode) || dep.TypeCode == "Reference")))
+                                {
+                                    slimFids = new HashSet<long>(memoryFids);
+                                    slimFids.UnionWith(deps);
+                                }
+                            }
+                        }
+                        var slimScan = slimFids != null;
+                        var scanFields = fields;
+                        var scanPageSize = _options.SearchRecordsPageSize;
+                        if (slimScan)
+                        {
+                            var scanFids = new HashSet<long>(slimFids!);
+                            scanFids.UnionWith(PipelineComputedProjection.ReferencedFids(streamSqlTree));
+                            scanFields = fields.Where(f => f.Fid.HasValue && scanFids.Contains(f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
+                            // Slim rows are small; the matches of one page are fetched in a single id-list query (≤ 2000 ids).
+                            scanPageSize = Math.Max(scanPageSize, 2000);
+                        }
                         await foreach (var pageRows in keysetSearch.SearchPagesAsync(
-                            table, fields, _options.SearchRecordsPageSize, streamSqlTree, workset.LastRecordId,
+                            table, scanFields, scanPageSize, streamSqlTree, workset.LastRecordId,
                             workset.SnapshotMaxRecordId, ct))
                         {
                             var remaining = limit.HasValue ? limit.Value - ordinal : int.MaxValue;
@@ -1926,7 +2003,7 @@ public partial class PipelineEngine : IPipelineEngine
                             var matchedCount = pageRows.Count;
                             if (streamMemoryTree != null)
                             {
-                                var pageComputed = await ProjectForFilterAsync(table, fields, pageRows,
+                                var (pageComputed, pageNarrowed) = await ProjectForFilterAsync(table, fields, pageRows,
                                     PipelineComputedProjection.ReferencedFids(streamMemoryTree), ct);
                                 var pagePairs = pageRows
                                     .Select((r, i) => (Row: r, Computed: pageComputed != null ? pageComputed[i] : (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
@@ -1935,8 +2012,29 @@ public partial class PipelineEngine : IPipelineEngine
                                 matchedCount = pagePairs.Count;
                                 // The Reference display text was projected only to evaluate the filter (see the non-streamed search).
                                 recordsToStage = pagePairs
-                                    .Select(p => computedFieldFids.Count == 0 ? p.Row : MergeComputed(p.Row, p.Computed))
+                                    .Select(p => computedFieldFids.Count == 0 || pageNarrowed ? p.Row : MergeComputed(p.Row, p.Computed))
                                     .Take(remaining).ToList();
+                                if (slimScan && recordsToStage.Count > 0)
+                                {
+                                    // Only the filter's columns were read: load the complete rows of the matches.
+                                    var matchedIds = recordsToStage.Select(r => Convert.ToInt64(r["Id"], CultureInfo.InvariantCulture)).ToList();
+                                    var fullRows = new List<IReadOnlyDictionary<string, object?>>(matchedIds.Count);
+                                    foreach (var idChunk in matchedIds.Chunk(sqlIdChunkSizeForSlim))
+                                    {
+                                        var idFilter = new FilterGroup { Logic = "and", Nodes = new List<FilterNode> {
+                                            new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "in", Value = JsonSerializer.Serialize(idChunk) } } } };
+                                        fullRows.AddRange(await recordSearchService.SearchAsync(table, fields, null, idFilter, ct));
+                                    }
+                                    recordsToStage = fullRows;
+                                }
+                                // The filter did not need the computed values, so none were projected for the page:
+                                // project them now, for the rows that matched only, so loop items still carry them.
+                                if ((pageComputed == null || pageNarrowed) && computedFieldFids.Count > 0 && recordsToStage.Count > 0)
+                                {
+                                    var matchedComputed = await ProjectComputedAsync(table, fields, recordsToStage, ct);
+                                    if (matchedComputed != null)
+                                        recordsToStage = recordsToStage.Select((r, i) => MergeComputed(r, matchedComputed[i])).ToList();
+                                }
                             }
                             else
                             {
@@ -2097,7 +2195,7 @@ public partial class PipelineEngine : IPipelineEngine
                     // cap — so nothing is silently dropped before the in-memory conditions are
                     // evaluated below, no matter how many rows match physically.
                     var candidates = await FetchAllAsync(physicalFilterTree);
-                    var computedPerRow = await ProjectForFilterAsync(table, fields, candidates, PipelineComputedProjection.ReferencedFids(inMemoryFilterTree), ct);
+                    var (computedPerRow, rowsNarrowed) = await ProjectForFilterAsync(table, fields, candidates, PipelineComputedProjection.ReferencedFids(inMemoryFilterTree), ct);
                     var pairs = candidates
                         .Select((r, i) => (Row: r, Computed: computedPerRow != null ? computedPerRow[i] : (IReadOnlyDictionary<long, object?>)EmptyComputedValues))
                         .ToList();
@@ -2106,9 +2204,10 @@ public partial class PipelineEngine : IPipelineEngine
                     // The Reference display text was projected only to evaluate the filter: a table with no
                     // computed fields keeps returning the stored Record ID# in the step output.
                     IEnumerable<IReadOnlyDictionary<string, object?>> filtered = pairs.Select(p =>
-                        computedFieldFids.Count == 0 ? p.Row : MergeComputed(p.Row, p.Computed));
+                        computedFieldFids.Count == 0 || rowsNarrowed ? p.Row : MergeComputed(p.Row, p.Computed));
                     resultsList = (limit.HasValue ? filtered.Take(limit.Value) : filtered).ToList();
-                    computedMerged = true;
+                    // No projection ran when the filter read only stored fields: the matched rows get theirs below.
+                    computedMerged = computedPerRow != null && !rowsNarrowed;
                 }
                 else if (limit.HasValue)
                 {
