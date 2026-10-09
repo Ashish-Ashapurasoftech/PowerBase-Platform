@@ -20,6 +20,17 @@ public interface ISchemaEngineService
     Task WidenIntColumnToDecimalIfNeededAsync(AppTable table, AppField field, CancellationToken ct = default);
 
     /// <summary>
+    /// Repurposes a non-numeric field's physical column as a Reference column (BIGINT, parent Record IDs).
+    /// <paramref name="parentIdByRowId"/> maps each child row Id to the parent Record ID its value
+    /// resolved to (the caller reads the values decrypted, so encrypted columns work too). Every other
+    /// row (blank or soft-deleted) becomes NULL. Values are replaced and the column becomes BIGINT in
+    /// one transaction; if the column can't be converted nothing changes.
+    /// </summary>
+    Task ConvertColumnToReferenceAsync(
+        AppTable table, AppField field, IReadOnlyDictionary<long, long> parentIdByRowId,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Rescales every stored value of a numeric field by a factor of 100 — multiplies when
     /// <paramref name="toPercent"/> is true, divides otherwise. Used by the Number/Currency/
     /// Percent/Rating "Display As" type switch so that a fraction (1.15) becomes a whole

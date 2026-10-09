@@ -1,4 +1,5 @@
 using Dapper;
+using Microsoft.Data.SqlClient;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -209,6 +210,42 @@ public class SchemaEngineService : ISchemaEngineService
         await using var connection = await _connectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+    }
+
+    public async Task ConvertColumnToReferenceAsync(
+        AppTable table, AppField field, IReadOnlyDictionary<long, long> parentIdByRowId, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var physicalColumn = PhysicalNaming.GetPhysicalColumnName(field);
+        var json = System.Text.Json.JsonSerializer.Serialize(parentIdByRowId.Select(p => new { id = p.Key, v = p.Value }));
+
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await using var tx = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            // The first UPDATE swaps each stored value (text, possibly ciphertext) for its parent Record ID;
+            // the second clears every row that has none (blank or soft-deleted), so what remains is all numeric.
+            await connection.ExecuteAsync(new CommandDefinition($"""
+                UPDATE t SET {physicalColumn} = CAST(m.v AS NVARCHAR(50))
+                FROM {physicalTable} t
+                JOIN OPENJSON(@json) WITH (id BIGINT '$.id', v BIGINT '$.v') m ON t.Id = m.id;
+
+                UPDATE {physicalTable} SET {physicalColumn} = NULL
+                WHERE Id NOT IN (SELECT id FROM OPENJSON(@json) WITH (id BIGINT '$.id'));
+                """, new { json }, tx, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition(
+                $"ALTER TABLE {physicalTable} ALTER COLUMN {physicalColumn} BIGINT NULL;", transaction: tx, cancellationToken: ct));
+            await tx.CommitAsync(ct);
+        }
+        catch (SqlException)
+        {
+            await tx.RollbackAsync(ct);
+            throw new Domain.Exceptions.ValidationException(new Dictionary<string, string[]>
+            {
+                ["referenceFieldFid"] = ["This field's column can't be converted (its type, or a unique/indexed setting, doesn't allow it)."],
+            });
+        }
     }
 
     public async Task ScaleNumericColumnForPercentAsync(AppTable table, AppField field, bool toPercent, CancellationToken ct = default)

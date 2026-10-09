@@ -18,6 +18,10 @@ public class CreateRelationshipCommandHandler
     private readonly RelationshipFieldFactory _fieldFactory;
     private readonly IAuditRepository _auditRepo;
     private readonly IAppRepository _appRepo;
+    private readonly ISchemaEngineService _schemaEngine;
+    private readonly IRecordRepository _recordRepo;
+    private readonly PowerBase.Application.Formulas.IFormulaProjector _formulaProjector;
+    private readonly IRelationalProjector _relationalProjector;
 
     public CreateRelationshipCommandHandler(
         IAppTableRepository tableRepo,
@@ -26,8 +30,16 @@ public class CreateRelationshipCommandHandler
         IRelationshipRepository relRepo,
         RelationshipFieldFactory fieldFactory,
         IAuditRepository auditRepo,
-        IAppRepository appRepo)
+        IAppRepository appRepo,
+        ISchemaEngineService schemaEngine,
+        IRecordRepository recordRepo,
+        PowerBase.Application.Formulas.IFormulaProjector formulaProjector,
+        IRelationalProjector relationalProjector)
     {
+        _schemaEngine = schemaEngine;
+        _recordRepo = recordRepo;
+        _formulaProjector = formulaProjector;
+        _relationalProjector = relationalProjector;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _fieldTypeRepo = fieldTypeRepo;
@@ -75,8 +87,24 @@ public class CreateRelationshipCommandHandler
             summaries.Add(spec with { Function = function });
         }
 
+        // Resolve the per-relationship display key: find the parent field matching DisplayKeyFieldFid.
+        // Only uniqueness is required — any field type is eligible as a display key override (this is
+        // a lighter-weight, per-relationship display choice, not the table-wide Set Key feature, so it
+        // isn't restricted to Set Key's scalar-type allowlist).
+        long? displayKeyFieldId = null;
+        int? displayKeyFid = null;
+        if (command.DisplayKeyFieldFid is int dkFid && dkFid != 3 /* 3 = Record ID# = standard */)
+        {
+            var dkField = parentFields.FirstOrDefault(f => f.Fid == dkFid)
+                ?? throw new ValidationException(new Dictionary<string, string[]> { ["displayKeyFieldFid"] = [$"Field {dkFid} not found on the parent table."] });
+            if (!dkField.IsUnique)
+                throw new ValidationException(new Dictionary<string, string[]> { ["displayKeyFieldFid"] = ["The display key field must be unique across all parent records."] });
+            displayKeyFieldId = dkField.Id;
+            displayKeyFid = dkFid;
+        }
+
         // 1. Reference field on the child (physical FK column). Settings get the relationship id after creation.
-        //    Two paths: create a brand-new Reference field, or convert an existing child Number field in place.
+        //    Two paths: create a brand-new Reference field, or convert an existing child field in place.
         AppField refField;
         var referenceIsExistingField = command.ReferenceFieldFid is not null;
         if (!referenceIsExistingField)
@@ -91,12 +119,18 @@ public class CreateRelationshipCommandHandler
             var existing = childFields.FirstOrDefault(f => f.Fid == command.ReferenceFieldFid!.Value)
                 ?? throw new NotFoundException("Field", command.ReferenceFieldFid!.Value);
 
-            // Only a plain, non-system Number field may be repurposed as the reference (it holds parent Record IDs).
-            // Number and Reference are both numeric physical columns, so the conversion is metadata-only (no DDL).
-            if (existing.IsSystem || !existing.Fid.HasValue || existing.TypeCode != nameof(Domain.Enums.FieldTypeCode.Number))
+            // Only a plain, non-system field whose type suits the parent's key field may be repurposed as the
+            // reference (see ReferenceFieldCompatibility). With no Set Key / alternate key the key is Record ID#.
+            var keyField = KeyFieldResolver.ResolveDisplayKey(
+                new Relationship { DisplayKeyFieldId = displayKeyFieldId }, parent, parentFields);
+            var keyTypeCode = keyField is null || keyField.Fid == 3
+                ? nameof(Domain.Enums.FieldTypeCode.Number)
+                : keyField.TypeCode;
+            if (existing.IsSystem || !existing.Fid.HasValue
+                || !ReferenceFieldCompatibility.IsAllowed(keyTypeCode, existing.TypeCode))
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
-                    ["referenceFieldFid"] = ["The reference field must be an existing, non-system Number field on the child table."],
+                    ["referenceFieldFid"] = [$"The reference field must be an existing, non-system field on the child table whose type matches the parent's key field ({keyTypeCode})."],
                 });
 
             var refType = await _fieldTypeRepo.GetByCodeAsync(FieldTypeCodeNames.Reference, ct)
@@ -107,6 +141,14 @@ public class CreateRelationshipCommandHandler
             await SummaryDependencyGuard.EnsureTypeChangeKeepsSummariesValidAsync(
                 existing, FieldTypeCodeNames.Reference, _relRepo, _tableRepo, _fieldRepo, ct);
 
+            // A plain Number field holding Record IDs is already numeric, so that conversion is metadata-only.
+            // Every other type (text, currency, date, formula…) holds the parent's human key, so each row's value
+            // is translated to the parent's Record ID first; nothing is written if any value has no match.
+            var metadataOnly = existing.TypeCode == nameof(Domain.Enums.FieldTypeCode.Number)
+                && keyTypeCode == nameof(Domain.Enums.FieldTypeCode.Number);
+            if (!metadataOnly)
+                await ConvertExistingFieldValuesAsync(child, childFields, existing, parent, keyField, refType, ct);
+
             await _fieldRepo.UpdateFieldTypeAsync(
                 existing.Id, refType.Id,
                 Serialize(new ReferenceSettings { ParentTableId = parent.Id }),
@@ -114,23 +156,8 @@ public class CreateRelationshipCommandHandler
             existing.FieldTypeId = refType.Id;
             existing.TypeCode = refType.Code;
             existing.IsRequired = command.IsReferenceRequired;
+            existing.IsEncrypted = false;   // a Reference column is never encrypted
             refField = existing;
-        }
-
-        // Resolve the per-relationship display key: find the parent field matching DisplayKeyFieldFid.
-        // Only uniqueness is required — any field type is eligible as a display key override (this is
-        // a lighter-weight, per-relationship display choice, not the table-wide Set Key feature, so it
-        // isn't restricted to Set Key's scalar-type allowlist).
-        long? displayKeyFieldId = null;
-        int? displayKeyFid = null;
-        if (command.DisplayKeyFieldFid is int dkFid && dkFid != 3 /* 3 = Record ID# = standard */) 
-        {
-            var dkField = parentFields.FirstOrDefault(f => f.Fid == dkFid)
-                ?? throw new ValidationException(new Dictionary<string, string[]> { ["displayKeyFieldFid"] = [$"Field {dkFid} not found on the parent table."] });
-            if (!dkField.IsUnique)
-                throw new ValidationException(new Dictionary<string, string[]> { ["displayKeyFieldFid"] = ["The display key field must be unique across all parent records."] });
-            displayKeyFieldId = dkField.Id;
-            displayKeyFid = dkFid;
         }
 
         // 2. Relationship row.
@@ -253,6 +280,109 @@ public class CreateRelationshipCommandHandler
             DisplayKeyFid = displayKeyFid,
             Fields = createdFields,
         };
+    }
+
+    /// <summary>
+    /// Turns an existing child field that holds the parent's human key (a name, code, date…) into a column of
+    /// parent Record IDs. Stored fields are read decrypted; a Formula field is evaluated per row (it has no
+    /// column, so one is created). Every row's value is matched to a parent record through the key column;
+    /// if any value has no match nothing is written.
+    /// </summary>
+    private async Task ConvertExistingFieldValuesAsync(
+        AppTable child, IReadOnlyList<AppField> childFields, AppField existing,
+        AppTable parent, AppField? keyField, FieldType refType, CancellationToken ct)
+    {
+        var isFormula = PhysicalNaming.IsComputedTypeCode(existing.TypeCode);
+        var rows = await _recordRepo.ListAllRowsDecryptedAsync(child, childFields, ct);
+
+        IReadOnlyList<IReadOnlyDictionary<long, object?>>? computed = null;
+        if (isFormula)
+        {
+            var relational = await _relationalProjector.ProjectAsync(child, childFields, rows, ct);
+            computed = _formulaProjector.Project(childFields, rows, relational, child);
+        }
+
+        var column = isFormula ? null : PhysicalNaming.GetPhysicalColumnName(existing);
+        var rowTexts = new Dictionary<long, string>();
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (!rows[i].TryGetValue("Id", out var idVal) || idVal is null) continue;
+            var value = isFormula ? computed![i].GetValueOrDefault(existing.Fid!.Value) : rows[i].GetValueOrDefault(column!);
+            var text = KeyText(value, existing.TypeCode);
+            if (!string.IsNullOrEmpty(text)) rowTexts[Convert.ToInt64(idVal)] = text;
+        }
+
+        var distinct = rowTexts.Values.Distinct(StringComparer.Ordinal).ToList();
+        var typed = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (var text in distinct)
+            if (KeyFieldResolver.ConvertToColumnType(keyField, text) is { } v) typed[text] = v;
+
+        var found = typed.Count == 0
+            ? new Dictionary<object, long>()
+            : (await _recordRepo.GetIdsByColumnValuesAsync(
+                parent, KeyFieldResolver.ColumnName(keyField), typed.Values.ToList(), ct))
+                .ToDictionary(p => p.Key, p => p.Value);
+
+        var parentIdByText = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (var (text, value) in typed)
+        {
+            var hit = found.FirstOrDefault(p =>
+                Equals(p.Key, value)
+                || string.Equals(p.Key.ToString()?.Trim(), text, StringComparison.OrdinalIgnoreCase));
+            if (hit.Key is not null) parentIdByText[text] = hit.Value;
+        }
+
+        var unmatched = distinct.Where(t => !parentIdByText.ContainsKey(t)).Take(5).ToList();
+        if (unmatched.Count > 0)
+            throw new ValidationException(new Dictionary<string, string[]>
+            {
+                ["referenceFieldFid"] = [$"These values have no matching record in {parent.Name}: {string.Join(", ", unmatched.Select(u => $"\"{u}\""))}. Fix or clear them first."],
+            });
+
+        var parentIdByRow = rowTexts.ToDictionary(p => p.Key, p => parentIdByText[p.Value]);
+
+        // The column the values land in. A Formula has none, so create it as a Reference (BIGINT) column.
+        var target = existing;
+        if (isFormula)
+        {
+            var physical = PhysicalNaming.ColumnName(existing.Fid!.Value);
+            await _fieldRepo.UpdatePhysicalColumnNameAsync(existing.Id, physical, ct);
+            existing.PhysicalColumnName = physical;
+            target = new AppField
+            {
+                Id = existing.Id, Fid = existing.Fid, AppTableId = existing.AppTableId, Name = existing.Name,
+                FieldTypeId = refType.Id, TypeCode = refType.Code, PhysicalColumnName = physical,
+            };
+            await _schemaEngine.AddColumnAsync(child, target, ct);
+        }
+        await _schemaEngine.ConvertColumnToReferenceAsync(child, target, parentIdByRow, ct);
+    }
+
+    /// <summary>A stored/computed value as the culture-independent text used to look up the parent key. A
+    /// Text - Multiple Choice holding a single choice (a JSON array of one) is unwrapped to that choice.</summary>
+    private static string? KeyText(object? value, string typeCode)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var text = (value switch
+        {
+            null => null,
+            JsonElement je => je.ValueKind == JsonValueKind.String ? je.GetString() : je.GetRawText(),
+            DateTime d => d.TimeOfDay == TimeSpan.Zero ? d.ToString("yyyy-MM-dd", inv) : d.ToString("yyyy-MM-ddTHH:mm:ss", inv),
+            DateOnly d => d.ToString("yyyy-MM-dd", inv),
+            IFormattable f => f.ToString(null, inv),
+            _ => value.ToString(),
+        })?.Trim();
+
+        if (typeCode == nameof(Domain.Enums.FieldTypeCode.MultiSelect) && text is { Length: > 0 } && text[0] == '[')
+        {
+            try
+            {
+                var items = JsonSerializer.Deserialize<string[]>(text);
+                return items is { Length: 1 } ? items[0]?.Trim() : text;   // several choices stay as-is → no match → clear error
+            }
+            catch (JsonException) { }
+        }
+        return text;
     }
 
     /// <summary>A sub-field only makes sense against a composite Address field, and only for one
