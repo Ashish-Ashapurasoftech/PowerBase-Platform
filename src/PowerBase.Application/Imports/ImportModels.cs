@@ -121,6 +121,33 @@ public sealed class ImportTargetConfig
     /// <summary>Only the source rows that match go into this table. A row must first pass the import's own conditions (which decide what is read
     /// at all); these then decide whether this table gets it. None means every row that was read.</summary>
     public FilterGroup? Conditions { get; set; }
+    /// <summary>A workbook read sheet by sheet: the sheets that fill this table, each with its own mapping. When there are any, they replace this
+    /// table's own mappings and rules (see <see cref="ImportSheetMapping"/>).</summary>
+    public List<ImportSheetMapping> SheetMappings { get => _sheetMappings; set => _sheetMappings = value ?? new(); }
+    private List<ImportSheetMapping> _sheetMappings = new();
+}
+
+/// <summary>One sheet of a workbook, mapped into one table: that sheet's columns go to the table's fields. The sheets of a workbook have their own
+/// columns, so each has its own mapping, column rules, virtual columns and filter. Fids are the sheet's own columns (1000 + place in the sheet's
+/// <see cref="Files.ImportSheetSettings.Columns"/>), so they only have to be unique within this mapping.</summary>
+public sealed class ImportSheetMapping
+{
+    public string Sheet { get; set; } = "";
+    public List<ImportFieldMapping> Mappings { get => _mappings; set => _mappings = value ?? new(); }
+    public List<ImportColumnRule> ColumnRules { get => _columnRules; set => _columnRules = value ?? new(); }
+    public List<ImportVirtualColumn> VirtualColumns { get => _virtualColumns; set => _virtualColumns = value ?? new(); }
+    /// <summary>Only the rows of this sheet that match go into the table. None means every row of the sheet.</summary>
+    public FilterGroup? Conditions { get; set; }
+    /// <summary>The destination field (which this sheet must map) whose value says which record a row belongs to: rows of the table's sheets that
+    /// share it are combined into one record, e.g. a student's row in each sheet. A sheet without it is not combined: each of its rows is a record
+    /// by itself. A table combines on one field, so every sheet that has this set has the same one.</summary>
+    public int? JoinFieldFid { get; set; }
+    /// <summary>The table's sheets are read together as records (see <see cref="JoinFieldFid"/>) even when no field combines them: a sheet then
+    /// does not need every field of the table, such as the merge key, because the key is looked for in the record as a whole.</summary>
+    public bool Combined { get; set; }
+    private List<ImportFieldMapping> _mappings = new();
+    private List<ImportColumnRule> _columnRules = new();
+    private List<ImportVirtualColumn> _virtualColumns = new();
 }
 
 /// <summary>The saved configuration of an import (everything except identity/audit columns). Also the shape
@@ -154,6 +181,14 @@ public sealed class ImportDefinitionConfig
     /// <summary>The same as <see cref="ImportTargetConfig.Conditions"/>, for the import's own table (the one the fields above belong to).
     /// Only for an import that fills several tables: with one table, <see cref="Conditions"/> already says which rows go in.</summary>
     public FilterGroup? TableConditions { get; set; }
+    /// <summary>The same as <see cref="ImportTargetConfig.SheetMappings"/>, for the import's own table.</summary>
+    public List<ImportSheetMapping> SheetMappings { get => _sheetMappings; set => _sheetMappings = value ?? new(); }
+    private List<ImportSheetMapping> _sheetMappings = new();
+
+    /// <summary>The import fills more than one table, or reads a workbook sheet by sheet: it runs through the runner that keeps counts and a
+    /// details file for each table. An import into one table from one source (every import saved before this existed) does not.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool UsesTargetRows => AdditionalTargets.Count > 0 || SheetMappings.Count > 0;
 }
 
 public static class ImportJson
@@ -180,7 +215,8 @@ public sealed record ImportDefinitionDetail(
     FilterGroup? Conditions, IReadOnlyList<ImportFieldMapping> Mappings, IReadOnlyList<ImportColumnRule> ColumnRules,
     string ConstraintPolicy, IReadOnlyList<string> NotifyEmails, bool NeedsAttention, string? AttentionReason,
     ImportSchedule? Schedule, DateTime? NextRunOn, string SourceKind = ImportSourceKinds.Table, ImportFileOptions? File = null,
-    IReadOnlyList<ImportTargetConfig>? AdditionalTargets = null, IReadOnlyList<ImportVirtualColumn>? VirtualColumns = null, FilterGroup? TableConditions = null);
+    IReadOnlyList<ImportTargetConfig>? AdditionalTargets = null, IReadOnlyList<ImportVirtualColumn>? VirtualColumns = null, FilterGroup? TableConditions = null,
+    IReadOnlyList<ImportSheetMapping>? SheetMappings = null);
 
 public sealed record ImportRunListItem(
     Guid PublicId, string TriggeredBy, string Status, byte Progress, long RowsRead, long Inserted, long Updated,

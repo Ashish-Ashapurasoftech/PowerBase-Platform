@@ -186,11 +186,24 @@ public sealed class ImportVirtualColumnReader(IImportChunkReader inner, ImportPl
     {
         var chunk = await inner.ReadChunkAsync(readPlan, afterId, maxId, ct);
         if (chunk.Rows.Count == 0) return chunk;
-        var rows = new List<IReadOnlyDictionary<string, object?>>(chunk.Rows.Count);
-        foreach (var source in chunk.Rows)
+        return chunk with { Rows = Apply(plan, engine, chunk.Rows, _fidToColumn) };
+    }
+
+    /// <summary>The rows with this plan's virtual columns added. Used for the whole read when the import has one set of virtual columns, and
+    /// for each plan's rows when plans have their own (tables reading a workbook sheet by sheet).</summary>
+    public static IReadOnlyList<IReadOnlyDictionary<string, object?>> Apply(
+        ImportPlan plan, FormulaEngine engine, IReadOnlyList<IReadOnlyDictionary<string, object?>> source, IReadOnlyDictionary<long, string>? fidToColumn = null)
+    {
+        if (plan.Virtuals.Count == 0) return source;
+        fidToColumn ??= plan.SourceFields.Where(f => f.Fid.HasValue)
+            .Select(f => (Fid: (long)f.Fid!.Value, Column: PhysicalNaming.GetPhysicalColumnName(f)))
+            .Concat(plan.Virtuals.Select(v => (Fid: (long)v.Field.Fid!.Value, v.Column)))
+            .ToDictionary(x => x.Fid, x => x.Column);
+        var rows = new List<IReadOnlyDictionary<string, object?>>(source.Count);
+        foreach (var original in source)
         {
-            var row = new Dictionary<string, object?>(source);
-            var context = new RowRecordContext(row, _fidToColumn);
+            var row = new Dictionary<string, object?>(original);
+            var context = new RowRecordContext(row, fidToColumn);
             foreach (var v in plan.Virtuals)
             {
                 if (v.Formula is null) { row[v.Column] = v.Text; continue; }
@@ -199,6 +212,6 @@ public sealed class ImportVirtualColumnReader(IImportChunkReader inner, ImportPl
             }
             rows.Add(row);
         }
-        return chunk with { Rows = rows };
+        return rows;
     }
 }

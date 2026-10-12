@@ -26,10 +26,41 @@ public static class ImportFileValidation
     {
         var layout = ValidateLayout(input);
         var columns = (input!.Columns ?? []).Select(c => (c ?? "").Trim()).ToList();
-        if (columns.Count is < 1 or > ImportFileFormats.MaxColumns) throw ImportFileErrors.Invalid($"The file must have between 1 and {ImportFileFormats.MaxColumns} columns.");
+        layout.Sheets = ValidateSheets(input.Sheets, layout.Format);
+        // A workbook read sheet by sheet keeps its columns per sheet; the shared list is then only for a table that reads the file whole.
+        var perSheetOnly = layout.Sheets.Count > 0 && columns.Count == 0;
+        if (!perSheetOnly && columns.Count is < 1 or > ImportFileFormats.MaxColumns) throw ImportFileErrors.Invalid($"The file must have between 1 and {ImportFileFormats.MaxColumns} columns.");
         if (columns.Any(c => c.Length > 500)) throw ImportFileErrors.Invalid("A column name is too long.");
         layout.Columns = columns;
         return layout;
+    }
+
+    public const int MaxSheets = 100;
+
+    /// <summary>The settings of the sheets a workbook is read by, one by one: each sheet once, with a sensible header row and first data row and
+    /// the columns it had when the import was set up.</summary>
+    public static List<ImportSheetSettings> ValidateSheets(IReadOnlyList<ImportSheetSettings>? input, string? format)
+    {
+        var sheets = new List<ImportSheetSettings>();
+        if (input is not { Count: > 0 }) return sheets;
+        if (format != ImportFileFormats.Xlsx) throw ImportFileErrors.Invalid("Reading sheets separately needs an Excel workbook.");
+        if (input.Count > MaxSheets) throw ImportFileErrors.Invalid($"A workbook can have at most {MaxSheets} sheets mapped.");
+        foreach (var sheet in input)
+        {
+            var name = sheet.Name?.Trim() ?? "";
+            if (name.Length is 0 or > 100) throw ImportFileErrors.Invalid("A sheet needs a name of at most 100 characters.");
+            if (sheets.Any(s => string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase))) throw ImportFileErrors.Invalid($"Sheet '{name}' is listed more than once.");
+            if (sheet.HeaderRow is < 0 or > ImportFileLayout.MaxHeaderRow)
+                throw ImportFileErrors.Invalid($"Sheet '{name}': the row with the column names must be between 0 and {ImportFileLayout.MaxHeaderRow}.");
+            if (sheet.DataStartRow is { } start && (start < 1 || start <= sheet.HeaderRow || start > 1_000_000))
+                throw ImportFileErrors.Invalid($"Sheet '{name}': the data must start below the row with the column names.");
+            var columns = (sheet.Columns ?? []).Select(c => (c ?? "").Trim()).ToList();
+            if (columns.Count is < 1 or > ImportFileFormats.MaxColumns)
+                throw ImportFileErrors.Invalid($"Sheet '{name}' must have between 1 and {ImportFileFormats.MaxColumns} columns.");
+            if (columns.Any(c => c.Length > 500)) throw ImportFileErrors.Invalid($"Sheet '{name}': a column name is too long.");
+            sheets.Add(new ImportSheetSettings { Name = name, HeaderRow = sheet.HeaderRow, DataStartRow = sheet.DataStartRow, Columns = columns });
+        }
+        return sheets;
     }
 
     /// <summary>The settings that say where the table is in the file (type, sheet, rows, separator, how columns are found), cleaned up.</summary>
@@ -56,8 +87,29 @@ public static class ImportFileValidation
     }
 
     /// <summary>The columns an import was saved with, standing in for a file while an import is saved or checked (no file is at hand then).</summary>
-    public static ImportFileSource SavedSource(ImportFileOptions options) => new(
-        ImportFileColumns.FromHeader(options.Columns.ToArray(), options.Columns.Count), "the file", options.ToLayout(), "", 0, 0, options);
+    public static ImportFileSource SavedSource(ImportFileOptions options)
+    {
+        var whole = new ImportFileSource(
+            ImportFileColumns.FromHeader(options.Columns.ToArray(), options.Columns.Count), "the file", options.ToLayout(), "", 0, 0, options);
+        return options.Sheets.Count == 0
+            ? whole
+            : whole with { SheetSources = options.Sheets.ToDictionary(s => s.Name, s => SavedSheetSource(options, s), StringComparer.OrdinalIgnoreCase) };
+    }
+
+    /// <summary>The options a sheet is read with when tables map the sheets separately: the file's, with this sheet's own place and columns.</summary>
+    public static ImportFileOptions SheetOptions(ImportFileOptions options, ImportSheetSettings sheet) => new()
+    {
+        Format = options.Format, Sheet = sheet.Name, HeaderRow = sheet.HeaderRow, DataStartRow = sheet.DataStartRow, Delimiter = options.Delimiter,
+        ColumnBy = options.ColumnBy, AllSheets = false, Columns = sheet.Columns
+    };
+
+    /// <summary>One sheet as saved, standing in for the sheet while an import is saved or checked.</summary>
+    public static ImportFileSource SavedSheetSource(ImportFileOptions options, ImportSheetSettings sheet)
+    {
+        var sheetOptions = SheetOptions(options, sheet);
+        return new ImportFileSource(
+            ImportFileColumns.FromHeader(sheet.Columns.ToArray(), sheet.Columns.Count), "the file", sheetOptions.ToLayout(), "", 0, 0, sheetOptions);
+    }
 }
 
 /// <summary>Takes in an upload: checks its size and what is really inside it, keeps it under a name nobody can guess, and says which
@@ -135,7 +187,7 @@ public sealed class UploadImportFileHandler(IAppAccessService access, IFileStora
 public sealed class PreviewImportFileHandler(IImportFileRepository files, IImportFileAccess fileAccess, IQueryContext user)
 {
     public async Task<ImportFilePreviewResponse> HandleAsync(
-        Guid fileId, string? sheet, int? headerRow, int? dataStartRow, string? delimiter, CancellationToken ct, bool allSheets = false)
+        Guid fileId, string? sheet, int? headerRow, int? dataStartRow, string? delimiter, CancellationToken ct, bool allSheets = false, int? rows = null)
     {
         var file = await ImportFileOwnership.LoadAsync(fileId, files, user, ct);
         var options = ImportFileValidation.ValidateLayout(
@@ -146,10 +198,11 @@ public sealed class PreviewImportFileHandler(IImportFileRepository files, IImpor
             IReadOnlyList<string> sheets = file.Format == ImportFileFormats.Xlsx ? ImportXlsxReader.SheetNames(stream) : [];
             stream.Position = 0;
             var layout = options.ToLayout();
-            if (options.AllSheets) return AllSheetsPreview(stream, layout, sheets);
+            var take = rows ?? ImportFileInspector.PreviewRows;
+            if (options.AllSheets) return AllSheetsPreview(stream, layout, sheets, take);
             // A workbook is read from its first sheet unless the person chose one.
             if (file.Format == ImportFileFormats.Xlsx && layout.Sheet is null) layout = layout with { Sheet = sheets.FirstOrDefault() };
-            var preview = ImportFileInspector.Preview(stream, layout);
+            var preview = ImportFileInspector.Preview(stream, layout, take);
             return new ImportFilePreviewResponse(preview.Columns, preview.Rows, preview.DataRows, preview.LastRow, preview.Delimiter, sheets);
         }
         catch (ImportFileFormatException ex) { throw ImportFileErrors.Invalid(ex.Message); }
@@ -157,7 +210,7 @@ public sealed class PreviewImportFileHandler(IImportFileRepository files, IImpor
 
     /// <summary>The first sheet's columns and rows stand for the import (every sheet is read with them); the total counts every sheet, and
     /// each sheet is listed with the columns it lacks, so a sheet laid out differently is seen before the import is run.</summary>
-    private static ImportFilePreviewResponse AllSheetsPreview(Stream stream, ImportFileLayout layout, IReadOnlyList<string> sheets)
+    private static ImportFilePreviewResponse AllSheetsPreview(Stream stream, ImportFileLayout layout, IReadOnlyList<string> sheets, int take)
     {
         ImportFilePreview? first = null;
         long total = 0;
@@ -167,7 +220,7 @@ public sealed class PreviewImportFileHandler(IImportFileRepository files, IImpor
             stream.Position = 0;
             try
             {
-                var preview = ImportFileInspector.Preview(stream, layout with { Sheet = name });
+                var preview = ImportFileInspector.Preview(stream, layout with { Sheet = name }, take);
                 first ??= preview;
                 total += preview.DataRows;
                 var missing = first.Columns.Where(c => !preview.Columns.Any(o => string.Equals(o.Name, c.Name, StringComparison.OrdinalIgnoreCase))).Select(c => c.Name).ToList();
@@ -177,6 +230,47 @@ public sealed class PreviewImportFileHandler(IImportFileRepository files, IImpor
         }
         if (first is null) throw ImportFileErrors.Invalid("None of the sheets has a row of column names where you said it is.");
         return new ImportFilePreviewResponse(first.Columns, first.Rows, total, 0, null, sheets, summaries);
+    }
+}
+
+/// <summary>One sheet of a workbook as it reads with the settings given: its columns and how many rows of data it has, or why it cannot be read.</summary>
+public sealed record ImportSheetPreview(string Name, IReadOnlyList<ImportFileColumn> Columns, long DataRows, string? Error = null);
+
+/// <summary>Reads several sheets of an uploaded workbook in one call (each with its own header row and first data row), so the screen that maps
+/// sheets separately learns every sheet's columns at once instead of asking once per sheet. Only the person who uploaded the file may ask.</summary>
+public sealed class PreviewImportSheetsHandler(IImportFileRepository files, IImportFileAccess fileAccess, IQueryContext user)
+{
+    public async Task<IReadOnlyList<ImportSheetPreview>> HandleAsync(Guid fileId, IReadOnlyList<ImportSheetRequest>? requested, CancellationToken ct)
+    {
+        var file = await ImportFileOwnership.LoadAsync(fileId, files, user, ct);
+        if (file.Format != ImportFileFormats.Xlsx) throw ImportFileErrors.Invalid("Only an Excel workbook has sheets.");
+        await using var stream = await fileAccess.OpenAsync(file.StoragePath, ct);
+        IReadOnlyList<string> names;
+        try { names = ImportXlsxReader.SheetNames(stream); }
+        catch (ImportFileFormatException ex) { throw ImportFileErrors.Invalid(ex.Message); }
+        // Without a list, every sheet is read with the default layout (column names on row 1).
+        var sheets = requested is { Count: > 0 } ? requested : names.Select(n => new ImportSheetRequest(n)).ToList();
+        if (sheets.Count > ImportFileValidation.MaxSheets) throw ImportFileErrors.Invalid($"At most {ImportFileValidation.MaxSheets} sheets can be read at once.");
+
+        var result = new List<ImportSheetPreview>(sheets.Count);
+        foreach (var sheet in sheets)
+        {
+            var actual = names.FirstOrDefault(n => string.Equals(n, sheet.Name, StringComparison.OrdinalIgnoreCase))
+                ?? throw ImportFileErrors.Invalid($"The workbook has no sheet called '{sheet.Name}'.");
+            var options = ImportFileValidation.ValidateLayout(new ImportFileOptions
+            {
+                Format = file.Format, Sheet = actual, HeaderRow = sheet.HeaderRow, DataStartRow = sheet.DataStartRow
+            });
+            stream.Position = 0;
+            try
+            {
+                var preview = ImportFileInspector.Preview(stream, options.ToLayout());
+                result.Add(new ImportSheetPreview(actual, preview.Columns, preview.DataRows));
+            }
+            catch (ImportFileHeaderMissingException ex) { result.Add(new ImportSheetPreview(actual, [], 0, ex.Message)); }
+            catch (ImportFileFormatException ex) { throw ImportFileErrors.Invalid(ex.Message); }
+        }
+        return result;
     }
 }
 
