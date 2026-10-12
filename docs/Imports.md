@@ -82,7 +82,34 @@ constraint problem). `read = inserted + updated + skipped + errored`. A bad row 
 * Conditions on a file's columns compare as text. Formulas refer to columns by heading, e.g. `Upper([Name])`.
 * A file import cannot be scheduled. The uploaded file is **kept for the retention** (see *History and files*) after the run; an upload nobody imported is removed after 24 hours.
 * **Excel with several sheets:** tick "Read every sheet" to import all sheets into the same table, in workbook order. Each sheet must have the columns the import uses (found by heading or position); a sheet without a row of column names is passed over; a sheet missing a used column stops the run before anything is written, naming the sheet. Problem rows are reported with their sheet and row.
-* Not supported: a different sheet for each table (every sheet feeds every table), `.xls` (save as `.xlsx`), Reference/User/Address/File/range destination fields.
+* Not supported: `.xls` (save as `.xlsx`), Reference/User/Address/File/range destination fields.
+
+#### Which columns a table is offered
+
+For every file import, and every table, a destination table is offered only the file columns that **fit it**: the heading matches one of the table's importable
+fields (ignoring case, spaces, underscores and punctuation, so `Employee ID` = `employee_id`; Record ID#, system, formula and unsupported fields never match) **and** the
+data fits the field's type. The server decides (`ImportColumnFit`, `POST import-files/{fileId}/column-fit`, one call per table for all its sheets): it reads the first 200 data rows
+of each sheet and tries every filled cell with the run's own conversion and format checks (max length, regex, email / phone / URL); one failing cell hides the column, blank cells
+are ignored, and a column with no filled cell fits. The screen lists a note such as "3 columns hidden" with the reason for each; there is no override. A saved mapping is never dropped
+by this. Formulas and virtual columns can still use every column of the sheet. If the check cannot be made, every column is listed and the run reports rows that do not convert.
+
+#### Sheets mapped separately, per table
+
+On the screen a table has **one list of columns**, whichever sheets it takes them from: a workbook with several sheets shows a tick-box per sheet, and each ticked sheet adds the columns that fit the table (a field in several sheets is listed once; the destination of a column is the field it matched). Formulas and virtual columns can use only those columns; a formula runs on the sheets that have all the columns it uses, so it cannot mix columns of different sheets. The list is spread over the sheets when saved (one `ImportSheetMapping` per sheet with `Combined`), and rows of different sheets that share the common field become one record (see below). An import saved before this is edited as it was saved.
+
+Each table of a workbook import chooses how it reads the workbook: **as chosen above** (the selected sheet, or "Read every sheet" with the same columns) or **sheet by sheet**.
+Sheet by sheet, the table picks one or more sheets (every sheet with a fitting column is suggested), and each is mapped on its own: its own header row and first data row, mapping,
+column rules, virtual columns and filter (`ImportSheetMapping`, stored per table as `sheetMappings`; the layout of each sheet used is stored once in `file.sheets`). The same sheet can feed several tables
+with different mappings, and one table can use sheet mode while another reads the file whole.
+
+* A sheet is read **once** per run and shared by every table that uses it; a table with several sheets gets one plan per sheet. Counts, the details file and Remove duplicates / unique checks are per **table**, across its sheets (the details file has a **Sheet** column and the union of the fields its sheets write).
+* **Combining sheets into one record.** When a record is spread over sheets (e.g. a student's details on one sheet, contact on another), the table can *combine on* a destination field (`JoinFieldFid` on each sheet mapping, the same field for every sheet that has it; the screen suggests the merge key or a field several sheets map).
+  Rows with the same value in that field (trimmed, case-insensitive) become **one record** before any check or write (`ImportJoinedChunkReader`): each field takes the first non-blank value, in sheet order; a sheet's own filter and virtual columns apply first.
+  When no field is chosen, the run picks one itself: the merge key if two or more sheets map it, else a unique field two or more sheets map (never a non-unique one); choosing "nothing" on purpose is saved as field 0 and keeps every row a record. A sheet that does not map the field, a row with no value in it, and a second row of the same sheet with the same value are records of their own (nothing is dropped). Required checks, Remove duplicates, merge and unique checks see the whole record, and a field only has to be mapped in one sheet; the merge key too.
+  Every row of a combined table's mapping must take its value from a column (a fixed value or formula is a virtual column of its sheet). **Rows read** is the number of rows the sheets had (500 rows in five sheets); the table's counts, "rows it got" and the details file are per **record** (the details file says which sheet and row each record started in); at most 1,000,000 records are combined in memory per run.
+* A table in sheet mode ignores the import-wide filter and the table filter; each sheet has its own filter. Merge needs the key mapped in every sheet of the table.
+* A missing sheet, or a sheet without its row of column names, stops the run before anything is written, naming the sheet. The sheet layouts are checked by *needs attention* like the rest.
+* `POST import-files/{fileId}/sheets` reads several sheets (each with its own layout) in one call. Limits: 50 sheets per table, 100 sheets in a workbook mapping.
 
 ### Several destination tables in one run
 

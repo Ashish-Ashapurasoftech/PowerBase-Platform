@@ -7,11 +7,13 @@ using PowerBase.Formula;
 
 namespace PowerBase.Application.Imports;
 
-/// <summary>Runs an import that fills several tables from the same source in one run. The source is read once, a chunk at a time; each chunk
-/// goes to every table's own writer (its own mapping, import type, merge key and column rules), so a row is checked and written
-/// independently for each table: fine for one table and rejected for another is imported into the first and reported for the second.
-/// Counts are kept per table, the run's own counters are their totals, and one details file names the table of every line.
-/// An import into one table never comes here: <see cref="ImportRunProcessor"/> keeps its own, unchanged path for it.</summary>
+/// <summary>Runs an import that fills several tables from the same source in one run, or that reads a workbook sheet by sheet. The source is read
+/// once, a chunk at a time; each chunk goes to every plan's own writer (its own mapping, import type, merge key and column rules), so a row is
+/// checked and written independently for each table: fine for one table and rejected for another is imported into the first and reported for the
+/// second. A table that reads sheet by sheet has a plan for each sheet; each sheet is a **source group** (read once, giving its rows to every plan
+/// that uses it), and the groups are run one after the other. Counts and the details file are kept per table, whatever sheets it took, and the
+/// run's own counters are their totals. An import into one table from one source never comes here: <see cref="ImportRunProcessor"/> keeps its own,
+/// unchanged path for it.</summary>
 public sealed class ImportMultiTargetRunner(
     IImportRunRepository runs,
     ImportPlanBuilder planBuilder,
@@ -31,12 +33,26 @@ public sealed class ImportMultiTargetRunner(
     /// <summary>The single way the processor ends a run (record, audit, tell people, delete the uploaded file); handed in so both paths end alike.</summary>
     public delegate Task EndRun(ImportRun run, ImportRunSnapshot? snapshot, ImportPlan? plan, string status, string? detail, string? feedbackPath, CancellationToken ct);
 
+    /// <summary>One plan: a table, as read from one source (for a table read sheet by sheet, one of its sheets).</summary>
     private sealed class Target(int index, ImportPlan plan)
     {
         public int Index { get; } = index;
+        public int TableIndex { get; } = plan.TableIndex;
         public ImportPlan Plan { get; } = plan;
         public string Label { get; } = plan.Destination.Name;
         public ImportDataRuleGate? Gate { get; set; }
+        /// <summary>Where this plan's values go among its table's details file's value columns (null: they are in the file's order).</summary>
+        public int[]? ValueAt { get; set; }
+    }
+
+    /// <summary>One thing read once: the whole file or table, or one sheet of a workbook, and the plans that take their rows from it.</summary>
+    private sealed class SourceGroup(ImportPlan readPlan, List<Target> targets, long maxId, bool virtualsPerPlan)
+    {
+        public ImportPlan ReadPlan { get; } = readPlan;
+        public List<Target> Targets { get; } = targets;
+        public long MaxId { get; } = maxId;
+        /// <summary>The plans calculate their own virtual columns (they were mapped separately, so they differ) instead of the read doing it once.</summary>
+        public bool VirtualsPerPlan { get; } = virtualsPerPlan;
     }
 
     /// <summary>What one table got in a pass.</summary>
@@ -84,25 +100,46 @@ public sealed class ImportMultiTargetRunner(
 
         var home = plans[0];
         var targets = plans.Select((p, i) => new Target(i, p)).ToList();
-        var readPlan = ImportPlanBuilder.UnionForReading(plans);
-        var maxId = run.SourceMaxId ?? readPlan.File?.LastRow ?? await store.GetMaxRecordIdAsync(readPlan.Source, ct);
+        // One representative plan per table (the first), for its name, destination and rule gate; the counts and the details file are per table.
+        var tableCount = targets.Max(t => t.TableIndex) + 1;
+        var tableOf = Enumerable.Range(0, tableCount).Select(i => targets.First(t => t.TableIndex == i)).ToList();
+        foreach (var table in tableOf)
+        {
+            var own = targets.Where(t => t.TableIndex == table.TableIndex).ToList();
+            var (_, valueAt) = ImportRunProcessor.NewDetailsWriter(own.Select(t => t.Plan).ToList());
+            for (var i = 0; i < own.Count; i++) own[i].ValueAt = valueAt[i];
+        }
+
+        var sourceGroups = new List<SourceGroup>();
+        // A table that combines its sheets is read as one source of its own (its sheets are read together); a table read sheet by sheet shares each sheet.
+        foreach (var members in targets.GroupBy(t => t.Plan.JoinedFrom is not null ? $"\0join{t.TableIndex}" : t.Plan.SheetName ?? "").Select(g => g.ToList()))
+        {
+            var perPlan = members[0].Plan.SheetName is not null;
+            var readPlan = ImportPlanBuilder.UnionForReading(members.Select(t => t.Plan).ToList(), virtualsPerPlan: perPlan);
+            var pinned = sourceGroups.Count == 0 ? run.SourceMaxId : null;
+            sourceGroups.Add(new SourceGroup(readPlan, members, pinned ?? readPlan.File?.LastRow ?? await store.GetMaxRecordIdAsync(readPlan.Source, ct), perPlan));
+        }
+        var maxId = sourceGroups[0].MaxId;
         // False when the run was cancelled while it waited in the queue: it must stay cancelled.
         if (!await runs.MarkRunningAsync(run.Id, maxId, ct)) return;
         await audit.LogActivityAsync("ImportStarted", "ImportRun", run.PublicId.ToString(), null, home.Destination.AppId, ct: ct);
 
         try
         {
-            await runs.InitTargetsAsync(run.Id, plans.Select(p => p.Destination.Id).ToList(), ct);
-            foreach (var t in targets)
-                t.Gate = await ImportDataRuleGate.CreateAsync(t.Plan.Destination, t.Plan.DestinationFields, tables, fieldRepo, records, formulaEngine, ct);
+            await runs.InitTargetsAsync(run.Id, tableOf.Select(t => t.Plan.Destination.Id).ToList(), ct);
+            foreach (var table in tableOf)
+            {
+                var gate = await ImportDataRuleGate.CreateAsync(table.Plan.Destination, table.Plan.DestinationFields, tables, fieldRepo, records, formulaEngine, ct);
+                foreach (var t in targets.Where(t => t.TableIndex == table.TableIndex)) t.Gate = gate;
+            }
 
-            List<Dictionary<int, HashSet<ulong>>?>? groups = null;
+            List<Dictionary<int, HashSet<ulong>>?>? duplicateGroups = null;
             var writeFrom = 0;
             var policy = home.ConstraintPolicy;
             if (policy == ImportConstraintPolicy.ExcludeDuplicateGroups)
             {
-                groups = await ScanDuplicateGroupsAsync(targets, readPlan, run, maxId, 0, 45, ct);
-                if (groups is null)
+                duplicateGroups = await ScanDuplicateGroupsAsync(sourceGroups, tableCount, run, 0, 45, ct);
+                if (duplicateGroups is null)
                 {
                     await FinishAsync(run, snapshot, home, ImportRunStatus.Cancelled, "Cancelled before anything was imported.", null, end, ct);
                     return;
@@ -111,7 +148,7 @@ public sealed class ImportMultiTargetRunner(
             }
             else if (policy == ImportConstraintPolicy.AbortIfAnyIssue)
             {
-                await using var check = await ExecutePassAsync(targets, readPlan, run, maxId, ImportPassMode.Validate, null, 0, 50, ct);
+                await using var check = await ExecutePassAsync(sourceGroups, targets, tableOf, run, ImportPassMode.Validate, null, 0, 50, ct);
                 if (check.Cancelled)
                 {
                     await FinishAsync(run, snapshot, home, ImportRunStatus.Cancelled, "Cancelled before anything was imported.", null, end, ct);
@@ -119,14 +156,14 @@ public sealed class ImportMultiTargetRunner(
                 }
                 if (check.Errored > 0)
                 {
-                    await RejectRunAsync(targets, run, snapshot, home, check, end, ct);
+                    await RejectRunAsync(tableOf, run, snapshot, home, check, end, ct);
                     return;
                 }
                 writeFrom = 50;
             }
 
-            await using var final = await ExecutePassAsync(targets, readPlan, run, maxId, ImportPassMode.Write, groups, writeFrom, 100, ct);
-            await CompleteRunAsync(targets, run, snapshot, home, final, end, ct);
+            await using var final = await ExecutePassAsync(sourceGroups, targets, tableOf, run, ImportPassMode.Write, duplicateGroups, writeFrom, 100, ct);
+            await CompleteRunAsync(tableOf, run, snapshot, home, final, end, ct);
         }
         catch (OperationCanceledException) { throw; } // shutdown: the lease expires and the run is failed as interrupted on pickup
         catch (Exception ex)
@@ -136,92 +173,119 @@ public sealed class ImportMultiTargetRunner(
         }
     }
 
-    private async Task<IImportChunkReader> OpenSourceAsync(ImportPlan readPlan, CancellationToken ct)
+    private async Task<IImportChunkReader> OpenSourceAsync(SourceGroup group, CancellationToken ct)
     {
+        var readPlan = group.ReadPlan;
+        if (readPlan.JoinedFrom is { } sheets) return new ImportJoinedChunkReader(sheets, readPlan, fileAccess, formulaEngine);
         IImportChunkReader source = readPlan.File is null ? reader : await fileAccess.OpenChunkReaderAsync(readPlan, ct);
         return readPlan.Virtuals.Count == 0 ? source : new ImportVirtualColumnReader(source, readPlan, formulaEngine);
     }
 
-    /// <summary>Reads the source once and, for every table, learns which unique values occur more than once, so the writing pass can leave
-    /// out each such group entirely. Writes nothing. Null when the run was stopped.</summary>
+    /// <summary>The part of the run's progress a source group covers: the groups share the pass's range evenly.</summary>
+    private static (int From, int To) GroupRange(int from, int to, int index, int count) =>
+        (from + (to - from) * index / count, from + (to - from) * (index + 1) / count);
+
+    /// <summary>Reads every source group once and, for every table, learns which unique values occur more than once (across all the sheets the
+    /// table reads), so the writing pass can leave out each such group entirely. Writes nothing. Null when the run was stopped.</summary>
     private async Task<List<Dictionary<int, HashSet<ulong>>?>?> ScanDuplicateGroupsAsync(
-        List<Target> targets, ImportPlan readPlan, ImportRun run, long maxId, int progressFrom, int progressTo, CancellationToken ct)
+        List<SourceGroup> groups, int tableCount, ImportRun run, int progressFrom, int progressTo, CancellationToken ct)
     {
-        var trackers = targets.Select(_ => new ImportDuplicateTracker()).ToList();
-        var writers = targets.Select((t, i) => new ImportChunkWriter(t.Plan, store, records, null, formulaEngine, run.TriggeredByUserId,
-            ImportPassMode.Validate, trackers[i], t.Label)).ToList();
-        await using var source = await OpenSourceAsync(readPlan, ct);
-        long cursor = 0;
-        while (true)
+        var trackers = Enumerable.Range(0, tableCount).Select(_ => new ImportDuplicateTracker()).ToList();
+        for (var g = 0; g < groups.Count; g++)
         {
-            ct.ThrowIfCancellationRequested();
-            var chunk = await source.ReadChunkAsync(readPlan, cursor, maxId, ct);
-            if (chunk.Exhausted) break;
-            for (var i = 0; i < writers.Count; i++) writers[i].CollectDuplicateGroups(RowsFor(targets[i], chunk.Rows));
-            cursor = chunk.LastId;
-            if (await runs.AdvanceAsync(run.Id, new ImportChunkResult(0, 0, 0, 0, 0, 0), Progress(progressFrom, progressTo, cursor, maxId), ct))
-                return null;
+            var group = groups[g];
+            var (from, to) = GroupRange(progressFrom, progressTo, g, groups.Count);
+            var writers = group.Targets.Select(t => new ImportChunkWriter(t.Plan, store, records, null, formulaEngine, run.TriggeredByUserId,
+                ImportPassMode.Validate, trackers[t.TableIndex], t.Label)).ToList();
+            await using var source = await OpenSourceAsync(group, ct);
+            long cursor = 0;
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                var chunk = await source.ReadChunkAsync(group.ReadPlan, cursor, group.MaxId, ct);
+                if (chunk.Exhausted) break;
+                for (var i = 0; i < writers.Count; i++) writers[i].CollectDuplicateGroups(RowsFor(group, group.Targets[i], chunk.Rows));
+                cursor = chunk.LastId;
+                if (await runs.AdvanceAsync(run.Id, new ImportChunkResult(0, 0, 0, 0, 0, 0), Progress(from, to, cursor, group.MaxId), ct))
+                    return null;
+            }
         }
         return trackers.Select(t => t.DuplicateGroups).ToList();
     }
 
-    /// <summary>One pass over the source: read a chunk, hand it to every table's writer, record what was rejected, and advance the run. A table's
-    /// counts and record total are recorded as soon as its part of the chunk is written, so a failure in a later table never leaves an
-    /// earlier table's rows uncounted. A validate pass does everything except the writes.</summary>
+    /// <summary>One pass over the sources: for each source group in turn, read a chunk, hand it to every plan's writer, record what was rejected,
+    /// and advance the run. A table's counts and record total are recorded as soon as its part of the chunk is written, so a failure in a later
+    /// table never leaves an earlier table's rows uncounted. A validate pass does everything except the writes. The values a unique field or a
+    /// "Remove duplicates" column has already seen are remembered per table across all of its sheets.</summary>
     private async Task<Pass> ExecutePassAsync(
-        List<Target> targets, ImportPlan readPlan, ImportRun run, long maxId, ImportPassMode mode,
-        List<Dictionary<int, HashSet<ulong>>?>? groups, int progressFrom, int progressTo, CancellationToken ct)
+        List<SourceGroup> groups, List<Target> targets, List<Target> tableOf, ImportRun run, ImportPassMode mode,
+        List<Dictionary<int, HashSet<ulong>>?>? duplicateGroups, int progressFrom, int progressTo, CancellationToken ct)
     {
-        var writers = targets.Select((t, i) => new ImportChunkWriter(t.Plan, store, records, t.Gate, formulaEngine, run.TriggeredByUserId, mode,
-            new ImportDuplicateTracker(groups?[i]), t.Label)).ToList();
-        foreach (var writer in writers) await writer.PrepareAsync(ct);
-        var pass = new Pass(targets.Select(t => ImportRunProcessor.NewDetailsWriter(t.Plan)).ToArray());
-        await using var source = await OpenSourceAsync(readPlan, ct);
+        var trackers = tableOf.Select((t, i) => new ImportDuplicateTracker(duplicateGroups?[i])).ToList();
+        var pass = new Pass(tableOf.Select(t => ImportRunProcessor.NewDetailsWriter(targets.Where(x => x.TableIndex == t.TableIndex).Select(x => x.Plan).ToList()).Writer).ToArray());
         try
         {
-            while (true)
+            for (var g = 0; g < groups.Count; g++)
             {
-                ct.ThrowIfCancellationRequested();
-                var chunk = await source.ReadChunkAsync(readPlan, pass.Cursor, maxId, ct);
-                if (chunk.Exhausted) break;
-                pass.Cursor = chunk.LastId;
-                pass.RowsRead += chunk.Rows.Count;
-                long chunkInserted = 0, chunkUpdated = 0, chunkUnchanged = 0, chunkSkipped = 0, chunkErrored = 0;
-
-                for (var i = 0; i < targets.Count; i++)
+                var group = groups[g];
+                var (from, to) = GroupRange(progressFrom, progressTo, g, groups.Count);
+                var writers = group.Targets.Select(t => new ImportChunkWriter(t.Plan, store, records, t.Gate, formulaEngine, run.TriggeredByUserId, mode,
+                    trackers[t.TableIndex], t.Label)).ToList();
+                foreach (var writer in writers) await writer.PrepareAsync(ct);
+                await using var source = await OpenSourceAsync(group, ct);
+                pass.Cursor = 0;
+                // Sheets that are combined give records, but what was read is their rows: reported once, with the first chunk.
+                var joined = source as ImportJoinedChunkReader;
+                var sourceRowsCounted = false;
+                while (true)
                 {
-                    // A table with its own filter is given only the rows that pass it; the others are neither imported, skipped nor reported for it.
-                    var rows = RowsFor(targets[i], chunk.Rows);
-                    var outcome = rows.Count == 0 ? ImportChunkOutcome.None : await writers[i].ProcessAsync(rows, ct);
-                    var tally = pass.Tallies[i];
-                    tally.Matched += rows.Count;
-                    tally.Inserted += outcome.Inserted; tally.Updated += outcome.Updated; tally.Unchanged += outcome.Unchanged;
-                    tally.Skipped += outcome.Skipped; tally.Errored += outcome.Errored;
-                    chunkInserted += outcome.Inserted; chunkUpdated += outcome.Updated; chunkUnchanged += outcome.Unchanged;
-                    chunkSkipped += outcome.Skipped; chunkErrored += outcome.Errored;
-                    await pass.Details[i].AppendAsync(outcome.Feedback, outcome.Written, ct);
+                    ct.ThrowIfCancellationRequested();
+                    var chunk = await source.ReadChunkAsync(group.ReadPlan, pass.Cursor, group.MaxId, ct);
+                    var rowsRead = joined is null ? chunk.Rows.Count : sourceRowsCounted ? 0 : joined.SourceRows;
+                    sourceRowsCounted = true;
+                    if (chunk.Exhausted) { pass.RowsRead += rowsRead; break; }
+                    pass.Cursor = chunk.LastId;
+                    pass.RowsRead += rowsRead;
+                    long chunkInserted = 0, chunkUpdated = 0, chunkUnchanged = 0, chunkSkipped = 0, chunkErrored = 0;
 
-                    if (mode == ImportPassMode.Write)
+                    for (var i = 0; i < group.Targets.Count; i++)
                     {
-                        if (outcome.Inserted > 0) await store.AddRecordCountAsync(targets[i].Plan.Destination.Id, (int)outcome.Inserted, ct);
-                        if (outcome.Feedback.Count > 0) await runs.AddIssuesAsync(run.Id, outcome.Feedback.Select(f => f.Issue).ToList(), IssueCap, ct);
-                        await runs.AddTargetCountsAsync(run.Id, [new ImportTargetCounts((byte)i, outcome.Inserted, outcome.Updated, outcome.Skipped, outcome.Errored, outcome.Unchanged)], ct);
-                    }
-                    else
-                    {
-                        // Held back: if the check passes these rows are found again by the real pass and recorded then.
-                        foreach (var f in outcome.Feedback.TakeWhile(_ => pass.BufferedIssues.Count < IssueCap)) pass.BufferedIssues.Add(f.Issue);
-                    }
-                }
+                        var target = group.Targets[i];
+                        // A plan with its own filter (a table's, or a sheet's) is given only the rows that pass it; the others are neither imported,
+                        // skipped nor reported for it.
+                        var rows = RowsFor(group, target, chunk.Rows);
+                        var outcome = rows.Count == 0 ? ImportChunkOutcome.None : await writers[i].ProcessAsync(rows, ct);
+                        var tally = pass.Tallies[target.TableIndex];
+                        tally.Matched += rows.Count;
+                        tally.Inserted += outcome.Inserted; tally.Updated += outcome.Updated; tally.Unchanged += outcome.Unchanged;
+                        tally.Skipped += outcome.Skipped; tally.Errored += outcome.Errored;
+                        chunkInserted += outcome.Inserted; chunkUpdated += outcome.Updated; chunkUnchanged += outcome.Unchanged;
+                        chunkSkipped += outcome.Skipped; chunkErrored += outcome.Errored;
+                        await pass.Details[target.TableIndex].AppendAsync(outcome.Feedback, outcome.Written, ct, target.ValueAt, target.Plan.SheetName);
 
-                var progress = Progress(progressFrom, progressTo, pass.Cursor, maxId);
-                var stop = mode == ImportPassMode.Write
-                    ? await runs.AdvanceAsync(run.Id, new ImportChunkResult(pass.Cursor, chunk.Rows.Count, chunkInserted, chunkUpdated, chunkSkipped, chunkErrored, chunkUnchanged), progress, ct)
-                    : await runs.AdvanceAsync(run.Id, new ImportChunkResult(0, 0, 0, 0, 0, 0), progress, ct);
-                if (stop)
-                {
-                    pass.Cancelled = true;
-                    break;
+                        if (mode == ImportPassMode.Write)
+                        {
+                            if (outcome.Inserted > 0) await store.AddRecordCountAsync(target.Plan.Destination.Id, (int)outcome.Inserted, ct);
+                            if (outcome.Feedback.Count > 0) await runs.AddIssuesAsync(run.Id, outcome.Feedback.Select(f => f.Issue).ToList(), IssueCap, ct);
+                            await runs.AddTargetCountsAsync(run.Id,
+                                [new ImportTargetCounts((byte)target.TableIndex, outcome.Inserted, outcome.Updated, outcome.Skipped, outcome.Errored, outcome.Unchanged)], ct);
+                        }
+                        else
+                        {
+                            // Held back: if the check passes these rows are found again by the real pass and recorded then.
+                            foreach (var f in outcome.Feedback.TakeWhile(_ => pass.BufferedIssues.Count < IssueCap)) pass.BufferedIssues.Add(f.Issue);
+                        }
+                    }
+
+                    var progress = Progress(from, to, pass.Cursor, group.MaxId);
+                    var stop = mode == ImportPassMode.Write
+                        ? await runs.AdvanceAsync(run.Id, new ImportChunkResult(pass.Cursor, rowsRead, chunkInserted, chunkUpdated, chunkSkipped, chunkErrored, chunkUnchanged), progress, ct)
+                        : await runs.AdvanceAsync(run.Id, new ImportChunkResult(0, 0, 0, 0, 0, 0), progress, ct);
+                    if (stop)
+                    {
+                        pass.Cancelled = true;
+                        return pass;
+                    }
                 }
             }
             return pass;
@@ -234,10 +298,10 @@ public sealed class ImportMultiTargetRunner(
     }
 
     /// <summary>Ends a run whose pre-check found rejected rows under "abort if any issue": nothing was written, in any table.</summary>
-    private async Task RejectRunAsync(List<Target> targets, ImportRun run, ImportRunSnapshot snapshot, ImportPlan home, Pass check, EndRun end, CancellationToken ct)
+    private async Task RejectRunAsync(List<Target> tableOf, ImportRun run, ImportRunSnapshot snapshot, ImportPlan home, Pass check, EndRun end, CancellationToken ct)
     {
         await runs.AddIssuesAsync(run.Id, check.BufferedIssues, IssueCap, ct);
-        for (var i = 0; i < targets.Count; i++)
+        for (var i = 0; i < tableOf.Count; i++)
         {
             var t = check.Tallies[i];
             await runs.AddTargetCountsAsync(run.Id, [new ImportTargetCounts((byte)i, 0, 0, t.Skipped, t.Errored)], ct);
@@ -248,14 +312,14 @@ public sealed class ImportMultiTargetRunner(
         await FinishAsync(run, snapshot, home, ImportRunStatus.Failed, note is null ? detail : $"{detail} {note}", path, end, ct);
     }
 
-    private async Task CompleteRunAsync(List<Target> targets, ImportRun run, ImportRunSnapshot snapshot, ImportPlan home, Pass final, EndRun end, CancellationToken ct)
+    private async Task CompleteRunAsync(List<Target> tableOf, ImportRun run, ImportRunSnapshot snapshot, ImportPlan home, Pass final, EndRun end, CancellationToken ct)
     {
-        for (var i = 0; i < targets.Count; i++)
+        for (var i = 0; i < tableOf.Count; i++)
         {
             var t = final.Tallies[i];
             if (t.Matched != t.Imported + t.Unchanged + t.Skipped + t.Errored)
                 logger.LogError("Import run {RunId} does not reconcile for table {Table}: matched {Matched} of {Read} rows, imported {Imported}, skipped {Skipped}, errored {Errored}.",
-                    run.PublicId, targets[i].Label, t.Matched, final.RowsRead, t.Imported, t.Skipped, t.Errored);
+                    run.PublicId, tableOf[i].Label, t.Matched, final.RowsRead, t.Imported, t.Skipped, t.Errored);
         }
 
         var (path, note) = await SaveDetailsAsync(final, run, ct);
@@ -307,13 +371,17 @@ public sealed class ImportMultiTargetRunner(
         return (first, failed ? "A details file could not be saved; the rows that were not imported are listed on this page." : null);
     }
 
-    /// <summary>The rows of a chunk this table is given: all of them, or those that pass its own filter.</summary>
-    private static IReadOnlyList<IReadOnlyDictionary<string, object?>> RowsFor(Target target, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    /// <summary>The rows of a chunk this plan is given: all of them, or those that pass its own filter (a table's, or for a sheet read on its
+    /// own, that sheet's); then, when plans have virtual columns of their own, with this plan's virtual columns added.</summary>
+    private IReadOnlyList<IReadOnlyDictionary<string, object?>> RowsFor(SourceGroup group, Target target, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
     {
-        if (target.Plan.TableFilter is not { } filter) return rows;
-        var kept = new List<IReadOnlyDictionary<string, object?>>(rows.Count);
-        foreach (var row in rows) if (filter.Matches(row)) kept.Add(row);
-        return kept;
+        if (target.Plan.TableFilter is { } filter)
+        {
+            var kept = new List<IReadOnlyDictionary<string, object?>>(rows.Count);
+            foreach (var row in rows) if (filter.Matches(row)) kept.Add(row);
+            rows = kept;
+        }
+        return group.VirtualsPerPlan && rows.Count > 0 ? ImportVirtualColumnReader.Apply(target.Plan, formulaEngine, rows) : rows;
     }
 
     private static byte Progress(int from, int to, long cursor, long maxId) =>

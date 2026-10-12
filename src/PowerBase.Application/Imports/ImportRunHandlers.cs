@@ -173,7 +173,7 @@ public sealed class GetImportRunHandler(IAppAccessService access, IImportRunRepo
     /// <summary>Each table's counts, for a run that filled several. A run into one table has none and costs no extra query.</summary>
     private async Task<IReadOnlyList<ImportRunTargetItem>?> TargetsAsync(ImportRun run, CancellationToken ct)
     {
-        if (ImportJson.Deserialize<ImportRunSnapshot>(run.DefinitionSnapshotJson)?.Config.AdditionalTargets is not { Count: > 0 }) return null;
+        if (ImportJson.Deserialize<ImportRunSnapshot>(run.DefinitionSnapshotJson)?.Config.UsesTargetRows is not true) return null;
         return await runs.ListTargetsAsync(run.Id, ct);
     }
 }
@@ -191,7 +191,7 @@ public sealed class GetImportFeedbackHandler(IAppAccessService access, IImportRu
         if (!ImportRunAccess.CanSeeRows(run, user)) throw new UnauthorizedActionException("download this import's details");
         var path = run.FeedbackFileUrl;
         var label = "";
-        if (tableId is { } table && ImportJson.Deserialize<ImportRunSnapshot>(run.DefinitionSnapshotJson)?.Config.AdditionalTargets is { Count: > 0 })
+        if (tableId is { } table && ImportJson.Deserialize<ImportRunSnapshot>(run.DefinitionSnapshotJson)?.Config.UsesTargetRows is true)
         {
             var target = await runs.GetTargetDetailsAsync(run.Id, table, ct) ?? throw new NotFoundException("ImportFeedback", runId);
             path = target.Path;

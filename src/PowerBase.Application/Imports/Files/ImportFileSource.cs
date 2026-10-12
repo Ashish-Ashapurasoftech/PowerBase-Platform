@@ -30,10 +30,25 @@ public sealed class ImportFileOptions
     public bool AllSheets { get; set; }
     /// <summary>The column headings of the file the import was set up with, in order. Mappings refer to columns by place in this list.</summary>
     public List<string> Columns { get; set; } = new();
+    /// <summary>Excel only: the sheets a table reads separately (each with its own columns), by sheet. A sheet's header row and first data row
+    /// are its own; see <see cref="ImportSheetMapping"/>. Empty for an import that reads one sheet, or every sheet with the same columns.</summary>
+    public List<ImportSheetSettings> Sheets { get => _sheets; set => _sheets = value ?? new(); }
+    private List<ImportSheetSettings> _sheets = new();
 
     public ImportFileLayout ToLayout() => new(
         Format, string.IsNullOrWhiteSpace(Sheet) ? null : Sheet, HeaderRow, DataStartRow,
         string.IsNullOrEmpty(Delimiter) ? null : Delimiter == "\\t" ? '\t' : Delimiter[0]);
+}
+
+/// <summary>How one sheet of a workbook is read when tables map the sheets separately: where its column names are, where its data starts, and
+/// the column headings it had when the import was set up (mappings refer to its columns by place in this list).</summary>
+public sealed class ImportSheetSettings
+{
+    public string Name { get; set; } = "";
+    public int HeaderRow { get; set; } = 1;
+    public int? DataStartRow { get; set; }
+    public List<string> Columns { get => _columns; set => _columns = value ?? new(); }
+    private List<string> _columns = new();
 }
 
 /// <summary>The file a run reads, as the plan builder and chunk reader need it.</summary>
@@ -44,9 +59,11 @@ public sealed record ImportFileSheet(string Name, IReadOnlyList<ImportFileColumn
 /// <param name="LastRow">The last row's number, which is also the end of the run's progress. For "every sheet" it is the last row's
 /// <see cref="ImportFileSheets.RowId"/>.</param>
 /// <param name="Sheets">Set only when every sheet is read.</param>
+/// <param name="SheetSources">When tables map the sheets separately: each sheet that is used, read as a file of its own (its columns, its rows, its
+/// layout), by sheet name.</param>
 public sealed record ImportFileSource(
     IReadOnlyList<ImportFileColumn> Columns, string FileName, ImportFileLayout Layout, string StoragePath, long DataRows, long LastRow, ImportFileOptions Options,
-    IReadOnlyList<ImportFileSheet>? Sheets = null);
+    IReadOnlyList<ImportFileSheet>? Sheets = null, IReadOnlyDictionary<string, ImportFileSource>? SheetSources = null);
 
 /// <summary>Reading several sheets as one source: where each sheet's columns are, and how a row is numbered across sheets.</summary>
 public static class ImportFileSheets
