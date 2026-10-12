@@ -3,6 +3,7 @@ using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Commands.CreateField;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Application.Fields.Commands;
+using PowerBase.Application.Formulas;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -21,6 +22,7 @@ public class BulkCreateFieldsCommandHandler
     private readonly FieldSettingsValidatorRegistry _settingsRegistry;
     private readonly IFieldNameResolver _fieldNameResolver;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IAppVariableRepository? _variableRepo;
 
     public BulkCreateFieldsCommandHandler(
         IAppTableRepository tableRepo,
@@ -44,6 +46,27 @@ public class BulkCreateFieldsCommandHandler
         _formRepo = formRepo;
         _settingsRegistry = settingsRegistry;
         _fieldNameResolver = fieldNameResolver;
+    }
+
+    /// <summary>The same handler, also given the app's variables so a formula typed with <c>[Tax]</c> can be stored by id.
+    /// A separate constructor (rather than a new optional parameter) so existing callers and mocks of the original keep working;
+    /// dependency injection uses this one.</summary>
+    public BulkCreateFieldsCommandHandler(
+        IAppTableRepository tableRepo,
+        IAppFieldRepository fieldRepo,
+        IFieldTypeRepository fieldTypeRepo,
+        ISchemaEngineService schemaEngine,
+        IQueryContext queryContext,
+        IAuditRepository auditRepo,
+        IFormRepository formRepo,
+        FieldSettingsValidatorRegistry settingsRegistry,
+        IFieldNameResolver fieldNameResolver,
+        IFieldReferenceIndexer? refIndexer,
+        IAppVariableRepository? variableRepo)
+        : this(tableRepo, fieldRepo, fieldTypeRepo, schemaEngine, queryContext, auditRepo, formRepo, settingsRegistry,
+            fieldNameResolver, refIndexer)
+    {
+        _variableRepo = variableRepo;
     }
 
     public async Task<IReadOnlyList<CreateFieldResult>> HandleAsync(BulkCreateFieldsCommand command, CancellationToken ct = default)
@@ -111,7 +134,9 @@ public class BulkCreateFieldsCommandHandler
             var normalized = NormalizeLabel(command.Fields[i].Label);
             if (normalized.Length == 0) continue; // NotEmpty already reported above
 
-            if (existingLabels.Contains(normalized))
+            if (PowerBase.Formula.Binding.FieldIdReference.IsReservedLabel(command.Fields[i].Label))
+                allErrors[$"Fields[{i}].Label"] = [CreateField.CreateFieldCommandValidator.ReservedLabelMessage(command.Fields[i].Label)];
+            else if (existingLabels.Contains(normalized))
                 allErrors[$"Fields[{i}].Label"] = [$"Field with label '{command.Fields[i].Label.Trim()}' already exists."];
             else if (!seenInBatch.Add(normalized))
                 allErrors[$"Fields[{i}].Label"] = [$"Duplicate label '{command.Fields[i].Label.Trim()}' in this request."];
@@ -123,6 +148,7 @@ public class BulkCreateFieldsCommandHandler
         var formsForTable = await _formRepo.ListByTableAsync(table.PublicId, ct);
 
         var results = new List<CreateFieldResult>();
+        var variables = await FormulaVariables.LoadAsync(_variableRepo, table.AppId, ct);
 
         foreach (var item in command.Fields)
         {
@@ -173,7 +199,9 @@ public class BulkCreateFieldsCommandHandler
                 IsRequired = item.IsRequired,
                 DefaultValue = item.DefaultValue,
                 Fid = nextFid,
-                Settings = item.Settings,
+                // Formula text is stored by field ID (see FormulaCanonicalizer); fieldsSoFar includes
+                // fields created earlier in this batch, so formulas can reference them.
+                Settings = new FormulaCanonicalizer(fieldsSoFar, variables: variables).ToStoredSettings(fieldType.Code, item.Settings),
                 CreatedBy = _queryContext.UserId,
                 IsSearchable = advancedDefaults.Searchable,
                 IsSortable = advancedDefaults.Sortable,
@@ -231,7 +259,7 @@ public class BulkCreateFieldsCommandHandler
                 IsRequired = field.IsRequired,
                 IsAuditable = field.IsAuditable,
                 Fid = field.Fid,
-                Settings = field.Settings,
+                Settings = new FormulaCanonicalizer(fieldsSoFar, variables: variables).ToDisplaySettings(field.TypeCode, field.Settings),
                 CreatedOn = DateTime.UtcNow,
                 IsEncrypted = field.IsEncrypted,
             });

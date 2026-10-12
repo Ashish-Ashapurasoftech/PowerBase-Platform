@@ -6,9 +6,15 @@ namespace PowerBase.Application.Fields.Commands.CreateField;
 
 public class CreateFieldCommandValidator : AbstractValidator<CreateFieldCommand>
 {
+    /// <summary>Shared with the update and bulk-create paths — "fid_14" is the by-ID formula spelling, so it can't be a label.</summary>
+    public static string ReservedLabelMessage(string? label) =>
+        $"The label '{label?.Trim()}' is reserved for referencing a field by its ID in formulas (labels like 'fid_14'). Choose a different label.";
+
     public CreateFieldCommandValidator()
     {
-        RuleFor(x => x.Label).NotEmpty().MaximumLength(200);
+        RuleFor(x => x.Label).NotEmpty().MaximumLength(200)
+            .Must(label => !PowerBase.Formula.Binding.FieldIdReference.IsReservedLabel(label))
+            .WithMessage(command => ReservedLabelMessage(command.Label));
         // TypeCode's real whitelist is this tenant's own core.FieldType table, not a fixed set —
         // different tenant databases can (and do) carry different rows there (see
         // PhysicalNaming.IsActionButtonTypeCode's comment for why). A prior version of this rule

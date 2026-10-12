@@ -7,7 +7,9 @@ public class CreateAppVariableCommandValidator : AbstractValidator<CreateAppVari
     public CreateAppVariableCommandValidator()
     {
         RuleFor(x => x.AppPublicId).NotEmpty();
-        RuleFor(x => x.Name).NotEmpty().MaximumLength(100);
+        RuleFor(x => x.Name).NotEmpty().MaximumLength(100)
+            .Must(AppVariableNameRules.HasNoBracketCharacters).WithMessage(AppVariableNameRules.BracketMessage)
+            .Must(name => !AppVariableNameRules.IsReserved(name)).WithMessage(command => AppVariableNameRules.ReservedMessage(command.Name));
         RuleFor(x => x.Value).NotEmpty().MaximumLength(500);
         RuleFor(x => x.Description).MaximumLength(500).When(x => x.Description is not null);
     }
