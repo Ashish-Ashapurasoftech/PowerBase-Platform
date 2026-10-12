@@ -569,7 +569,7 @@ public class GetPipelineEditorQueryHandler
             AppPublicId = appPublicId,
             TablePublicId = table.PublicId,
             TableName = table.Name,
-            Fields = fields.Select(f => new PipelineEditorFieldMetadata
+            Fields = Relationships.HelperFields.Visible(fields).Select(f => new PipelineEditorFieldMetadata
             {
                 PublicId = f.PublicId,
                 Name = f.Name,

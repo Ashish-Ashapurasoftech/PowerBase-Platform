@@ -44,14 +44,18 @@ public sealed class RelationshipFieldFactory
         _fieldNameResolver = fieldNameResolver;
     }
 
+    /// <param name="isEncrypted">Marks the field's column as encrypted (needed when its values are copied raw from an encrypted column).</param>
+    /// <param name="hidden">Keeps the field out of searches, sorts, filters and reports (it is also never auto-added to forms by this method).</param>
     public async Task<AppField> CreateAsync(
-        AppTable table, string typeCode, string label, bool isRequired, object settingsObj, CancellationToken ct)
+        AppTable table, string typeCode, string label, bool isRequired, object settingsObj, CancellationToken ct,
+        bool isEncrypted = false, bool hidden = false)
     {
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(typeCode, ct) ?? throw new NotFoundException("FieldType", typeCode);
 
         if (typeCode == nameof(Domain.Enums.FieldTypeCode.Lookup)
             || typeCode == nameof(Domain.Enums.FieldTypeCode.Reference)
-            || typeCode == nameof(Domain.Enums.FieldTypeCode.ReportLink))
+            || typeCode == nameof(Domain.Enums.FieldTypeCode.ReportLink)
+            || hidden)   // a hidden helper field must never fail on a label clash (e.g. an earlier "(original)" left by a deleted relationship)
         {
             label = await ResolveUniqueLabelAsync(table.Id, label, ct);
         }
@@ -74,10 +78,11 @@ public sealed class RelationshipFieldFactory
             Fid = fid,
             Settings = Serialize(settingsObj),
             CreatedBy = _queryContext.UserId,
-            IsSearchable = true,
-            IsSortable = true,
-            IsFilterable = true,
-            IsReportable = true,
+            IsSearchable = !hidden,
+            IsSortable = !hidden,
+            IsFilterable = !hidden,
+            IsReportable = !hidden,
+            IsEncrypted = isEncrypted,
         };
 
         var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);

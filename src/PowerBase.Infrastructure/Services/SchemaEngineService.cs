@@ -233,7 +233,8 @@ public class SchemaEngineService : ISchemaEngineService
     }
 
     public async Task ConvertColumnToReferenceAsync(
-        AppTable table, AppField field, IReadOnlyDictionary<long, long> parentIdByRowId, CancellationToken ct = default)
+        AppTable table, AppField field, IReadOnlyDictionary<long, long> parentIdByRowId, CancellationToken ct = default,
+        PreservedOriginal? preserveUnmatched = null)
     {
         var physicalTable = PhysicalNaming.FullTableName(table.Id);
         var physicalColumn = PhysicalNaming.GetPhysicalColumnName(field);
@@ -244,6 +245,28 @@ public class SchemaEngineService : ISchemaEngineService
         await using var tx = await connection.BeginTransactionAsync(ct);
         try
         {
+            if (preserveUnmatched is not null)
+            {
+                var originalColumn = PhysicalNaming.GetPhysicalColumnName(preserveUnmatched.Target);
+                if (preserveUnmatched.PlainTextByRowId is { Count: > 0 } plain)
+                {
+                    var plainJson = System.Text.Json.JsonSerializer.Serialize(plain.Select(p => new { id = p.Key, v = p.Value }));
+                    await connection.ExecuteAsync(new CommandDefinition($"""
+                        UPDATE t SET {originalColumn} = m.v
+                        FROM {physicalTable} t
+                        JOIN OPENJSON(@plainJson) WITH (id BIGINT '$.id', v NVARCHAR(MAX) '$.v') m ON t.Id = m.id;
+                        """, new { plainJson }, tx, cancellationToken: ct));
+                }
+                else if (preserveUnmatched.PlainTextByRowId is null)
+                {
+                    await connection.ExecuteAsync(new CommandDefinition($"""
+                        UPDATE {physicalTable} SET {originalColumn} = CONVERT(NVARCHAR(MAX), {physicalColumn})
+                        WHERE {physicalColumn} IS NOT NULL
+                          AND Id NOT IN (SELECT id FROM OPENJSON(@json) WITH (id BIGINT '$.id'));
+                        """, new { json }, tx, cancellationToken: ct));
+                }
+            }
+
             // The first UPDATE swaps each stored value (text, possibly ciphertext) for its parent Record ID;
             // the second clears every row that has none (blank or soft-deleted), so what remains is all numeric.
             await connection.ExecuteAsync(new CommandDefinition($"""
@@ -266,6 +289,78 @@ public class SchemaEngineService : ISchemaEngineService
                 ["referenceFieldFid"] = ["This field's column can't be converted (its type, or a unique/indexed setting, doesn't allow it)."],
             });
         }
+    }
+
+    public async Task<bool> RestoreColumnFromReferenceAsync(
+        AppTable table, AppField restoredField, IReadOnlyDictionary<long, string> textByRowId, CancellationToken ct = default)
+    {
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+
+        var sqlDataType = await connection.ExecuteScalarAsync<string>(
+            new CommandDefinition(GetFieldTypeSqlDataTypeSql, new { id = restoredField.FieldTypeId }, cancellationToken: ct))
+            ?? throw new InvalidOperationException($"Unknown or inactive field type id: {restoredField.FieldTypeId}");
+
+        // Same rule AddColumnAsync uses: in an encrypted app (or for an encrypted field) the column holds ciphertext.
+        // The caller has already encrypted textByRowId then (IRecordRepository.EncryptColumnTextsAsync), so it is stored as
+        // given — in the local-AES layout (VARCHAR(MAX) base64). The SQL-enclave layout (column-level encryption) can't
+        // take a bulk UPDATE like this one, so that case is left alone.
+        var appIsEncrypted = await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
+            "SELECT IsEncrypted FROM meta.App WHERE Id = @appId AND IsDeleted = 0", new { appId = table.AppId }, cancellationToken: ct));
+        if (!PhysicalNaming.IsEncryptionExemptTypeCode(restoredField.TypeCode) && (appIsEncrypted || restoredField.IsEncrypted))
+        {
+            var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(connection.ConnectionString);
+            if (builder.ColumnEncryptionSetting == Microsoft.Data.SqlClient.SqlConnectionColumnEncryptionSetting.Enabled) return false;
+            sqlDataType = "VARCHAR(MAX)";
+        }
+
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var tableName = PhysicalNaming.TableName(table.Id);
+        var physicalColumn = PhysicalNaming.GetPhysicalColumnName(restoredField);
+        var oldColumn = $"{physicalColumn}_ref_old";
+        var json = System.Text.Json.JsonSerializer.Serialize(textByRowId.Select(p => new { id = p.Key, v = p.Value }));
+
+        await using var tx = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            // A new column is added (not ALTERed) because BIGINT can't be altered into every target type (e.g. DATE).
+            await connection.ExecuteAsync(new CommandDefinition(
+                $"DROP INDEX IF EXISTS IX_{tableName}_{physicalColumn} ON {physicalTable};", transaction: tx, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition(
+                $"EXEC sp_rename '{physicalTable}.{physicalColumn}', '{oldColumn}', 'COLUMN';", transaction: tx, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition(
+                $"ALTER TABLE {physicalTable} ADD {physicalColumn} {sqlDataType} NULL;", transaction: tx, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition($"""
+                UPDATE t SET {physicalColumn} = TRY_CONVERT({sqlDataType}, m.v)
+                FROM {physicalTable} t
+                JOIN OPENJSON(@json) WITH (id BIGINT '$.id', v NVARCHAR(MAX) '$.v') m ON t.Id = m.id;
+                """, new { json }, tx, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition(
+                $"ALTER TABLE {physicalTable} DROP COLUMN {oldColumn};", transaction: tx, cancellationToken: ct));
+            await tx.CommitAsync(ct);
+            return true;
+        }
+        catch (SqlException ex)
+        {
+            await tx.RollbackAsync(ct);
+            Console.WriteLine($"[RestoreColumnFromReference] {physicalTable}.{physicalColumn} not restored: {ex.Message}");
+            return false;
+        }
+    }
+
+    public async Task DropColumnIfExistsAsync(AppTable table, AppField field, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var tableName = PhysicalNaming.TableName(table.Id);
+        var physicalColumn = PhysicalNaming.GetPhysicalColumnName(field);
+
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition($"""
+            DROP INDEX IF EXISTS IX_{tableName}_{physicalColumn} ON {physicalTable};
+            IF COL_LENGTH('{physicalTable}', '{physicalColumn}') IS NOT NULL
+                ALTER TABLE {physicalTable} DROP COLUMN {physicalColumn};
+            """, cancellationToken: ct));
     }
 
     public async Task ScaleNumericColumnForPercentAsync(AppTable table, AppField field, bool toPercent, CancellationToken ct = default)
