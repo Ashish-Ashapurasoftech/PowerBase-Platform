@@ -381,6 +381,8 @@ builder.Services.AddScoped<PowerBase.Application.Imports.ListImportDefinitionsHa
 builder.Services.AddScoped<PowerBase.Application.Imports.ListAppImportDefinitionsHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ValidateImportFormulaHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListImportHistoryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.Files.ColumnFitHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.Files.PreviewImportSheetsHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.GetImportSourceFileHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.DeleteImportDefinitionsHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.GetImportDefinitionHandler>();

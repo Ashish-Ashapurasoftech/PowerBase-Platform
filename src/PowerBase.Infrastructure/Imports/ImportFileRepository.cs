@@ -35,11 +35,12 @@ public sealed class ImportFileRepository(ITenantConnectionFactory connections, I
         await conn.ExecuteAsync(new CommandDefinition("DELETE FROM meta.ImportFile WHERE PublicId = @publicId", new { publicId }, cancellationToken: ct));
     }
 
+    /// <summary>The uploads still waiting for an import. A file a run has used is kept for its history and does not count.</summary>
     public async Task<int> CountByUserAsync(long userId, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         return await conn.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT COUNT(*) FROM meta.ImportFile WHERE UploadedByUserId = @userId", new { userId }, cancellationToken: ct));
+            "SELECT COUNT(*) FROM meta.ImportFile WHERE UploadedByUserId = @userId AND RetainedUntil IS NULL", new { userId }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<ImportFile>> ListOlderThanAsync(DateTime before, int take, CancellationToken ct = default)

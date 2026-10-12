@@ -121,11 +121,63 @@ public sealed class ImportFileAccess(IFileStorageService storage, IImportFileRep
             layout = layout with { Delimiter = ImportCsvReader.DetectDelimiter(stream) };
             stream.Position = 0;
         }
+        var sheetsUsed = ImportSheetModes.SheetsUsed(snapshot.Config);
+        if (sheetsUsed.Count > 0) return await OpenSheetSourcesAsync(stream, run, layout, options, snapshot.Config, sheetsUsed, countRows);
         if (options.AllSheets) return await OpenAllSheetsAsync(stream, run, layout, options, countRows);
         if (!countRows) return new ImportFileSource(ImportFileInspector.ReadColumns(stream, layout), run.FileName, layout, run.StoragePath, 0, 0, options);
         var preview = ImportFileInspector.Preview(stream, layout);
         return new ImportFileSource(preview.Columns, run.FileName, layout, run.StoragePath, preview.DataRows, preview.LastRow, options);
     }
+
+    /// <summary>Tables that map sheets separately: each sheet any of them uses is read as a file of its own, with its own header row and first
+    /// data row and its own columns as they are in the file now. A sheet the workbook does not have, or one whose column names are not where
+    /// the import expects them, is named. Tables that read the file whole (every sheet with the same columns, or one sheet) still get their source.</summary>
+    private async Task<ImportFileSource> OpenSheetSourcesAsync(
+        Stream stream, ImportRunFile run, ImportFileLayout layout, ImportFileOptions options, ImportDefinitionConfig config,
+        IReadOnlyList<string> used, bool countRows)
+    {
+        if (layout.Format != ImportFileFormats.Xlsx) throw new ImportFileFormatException("Reading sheets separately needs an Excel workbook.");
+        var names = ImportXlsxReader.SheetNames(stream);
+        var sources = new Dictionary<string, ImportFileSource>(StringComparer.OrdinalIgnoreCase);
+        foreach (var wanted in used)
+        {
+            var settings = options.Sheets.FirstOrDefault(s => string.Equals(s.Name, wanted, StringComparison.OrdinalIgnoreCase))
+                ?? throw new ImportFileFormatException($"The import has no settings for sheet '{wanted}'.");
+            var actual = names.FirstOrDefault(n => string.Equals(n, wanted, StringComparison.OrdinalIgnoreCase))
+                ?? throw new ImportFileFormatException($"The workbook has no sheet called '{wanted}'. Rename the sheet back, or edit the import.");
+            var sheetOptions = ImportFileValidation.SheetOptions(options, settings);
+            var sheetLayout = sheetOptions.ToLayout() with { Sheet = actual };
+            stream.Position = 0;
+            try
+            {
+                sources[wanted] = countRows
+                    ? SheetSource(ImportFileInspector.Preview(stream, sheetLayout), run, sheetLayout, sheetOptions)
+                    : new ImportFileSource(ImportFileInspector.ReadColumns(stream, sheetLayout), run.FileName, sheetLayout, run.StoragePath, 0, 0, sheetOptions);
+            }
+            catch (ImportFileHeaderMissingException ex) { throw new ImportFileFormatException($"Sheet '{wanted}': {ex.Message}"); }
+        }
+
+        ImportFileSource whole;
+        if (ImportSheetModes.AnyTableReadsTheWholeFile(config))
+        {
+            stream.Position = 0;
+            whole = options.AllSheets
+                ? await OpenAllSheetsAsync(stream, run, layout, options, countRows)
+                : countRows
+                    ? SheetSource(ImportFileInspector.Preview(stream, layout), run, layout, options)
+                    : new ImportFileSource(ImportFileInspector.ReadColumns(stream, layout), run.FileName, layout, run.StoragePath, 0, 0, options);
+        }
+        else
+        {
+            // Every table reads its sheets: there is no whole-file source, but the run still needs the totals.
+            var first = sources.Values.First();
+            whole = first with { DataRows = sources.Values.Sum(s => s.DataRows), Layout = layout, Options = options };
+        }
+        return whole with { SheetSources = sources };
+    }
+
+    private static ImportFileSource SheetSource(ImportFilePreview preview, ImportRunFile run, ImportFileLayout layout, ImportFileOptions options) =>
+        new(preview.Columns, run.FileName, layout, run.StoragePath, preview.DataRows, preview.LastRow, options);
 
     /// <summary>Reads each sheet's column names (and, for a run, counts its rows). A sheet with no column-name row at all (an empty sheet)
     /// is passed over; the first sheet that has one sets the columns the import is planned against.</summary>
