@@ -715,6 +715,20 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
     }
 
+    public async Task<IReadOnlyDictionary<long, string>> EncryptColumnTextsAsync(
+        AppTable table, AppField field, IReadOnlyDictionary<long, string> plainByRowId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        if (!enc.IsActive || PhysicalNaming.IsEncryptionExemptTypeCode(field.TypeCode) || !(enc.IsAppEncrypted || field.IsEncrypted))
+            return plainByRowId;
+
+        var result = new Dictionary<long, string>(plainByRowId.Count);
+        foreach (var (rowId, text) in plainByRowId)
+            result[rowId] = await enc.EncryptValueAsync(field, text, ct);
+        return result;
+    }
+
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllRowsDecryptedAsync(
         AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default)
     {

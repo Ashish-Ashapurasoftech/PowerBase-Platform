@@ -26,7 +26,7 @@ public sealed class ImportCompletionNotifier(
                 if (!recipients.Contains(extra, StringComparer.OrdinalIgnoreCase)) recipients.Add(extra);
             if (recipients.Count == 0) return "No completion email was sent: there is no email address on the account that ran this import.";
 
-            var targets = runs is not null && snapshot.Config.AdditionalTargets.Count > 0 ? await runs.ListTargetsAsync(run.Id, ct) : null;
+            var targets = runs is not null && snapshot.Config.UsesTargetRows ? await runs.ListTargetsAsync(run.Id, ct) : null;
             var (subject, body) = Compose(run, snapshot.Config.Name, await LinkAsync(run, snapshot, ct), targets);
             foreach (var to in recipients)
             {

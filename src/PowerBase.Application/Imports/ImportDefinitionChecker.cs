@@ -80,6 +80,9 @@ public sealed class ImportDefinitionChecker(
 
         var schema = new AppFieldSchema(sourceFields);
         if (TargetProblem(def.ImportType, def.MergeKeyFid, mappings, destByFid, sourceByFid, schema, isFile) is { } homeProblem) return Cap(homeProblem);
+        var checkedConfig = ImportConfigMapper.ToConfig(def, Guid.Empty);
+        if (isFile && checkedConfig.File is { } homeFile && SheetProblem(homeFile, destByFid, def.ImportType, def.MergeKeyFid, checkedConfig.SheetMappings) is { } homeSheet)
+            return Cap(homeSheet);
 
         // The other tables this import fills are checked the same way, each against its own fields.
         foreach (var target in ImportConfigMapper.ToConfig(def, Guid.Empty).AdditionalTargets)
@@ -88,6 +91,8 @@ public sealed class ImportDefinitionChecker(
             if (extra.Table is null) return Cap("A table this import also copies into no longer exists.");
             if (TargetProblem(target.ImportType, target.MergeKeyFid, target.Mappings, Live(extra.Fields), sourceByFid, schema, isFile) is { } problem)
                 return Cap($"'{extra.Table.Name}': {problem}");
+            if (isFile && checkedConfig.File is { } targetFile && SheetProblem(targetFile, Live(extra.Fields), target.ImportType, target.MergeKeyFid, target.SheetMappings) is { } sheetProblem)
+                return Cap($"'{extra.Table.Name}': {sheetProblem}");
         }
 
         if (MissingConditionField(conditions, sourceByFid) is { } missing)
@@ -99,6 +104,28 @@ public sealed class ImportDefinitionChecker(
         foreach (var target in config.AdditionalTargets)
             if (MissingConditionField(target.Conditions, sourceByFid) is { } missingTarget)
                 return Cap($"A field this import filters a table on was deleted (field {missingTarget}).");
+        return null;
+    }
+
+    /// <summary>What is wrong with a table that reads a workbook sheet by sheet: each sheet's mapping is checked against that sheet's own saved
+    /// columns, with its own virtual columns and filter, or null. Whether the sheet is still in the workbook is only known when a file is uploaded.</summary>
+    private string? SheetProblem(
+        ImportFileOptions options, Dictionary<int, AppField> destByFid, string importType, int? mergeKeyFid, IReadOnlyList<ImportSheetMapping> sheets)
+    {
+        foreach (var sheet in sheets)
+        {
+            var settings = options.Sheets.FirstOrDefault(s => string.Equals(s.Name, sheet.Sheet, StringComparison.OrdinalIgnoreCase));
+            if (settings is null) return $"Sheet '{sheet.Sheet}' has no saved settings.";
+            IReadOnlyList<AppField> fields = ImportFileColumns.ToFields(ImportFileValidation.SavedSheetSource(options, settings).Columns);
+            var (virtuals, virtualError) = ImportVirtual.Resolve(sheet.VirtualColumns, fields, formulaEngine);
+            if (virtualError is not null) return $"Sheet '{sheet.Sheet}': {virtualError}";
+            if (virtuals.Count > 0) fields = fields.Concat(virtuals.Select(v => v.Field)).ToList();
+            var byFid = Live(fields);
+            if (TargetProblem(importType, mergeKeyFid, sheet.Mappings, destByFid, byFid, new AppFieldSchema(fields), isFile: true) is { } problem)
+                return $"Sheet '{sheet.Sheet}': {problem}";
+            if (MissingConditionField(sheet.Conditions, byFid) is { } missing)
+                return $"Sheet '{sheet.Sheet}': a field it filters on was deleted (field {missing}).";
+        }
         return null;
     }
 

@@ -42,7 +42,7 @@ public class CreateRelationshipSummaryGuardTests
     public CreateRelationshipSummaryGuardTests()
     {
         var fieldFactory = new RelationshipFieldFactory(_fieldRepo, _fieldTypeRepo, _schemaEngine, _formRepo, _queryContext, _nameResolver);
-        _handler = new CreateRelationshipCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _relRepo, fieldFactory, _auditRepo, _appRepo);
+        _handler = new CreateRelationshipCommandHandler(_tableRepo, _fieldRepo, _fieldTypeRepo, _relRepo, fieldFactory, _auditRepo, _appRepo, NSubstitute.Substitute.For<PowerBase.Application.Common.Interfaces.ISchemaEngineService>(), NSubstitute.Substitute.For<PowerBase.Application.Common.Interfaces.IRecordRepository>(), NSubstitute.Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>(), NSubstitute.Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>());
 
         var project = new AppTable { Id = ProjectTableId, PublicId = ProjectPublicId, AppId = AppId, Name = "Project" };
         var task = new AppTable { Id = TaskTableId, PublicId = TaskPublicId, AppId = AppId, Name = "Task" };

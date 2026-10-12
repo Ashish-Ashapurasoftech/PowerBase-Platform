@@ -550,6 +550,16 @@ public sealed class ReferenceSettings
     /// <summary>The parent table's <see cref="Entities.AppTable.Id"/>.</summary>
     public long? ParentTableId { get; set; }
 
+    /// <summary>Fid of the hidden "(original)" Text field that kept the values which had no parent record when this
+    /// field was converted from an existing field. List/report/export reads show it for rows whose reference is NULL.</summary>
+    public int? OriginalFid { get; set; }
+
+    /// <summary>Type code (and settings JSON) the field had before it was converted into this Reference. Lets deleting
+    /// the relationship put the field back as it was, with the parent's key text instead of Record IDs.
+    /// Null when the field was created as a Reference, or was an already-numeric field converted metadata-only.</summary>
+    public string? OriginalTypeCode { get; set; }
+    public string? OriginalSettings { get; set; }
+
     /// <summary>Dependent-dropdown conditions ("the values in this field depend on a selection in
     /// another field"). All conditions must hold (AND). Null/empty = every parent record is offered.</summary>
     public List<ReferenceFilterCondition>? FilterConditions { get; set; }

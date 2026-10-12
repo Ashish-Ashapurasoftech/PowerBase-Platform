@@ -63,6 +63,16 @@ public sealed class ImportPlan
     /// <summary>This table's own filter, for an import that fills several tables: checked on each row read, in memory, to decide whether this
     /// table gets it. Null when the table takes every row that was read.</summary>
     public ImportRowFilter? TableFilter { get; init; }
+    /// <summary>Which of the import's tables this plan fills: 0 is the import's own table. A table read sheet by sheet has a plan per sheet, all with
+    /// the same index, and the run keeps one set of counts and one details file for the table.</summary>
+    public int TableIndex { get; set; }
+    /// <summary>The sheet this plan reads, when its table reads a workbook sheet by sheet; null otherwise.</summary>
+    public string? SheetName { get; set; }
+    /// <summary>A sheet plan of a table that combines its sheets: the destination field its rows are combined on, when this sheet has one.</summary>
+    public int? JoinFieldFid { get; set; }
+    /// <summary>The plan of a table that combines its sheets into one record per value: the sheets' own plans, in the order they are read. This
+    /// plan's mappings take their values from the combined records.</summary>
+    public IReadOnlyList<ImportPlan>? JoinedFrom { get; set; }
 }
 
 /// <summary>Validates an import configuration against the live schema and the caller's access, and resolves it
@@ -82,6 +92,8 @@ public sealed class ImportPlanBuilder(
     public const int MaxMappings = 250;
     /// <summary>Tables an import may fill besides its own.</summary>
     public const int MaxAdditionalTargets = 4;
+    /// <summary>Sheets one table may read separately.</summary>
+    public const int MaxSheetsPerTable = 50;
     public const int MaxFormulaLength = 4000;
 
     private static ValidationException Invalid(string message) =>
@@ -223,10 +235,13 @@ public sealed class ImportPlanBuilder(
     public async Task<IReadOnlyList<ImportPlan>> BuildAllAsync(ImportDefinitionConfig cfg, Guid homeTableId, CancellationToken ct, ImportFileSource? file = null)
     {
         // With one table, the import's conditions already say which rows go in; a second set would only be a way to get them wrong.
-        if (cfg.AdditionalTargets.Count == 0 && cfg.TableConditions is { Nodes.Count: > 0 })
+        if (cfg.AdditionalTargets.Count == 0 && cfg.SheetMappings.Count == 0 && cfg.TableConditions is { Nodes.Count: > 0 })
             throw Invalid("A table's own filter is for an import that fills more than one table. Use the conditions above instead.");
+        if (cfg.SheetMappings.Count > 0 && cfg.TableConditions is { Nodes.Count: > 0 })
+            throw Invalid("A table that reads the workbook sheet by sheet is filtered in each sheet's own mapping.");
         var clock = DateTime.UtcNow;
-        var plans = new List<ImportPlan> { await BuildAsync(cfg, homeTableId, ct, file, clock) };
+        var plans = new List<ImportPlan>();
+        plans.AddRange(await BuildTableAsync(cfg, homeTableId, cfg.SheetMappings, file, clock, 0, ct));
         if (cfg.AdditionalTargets.Count == 0) return plans;
         if (cfg.AdditionalTargets.Count > MaxAdditionalTargets)
             throw Invalid($"An import can fill at most {MaxAdditionalTargets + 1} tables.");
@@ -235,16 +250,21 @@ public sealed class ImportPlanBuilder(
         var chosen = cfg.AdditionalTargets.Select(t => t.DestinationTableId).Prepend(homeTableId).ToList();
         if (chosen.Distinct().Count() != chosen.Count) throw Invalid("Each table can be filled only once by an import.");
 
+        var index = 0;
         foreach (var target in cfg.AdditionalTargets)
         {
+            index++;
+            if (target.SheetMappings.Count > 0 && target.Conditions is { Nodes.Count: > 0 })
+                throw Invalid("A table that reads the workbook sheet by sheet is filtered in each sheet's own mapping.");
             var view = ImportJson.Deserialize<ImportDefinitionConfig>(ImportJson.Serialize(cfg))!;
             view.AdditionalTargets = [];
+            view.SheetMappings = [];
             view.TableConditions = target.Conditions;
             view.ImportType = target.ImportType;
             view.MergeKeyFid = target.MergeKeyFid;
             view.Mappings = target.Mappings;
             view.ColumnRules = target.ColumnRules;
-            try { plans.Add(await BuildAsync(view, target.DestinationTableId, ct, file, clock)); }
+            try { plans.AddRange(await BuildTableAsync(view, target.DestinationTableId, target.SheetMappings, file, clock, index, ct)); }
             catch (ValidationException ex)
             {
                 // Say which table the problem is in: the messages themselves speak of "the destination".
@@ -254,19 +274,144 @@ public sealed class ImportPlanBuilder(
         }
 
         var home = plans[0].Destination;
-        if (plans.Select(p => p.Destination.Id).Distinct().Count() != plans.Count)
+        if (plans.Select(p => p.Destination.Id).Distinct().Count() != chosen.Count)
             throw Invalid("Each table can be filled only once by an import.");
         if (plans.Any(p => p.Destination.AppId != home.AppId))
             throw Invalid("All the tables an import fills must be in the same app.");
         return plans;
     }
 
+    /// <summary>The plans of one table: one for the table as the import reads its source, or, when the table reads a workbook sheet by sheet, one
+    /// for each sheet it takes, each built like a single-sheet file import against that sheet's own columns. A sheet's filter is the table's own
+    /// filter for that sheet (checked per row, in memory), and its virtual columns are its own.</summary>
+    private async Task<List<ImportPlan>> BuildTableAsync(
+        ImportDefinitionConfig view, Guid tableId, List<ImportSheetMapping> sheetMappings, ImportFileSource? file, DateTime clock, int tableIndex, CancellationToken ct)
+    {
+        if (sheetMappings.Count == 0)
+        {
+            var whole = await BuildAsync(view, tableId, ct, file, clock);
+            whole.TableIndex = tableIndex;
+            return [whole];
+        }
+        if (view.SourceKind != ImportSourceKinds.File || file?.SheetSources is null)
+            throw Invalid("Sheets can only be mapped separately for an import that reads an Excel workbook.");
+        var duplicate = sheetMappings.GroupBy(s => s.Sheet?.Trim() ?? "", StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+        if (duplicate is not null) throw Invalid($"Sheet '{duplicate.Key}' is mapped more than once for the same table.");
+        if (sheetMappings.Count > MaxSheetsPerTable) throw Invalid($"A table can read at most {MaxSheetsPerTable} sheets.");
+
+        // 0 says "combine on nothing" (chosen on purpose); no value on a table whose sheets are read together means "work it out" (below).
+        var joinFids = sheetMappings.Where(s => s.JoinFieldFid > 0).Select(s => s.JoinFieldFid!.Value).Distinct().ToList();
+        var joinOff = sheetMappings.Any(s => s.JoinFieldFid == 0);
+        if (joinFids.Count > 1) throw Invalid("The sheets of a table can be combined on one field only.");
+        var combine = joinFids.Count == 1 || sheetMappings.Any(s => s.Combined);
+
+        var plans = new List<ImportPlan>(sheetMappings.Count);
+        foreach (var sheet in sheetMappings)
+        {
+            if (!file.SheetSources.TryGetValue(sheet.Sheet ?? "", out var sheetFile))
+                throw Invalid($"The workbook has no sheet called '{sheet.Sheet}'.");
+            var unit = ImportJson.Deserialize<ImportDefinitionConfig>(ImportJson.Serialize(view))!;
+            unit.SheetMappings = [];
+            unit.File = sheetFile.Options;
+            unit.Mappings = sheet.Mappings;
+            unit.ColumnRules = sheet.ColumnRules;
+            unit.VirtualColumns = sheet.VirtualColumns;
+            unit.Conditions = null;               // the import-wide filter belongs to the shared mapping: a sheet has its own
+            unit.TableConditions = sheet.Conditions;
+            if (combine)
+            {
+                // The sheet only says what each of its rows holds; the table's type and key are applied to the combined records, which is where
+                // a key can be found (a sheet without the key is fine).
+                unit.ImportType = ImportTypes.Copy;
+                unit.MergeKeyFid = null;
+            }
+            try { plans.Add(await BuildAsync(unit, tableId, ct, sheetFile, clock)); }
+            catch (ValidationException ex) { throw Invalid($"Sheet '{sheet.Sheet}': {ex.Message}"); }
+            var plan = plans[^1];
+            plan.TableIndex = tableIndex;
+            plan.SheetName = sheet.Sheet;
+            if (!combine) continue;
+            if (plan.Mappings.Any(m => m.Kind != ImportMappingSource.Dynamic))
+                throw Invalid($"Sheet '{sheet.Sheet}': when a table's sheets are combined, every row of its mapping takes its value from a column.");
+            if (sheet.JoinFieldFid is > 0 and var join)
+            {
+                if (plan.Mappings.All(m => m.Destination.Fid != join))
+                    throw Invalid($"Sheet '{sheet.Sheet}': choose a column for the field its rows are combined on, or leave the sheet out of the combining.");
+                plan.JoinFieldFid = join;
+            }
+        }
+        if (!combine) return plans;
+        if (joinFids.Count == 0 && !joinOff) InferJoin(plans, view.ImportType == ImportTypes.Merge ? view.MergeKeyFid : null);
+        return [await BuildJoinedAsync(view, tableId, plans, clock, tableIndex, ct)];
+    }
+
+    /// <summary>A table whose sheets are read together, with no field chosen to combine them on: rows are combined on the field its sheets share, so a
+    /// record spread over sheets is not rejected for the fields another sheet holds. The merge key if two or more sheets map it, otherwise a unique field
+    /// two or more sheets map (the first, in the first sheet's order); never a field that is not unique, since equal values there mean nothing. When no
+    /// field qualifies, each row stays its own record.</summary>
+    private static void InferJoin(List<ImportPlan> members, int? mergeKeyFid)
+    {
+        var sheetsWith = members.SelectMany(p => p.Mappings.Select(m => m.Destination).DistinctBy(d => d.Fid)).GroupBy(d => d.Fid!.Value).ToDictionary(g => g.Key, g => g.Count());
+        var shared = members.SelectMany(p => p.Mappings.Select(m => m.Destination)).Where(d => sheetsWith[d.Fid!.Value] >= 2).DistinctBy(d => d.Fid).ToList();
+        var chosen = shared.FirstOrDefault(d => d.Fid == mergeKeyFid) ?? shared.FirstOrDefault(d => d.IsUnique && !ImportTypeCompatibility.IsRecordId(d));
+        if (chosen is null) return;
+        foreach (var plan in members)
+            if (plan.Mappings.Any(m => m.Destination.Fid == chosen.Fid)) plan.JoinFieldFid = chosen.Fid;
+    }
+
+    /// <summary>The plan of a table whose sheets are combined: its destination fields are every field any sheet writes, and each takes its value
+    /// from a column of the combined record. Built like a file import of its own, against those columns, so the table's import type, key, rules
+    /// and every check a run makes apply to the whole record, not to each sheet's part of it.</summary>
+    private async Task<ImportPlan> BuildJoinedAsync(
+        ImportDefinitionConfig view, Guid tableId, List<ImportPlan> members, DateTime clock, int tableIndex, CancellationToken ct)
+    {
+        var order = new List<AppField>();
+        foreach (var m in members.SelectMany(p => p.Mappings))
+            if (order.All(f => f.Fid != m.Destination.Fid)) order.Add(m.Destination);
+        var names = order.Select(ImportTypeCompatibility.DisplayName).ToArray();
+        var columns = ImportFileColumns.FromHeader(names, names.Length);
+
+        var rules = new Dictionary<int, ImportColumnRule>();
+        foreach (var (fid, rule) in members.SelectMany(p => p.Rules))
+        {
+            rules.TryGetValue(fid, out var have);
+            rules[fid] = new ImportColumnRule
+            {
+                DestFid = fid, RemoveDuplicates = rule.RemoveDuplicates || have?.RemoveDuplicates == true,
+                RequireField = rule.RequireField || have?.RequireField == true, IgnoreBlanks = rule.IgnoreBlanks || have?.IgnoreBlanks == true
+            };
+        }
+
+        var unit = ImportJson.Deserialize<ImportDefinitionConfig>(ImportJson.Serialize(view))!;
+        unit.SheetMappings = [];
+        unit.VirtualColumns = [];
+        unit.Conditions = null;
+        unit.TableConditions = null;
+        unit.File = new ImportFileOptions { Format = ImportFileFormats.Xlsx, ColumnBy = ImportSourceKinds.ColumnByPosition, HeaderRow = 1, Columns = columns.Select(c => c.Name).ToList() };
+        unit.Mappings = order.Select((f, i) => new ImportFieldMapping { DestFid = f.Fid!.Value, Source = ImportMappingSource.Dynamic, SourceFid = columns[i].Fid }).ToList();
+        unit.ColumnRules = rules.Values.ToList();
+
+        var first = members[0].File!;
+        var rows = members.Sum(p => p.File?.DataRows ?? 0);
+        var file = new ImportFileSource(
+            columns, first.FileName, first.Layout, first.StoragePath, rows, rows, unit.File,
+            Sheets: members.Select(p => new ImportFileSheet(p.SheetName!, columns, p.File?.DataRows ?? 0, p.File?.LastRow ?? 0)).ToList());
+        ImportPlan plan;
+        try { plan = await BuildAsync(unit, tableId, ct, file, clock); }
+        catch (ValidationException ex) { throw Invalid($"Combining the sheets: {ex.Message}"); }
+        plan.TableIndex = tableIndex;
+        plan.JoinedFrom = members;
+        return plan;
+    }
+
     /// <summary>The plan the source is read with when several tables are filled: the first table's, widened to read every field any of the
     /// tables maps, uses in a formula or filters on. Everything else about reading (source, conditions, file) is the same in every plan.</summary>
-    public static ImportPlan UnionForReading(IReadOnlyList<ImportPlan> plans)
+    /// <param name="virtualsPerPlan">Each plan has virtual columns of its own (tables reading a sheet differently), so they are calculated for each
+    /// plan's rows, not once for the read.</param>
+    public static ImportPlan UnionForReading(IReadOnlyList<ImportPlan> plans, bool virtualsPerPlan = false)
     {
         var first = plans[0];
-        if (plans.Count == 1) return first;
+        if (plans.Count == 1 && !virtualsPerPlan) return first;
         return new ImportPlan
         {
             Source = first.Source, File = first.File, SourceFields = first.SourceFields, Destination = first.Destination,
@@ -274,7 +419,8 @@ public sealed class ImportPlanBuilder(
             SourceFilter = first.SourceFilter, RowFilter = first.RowFilter, MergeKey = first.MergeKey, Rules = first.Rules,
             ConstraintPolicy = first.ConstraintPolicy, SourceOwnerRestriction = first.SourceOwnerRestriction,
             ReadFields = plans.SelectMany(p => p.ReadFields).GroupBy(f => f.Id).Select(g => g.First()).ToList(),
-            NeedsProjection = plans.Any(p => p.NeedsProjection), FormulaOptions = first.FormulaOptions, Virtuals = first.Virtuals
+            NeedsProjection = plans.Any(p => p.NeedsProjection), FormulaOptions = first.FormulaOptions, Virtuals = virtualsPerPlan ? [] : first.Virtuals,
+            TableIndex = first.TableIndex, SheetName = first.SheetName
         };
     }
 

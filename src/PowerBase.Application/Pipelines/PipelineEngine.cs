@@ -1580,6 +1580,23 @@ public partial class PipelineEngine : IPipelineEngine
         }
     }
 
+    /// <summary>A row Commit Bulk Upsert is about to insert has to pass the same rules as a record added by hand (defaults, Required /
+    /// Unique / format, Custom Data Rule). Rows inserted earlier in the same commit are already in the transaction, so a value repeated
+    /// within the batch is reported as a duplicate too. The error names the row; the whole commit is rolled back, as for any row error.</summary>
+    private async Task ValidateNewBulkUpsertRowAsync(AppTable table, IReadOnlyList<AppField> fields, Dictionary<long, object?> row,
+        IRecordRepository recordRepo, IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IDbTransaction? transaction, int rowNumber, CancellationToken ct)
+    {
+        await PipelineCreateRecordRules.ApplyDefaultsAsync(fields, row, StepActingUserId, CurrentStepServices, ct);
+        try
+        {
+            await PipelineCreateRecordRules.ValidateAsync(table, fields, row, recordRepo, tableRepo, fieldRepo, CurrentStepServices, transaction, ct);
+        }
+        catch (ValidationException ex)
+        {
+            throw new PipelineBulkUpsertException("ROW_VALIDATION_FAILED", $"Row {rowNumber}: {ex.Message}", rowIndex: rowNumber);
+        }
+    }
+
     private static bool IsUniqueConstraintViolation(Exception ex)
     {
         var property = ex.GetType().GetProperty("Number");
@@ -2292,6 +2309,11 @@ public partial class PipelineEngine : IPipelineEngine
                     return cachedOutput;
                 }
 
+                // Same rules as adding the record by hand: defaults, Required / Unique / format, Custom Data Rule. After the receipt check
+                // above, so a retry of a step that already wrote its record returns that result instead of reporting its own record as a duplicate.
+                await PipelineCreateRecordRules.ApplyDefaultsAsync(fields, values, StepActingUserId, CurrentStepServices, ct);
+                await PipelineCreateRecordRules.ValidateAsync(table, fields, values, recordRepo, tableRepo, fieldRepo, CurrentStepServices, uow.Transaction, ct);
+
                 recordPublicId = await recordRepo.CreateAsync(table, fields, values, uow.Transaction, ct);
                 _logger.LogInformation("Create Record step {StepId} succeeded. Created record: {RecordPublicId}.", step.Id, recordPublicId);
                 var recordId = await recordRepo.GetActiveRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
@@ -2348,6 +2370,13 @@ public partial class PipelineEngine : IPipelineEngine
                 await uow.RollbackAsync(CancellationToken.None);
                 var winningOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, null, ct);
                 if (winningOutput != null) return winningOutput;
+                throw;
+            }
+            catch (ValidationException ex)
+            {
+                // The record broke a Required / Unique / format rule: its own data is at fault, not the system.
+                _logger.LogWarning("Create Record step {StepId} rejected the record: {Message}", step.Id, ex.Message);
+                await uow.RollbackAsync(CancellationToken.None);
                 throw;
             }
             catch (Exception ex)
@@ -3699,6 +3728,7 @@ public partial class PipelineEngine : IPipelineEngine
                             foreach (var kvp in insertRefOverrides1)
                                 row[kvp.Key] = kvp.Value;
 
+                            await ValidateNewBulkUpsertRowAsync(table, fields, row, recordRepo, tableRepo, fieldRepo, uow.Transaction, i + 1, ct);
                             var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
                             var changeValues = new Dictionary<long, object?>();
                             foreach (var f in fields)
@@ -3723,6 +3753,7 @@ public partial class PipelineEngine : IPipelineEngine
                         foreach (var kvp in insertRefOverrides2)
                             row[kvp.Key] = kvp.Value;
 
+                        await ValidateNewBulkUpsertRowAsync(table, fields, row, recordRepo, tableRepo, fieldRepo, uow.Transaction, i + 1, ct);
                         var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
                         var changeValues = new Dictionary<long, object?>();
                         foreach (var f in fields)
@@ -5667,18 +5698,25 @@ public partial class PipelineEngine : IPipelineEngine
             return true;
         }
 
-        var property = ex.GetType().GetProperty("Number");
-        if (property != null)
+        // A SQL error that says "try again", not "this record is bad": the deadlock victim and a lost connection. The record is
+        // left pending and the step is retried; treating it as the record's own failure would skip the record for good.
+        for (var current = ex; current != null; current = current.InnerException)
         {
-            var number = property.GetValue(ex);
-            if (number is int intVal && intVal == 1205)
-            {
+            var property = current.GetType().GetProperty("Number");
+            if (property != null && property.GetValue(current) is int number && TransientSqlErrorNumbers.Contains(number))
                 return true;
-            }
         }
 
         return false;
     }
+
+    /// <summary>1205 deadlock victim; 64 / 233 / 10053 / 10054 / 10060 connection lost or refused; 10928 / 10929 / 40197 / 40501 /
+    /// 40613 / 49918-49920 Azure SQL "busy / failing over, retry". Command timeouts (-2) are not here: a query that is too slow
+    /// would only be slow again.</summary>
+    private static readonly HashSet<int> TransientSqlErrorNumbers = new()
+    {
+        1205, 64, 233, 10053, 10054, 10060, 10928, 10929, 40197, 40501, 40613, 49918, 49919, 49920
+    };
 
     public static bool IsCatchablePipelineStepError(Exception ex)
     {

@@ -68,7 +68,7 @@ public sealed class ImportRunProcessor(
         }
 
         // An import that fills several tables has its own runner; an import into one table (every import saved before) takes the path below.
-        if (snapshot?.Config.AdditionalTargets is { Count: > 0 })
+        if (snapshot?.Config.UsesTargetRows is true)
         {
             await multiTarget.RunAsync(run, snapshot, EndAsync, ct);
             return;
@@ -304,6 +304,19 @@ public sealed class ImportRunProcessor(
             logger.LogWarning(ex, "Could not save the details file for import run {RunId}.", run.PublicId);
             return (null, "The details file could not be saved; the rows that were not imported are listed on this page.");
         }
+    }
+
+    /// <summary>The details file of a table that has several plans (it reads a workbook sheet by sheet): the value columns are every field any of
+    /// its sheets writes, once each, and each line fills the ones its own sheet writes. Also returns, for each plan, where each of its values goes.</summary>
+    internal static (ImportDetailsWriter Writer, IReadOnlyList<int[]> ValueAt) NewDetailsWriter(IReadOnlyList<ImportPlan> tablePlans)
+    {
+        var fields = new List<(int Fid, string Label)>();
+        foreach (var m in tablePlans.SelectMany(p => p.Mappings))
+            if (!fields.Any(f => f.Fid == m.Destination.Fid)) fields.Add((m.Destination.Fid!.Value, ImportTypeCompatibility.DisplayName(m.Destination)));
+        var labels = tablePlans.SelectMany(p => p.DestinationFields).Where(f => f.Fid.HasValue).GroupBy(f => f.Fid!.Value)
+            .ToDictionary(g => g.Key, g => ImportTypeCompatibility.DisplayName(g.First()));
+        var valueAt = tablePlans.Select(p => p.Mappings.Select(m => fields.FindIndex(f => f.Fid == m.Destination.Fid)).ToArray()).ToList();
+        return (new ImportDetailsWriter(fields.Select(f => f.Label).ToList(), labels, includeSheet: tablePlans.Any(p => p.SheetName is not null)), valueAt);
     }
 
     /// <summary>The details file of one table: its headings are the fields the rows were mapped into.</summary>

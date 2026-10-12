@@ -41,51 +41,66 @@ public sealed class ImportDetailsWriter : IAsyncDisposable
     private readonly IReadOnlyList<string> _valueHeaders;
     private readonly IReadOnlyDictionary<int, string> _columnLabels;
     private readonly string _path = Path.Combine(Path.GetTempPath(), $"import-details-{Guid.NewGuid():N}.csv");
+    private readonly bool _includeSheet;
     private StreamWriter? _writer;
 
     /// <param name="valueHeaders">One heading per carried value (the destination field each is mapped to).</param>
     /// <param name="columnLabels">Destination field names by id, to name the column a problem refers to.</param>
-    public ImportDetailsWriter(IReadOnlyList<string> valueHeaders, IReadOnlyDictionary<int, string> columnLabels)
+    /// <param name="includeSheet">The table reads a workbook sheet by sheet: each line says which sheet its row is in.</param>
+    public ImportDetailsWriter(IReadOnlyList<string> valueHeaders, IReadOnlyDictionary<int, string> columnLabels, bool includeSheet = false)
     {
         _valueHeaders = valueHeaders;
         _columnLabels = columnLabels;
+        _includeSheet = includeSheet;
     }
 
     public long RowCount { get; private set; }
 
     public static readonly string[] FixedHeaders = ["Source row", "Result", "Record ID#", "Reason", "Column", "Details", "Existing record"];
 
-    public async Task AppendAsync(IReadOnlyList<ImportFeedbackRow> problems, IReadOnlyList<ImportWrittenRow>? written, CancellationToken ct)
+    /// <param name="valueAt">When the lines come from one of several mappings into the same table (a sheet each), where each carried value goes among
+    /// the file's value columns: value <c>i</c> goes to column <c>valueAt[i]</c>. Null when the values are already in the file's order.</param>
+    /// <param name="sheet">The sheet these lines came from, for a table read sheet by sheet.</param>
+    public async Task AppendAsync(
+        IReadOnlyList<ImportFeedbackRow> problems, IReadOnlyList<ImportWrittenRow>? written, CancellationToken ct, int[]? valueAt = null, string? sheet = null)
     {
         var writer = await WriterAsync();
         // One line per source row, in the order of the source.
         var lines = new List<(long Row, string Line)>(problems.Count + (written?.Count ?? 0));
         foreach (var w in written ?? [])
-            lines.Add((w.SourceRowRef, Line(w.SourceRowRef, w.Outcome switch
+            lines.Add((w.SourceRowRef, Line(w.SourceRowRef, sheet, w.Outcome switch
             {
                 ImportOutcome.Inserted => "Inserted",
                 ImportOutcome.Updated => "Updated",
                 _ => "Unchanged"
-            }, w.RecordId, null, null, w.Note, null, w.SourceValues)));
+            }, w.RecordId, null, null, w.Note, null, Align(w.SourceValues, valueAt))));
         foreach (var p in problems)
         {
             var i = p.Issue;
             var column = p.ColumnLabel ?? (i.ColumnFid is { } fid && _columnLabels.TryGetValue(fid, out var label) ? label : null);
-            lines.Add((i.SourceRowRef ?? 0, Line(i.SourceRowRef ?? 0, i.Outcome == ImportOutcome.Skipped ? "Skipped" : "Error", p.RecordId,
-                ImportFeedbackWriter.ReasonOf(i.ReasonCode), column, i.Message, i.ExistingRecordRef, p.SourceValues)));
+            lines.Add((i.SourceRowRef ?? 0, Line(i.SourceRowRef ?? 0, sheet, i.Outcome == ImportOutcome.Skipped ? "Skipped" : "Error", p.RecordId,
+                ImportFeedbackWriter.ReasonOf(i.ReasonCode), column, i.Message, i.ExistingRecordRef, Align(p.SourceValues, valueAt))));
         }
         lines.Sort((a, b) => a.Row.CompareTo(b.Row)); // a stable sort in effect: rows with the same number keep their order
         foreach (var (_, line) in lines) await writer.WriteLineAsync(line);
         RowCount += lines.Count;
     }
 
-    private static string Line(long row, string result, long? recordId, string? reason, string? column, string? details, long? existing, IReadOnlyList<string?> values)
+    /// <summary>Puts a mapping's values where the file's value columns want them (a column no value goes to stays blank).</summary>
+    private IReadOnlyList<string?> Align(IReadOnlyList<string?> values, int[]? valueAt)
     {
-        var cells = new List<string?>
-        {
-            row == 0 ? null : row.ToString(CultureInfo.InvariantCulture), result, recordId?.ToString(CultureInfo.InvariantCulture),
-            reason, column, details, existing?.ToString(CultureInfo.InvariantCulture)
-        };
+        if (valueAt is null) return values;
+        var aligned = new string?[_valueHeaders.Count];
+        for (var i = 0; i < values.Count && i < valueAt.Length; i++)
+            if (valueAt[i] >= 0 && valueAt[i] < aligned.Length) aligned[valueAt[i]] = values[i];
+        return aligned;
+    }
+
+    private string Line(long row, string? sheet, string result, long? recordId, string? reason, string? column, string? details, long? existing, IReadOnlyList<string?> values)
+    {
+        var cells = new List<string?> { row == 0 ? null : row.ToString(CultureInfo.InvariantCulture) };
+        if (_includeSheet) cells.Add(sheet);
+        cells.AddRange([result, recordId?.ToString(CultureInfo.InvariantCulture), reason, column, details, existing?.ToString(CultureInfo.InvariantCulture)]);
         cells.AddRange(values);
         return string.Join(',', cells.Select(ImportFeedbackWriter.Cell));
     }
@@ -95,7 +110,8 @@ public sealed class ImportDetailsWriter : IAsyncDisposable
         if (_writer is not null) return _writer;
         _writer = new StreamWriter(new FileStream(_path, FileMode.Create, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true),
             new UTF8Encoding(encoderShouldEmitUTF8Identifier: true)); // the BOM makes Excel read it as UTF-8
-        await _writer.WriteLineAsync(string.Join(',', FixedHeaders.Concat(_valueHeaders).Select(ImportFeedbackWriter.Cell)));
+        var fixedHeaders = _includeSheet ? FixedHeaders.Take(1).Append("Sheet").Concat(FixedHeaders.Skip(1)) : FixedHeaders;
+        await _writer.WriteLineAsync(string.Join(',', fixedHeaders.Concat(_valueHeaders).Select(ImportFeedbackWriter.Cell)));
         return _writer;
     }
 

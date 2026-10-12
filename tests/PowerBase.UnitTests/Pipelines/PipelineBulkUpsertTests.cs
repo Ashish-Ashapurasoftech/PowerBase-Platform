@@ -632,6 +632,68 @@ public class PipelineBulkUpsertTests
         result.GetProperty("created_record_ids").EnumerateArray().Select(x => x.GetInt64()).Should().ContainSingle().Which.Should().Be(88L);
     }
 
+    // ── Rows that are inserted must pass the field rules (Required / Unique) like a record added by hand ───────────────
+
+    private async Task<string> CommitOneNewRowAsync(string email, string? fullName)
+    {
+        var prepStep = new PipelineStep { RefId = "prep_rules", Type = "action", Subtype = "prepare-bulk-upsert",
+            ConfigJson = JsonSerializer.Serialize(new { tableLabel = _tablePublicId.ToString(), mergeKeyFid = "f_6" }) };
+        var contextDict = new Dictionary<string, object>();
+        await RunStepAsync(prepStep, contextDict);
+        var rowValues = new Dictionary<string, object?> { ["f_6"] = email };
+        if (fullName != null) rowValues["fid_7"] = fullName;
+        await RunStepAsync(new PipelineStep { RefId = "r_rules", Type = "action", Subtype = "add-bulk-upsert-row",
+            ConfigJson = JsonSerializer.Serialize(new { parentUpsertStepRefId = "prep_rules", rowValues }) }, contextDict);
+
+        _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
+        var newGuid = Guid.NewGuid();
+        _recordRepo.CreateAsync(_testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(newGuid);
+        _recordRepo.GetActiveRecordIdsByPublicIdsAsync(_testTable, Arg.Any<IReadOnlyCollection<Guid>>(), _dbTx, Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<Guid, long> { [newGuid] = 1L });
+        return await RunStepAsync(new PipelineStep { RefId = "commit_rules", Type = "action", Subtype = "commit-upsert",
+            ConfigJson = JsonSerializer.Serialize(new { parentUpsertStepRefId = "prep_rules" }) }, contextDict);
+    }
+
+    [Fact]
+    public async Task InsertedRow_UniqueFieldAlreadyInUse_RejectsTheCommitNamingTheRow_AndWritesNothing()
+    {
+        _testFields.Single(f => f.Fid == 7).IsUnique = true;
+        _recordRepo.HasValueDuplicateAsync(_testTable, Arg.Is<AppField>(f => f.Fid == 7), "Grace", Arg.Any<long?>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>())
+            .Returns(true);
+
+        var act = () => CommitOneNewRowAsync("grace@example.com", "Grace");
+
+        var error = (await act.Should().ThrowAsync<PipelineBulkUpsertException>()).Which;
+        error.ErrorCode.Should().Be("ROW_VALIDATION_FAILED");
+        error.RowIndex.Should().Be(1);
+        error.Message.Should().Contain("must be unique");
+        await _recordRepo.DidNotReceive().CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+        await _uow.Received().RollbackAsync(Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task InsertedRow_RequiredFieldMissing_RejectsTheCommit()
+    {
+        _testFields.Single(f => f.Fid == 7).IsRequired = true;
+
+        var act = () => CommitOneNewRowAsync("grace@example.com", fullName: null);
+
+        var error = (await act.Should().ThrowAsync<PipelineBulkUpsertException>()).Which;
+        error.ErrorCode.Should().Be("ROW_VALIDATION_FAILED");
+        error.Message.Should().Contain("is required");
+    }
+
+    [Fact]
+    public async Task InsertedRow_UniqueValueNotInUse_IsInserted()
+    {
+        _testFields.Single(f => f.Fid == 7).IsUnique = true;   // HasValueDuplicateAsync answers false
+
+        var resultJson = await CommitOneNewRowAsync("grace@example.com", "Grace");
+
+        JsonSerializer.Deserialize<JsonElement>(resultJson).GetProperty("inserted_count").GetInt32().Should().Be(1);
+    }
+
     [Fact]
     public async Task PlanV2_Case3_BothIdentifiersProvided_IdentifySameRecord_UpdatesRecord()
     {

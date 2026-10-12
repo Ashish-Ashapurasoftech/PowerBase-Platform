@@ -278,12 +278,15 @@ public sealed class ImportChunkWriter
     private ImportWrittenRow Written(Row row, string outcome, long recordId)
     {
         var (rowRef, sheet) = RowRef(row);
-        return new ImportWrittenRow(rowRef, outcome, recordId, Carried(row), sheet is null ? null : $"Sheet '{sheet}'");
+        // The details file of a table read sheet by sheet has a Sheet column of its own.
+        return new ImportWrittenRow(rowRef, outcome, recordId, Carried(row), sheet is null || _plan.SheetName is not null ? null : $"Sheet '{sheet}'");
     }
 
     /// <summary>The row's number in its file or sheet (a person is shown the row where they would look for it), and the sheet's name.</summary>
     private (long Row, string? Sheet) RowRef(Row row)
     {
+        // A table that reads a workbook sheet by sheet has a plan for each sheet: the row is numbered in its own sheet.
+        if (_plan.SheetName is { } own) return (row.SourceId, own);
         if (_plan.File?.Sheets is not { } sheets) return (row.SourceId, null);
         var (sheetIndex, rowNumber) = ImportFileSheets.Split(row.SourceId);
         return (rowNumber, sheetIndex < sheets.Count ? sheets[sheetIndex].Name : null);

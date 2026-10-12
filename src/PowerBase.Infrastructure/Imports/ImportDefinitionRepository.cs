@@ -47,7 +47,7 @@ public sealed class ImportDefinitionRepository(ITenantConnectionFactory connecti
             OUTER APPLY (SELECT TOP 1 r.Status, COALESCE(r.CompletedOn, r.StartedOn, r.CreatedOn) AS RunOn
                          FROM meta.ImportRun r WHERE r.ImportDefinitionId = d.Id ORDER BY r.Id DESC) lr
             WHERE {where} AND d.IsDeleted = 0
-            ORDER BY d.Name
+            ORDER BY CASE WHEN lr.RunOn IS NOT NULL AND lr.RunOn > d.CreatedOn THEN lr.RunOn ELSE d.CreatedOn END DESC, d.Id DESC
             """;
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         var rows = await conn.QueryAsync<ListRow>(new CommandDefinition(sql, new { id }, cancellationToken: ct));

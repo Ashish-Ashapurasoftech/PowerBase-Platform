@@ -156,7 +156,8 @@ public class ExportReportQueryHandler
 
         var rows = await _recordRepo.ListAsync(table, allFields, 1, 50_000, physicalFilterTree, sqlSorts,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-        var relational = await _relationalProjector.ProjectAsync(table, allFields, rows, ct);
+        var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
+            await _relationalProjector.ProjectAsync(table, allFields, rows, ct));
         var computed = _formulaProjector.Project(allFields, rows, relational, table);
         var pairs = rows.Zip(computed, (r, c) => (Row: r, Computed: c)).ToList();
 
