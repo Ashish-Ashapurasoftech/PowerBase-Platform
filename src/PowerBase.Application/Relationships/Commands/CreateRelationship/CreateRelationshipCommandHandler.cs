@@ -106,6 +106,9 @@ public class CreateRelationshipCommandHandler
         // 1. Reference field on the child (physical FK column). Settings get the relationship id after creation.
         //    Two paths: create a brand-new Reference field, or convert an existing child field in place.
         AppField refField;
+        string? conversionWarning = null;
+        int? originalFid = null;
+        string? originalTypeCode = null, originalSettings = null;
         var referenceIsExistingField = command.ReferenceFieldFid is not null;
         if (!referenceIsExistingField)
         {
@@ -143,11 +146,16 @@ public class CreateRelationshipCommandHandler
 
             // A plain Number field holding Record IDs is already numeric, so that conversion is metadata-only.
             // Every other type (text, currency, date, formula…) holds the parent's human key, so each row's value
-            // is translated to the parent's Record ID first; nothing is written if any value has no match.
+            // is translated to the parent's Record ID first (a value with no match gets a NULL reference). The field's
+            // original type is remembered so deleting the relationship can put it back.
             var metadataOnly = existing.TypeCode == nameof(Domain.Enums.FieldTypeCode.Number)
                 && keyTypeCode == nameof(Domain.Enums.FieldTypeCode.Number);
             if (!metadataOnly)
-                await ConvertExistingFieldValuesAsync(child, childFields, existing, parent, keyField, refType, ct);
+            {
+                originalTypeCode = existing.TypeCode;
+                originalSettings = existing.Settings;
+                (conversionWarning, originalFid) = await ConvertExistingFieldValuesAsync(child, childFields, existing, parent, keyField, refType, ct);
+            }
 
             await _fieldRepo.UpdateFieldTypeAsync(
                 existing.Id, refType.Id,
@@ -174,7 +182,11 @@ public class CreateRelationshipCommandHandler
         }, ct);
 
         await _fieldRepo.UpdateSettingsAsync(refField.Id,
-            Serialize(new ReferenceSettings { RelationshipId = relId, ParentTableId = parent.Id }), ct);
+            Serialize(new ReferenceSettings
+            {
+                RelationshipId = relId, ParentTableId = parent.Id, OriginalFid = originalFid,
+                OriginalTypeCode = originalTypeCode, OriginalSettings = originalSettings,
+            }), ct);
 
         // 3. Lookup fields on the child (first one becomes the proxy).
         var createdFields = new List<RelationshipFieldDto> { new(refField.PublicId, refField.Fid!.Value, refField.Label ?? refField.Name, "reference", "Reference") };
@@ -279,6 +291,7 @@ public class CreateRelationshipCommandHandler
             ProxyFid = firstLookup?.Fid,
             DisplayKeyFid = displayKeyFid,
             Fields = createdFields,
+            Warnings = conversionWarning is null ? [] : [conversionWarning],
         };
     }
 
@@ -286,9 +299,10 @@ public class CreateRelationshipCommandHandler
     /// Turns an existing child field that holds the parent's human key (a name, code, date…) into a column of
     /// parent Record IDs. Stored fields are read decrypted; a Formula field is evaluated per row (it has no
     /// column, so one is created). Every row's value is matched to a parent record through the key column;
-    /// if any value has no match nothing is written.
+    /// a value with no match gets a NULL reference and is kept in a hidden "(original)" text field. Returns a
+    /// warning describing that (null when every value matched) plus the Fid of that original field (null if none).
     /// </summary>
-    private async Task ConvertExistingFieldValuesAsync(
+    private async Task<(string? Warning, int? OriginalFid)> ConvertExistingFieldValuesAsync(
         AppTable child, IReadOnlyList<AppField> childFields, AppField existing,
         AppTable parent, AppField? keyField, FieldType refType, CancellationToken ct)
     {
@@ -332,14 +346,37 @@ public class CreateRelationshipCommandHandler
             if (hit.Key is not null) parentIdByText[text] = hit.Value;
         }
 
-        var unmatched = distinct.Where(t => !parentIdByText.ContainsKey(t)).Take(5).ToList();
-        if (unmatched.Count > 0)
-            throw new ValidationException(new Dictionary<string, string[]>
-            {
-                ["referenceFieldFid"] = [$"These values have no matching record in {parent.Name}: {string.Join(", ", unmatched.Select(u => $"\"{u}\""))}. Fix or clear them first."],
-            });
+        // Rows whose value has no parent record don't block the conversion: their reference becomes NULL and the
+        // text they held is kept in a hidden "<label> (original)" field, so nothing the user typed is lost.
+        var parentIdByRow = rowTexts.Where(p => parentIdByText.ContainsKey(p.Value))
+            .ToDictionary(p => p.Key, p => parentIdByText[p.Value]);
+        var unmatchedRows = rowTexts.Where(p => !parentIdByText.ContainsKey(p.Value)).ToList();
 
-        var parentIdByRow = rowTexts.ToDictionary(p => p.Key, p => parentIdByText[p.Value]);
+        AppField? originalField = null;
+        PreservedOriginal? preserve = null;
+        string? warning = null;
+        if (unmatchedRows.Count > 0)
+        {
+            var sample = string.Join(", ", unmatchedRows.Select(p => $"\"{p.Value}\"").Distinct().Take(5));
+            warning = $"{unmatchedRows.Count} row(s) had no matching record in {parent.Name} ({sample}); their reference was cleared. ";
+            var appEncrypted = (await _appRepo.GetByIdAsync(child.AppId, ct))?.IsEncrypted == true;
+
+            // A Formula has no stored value to copy, so its evaluated text is written as plain text — which an
+            // encrypted app must not store; there the originals can't be kept (the formula's own value is derived).
+            if (isFormula && (appEncrypted || existing.IsEncrypted))
+            {
+                warning += "The original values could not be kept because the app is encrypted.";
+            }
+            else
+            {
+                var label = $"{existing.Label ?? existing.Name} (original)";
+                originalField = await _fieldFactory.CreateAsync(child, nameof(Domain.Enums.FieldTypeCode.Text), label, false,
+                    new Dictionary<string, bool> { [HelperFields.HiddenMarkerProperty] = true }, ct, isEncrypted: !isFormula && existing.IsEncrypted, hidden: true);
+                preserve = new PreservedOriginal(originalField,
+                    isFormula ? unmatchedRows.ToDictionary(p => p.Key, p => p.Value) : null);
+                warning += $"The original values are kept in the hidden field \"{label}\".";
+            }
+        }
 
         // The column the values land in. A Formula has none, so create it as a Reference (BIGINT) column.
         var target = existing;
@@ -355,7 +392,17 @@ public class CreateRelationshipCommandHandler
             };
             await _schemaEngine.AddColumnAsync(child, target, ct);
         }
-        await _schemaEngine.ConvertColumnToReferenceAsync(child, target, parentIdByRow, ct);
+        try
+        {
+            await _schemaEngine.ConvertColumnToReferenceAsync(child, target, parentIdByRow, ct, preserve);
+        }
+        catch
+        {
+            // The conversion is one transaction, so the data is untouched — just don't leave the empty hidden field behind.
+            if (originalField is not null) await _fieldRepo.DeleteAsync(originalField.PublicId, child.Id, CancellationToken.None);
+            throw;
+        }
+        return (warning, originalField?.Fid);
     }
 
     /// <summary>A stored/computed value as the culture-independent text used to look up the parent key. A

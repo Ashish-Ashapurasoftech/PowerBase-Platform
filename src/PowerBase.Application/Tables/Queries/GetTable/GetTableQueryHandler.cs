@@ -30,7 +30,8 @@ public class GetTableQueryHandler
         var table = await _tableRepo.GetByPublicIdAsync(query.PublicId, ct);
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         var summarySourceSettings = await ResolveSummarySourceSettingsAsync(fields, ct);
-        return new GetTableResult(table, fields, summarySourceSettings);
+        // The fields a user sees and picks from (forms, reports, filters, formulas…) — helper fields stay out.
+        return new GetTableResult(table, Relationships.HelperFields.Visible(fields), summarySourceSettings);
     }
 
     /// <summary>Looks up each Min/Max summary's source field live (not a copy taken at creation),

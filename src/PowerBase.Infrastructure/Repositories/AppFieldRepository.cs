@@ -37,6 +37,9 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         ORDER BY af.Id
         """;
 
+    // The three list/count templates below skip fields whose Settings carry "hiddenFromFieldList":true — the
+    // hidden "(original)" Text field a relationship conversion creates (see HelperFields.HiddenMarkerProperty).
+    // The field still exists everywhere else (ListByTableAsync is unchanged), so reads/projection can use it.
     // {0} = whitelisted "column direction" fragment; {1} = whitelisted filter-predicate fragment —
     // both built from fixed C# switches (ResolveSortColumn/ResolveFilterFragment), never from raw
     // user input, so string.Format here can't introduce SQL injection.
@@ -49,6 +52,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE af.AppTableId = @tableId
           AND af.IsDeleted = 0
           AND (@search IS NULL OR af.Label LIKE @search)
+          AND (af.Settings IS NULL OR af.Settings NOT LIKE '%"hiddenFromFieldList":true%')
           {1}
         ORDER BY {0}
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
@@ -64,6 +68,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE af.AppTableId = @tableId
           AND af.IsDeleted = 0
           AND (@search IS NULL OR af.Label LIKE @search)
+          AND (af.Settings IS NULL OR af.Settings NOT LIKE '%"hiddenFromFieldList":true%')
           {1}
         ORDER BY {0}
         """;
@@ -75,6 +80,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE af.AppTableId = @tableId
           AND af.IsDeleted = 0
           AND (@search IS NULL OR af.Label LIKE @search)
+          AND (af.Settings IS NULL OR af.Settings NOT LIKE '%"hiddenFromFieldList":true%')
           {0}
         """;
 

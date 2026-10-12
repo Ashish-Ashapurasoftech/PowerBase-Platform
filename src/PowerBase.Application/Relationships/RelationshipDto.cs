@@ -17,6 +17,8 @@ public sealed class RelationshipDto
     /// </summary>
     public int? DisplayKeyFid { get; init; }
     public IReadOnlyList<RelationshipFieldDto> Fields { get; init; } = [];
+    /// <summary>Non-fatal notes for the caller, e.g. rows whose value had no parent match and were kept in a hidden "original" field.</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = [];
 }
 
 /// <summary>A field participating in a relationship. <paramref name="Role"/> is "reference", "lookup" or "summary".</summary>
