@@ -148,6 +148,13 @@ public interface IImportDataStore
     /// it, keyed by <see cref="ImportKey"/>. The field must be unique (or the Record ID#) so a value maps to one record.</summary>
     Task<Dictionary<string, long>> FindRecordIdsAsync(AppTable table, AppField field, IReadOnlyCollection<object> values, CancellationToken ct = default);
 
+    /// <summary>Of the given Record ID#s, those that are records (not deleted) of <paramref name="table"/>: how a Reference value is checked.</summary>
+    Task<HashSet<long>> ExistingRecordIdsAsync(AppTable table, IReadOnlyCollection<long> ids, CancellationToken ct = default);
+
+    /// <summary>Values that more than one record of the table holds in the field, with how many, most repeated first (at most <paramref name="take"/>).
+    /// For telling the person which values to fix; not for an encrypted field, whose stored values are ciphertext.</summary>
+    Task<IReadOnlyList<(string Value, int Count)>> FindDuplicateValuesAsync(AppTable table, AppField field, int take, CancellationToken ct = default);
+
     /// <summary>Inserts all rows with one bulk copy in one transaction. Each row is a Fid → value map. Throws on any
     /// row failure without writing anything, so the caller can bisect to isolate the offending rows. Returns the Record ID# each row was
     /// given, in the order of <paramref name="rows"/>.</summary>

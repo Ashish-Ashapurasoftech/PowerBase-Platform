@@ -3,6 +3,7 @@ using PowerBase.Application.Formulas;
 using PowerBase.Application.Imports.Files;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Queries.RunReport;
+using PowerBase.Application.Relationships;
 using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -29,6 +30,10 @@ public sealed class ResolvedMapping
     /// <summary>Formula: compiled once for the run, evaluated against each row.</summary>
     public CompiledFormula? Formula { get; init; }
 }
+
+/// <summary>Where a Reference field's values point: the parent table, the field of it that people know a record by (null when that is the Record ID#,
+/// or it has none; an encrypted field is read decrypted and searched in memory), and the hidden "(original)" text field that keeps a value that found no parent record.</summary>
+public sealed record ImportReferenceTarget(AppTable Parent, AppField? DisplayKey, int? OriginalFid, IReadOnlyList<AppField> ParentFields);
 
 /// <summary>Everything the engine needs to run a definition, resolved and permission-checked once.</summary>
 public sealed class ImportPlan
@@ -68,6 +73,8 @@ public sealed class ImportPlan
     public int TableIndex { get; set; }
     /// <summary>The sheet this plan reads, when its table reads a workbook sheet by sheet; null otherwise.</summary>
     public string? SheetName { get; set; }
+    /// <summary>For each Reference field the import writes, how its values find the parent record.</summary>
+    public IReadOnlyDictionary<int, ImportReferenceTarget> ReferenceTargets { get; init; } = new Dictionary<int, ImportReferenceTarget>();
     /// <summary>A sheet plan of a table that combines its sheets: the destination field its rows are combined on, when this sheet has one.</summary>
     public int? JoinFieldFid { get; set; }
     /// <summary>The plan of a table that combines its sheets into one record per value: the sheets' own plans, in the order they are read. This
@@ -87,7 +94,9 @@ public sealed class ImportPlanBuilder(
     IUserRepository users,
     IQueryContext user,
     IRecordRepository records,
-    FormulaEngine formulaEngine)
+    FormulaEngine formulaEngine,
+    IImportDataStore? store = null,
+    IRelationshipRepository? relationships = null)
 {
     public const int MaxMappings = 250;
     /// <summary>Tables an import may fill besides its own.</summary>
@@ -169,6 +178,7 @@ public sealed class ImportPlanBuilder(
 
         if (mergeKey is not null && mappings.All(m => m.Destination.Fid != mergeKey.Fid))
             throw Invalid($"Map a source field to '{ImportTypeCompatibility.DisplayName(mergeKey)}', the field existing records are matched on.");
+        var referenceTargets = await ResolveReferenceTargetsAsync(mappings, destFields, ct);
 
         var rules = ValidateRules(cfg, mappings, mergeKey, isMerge);
         ValidateConditions(cfg.Conditions, visibleSource);
@@ -219,7 +229,7 @@ public sealed class ImportPlanBuilder(
         return new ImportPlan
         {
             Source = source, SourceFields = sourceFields, Destination = destination, DestinationFields = destFields,
-            Mappings = mappings, ImportType = cfg.ImportType, MergeKey = mergeKey, Rules = rules, ConstraintPolicy = cfg.ConstraintPolicy,
+            Mappings = mappings, ReferenceTargets = referenceTargets, ImportType = cfg.ImportType, MergeKey = mergeKey, Rules = rules, ConstraintPolicy = cfg.ConstraintPolicy,
             SourceFilter = sqlFilter, RowFilter = rowFilterTree is null ? null : new ImportRowFilter(rowFilterTree, sourceFields),
             SourceOwnerRestriction = sourceAccess?.RestrictToCreatedBy, File = file, ReadFields = readFields, NeedsProjection = needsProjection,
             FormulaOptions = FormulaOptionsForRun(source, runClock), Virtuals = virtuals, TableFilter = tableFilter
@@ -497,6 +507,44 @@ public sealed class ImportPlanBuilder(
         return rules;
     }
 
+    /// <summary>For each Reference field the import writes: its parent table, the key a value is looked up by, and where a value that finds no parent is
+    /// kept. The person needs to be able to read the parent table (the reference picker asks the same), and a field that only accepts some of its
+    /// parent's records (a dependent dropdown) is refused: an import cannot judge that rule.</summary>
+    private async Task<Dictionary<int, ImportReferenceTarget>> ResolveReferenceTargetsAsync(
+        IReadOnlyList<ResolvedMapping> mappings, IReadOnlyList<AppField> destFields, CancellationToken ct)
+    {
+        var targets = new Dictionary<int, ImportReferenceTarget>();
+        foreach (var m in mappings.Where(m => ImportTypeCompatibility.IsReference(m.Destination)))
+        {
+            var name = ImportTypeCompatibility.DisplayName(m.Destination);
+            var settings = FormulaTypeMap.ParseReferenceSettings(m.Destination.Settings);
+            if (settings?.ParentTableId is not long parentId) throw Invalid($"'{name}' is not connected to a parent table.");
+            if (ReferenceFilterResolver.HasFilter(settings))
+                throw Invalid($"'{name}' only accepts some records of its parent table (a rule on the field), which an import cannot check yet.");
+            var parent = await tables.GetByIdAsync(parentId, ct);
+            await access.RequirePermissionByTablePublicIdAsync(parent.PublicId, PermissionCodes.RecordsRead, ct);
+
+            // The key a person knows a parent record by: the relationship's own display key, else the table's key, else the Record ID# itself.
+            var relationship = settings.RelationshipId is long relId && relationships is not null ? await relationships.GetByIdAsync(relId, ct) : null;
+            var parentFields = await fields.ListByTableAsync(parent.Id, ct);
+            // A table with no key set is still shown by a field (the one its reference picker labels records with): that is what a person has in the file.
+            var displayKey = KeyFieldResolver.ResolveDisplayKey(relationship, parent, parentFields) ?? PickerLabelField(parent, parentFields);
+            var original = settings.OriginalFid is int o && destFields.Any(f => f.Fid == o && !f.IsDeleted) ? o : (int?)null;
+            targets[m.Destination.Fid!.Value] = new ImportReferenceTarget(parent, displayKey, original, parentFields);
+        }
+        return targets;
+    }
+
+    /// <summary>The field the reference picker labels a parent's records with (its first picker field, else the table's display field, else its first ordinary
+    /// stored field), when it is one a value can be looked up in: a stored column, neither computed, hidden nor system.</summary>
+    private static AppField? PickerLabelField(AppTable parent, IReadOnlyList<AppField> parentFields)
+    {
+        static bool Storable(AppField f) => f.Fid.HasValue && !f.IsDeleted && !f.IsHidden && !f.IsSystem && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)
+            && !PhysicalNaming.IsRangeTypeCode(f.TypeCode) && f.TypeCode is "Text" or "Email" or "Phone" or "Url" or "Number" or "Currency" or "Percent" or "Rating" or "Date" or "DateTime";
+        AppField? Pick(long? id) => id is long x ? parentFields.FirstOrDefault(f => f.Id == x && Storable(f)) : null;
+        return Pick(parent.DefaultRecordPickerField1Id) ?? Pick(parent.DisplayFieldId) ?? parentFields.FirstOrDefault(Storable);
+    }
+
     /// <summary>The merge key must be a unique field (or the Record ID#) so a value identifies exactly one record.</summary>
     private static AppField ResolveMergeKey(int fid, IReadOnlyList<AppField> destFields)
     {
@@ -515,8 +563,16 @@ public sealed class ImportPlanBuilder(
     public async Task EnsureMergeKeyIsUniqueAsync(ImportPlan plan, CancellationToken ct)
     {
         if (plan.MergeKey is null || ImportTypeCompatibility.IsRecordId(plan.MergeKey)) return;
-        if (await records.HasDuplicatesAsync(plan.Destination, plan.MergeKey, ct))
-            throw Invalid($"'{ImportTypeCompatibility.DisplayName(plan.MergeKey)}' has duplicate values in {plan.Destination.Name}. Fix them before running a merge.");
+        if (!await records.HasDuplicatesAsync(plan.Destination, plan.MergeKey, ct)) return;
+        var message = $"'{ImportTypeCompatibility.DisplayName(plan.MergeKey)}' has duplicate values in {plan.Destination.Name}";
+        // Say which values, so they can be found and fixed (an encrypted field's stored values are ciphertext: nothing to show).
+        if (store is not null && !plan.MergeKey.IsEncrypted)
+        {
+            var examples = await store.FindDuplicateValuesAsync(plan.Destination, plan.MergeKey, 5, ct);
+            if (examples.Count > 0)
+                message += $" (for example {string.Join(", ", examples.Select(e => $"'{e.Value}' on {e.Count} records"))})";
+        }
+        throw Invalid($"{message}. Fix them before running a merge.");
     }
 
     /// <summary>Same structural rules a report filter gets, plus the ones that only make sense for a saved import.</summary>

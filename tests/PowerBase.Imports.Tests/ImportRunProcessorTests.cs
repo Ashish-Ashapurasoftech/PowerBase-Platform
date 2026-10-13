@@ -211,6 +211,18 @@ public class ImportRunProcessorTests
         AssertRunFailsWith(MergeOnName(), "duplicate values", new HarnessOptions { DuplicateKeyValues = true });
 
     [Fact]
+    public async Task The_duplicate_key_message_names_the_values_that_repeat()
+    {
+        var h = ImportHarness.Create(MergeOnName(), new HarnessOptions { DuplicateKeyValues = true });
+        h.Store.DuplicateValues.AddRange([("STU0007", 3), ("STU0012", 2)]);
+
+        await h.RunAsync();
+
+        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Failed);
+        h.Completion!.Value.Detail.Should().Contain("'STU0007' on 3 records").And.Contain("'STU0012' on 2 records").And.Contain("Fix them");
+    }
+
+    [Fact]
     public async Task A_run_that_was_already_running_is_failed_as_interrupted_instead_of_resumed()
     {
         var h = ImportHarness.Create();
