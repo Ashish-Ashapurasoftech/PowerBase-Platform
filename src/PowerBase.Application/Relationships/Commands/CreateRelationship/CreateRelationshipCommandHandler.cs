@@ -270,7 +270,9 @@ public class CreateRelationshipCommandHandler
                 OpenInNewWindow = false,
             }, ct);
         createdFields.Add(new(reportLink.PublicId, reportLink.Fid!.Value, reportLink.Label ?? reportLink.Name, "reportlink", reportLink.TypeCode));
-        parentAddFids.Add(reportLink.Fid!.Value);
+        // No longer appended to forms automatically: the "{child} details" section (added by the wizard via
+        // AddRelationshipFormSectionCommandHandler) shows the child records, so the link field itself stays off the form.
+        // parentAddFids.Add(reportLink.Fid!.Value);
 
         // 6. Auto-create a Formula URL on the parent: "Add {child.Name}" — opens a new child record with the
         //    reference pre-filled to this parent (Quickbase's "Add Child" URL formula). Not appended to forms:

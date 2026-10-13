@@ -33,6 +33,12 @@ public interface IFormRepository
         IReadOnlyDictionary<FormElement, Guid>? elementPageLinks = null,
         CancellationToken ct = default);
     Task AppendFieldToLastSectionAsync(long formId, int fieldFid, CancellationToken ct = default);
+    /// <summary>Appends one fully-built section (with its blocks and elements) after the form's last
+    /// section, on the same page as that section, without touching any existing layout row.</summary>
+    Task AppendSectionAsync(long formId, FormSection section, CancellationToken ct = default);
+    /// <summary>Removes every Report form element (on any form) that points at the given report. Rule actions
+    /// aimed at such an element are cleared first.</summary>
+    Task DeleteReportElementsAsync(Guid reportPublicId, CancellationToken ct = default);
     Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default);
     Task SetDefaultAsync(Guid tablePublicId, Guid formPublicId, CancellationToken ct = default);
     /// <summary>Flags/un-flags one form as a Quick Peek form. Non-exclusive: other forms on the

@@ -4,6 +4,7 @@ using PowerBase.API.Models;
 using PowerBase.API.Models.Records;
 using PowerBase.API.Models.Relationships;
 using PowerBase.Application.Relationships;
+using PowerBase.Application.Relationships.Commands.AddFormSection;
 using PowerBase.Application.Relationships.Commands.AddLookupFields;
 using PowerBase.Application.Relationships.Commands.AddSummaryField;
 using PowerBase.Application.Relationships.Commands.CreateRelationship;
@@ -34,6 +35,7 @@ public class RelationshipsController : ControllerBase
     private readonly RemoveRelationshipFieldCommandHandler _removeField;
     private readonly UpdateDisplayKeyCommandHandler _updateDisplayKey;
     private readonly UpdateReferenceFilterCommandHandler _updateReferenceFilter;
+    private readonly AddRelationshipFormSectionCommandHandler _addFormSection;
 
     public RelationshipsController(
         CreateRelationshipCommandHandler createHandler,
@@ -47,7 +49,8 @@ public class RelationshipsController : ControllerBase
         UpdateSummaryFieldCommandHandler updateSummary,
         RemoveRelationshipFieldCommandHandler removeField,
         UpdateDisplayKeyCommandHandler updateDisplayKey,
-        UpdateReferenceFilterCommandHandler updateReferenceFilter)
+        UpdateReferenceFilterCommandHandler updateReferenceFilter,
+        AddRelationshipFormSectionCommandHandler addFormSection)
     {
         _createHandler = createHandler;
         _deleteHandler = deleteHandler;
@@ -61,6 +64,7 @@ public class RelationshipsController : ControllerBase
         _removeField = removeField;
         _updateDisplayKey = updateDisplayKey;
         _updateReferenceFilter = updateReferenceFilter;
+        _addFormSection = addFormSection;
     }
 
     /// <summary>Create a one-to-many relationship (provisions the reference, lookup and summary fields).</summary>
@@ -216,6 +220,18 @@ public class RelationshipsController : ControllerBase
     {
         var result = await _removeField.HandleAsync(new RemoveRelationshipFieldCommand(id, fieldId), ct);
         return Ok(new ApiResponse<RelationshipDto>(result));
+    }
+
+    /// <summary>Adds a "{Child} details" section (embedded report + "Add {Child}" link) to the parent table's forms that
+    /// auto-add new fields. Called by the relationship wizard once it has created the relationship's embedded report.</summary>
+    [HttpPost("relationships/{relId:guid}/form-sections")]
+    [RequireAppPermission(PermissionCodes.FormsUpdate, AppAccessResolver.ByRelationshipId)]
+    [ProducesResponseType(typeof(ApiResponse<int>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> AddFormSection(Guid relId, [FromBody] AddRelationshipFormSectionRequest request, CancellationToken ct)
+    {
+        var added = await _addFormSection.HandleAsync(new AddRelationshipFormSectionCommand(relId, request.ReportPublicId, request.ReportName), ct);
+        return Ok(new ApiResponse<int>(added));
     }
 
     /// <summary>Delete a relationship and its reference/lookup/summary fields.</summary>
