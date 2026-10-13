@@ -53,7 +53,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
     // {0} = whitelisted "column direction" fragment — never built from raw user input.
     private const string ListByAppPagedSqlTemplate = """
         SELECT t.PublicId, t.Name, t.SingularLabel, t.Icon, t.RecordCount, t.IsShowInBar, t.CreatedOn,
-               (SELECT COUNT(1) FROM meta.AppField f WHERE f.AppTableId = t.Id AND f.IsDeleted = 0) AS FieldCount
+               (SELECT COUNT(1) FROM meta.AppField f WHERE f.AppTableId = t.Id AND f.IsDeleted = 0 AND f.IsHidden = 0) AS FieldCount
         FROM meta.AppTable t
         WHERE t.AppId = @appId
           AND t.IsDeleted = 0

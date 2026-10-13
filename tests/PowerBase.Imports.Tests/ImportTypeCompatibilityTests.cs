@@ -37,6 +37,13 @@ public class ImportTypeCompatibilityTests
         ImportTypeCompatibility.IsWritable(F(type)).Should().BeFalse();
 
     [Fact]
+    public void Hidden_helper_fields_are_not_writable()
+    {
+        ImportTypeCompatibility.IsWritable(F("Text")).Should().BeTrue();
+        ImportTypeCompatibility.IsWritable(new AppField { Fid = 9, Name = "F", TypeCode = "Text", IsHidden = true }).Should().BeFalse();
+    }
+
+    [Fact]
     public void Text_to_number_rejects_non_numeric_values_instead_of_writing_null()
     {
         ImportTypeCompatibility.TryConvert("12.5", F("Number"), out var ok, out _).Should().BeTrue();
