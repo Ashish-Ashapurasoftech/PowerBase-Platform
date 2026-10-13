@@ -407,6 +407,38 @@ public class PipelineComputedFieldSearchTests
         public JsonElement Payload() => JsonDocument.Parse(Outbox[0].TriggerPayloadJson).RootElement;
     }
 
+    // A bulk event (e.g. after a mass update) stages each record with the Lookup / Summary values computed for it. The change describes the
+    // record under both its internal-id keys and its FID keys, with the computed fields as null under each: the computed value must replace
+    // them under both, or the staged record — and every step reading it — says "no value".
+    [Fact]
+    public async Task BulkEvent_DualKeyedChange_StagesTheLookupAndSummaryValues()
+    {
+        var fields = new List<AppField>
+        {
+            new() { Id = 206, Fid = (int)NameFid, Name = "Name", TypeCode = "Text" },
+            new() { Id = 312, Fid = 12, Name = "Lookup", TypeCode = "Lookup", Settings = JsonSerializer.Serialize(new { sourceTypeCode = "Text" }) },
+            new() { Id = 314, Fid = (int)SummaryFid, Name = "Summary", TypeCode = "Summary", Settings = JsonSerializer.Serialize(new { function = "Count" }) }
+        };
+        var h = new InterceptorHarness("fid_6", "is", "row", subtype: "new-bulk-event");
+        var staged = new List<PipelineBulkEventRecord>();
+        await h.PipelineRepo.InsertBulkEventRecordsAsync(Arg.Do<List<PipelineBulkEventRecord>>(staged.AddRange), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>());
+        var id = Guid.NewGuid();
+        h.Computes(id, new Dictionary<long, object?> { [12] = "Hardik Patel", [SummaryFid] = 7L });
+        IReadOnlyDictionary<long, object?> Keyed() => new Dictionary<long, object?>
+        {
+            [206] = "row", [NameFid] = "row", [312] = null, [12] = null, [314] = null, [SummaryFid] = null
+        };
+        var change = new PipelineRecordChange(id, Keyed(), Keyed(), new List<long> { 206 }, PowerBase.Domain.Enums.PipelineRecordEventType.Modified);
+
+        await h.Interceptor.InterceptBulkAsync(Table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), 1, default);
+
+        var record = Assert.Single(staged);
+        using var after = JsonDocument.Parse(record.AfterValuesJson!);
+        Assert.Equal("row", after.RootElement.GetProperty("fid_6").GetString());
+        Assert.Equal("Hardik Patel", after.RootElement.GetProperty("fid_12").GetString());
+        Assert.Equal(7, after.RootElement.GetProperty($"fid_{SummaryFid}").GetInt64());
+    }
+
     [Fact]
     public async Task Event_SummaryCombinedTextFilter_FiresWhenTheJoinedTextMatches()
     {
@@ -615,6 +647,48 @@ public class PipelineComputedFieldSearchTests
 
     private static bool HasCondition(FilterGroup? group, long fid) =>
         group != null && group.Nodes.Any(n => n.Condition?.FieldId == fid || HasCondition(n.Group, fid));
+
+    private static PipelineStep LookUp(long recordId) => new()
+    {
+        Id = 1, RefId = "ref_lookup", Type = "query", Subtype = "look-up-record",
+        ConfigJson = JsonSerializer.Serialize(new { TablePublicId = Table.PublicId.ToString(), RecordIdValue = recordId.ToString() })
+    };
+
+    [Fact]
+    public async Task LookUpRecord_ReturnsTheComputedLookupSummaryAndFormulaValuesNotJustTheStoredOnes()
+    {
+        // The stored row has no value for a Lookup / Summary / Formula field; every step after the look-up reads {{steps.<lookup>.fid_N}}.
+        var formula = new AppField { Id = 15, Fid = 15, Name = "Order no", TypeCode = "Formula_Text", Settings = "{\"expression\":\"1\"}" };
+        var h = new EngineHarness(TableFields(Lookup("Text"), Summary("Count"), formula));
+        var publicId = Guid.NewGuid();
+        h.RecordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { [7] = Row(7, publicId) });
+        h.Computes(new Dictionary<long, IReadOnlyDictionary<long, object?>>
+        {
+            [7] = new Dictionary<long, object?> { [12] = "Hardik Patel", [SummaryFid] = 4L, [15] = "CST0007" }
+        });
+
+        var root = await h.RunStepAsync(LookUp(7));
+
+        Assert.Equal("r7", root.GetProperty("fid_6").GetString());                 // stored values as before
+        Assert.Equal("Hardik Patel", root.GetProperty("fid_12").GetString());      // Lookup
+        Assert.Equal(4, root.GetProperty($"fid_{SummaryFid}").GetInt64());         // Summary
+        Assert.Equal("CST0007", root.GetProperty("fid_15").GetString());           // Formula
+        Assert.Equal(7, root.GetProperty("Id").GetInt64());
+    }
+
+    [Fact]
+    public async Task LookUpRecord_ATableWithNoComputedFields_IsUnchanged()
+    {
+        var h = new EngineHarness(TableFields());
+        h.RecordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> { [7] = Row(7, Guid.NewGuid()) });
+
+        var root = await h.RunStepAsync(LookUp(7));
+
+        Assert.Equal("r7", root.GetProperty("fid_6").GetString());
+        h.Projector.DidNotReceiveWithAnyArgs().Project(default!, default!, default, default);
+    }
 
     [Fact]
     public async Task SearchRecords_SummaryCountGreaterThan_FiltersInMemoryNumerically()

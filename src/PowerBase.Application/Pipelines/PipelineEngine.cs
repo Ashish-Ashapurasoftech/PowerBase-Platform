@@ -1282,6 +1282,9 @@ public partial class PipelineEngine : IPipelineEngine
                 {
                     errorInfo["InnerError"] = SanitizeErrorMessage(stepEx.InnerException.Message);
                 }
+                // Structured failure details (e.g. Copy Records' rejected records) ride along so the history can show them.
+                if (stepEx is PowerBase.Domain.Exceptions.PipelineNonRetryableException { FailureDetails: { } failureDetails })
+                    foreach (var detail in failureDetails) errorInfo[detail.Key] = detail.Value;
                 var errorOutput = JsonSerializer.Serialize(errorInfo);
 
                 snapshots.Add(new RawStepAuditSnapshot
@@ -1842,6 +1845,14 @@ public partial class PipelineEngine : IPipelineEngine
                 }
             }
 
+            // Formula / Lookup / Summary values are computed on read — they are not in the stored row — so every step after this one
+            // ({{steps.<lookup>.fid_N}}) saw them as empty. Compute them for the record, for the fields the flow's role may read.
+            var lookupComputed = await ProjectComputedAsync(table, fields, [record], ct);
+            if (lookupComputed is { Count: > 0 })
+                foreach (var computedValue in lookupComputed[0])
+                    if (lookupReadableFids == null || lookupReadableFids.Contains((int)computedValue.Key))
+                        norm[$"fid_{computedValue.Key}"] = computedValue.Value;
+
             return JsonSerializer.Serialize(norm);
         }
 
@@ -2273,7 +2284,7 @@ public partial class PipelineEngine : IPipelineEngine
 
                     if (field.Fid.HasValue)
                     {
-                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
+                        var resolvedValStr = EvaluateTokens(await RenderUserTokensForTextAsync(mapping.Value, field, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct), payloadJson, executionPath, allSteps);
                         // Quickbase single-record steps omit blank mappings instead of
                         // writing NULL (which would clear an existing value on update).
                         if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
@@ -2411,7 +2422,7 @@ public partial class PipelineEngine : IPipelineEngine
 
                     if (field.Fid.HasValue)
                     {
-                        var resolvedValStr = EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps);
+                        var resolvedValStr = EvaluateTokens(await RenderUserTokensForTextAsync(mapping.Value, field, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct), payloadJson, executionPath, allSteps);
                         if (string.IsNullOrWhiteSpace(resolvedValStr)) continue;
                         var parsedVal = ParseRecordMappingValueWithFormat(resolvedValStr, field, mapping.Value, mapping.FormatString);
                         values[field.Fid.Value] = parsedVal;
@@ -2458,6 +2469,8 @@ public partial class PipelineEngine : IPipelineEngine
                 if (uow.Transaction is not null)
                 {
                     var updatedId = await recordRepo.GetActiveRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
+                    output["Id"] = updatedId;
+                    output["fid_3"] = updatedId;
                     var updatedRows = await recordRepo.GetBulkUpsertRowsByIdsAsync(table, fields, [updatedId], uow.Transaction, ct);
                     if (updatedRows.TryGetValue(updatedId, out var updatedRow))
                     {
@@ -2542,8 +2555,12 @@ public partial class PipelineEngine : IPipelineEngine
                 await recordRepo.DeleteAsync(table, recordPublicId, uow.Transaction, ct);
 
                 var deletedValues = oldValuesDict.ToDictionary(kv => $"fid_{kv.Key}", kv => kv.Value);
+                long? deletedRecordId = oldValuesDict.TryGetValue(3, out var ridVal) && ridVal != null && long.TryParse(ridVal.ToString(), out var ridParsed)
+                    ? ridParsed
+                    : oldRecord.TryGetValue("Id", out var idVal) && idVal != null && long.TryParse(idVal.ToString(), out var idParsed) ? idParsed : null;
                 var outputJson = JsonSerializer.Serialize(new {
                     DeletedRecordPublicId = recordPublicId.ToString(),
+                    DeletedRecordId = deletedRecordId,
                     DeletedRecordName = PipelineRecordDisplayName.Resolve(table, fields, deletedValues, recordPublicId.ToString())
                 });
 
@@ -3162,7 +3179,7 @@ public partial class PipelineEngine : IPipelineEngine
                     var field = ResolveBulkUpsertField(mapping.Field, fields);
                     if (field != null && field.Fid.HasValue)
                     {
-                        var resolvedValStr = mapping.Value != null ? EvaluateTokens(mapping.Value, payloadJson, executionPath, allSteps) : null;
+                        var resolvedValStr = mapping.Value != null ? EvaluateTokens(await RenderUserTokensForTextAsync(mapping.Value, field, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct), payloadJson, executionPath, allSteps) : null;
                         var parsedVal = mapping.Value != null ? ParseBulkUpsertValueType(resolvedValStr, field.TypeCode) : null;
                         rowValues[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
@@ -3653,23 +3670,20 @@ public partial class PipelineEngine : IPipelineEngine
                                 {
                                     var colKey = PhysicalNaming.GetPhysicalColumnName(f);
                                     var oldVal = matchedExistingRow.TryGetValue(colKey, out var ov) ? ov : (matchedExistingRow.TryGetValue($"fid_{f.Fid.Value}", out var ov2) ? ov2 : null);
-                                    beforeValues[f.Id] = oldVal;
                                     beforeValues[f.Fid.Value] = oldVal;
 
                                     if (row.ContainsKey(f.Fid.Value))
                                     {
                                         var newVal = row[f.Fid.Value];
-                                        afterValues[f.Id] = newVal;
                                         afterValues[f.Fid.Value] = newVal;
 
                                         if (!f.IsSystem && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && !AreValuesEqual(oldVal, newVal, f.TypeCode))
                                         {
-                                            changedFieldIds.Add((long)f.Fid.Value);
+                                            changedFieldIds.Add(f.Id);   // internal ids, like every other producer (the interceptor matches trigger fields by f.Id)
                                         }
                                     }
                                     else
                                     {
-                                        afterValues[f.Id] = oldVal;
                                         afterValues[f.Fid.Value] = oldVal;
                                     }
                                 }
@@ -3681,9 +3695,9 @@ public partial class PipelineEngine : IPipelineEngine
                             // own UPDATE just set them for real. Same fix as RecordWriteService's
                             // analogous backfill for the non-bulk update path.
                             var bulkModifiedOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedOn" && f.Fid.HasValue);
-                            if (bulkModifiedOnField != null) { afterValues[bulkModifiedOnField.Id] = DateTime.UtcNow; afterValues[bulkModifiedOnField.Fid!.Value] = DateTime.UtcNow; }
+                            if (bulkModifiedOnField != null) { afterValues[bulkModifiedOnField.Fid!.Value] = DateTime.UtcNow; }
                             var bulkModifiedByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "ModifiedBy" && f.Fid.HasValue);
-                            if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Id] = StepActingUserId; afterValues[bulkModifiedByField.Fid!.Value] = StepActingUserId; }
+                            if (bulkModifiedByField != null) { afterValues[bulkModifiedByField.Fid!.Value] = StepActingUserId; }
 
                             // UPDATE in DB on uow.Transaction via recordWriteService (with sanitized row)
                             await PipelineReferenceTargets.EnsureAvailableAsync(fields, row, tableRepo, ct);
@@ -3735,7 +3749,6 @@ public partial class PipelineEngine : IPipelineEngine
                             {
                                 if (f.Fid.HasValue && row.TryGetValue(f.Fid.Value, out var val))
                                 {
-                                    changeValues[f.Id] = val;
                                     changeValues[f.Fid.Value] = val;
                                 }
                             }
@@ -3760,7 +3773,6 @@ public partial class PipelineEngine : IPipelineEngine
                         {
                             if (f.Fid.HasValue && row.TryGetValue(f.Fid.Value, out var val))
                             {
-                                changeValues[f.Id] = val;
                                 changeValues[f.Fid.Value] = val;
                             }
                         }
@@ -3787,13 +3799,12 @@ public partial class PipelineEngine : IPipelineEngine
                             r[3] = id;
                             if (recordIdField != null)
                             {
-                                cv[recordIdField.Id] = id;
                             }
                             cv[3] = id;
                             createdRecordIds.Add(id);
                         }
-                        if (bulkCreatedOnField != null) { cv[bulkCreatedOnField.Id] = DateTime.UtcNow; cv[bulkCreatedOnField.Fid!.Value] = DateTime.UtcNow; }
-                        if (bulkCreatedByField != null) { cv[bulkCreatedByField.Id] = StepActingUserId; cv[bulkCreatedByField.Fid!.Value] = StepActingUserId; }
+                        if (bulkCreatedOnField != null) { cv[bulkCreatedOnField.Fid!.Value] = DateTime.UtcNow; }
+                        if (bulkCreatedByField != null) { cv[bulkCreatedByField.Fid!.Value] = StepActingUserId; }
 
                         addedChanges.Add(new PipelineRecordChange(
                             pubId,
@@ -4440,14 +4451,52 @@ public partial class PipelineEngine : IPipelineEngine
         IAppFieldRepository fieldRepo,
         IAppTableRepository tableRepo,
         CancellationToken ct)
+        => (await ResolveTokenSourceFieldAsync(token, payloadJson, allSteps, fieldRepo, tableRepo, ct)).Category;
+
+    /// <summary>A User / MultiUser field (Record Owner, Last Modified By, a picked user) is stored and carried through steps as a user id.
+    /// Mapped into a text-like field, that id would read as "40021"; this swaps each such token for the person's name, as the record
+    /// table shows it. Mapped into a User field the id is kept, since that is what the field stores.</summary>
+    private async Task<string?> RenderUserTokensForTextAsync(
+        string? input, AppField destination, string payloadJson, string? executionPath, List<PipelineStep>? allSteps,
+        IAppFieldRepository fieldRepo, IAppTableRepository tableRepo, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(token)) return "TEXT";
+        if (string.IsNullOrEmpty(input) || !input.Contains("{{", StringComparison.Ordinal)) return input;
+        if (destination.TypeCode is "User" or "MultiUser" or "Formula_User" or "Formula_ListUser") return input;
+        var tokens = Regex.Matches(input, @"\{\{[^{}]*\}\}").Select(m => m.Value).Distinct().ToList();
+        foreach (var token in tokens)
+        {
+            AppField? source;
+            try { source = (await ResolveTokenSourceFieldAsync(token, payloadJson, allSteps, fieldRepo, tableRepo, ct)).Field; }
+            catch (Exception) { continue; } // an unresolvable source is reported by the normal token evaluation
+            if (source?.TypeCode is not ("User" or "MultiUser" or "Formula_User" or "Formula_ListUser")) continue;
+
+            var raw = EvaluateTokens(token, payloadJson, executionPath, allSteps);
+            if (string.IsNullOrWhiteSpace(raw)) { input = input.Replace(token, string.Empty); continue; }
+            var ids = new List<long>();
+            foreach (var part in raw.TrimStart('[').TrimEnd(']').Split(',', StringSplitOptions.RemoveEmptyEntries))
+                if (long.TryParse(part.Trim().Trim('"'), out var id)) ids.Add(id);
+            if (ids.Count == 0) continue; // already a name / free text
+            var names = await CurrentStepServices.GetRequiredService<IUserRepository>().GetNamesByIdsAsync(ids, ct);
+            input = input.Replace(token, string.Join(", ", ids.Select(id => names.TryGetValue(id, out var n) ? n : id.ToString())));
+        }
+        return input;
+    }
+
+    private async Task<(string Category, AppField? Field)> ResolveTokenSourceFieldAsync(
+        string? token,
+        string payloadJson,
+        List<PipelineStep>? allSteps,
+        IAppFieldRepository fieldRepo,
+        IAppTableRepository tableRepo,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return ("TEXT", null);
 
         var trimmedToken = token.Trim();
         bool isDynamicToken = System.Text.RegularExpressions.Regex.IsMatch(trimmedToken, @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
         if (!isDynamicToken)
         {
-            return "TEXT"; // Static literal value defaults to category TEXT
+            return ("TEXT", null); // Static literal value defaults to category TEXT
         }
 
         // Match {{steps.ref_1001.fid_5}}, {{steps.ref_loop.item.fid_5}}, {{ref_1001.fid_5}}, or {{trigger.fid_3}}
@@ -4482,7 +4531,7 @@ public partial class PipelineEngine : IPipelineEngine
         {
             if (allSteps == null || allSteps.Count == 0 || (sourceStep != null && sourceStep.Type == "trigger"))
             {
-                return "TEXT";
+                return ("TEXT", null);
             }
             throw new PipelineStepException($"Source step '{stepRef}' referenced in condition token '{token}' could not be resolved.");
         }
@@ -4490,12 +4539,12 @@ public partial class PipelineEngine : IPipelineEngine
         if (sourceStep.Subtype == "pipeline-called")
         {
             var value = ResolveCallableValue(trimmedToken, payloadJson, null, allSteps);
-            return value switch
+            return (value switch
             {
                 bool => "BOOLEAN",
                 byte or short or int or long or float or double or decimal => "NUMBER",
                 _ => "TEXT"
-            };
+            }, null);
         }
 
         // If source step is a Loop step, resolve table metadata from its loopOverStepId step
@@ -4659,7 +4708,7 @@ public partial class PipelineEngine : IPipelineEngine
                 throw new PipelineStepException($"Field metadata for token '{token}' (field '{fieldRef}') could not be resolved.");
             }
 
-            return PipelineFilterEvaluator.GetTypeCategory(matchedField);
+            return (PipelineFilterEvaluator.GetTypeCategory(matchedField), matchedField);
         }
         finally
         {

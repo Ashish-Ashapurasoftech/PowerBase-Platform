@@ -182,6 +182,20 @@ public interface IRecordRepository
     Task<Guid> CreateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
 
+    /// <summary>Inserts many records with multi-row INSERT statements inside <paramref name="transaction"/> (required). Each row is
+    /// stored exactly as <see cref="CreateAsync"/> would store it (same encryption, same blank handling, same search-index
+    /// message); only the round trips differ. Returns the new records' PublicIds in the order of <paramref name="rows"/>. A unique-index
+    /// violation fails the whole call (nothing is inserted) with <c>ConflictException</c>, like the single insert.</summary>
+    Task<IReadOnlyList<Guid>> CreateManyAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows,
+        System.Data.IDbTransaction transaction, CancellationToken ct = default,
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+
+    /// <summary>For each requested key, the live records whose (plain, unencrypted Text or Number) <paramref name="field"/> equals
+    /// it: (value as stored, PublicId). Keys are looked up in chunks, so the number of keys is not limited.</summary>
+    Task<IReadOnlyList<(object? Value, Guid PublicId)>> FindRecordsByFieldValuesAsync(
+        AppTable table, AppField field, IReadOnlyCollection<object> keys, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+
     Task UpdateAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId,
         IReadOnlyDictionary<long, object?> values, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
@@ -208,6 +222,19 @@ public interface IRecordRepository
     /// field's column — the per-write check behind the Unique constraint. <paramref name="excludeRecordId"/>
     /// (the record's internal row Id, not PublicId) excludes the record being updated from the check.</summary>
     Task<bool> HasValueDuplicateAsync(AppTable table, AppField field, object value, long? excludeRecordId = null, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+
+    /// <summary>True when the field's values are stored encrypted (so SQL cannot compare them).</summary>
+    Task<bool> FieldValuesAreEncryptedAsync(AppTable table, AppField field, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+
+    /// <summary>Every non-empty value the field holds across the table's non-deleted rows, decrypted — one scan, for callers
+    /// that check many values against it in memory (the per-value <see cref="HasValueDuplicateAsync"/> on an encrypted field
+    /// decrypts the whole column each time).</summary>
+    Task<IReadOnlyList<string>> GetAllValuesForUniqueCheckAsync(AppTable table, AppField field, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+
+    /// <summary>Batched form of <see cref="HasValueDuplicateAsync"/> for a plain (not encrypted) Text/Number field:
+    /// the positions in <paramref name="values"/> whose value some non-deleted row already holds, decided by the
+    /// database's own comparison, in one query per chunk instead of one table scan per value.</summary>
+    Task<IReadOnlySet<int>> GetExistingValueIndexesAsync(AppTable table, AppField field, IReadOnlyList<object> values, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
     /// <summary>Returns true if any non-deleted row has a NULL or empty-string value in the field's
     /// column (a candidate key field must be populated on every row).</summary>

@@ -371,7 +371,7 @@ public class CreateRelationshipCommandHandler
             {
                 var label = $"{existing.Label ?? existing.Name} (original)";
                 originalField = await _fieldFactory.CreateAsync(child, nameof(Domain.Enums.FieldTypeCode.Text), label, false,
-                    new Dictionary<string, bool> { [HelperFields.HiddenMarkerProperty] = true }, ct, isEncrypted: !isFormula && existing.IsEncrypted, hidden: true);
+                    new Dictionary<string, bool>(), ct, isEncrypted: !isFormula && existing.IsEncrypted, hidden: true);
                 preserve = new PreservedOriginal(originalField,
                     isFormula ? unmatchedRows.ToDictionary(p => p.Key, p => p.Value) : null);
                 warning += $"The original values are kept in the hidden field \"{label}\".";

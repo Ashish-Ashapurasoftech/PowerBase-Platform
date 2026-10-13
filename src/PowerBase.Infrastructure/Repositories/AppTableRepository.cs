@@ -53,7 +53,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
     // {0} = whitelisted "column direction" fragment — never built from raw user input.
     private const string ListByAppPagedSqlTemplate = """
         SELECT t.PublicId, t.Name, t.SingularLabel, t.Icon, t.RecordCount, t.IsShowInBar, t.CreatedOn,
-               (SELECT COUNT(1) FROM meta.AppField f WHERE f.AppTableId = t.Id AND f.IsDeleted = 0) AS FieldCount
+               (SELECT COUNT(1) FROM meta.AppField f WHERE f.AppTableId = t.Id AND f.IsDeleted = 0 AND f.IsHidden = 0) AS FieldCount
         FROM meta.AppTable t
         WHERE t.AppId = @appId
           AND t.IsDeleted = 0
@@ -192,6 +192,10 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
 
     private const string IncrementRecordCountSql = """
         UPDATE meta.AppTable SET RecordCount = RecordCount + 1 WHERE Id = @id
+        """;
+
+    private const string IncrementRecordCountBySql = """
+        UPDATE meta.AppTable SET RecordCount = RecordCount + @count WHERE Id = @id
         """;
 
     private const string DecrementRecordCountSql = """
@@ -427,6 +431,20 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(IncrementRecordCountSql, new { id }, cancellationToken: ct));
+    }
+
+    public async Task IncrementRecordCountByAsync(long id, int count, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        if (count <= 0) return;
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(IncrementRecordCountBySql, new { id, count }, transaction, cancellationToken: ct));
+            return;
+        }
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(IncrementRecordCountBySql, new { id, count }, cancellationToken: ct));
     }
 
     public async Task DecrementRecordCountAsync(long id, CancellationToken ct = default)

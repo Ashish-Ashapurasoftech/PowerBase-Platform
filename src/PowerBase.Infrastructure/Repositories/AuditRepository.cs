@@ -168,6 +168,50 @@ public class AuditRepository : IAuditRepository
         }, cancellationToken: ct));
     }
 
+    // 8 shared parameters + 1 per row, well under SQL Server's 2,100 limit.
+    private const int ActivityLogChunk = 500;
+
+    public async Task LogActivitiesAsync(
+        string action,
+        string entityType,
+        IReadOnlyCollection<string> entityIds,
+        string? entityTitle = null,
+        long? appId = null,
+        System.Data.IDbTransaction? transaction = null,
+        CancellationToken ct = default)
+    {
+        if (entityIds.Count == 0) return;
+        var connection = transaction?.Connection ?? await _tenantFactory.CreateAsync(ct);
+        var ownConnection = transaction is null;
+        try
+        {
+            foreach (var chunk in entityIds.Chunk(ActivityLogChunk))
+            {
+                var parameters = new DynamicParameters(new
+                {
+                    userId    = _queryContext.UserId,
+                    userName  = _queryContext.UserName,
+                    userEmail = _queryContext.UserEmail,
+                    action, entityType, entityTitle, appId,
+                    ipAddress = _queryContext.IpAddress,
+                });
+                var tuples = new string[chunk.Length];
+                for (var i = 0; i < chunk.Length; i++)
+                {
+                    tuples[i] = $"(@userId, @userName, @userEmail, @action, @entityType, @e{i}, @entityTitle, @appId, NULL, NULL, @ipAddress, SYSUTCDATETIME())";
+                    parameters.Add("e" + i, chunk[i]);
+                }
+                var sql = "INSERT INTO audit.ActivityLog (UserId, UserName, UserEmail, Action, EntityType, EntityId, EntityTitle, AppId, OldValues, NewValues, IpAddress, OccurredOn) VALUES "
+                    + string.Join(",", tuples);
+                await connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct));
+            }
+        }
+        finally
+        {
+            if (ownConnection) await ((IAsyncDisposable)connection).DisposeAsync();
+        }
+    }
+
     public async Task<(IReadOnlyList<ActivityLog> Items, int Total)> QueryActivityLogsAsync(
         ActivityLogFilter filter, CancellationToken ct = default)
     {

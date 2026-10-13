@@ -1268,6 +1268,134 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return insertedPublicId;
     }
 
+    public async Task<IReadOnlyList<Guid>> CreateManyAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows,
+        IDbTransaction transaction, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+    {
+        ArgumentNullException.ThrowIfNull(transaction);
+        var publicIds = new Guid[rows.Count];
+        if (rows.Count == 0) return publicIds;
+        var connection = transaction.Connection!;
+
+        // One encryption context (and one key lookup) for the whole batch, instead of one per record.
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
+        if (!enc.IsActive && (enc.IsAppEncrypted || fields.Any(f => f.IsEncrypted)))
+            await enc.EnsureDekAsync(connection, transaction, ct);
+
+        // Rows that write the same columns share one INSERT shape; a row that writes a different set of columns goes in another group.
+        var groups = new Dictionary<string, (List<AppField> Fields, List<int> Rows)>(StringComparer.Ordinal);
+        for (var r = 0; r < rows.Count; r++)
+        {
+            var relevant = fields.Where(f => f.Fid.HasValue && rows[r].ContainsKey((long)f.Fid.Value) && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)).ToList();
+            var key = string.Join(",", relevant.Select(f => f.Fid!.Value));
+            if (!groups.TryGetValue(key, out var group)) groups[key] = group = (relevant, new List<int>());
+            group.Rows.Add(r);
+            publicIds[r] = Guid.NewGuid();
+        }
+
+        const int maxParameters = 2000;
+        foreach (var (relevant, rowIndexes) in groups.Values)
+        {
+            var columns = new List<string>();
+            foreach (var f in relevant)
+            {
+                columns.Add(PhysicalNaming.ColumnName(f.Fid!.Value));
+                if (PhysicalNaming.IsRangeTypeCode(f.TypeCode)) columns.Add(PhysicalNaming.EndColumnName(f.Fid!.Value));
+            }
+            var perRow = columns.Count + 1;                    // the columns + PublicId
+            var rowsPerStatement = Math.Max(1, Math.Min(1000, (maxParameters - 1) / perRow));
+            foreach (var chunk in rowIndexes.Chunk(rowsPerStatement))
+            {
+                var parameters = new DynamicParameters();
+                parameters.Add("createdBy", QueryContext.UserId);
+                var tuples = new List<string>(chunk.Length);
+                for (var n = 0; n < chunk.Length; n++)
+                {
+                    var r = chunk[n];
+                    var values = rows[r];
+                    var encryptedValues = await enc.EncryptValuesAsync(fields, values, ct);
+                    var names = new List<string> { $"@id{n}", "@createdBy" };
+                    parameters.Add($"id{n}", publicIds[r]);
+                    foreach (var f in relevant)
+                    {
+                        var fid = (long)f.Fid!.Value;
+                        var col = PhysicalNaming.ColumnName(f.Fid!.Value);
+                        if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
+                        {
+                            var endCol = PhysicalNaming.EndColumnName(f.Fid!.Value);
+                            var (startVal, endVal) = SplitRangeValue(encryptedValues.TryGetValue(fid, out var rv) ? rv : values[fid]);
+                            parameters.Add($"{col}_{n}", startVal);
+                            parameters.Add($"{endCol}_{n}", endVal);
+                            names.Add($"@{col}_{n}");
+                            names.Add($"@{endCol}_{n}");
+                        }
+                        else
+                        {
+                            var raw = values.TryGetValue(fid, out var rv2) ? rv2 : null;
+                            parameters.Add($"{col}_{n}", IsBlankForNonTextField(f, raw)
+                                ? null
+                                : (encryptedValues.TryGetValue(fid, out var ev) ? ev : raw));
+                            names.Add($"@{col}_{n}");
+                        }
+                    }
+                    tuples.Add("(" + string.Join(", ", names) + ")");
+                }
+                var sql = $"INSERT INTO {PhysicalNaming.FullTableName(table.Id)} (PublicId, CreatedBy{string.Concat(columns.Select(c => ", " + c))}) VALUES {string.Join(", ", tuples)}";
+                await ExecuteTranslatingUniqueViolationsAsync(() =>
+                    connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct)));
+            }
+        }
+
+        // Search-index messages carry the ORIGINAL plaintext values, like CreateAsync.
+        var messages = new List<PowerBase.Application.Common.Models.SearchIndexMessage>(rows.Count);
+        var searchable = fields.Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue).ToList();
+        for (var r = 0; r < rows.Count; r++)
+        {
+            var payload = searchable
+                .Where(f => rows[r].ContainsKey((long)f.Fid!.Value))
+                .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? rows[r][(long)f.Fid!.Value] : null);
+            messages.Add(new PowerBase.Application.Common.Models.SearchIndexMessage
+            {
+                Action = PowerBase.Application.Common.Models.IndexAction.Upsert,
+                TenantId = QueryContext.TenantId,
+                AppId = table.AppId,
+                TableId = table.Id,
+                RecordPublicId = publicIds[r],
+                Payload = payload.Count > 0 ? payload : null
+            });
+        }
+        if (onIndexMessageCreated != null)
+            foreach (var msg in messages) onIndexMessageCreated(msg);
+        else
+            _ = _messagePublisher.PublishBatchAsync(messages, default);
+
+        return publicIds;
+    }
+
+    public async Task<IReadOnlyList<(object? Value, Guid PublicId)>> FindRecordsByFieldValuesAsync(
+        AppTable table, AppField field, IReadOnlyCollection<object> keys, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var found = new List<(object? Value, Guid PublicId)>();
+        if (keys.Count == 0) return found;
+        var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName) ? field.PhysicalColumnName! : PhysicalNaming.ColumnName(field.Fid!.Value);
+        IDbConnection? own = null;
+        try
+        {
+            var connection = transaction?.Connection ?? (own = await ConnectionFactory.CreateAsync(ct));
+            foreach (var chunk in keys.Chunk(1000))
+            {
+                var parameters = new DynamicParameters();
+                var names = new string[chunk.Length];
+                for (var i = 0; i < chunk.Length; i++) { names[i] = "@k" + i; parameters.Add("k" + i, chunk[i]); }
+                var sql = $"SELECT {col} AS [Value], PublicId FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0 AND {col} IN ({string.Join(",", names)})";
+                var rows = await connection.QueryAsync<(object? Value, Guid PublicId)>(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct));
+                found.AddRange(rows);
+            }
+        }
+        finally { own?.Dispose(); }
+        return found;
+    }
+
     public async Task UpdateAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId,
         IReadOnlyDictionary<long, object?> values, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
@@ -2771,6 +2899,65 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         return await connection.ExecuteScalarAsync<bool>(
             new CommandDefinition(sql, new { value, excludeRecordId }, cancellationToken: ct));
+    }
+
+    public async Task<bool> FieldValuesAreEncryptedAsync(AppTable table, AppField field, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        await using var ownedConnection = transaction is null ? await ConnectionFactory.CreateAsync(ct) : null;
+        var connection = transaction?.Connection ?? ownedConnection!;
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
+        return enc.IsActive && NeedsDecrypt(enc, field);
+    }
+
+    public async Task<IReadOnlyList<string>> GetAllValuesForUniqueCheckAsync(AppTable table, AppField field, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var col = PhysicalNaming.ColumnName(field.Fid!.Value);
+        await using var ownedConnection = transaction is null ? await ConnectionFactory.CreateAsync(ct) : null;
+        var connection = transaction?.Connection ?? ownedConnection!;
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
+        var sql = $"SELECT CAST({col} AS NVARCHAR(MAX)) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0 AND {col} IS NOT NULL";
+        var raw = await connection.QueryAsync<string>(new CommandDefinition(sql, transaction: transaction, cancellationToken: ct));
+        var decrypt = enc.IsActive && NeedsDecrypt(enc, field);
+        var values = new List<string>();
+        foreach (var cipher in raw)
+        {
+            if (string.IsNullOrEmpty(cipher)) continue;
+            // Same reading as HasValueDuplicateAsync: a value that does not decrypt is compared as stored.
+            var plain = decrypt ? await enc.DecryptValueAsync(cipher, ct) : cipher;
+            if (!string.IsNullOrEmpty(plain)) values.Add(plain);
+        }
+        return values;
+    }
+
+    public async Task<IReadOnlySet<int>> GetExistingValueIndexesAsync(AppTable table, AppField field, IReadOnlyList<object> values, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var existing = new HashSet<int>();
+        if (values.Count == 0) return existing;
+        var col = PhysicalNaming.ColumnName(field.Fid!.Value);
+        await using var ownedConnection = transaction is null ? await ConnectionFactory.CreateAsync(ct) : null;
+        var connection = transaction?.Connection ?? ownedConnection!;
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, transaction, ct);
+        if (enc.IsActive && NeedsDecrypt(enc, field))
+            throw new NotSupportedException("An encrypted field's values cannot be compared in SQL; use HasValueDuplicateAsync.");
+        // Same equality as HasValueDuplicateAsync ("col = value"), asked for a whole chunk of values at once.
+        foreach (var chunk in Enumerable.Range(0, values.Count).Chunk(1000))
+        {
+            var parameters = new DynamicParameters();
+            var rowsSql = new string[chunk.Length];
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                parameters.Add("v" + i, values[chunk[i]]);
+                parameters.Add("i" + i, chunk[i]);
+                rowsSql[i] = $"(@v{i}, @i{i})";
+            }
+            var sql = $"""
+                SELECT v.idx FROM (VALUES {string.Join(",", rowsSql)}) AS v(val, idx)
+                WHERE EXISTS (SELECT 1 FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0 AND {col} = v.val)
+                """;
+            foreach (var idx in await connection.QueryAsync<int>(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct)))
+                existing.Add(idx);
+        }
+        return existing;
     }
 
     public async Task<bool> HasNullsAsync(AppTable table, AppField field, CancellationToken ct = default)

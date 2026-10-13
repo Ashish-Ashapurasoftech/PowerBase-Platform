@@ -45,7 +45,7 @@ public sealed class RelationshipFieldFactory
     }
 
     /// <param name="isEncrypted">Marks the field's column as encrypted (needed when its values are copied raw from an encrypted column).</param>
-    /// <param name="hidden">Keeps the field out of searches, sorts, filters and reports (it is also never auto-added to forms by this method).</param>
+    /// <param name="hidden">Sets <c>IsHidden</c> (kept out of field lists) and keeps the field out of searches, sorts, filters and reports (it is also never auto-added to forms by this method).</param>
     public async Task<AppField> CreateAsync(
         AppTable table, string typeCode, string label, bool isRequired, object settingsObj, CancellationToken ct,
         bool isEncrypted = false, bool hidden = false)
@@ -83,6 +83,7 @@ public sealed class RelationshipFieldFactory
             IsFilterable = !hidden,
             IsReportable = !hidden,
             IsEncrypted = isEncrypted,
+            IsHidden = hidden,
         };
 
         var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);
