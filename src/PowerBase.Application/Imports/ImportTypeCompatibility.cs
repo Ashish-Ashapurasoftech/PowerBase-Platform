@@ -15,18 +15,23 @@ public static class ImportTypeCompatibility
     /// <summary>Field types the import engine cannot write yet (values need resolving or multi-column storage).</summary>
     private static readonly HashSet<string> UnsupportedDestination = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Reference", "User", "MultiUser", "File", "Address", "DateRange", "NumericRange"
+        "User", "MultiUser", "File", "Address", "DateRange", "NumericRange"
     };
 
     public static bool IsWritable(AppField f) =>
         f.Fid.HasValue && !f.IsDeleted && !f.IsHidden && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)
         && (!f.IsSystem || IsRecordId(f)) && !UnsupportedDestination.Contains(f.TypeCode);
 
+    /// <summary>A Reference field stores the Record ID# of a record of its parent table. An import fills it from the parent's key (the value
+    /// the relationship shows for a record, e.g. a course's title) or, as every Reference write accepts, the Record ID# itself; the run turns
+    /// each into the Record ID# (see <c>ImportChunkWriter</c>), so the value that goes through conversion is just the text from the source.</summary>
+    public static bool IsReference(AppField f) => string.Equals(f.TypeCode, "Reference", StringComparison.OrdinalIgnoreCase);
+
     public static bool IsRecordId(AppField f) =>
         f.IsSystem && string.Equals(f.PhysicalColumnName, "Id", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>A merge key must be unique (or the Record ID#) on the destination.</summary>
-    public static bool IsKeyCandidate(AppField f) => f.IsUnique || f.IsPrimary || IsRecordId(f);
+    public static bool IsKeyCandidate(AppField f) => !IsReference(f) && (f.IsUnique || f.IsPrimary || IsRecordId(f));
 
     public static string DisplayName(AppField f) => string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label;
 
@@ -89,6 +94,11 @@ public static class ImportTypeCompatibility
                     default: error = $"'{text}' is not a checkbox value. Use true or false."; return false;
                 }
         }
+        if (code == "Reference")
+        {
+            value = text.Trim().Length == 0 ? null : text.Trim();
+            return true;
+        }
         if (code == "Date")
         {
             if (DateTime.TryParseExact(text.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)) { value = date; return true; }
@@ -134,6 +144,13 @@ public static class ImportTypeCompatibility
                     default: error = $"'{flag}' is not a checkbox value for '{DisplayName(destination)}'. Use true or false."; return false;
                 }
             default:
+                if (KindOf(destination).Code.Equals("Reference", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Kept as text: whether it names a parent record is decided against the parent table, for the whole chunk at once.
+                    var reference = Convert.ToString(value, CultureInfo.InvariantCulture)?.Trim();
+                    result = string.IsNullOrEmpty(reference) ? null : reference;
+                    return true;
+                }
                 // A date or date-time calculated by a formula arrives as ISO text: store a real date, not text the database parses
                 // in whatever culture it happens to run in.
                 if (value is string text && KindOf(destination).Code is "Date" or "DateTime")
@@ -158,7 +175,9 @@ public static class ImportTypeCompatibility
         var safeCast = (from.Kind, to.Kind) is (Kind.Number, Kind.Text) or (Kind.Text, Kind.Number);
         // A single-select's value is the text of the option chosen, so it goes into a text field as it is.
         var optionToText = from.Kind == Kind.Other && string.Equals(from.Code, "SingleSelect", StringComparison.OrdinalIgnoreCase) && to.Kind == Kind.Text;
-        return sameKind || safeCast || optionToText || (from.Kind == Kind.Other && from.Code == to.Code);
+        // A text or a number can hold the Record ID# of the record a Reference points at.
+        var toReference = string.Equals(to.Code, "Reference", StringComparison.OrdinalIgnoreCase) && from.Kind is Kind.Text or Kind.Number;
+        return sameKind || safeCast || optionToText || toReference || (from.Kind == Kind.Other && from.Code == to.Code);
     }
 
     private static (Kind Kind, string Code) KindOf(AppField f)

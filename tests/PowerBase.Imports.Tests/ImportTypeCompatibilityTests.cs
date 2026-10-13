@@ -28,7 +28,6 @@ public class ImportTypeCompatibilityTests
         (ImportTypeCompatibility.CheckMapping(F(from), F(to)) is null).Should().Be(allowed);
 
     [Theory]
-    [InlineData("Reference")]
     [InlineData("User")]
     [InlineData("File")]
     [InlineData("Formula")]

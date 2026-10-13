@@ -35,7 +35,8 @@ public sealed class ImportRunProcessor(
     IImportFileAccess fileAccess,
     ImportMultiTargetRunner multiTarget,
     IOptions<ImportOptions> options,
-    ILogger<ImportRunProcessor> logger)
+    ILogger<ImportRunProcessor> logger,
+    IReferenceOriginalFields? originals = null)
 {
     /// <summary>The issue table keeps this many rows per run for the run page; the feedback file has them all.</summary>
     private const int IssueCap = 5000;
@@ -151,7 +152,7 @@ public sealed class ImportRunProcessor(
         ImportPlan plan, ImportRun run, long maxId, int progressFrom, int progressTo, CancellationToken ct)
     {
         var tracker = new ImportDuplicateTracker();
-        var writer = new ImportChunkWriter(plan, store, records, null, formulaEngine, run.TriggeredByUserId, ImportPassMode.Validate, tracker);
+        var writer = new ImportChunkWriter(plan, store, records, null, formulaEngine, run.TriggeredByUserId, ImportPassMode.Validate, tracker, null, originals);
         await using var source = await OpenSourceAsync(plan, ct);
         long cursor = 0;
         while (true)
@@ -175,7 +176,7 @@ public sealed class ImportRunProcessor(
         ImportPlan plan, ImportRun run, long maxId, ImportDataRuleGate? gate, ImportPassMode mode,
         Dictionary<int, HashSet<ulong>>? groups, int progressFrom, int progressTo, CancellationToken ct)
     {
-        var writer = new ImportChunkWriter(plan, store, records, gate, formulaEngine, run.TriggeredByUserId, mode, new ImportDuplicateTracker(groups));
+        var writer = new ImportChunkWriter(plan, store, records, gate, formulaEngine, run.TriggeredByUserId, mode, new ImportDuplicateTracker(groups), null, originals);
         await writer.PrepareAsync(ct);
         var result = new PassResult(NewDetailsWriter(plan));
         await using var source = await OpenSourceAsync(plan, ct);

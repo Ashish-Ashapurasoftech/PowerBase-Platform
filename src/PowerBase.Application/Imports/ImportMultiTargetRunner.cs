@@ -26,7 +26,8 @@ public sealed class ImportMultiTargetRunner(
     IAuditRepository audit,
     IFileStorageService storage,
     IImportFileAccess fileAccess,
-    ILogger<ImportMultiTargetRunner> logger)
+    ILogger<ImportMultiTargetRunner> logger,
+    IReferenceOriginalFields? originals = null)
 {
     private const int IssueCap = 5000;
 
@@ -196,7 +197,7 @@ public sealed class ImportMultiTargetRunner(
             var group = groups[g];
             var (from, to) = GroupRange(progressFrom, progressTo, g, groups.Count);
             var writers = group.Targets.Select(t => new ImportChunkWriter(t.Plan, store, records, null, formulaEngine, run.TriggeredByUserId,
-                ImportPassMode.Validate, trackers[t.TableIndex], t.Label)).ToList();
+                ImportPassMode.Validate, trackers[t.TableIndex], t.Label, originals)).ToList();
             await using var source = await OpenSourceAsync(group, ct);
             long cursor = 0;
             while (true)
@@ -230,7 +231,7 @@ public sealed class ImportMultiTargetRunner(
                 var group = groups[g];
                 var (from, to) = GroupRange(progressFrom, progressTo, g, groups.Count);
                 var writers = group.Targets.Select(t => new ImportChunkWriter(t.Plan, store, records, t.Gate, formulaEngine, run.TriggeredByUserId, mode,
-                    trackers[t.TableIndex], t.Label)).ToList();
+                    trackers[t.TableIndex], t.Label, originals)).ToList();
                 foreach (var writer in writers) await writer.PrepareAsync(ct);
                 await using var source = await OpenSourceAsync(group, ct);
                 pass.Cursor = 0;
