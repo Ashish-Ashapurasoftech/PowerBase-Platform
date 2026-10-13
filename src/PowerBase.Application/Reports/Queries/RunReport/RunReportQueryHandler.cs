@@ -322,7 +322,7 @@ public class RunReportQueryHandler
         }
         if (selectedFields.Count == 0)
         {
-            selectedFields = allFields.Where(f => f.Fid.HasValue && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
+            selectedFields = allFields.Where(f => f.Fid.HasValue && !f.IsHidden && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
 
         // Merge role record filter into the report's filter tree.
@@ -389,7 +389,7 @@ public class RunReportQueryHandler
             {
                 // Standard SQL LIKE fallback (used when AI Search is disabled, unhealthy, or returns 0 matches).
                 var textFields = allFields
-                    .Where(f => !PhysicalNaming.IsComputedTypeCode(f.TypeCode) &&
+                    .Where(f => !f.IsHidden && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) &&
                                 !f.TypeCode.Equals("File", StringComparison.OrdinalIgnoreCase) &&
                                 !f.TypeCode.Equals("Attachment", StringComparison.OrdinalIgnoreCase) &&
                                 !f.TypeCode.Equals("Signature", StringComparison.OrdinalIgnoreCase) &&

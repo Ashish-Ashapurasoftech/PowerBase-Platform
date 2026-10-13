@@ -23,7 +23,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                    af.IsSystem, af.IsEncrypted, af.IsDeleted
             FROM meta.AppField af
             JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
-            WHERE af.AppTableId = @tableId AND af.IsDeleted = 0
+            WHERE af.AppTableId = @tableId AND af.IsDeleted = 0 AND af.IsHidden = 0
             ORDER BY af.Id
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);

@@ -19,7 +19,7 @@ public static class ImportTypeCompatibility
     };
 
     public static bool IsWritable(AppField f) =>
-        f.Fid.HasValue && !f.IsDeleted && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)
+        f.Fid.HasValue && !f.IsDeleted && !f.IsHidden && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)
         && (!f.IsSystem || IsRecordId(f)) && !UnsupportedDestination.Contains(f.TypeCode);
 
     public static bool IsRecordId(AppField f) =>

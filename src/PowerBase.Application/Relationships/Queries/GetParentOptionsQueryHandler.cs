@@ -76,11 +76,14 @@ public class GetParentOptionsQueryHandler
             labelFields = combined;
 
             // The closed-input text (ReferenceOption.Label) always reads like the standard Record
-            // ID# key does: the parent's descriptive/picker field, never the raw alternate key value
+            // ID# key does: the parent's first picker field, never the raw alternate key value
             // (e.g. a phone number). The key field still shows as column 1 in the multi-column list
             // above so users can see both while picking; falls back to the key field itself only if
-            // the parent has no separate descriptive field configured.
-            primaryLabelField = descriptiveFields.FirstOrDefault() ?? displayKey;
+            // the parent has no picker field configured.
+            // The first picker field is used even when it IS the key (a Set Key on "Department Name"
+            // with picker fields Name + Code): skipping it would label the selection "01" while the
+            // grid and the list show "IT".
+            primaryLabelField = ResolveLabelFields(parent, parentFields).FirstOrDefault(f => !f.IsSystem) ?? displayKey;
         }
         else
         {
@@ -226,8 +229,8 @@ public class GetParentOptionsQueryHandler
             if (display is not null) return [display];
         }
 
-        // Fall back to the first non-system field that can serve as a label.
-        var fallback = parentFields.FirstOrDefault(f => !f.IsSystem && CanServeAsLabel(f));
+        // Fall back to the first non-system, non-hidden field that can serve as a label.
+        var fallback = parentFields.FirstOrDefault(f => !f.IsSystem && !f.IsHidden && CanServeAsLabel(f));
         if (fallback != null) return [fallback];
 
         // Ultimate fallback: Record ID# (Fid 3), so a table with zero business fields still shows

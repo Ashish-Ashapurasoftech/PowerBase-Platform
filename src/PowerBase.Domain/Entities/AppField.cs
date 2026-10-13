@@ -30,6 +30,8 @@ public class AppField
     public bool IsAuditable { get; set; } = true;
     public bool IsEncrypted { get; set; }
     public bool IsAutoFill { get; set; }
+    /// <summary>Helper field (e.g. a relationship's "(original)" copy) kept out of every user-facing field list.</summary>
+    public bool IsHidden { get; set; }
     public int? Fid { get; set; }
     public string? Settings { get; set; }
     public bool IsDeleted { get; set; }

@@ -16,7 +16,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         af.Id, af.PublicId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName, af.DefaultValue,
         af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsAutoFill, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsAutoFill, af.IsHidden, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
     private const string GetByIdInTableSql = $"""
@@ -37,8 +37,8 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         ORDER BY af.Id
         """;
 
-    // The three list/count templates below skip fields whose Settings carry "hiddenFromFieldList":true — the
-    // hidden "(original)" Text field a relationship conversion creates (see HelperFields.HiddenMarkerProperty).
+    // The three list/count templates below skip fields flagged IsHidden — the hidden "(original)" Text
+    // field a relationship conversion creates (see HelperFields).
     // The field still exists everywhere else (ListByTableAsync is unchanged), so reads/projection can use it.
     // {0} = whitelisted "column direction" fragment; {1} = whitelisted filter-predicate fragment —
     // both built from fixed C# switches (ResolveSortColumn/ResolveFilterFragment), never from raw
@@ -52,7 +52,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE af.AppTableId = @tableId
           AND af.IsDeleted = 0
           AND (@search IS NULL OR af.Label LIKE @search)
-          AND (af.Settings IS NULL OR af.Settings NOT LIKE '%"hiddenFromFieldList":true%')
+          AND af.IsHidden = 0
           {1}
         ORDER BY {0}
         OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
@@ -68,7 +68,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE af.AppTableId = @tableId
           AND af.IsDeleted = 0
           AND (@search IS NULL OR af.Label LIKE @search)
-          AND (af.Settings IS NULL OR af.Settings NOT LIKE '%"hiddenFromFieldList":true%')
+          AND af.IsHidden = 0
           {1}
         ORDER BY {0}
         """;
@@ -80,7 +80,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE af.AppTableId = @tableId
           AND af.IsDeleted = 0
           AND (@search IS NULL OR af.Label LIKE @search)
-          AND (af.Settings IS NULL OR af.Settings NOT LIKE '%"hiddenFromFieldList":true%')
+          AND af.IsHidden = 0
           {0}
         """;
 
@@ -102,11 +102,11 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string InsertSql = """
         INSERT INTO meta.AppField
             (AppTableId, FieldTypeId, Name, Label, Description, IsRequired, DefaultValue,
-             IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable, IsAuditable, IsEncrypted, IsAutoFill,
+             IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable, IsAuditable, IsEncrypted, IsAutoFill, IsHidden,
              Fid, Settings, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
         VALUES (@tableId, @fieldTypeId, @name, @label, @description, @isRequired, @defaultValue,
-                @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable, @isAuditable, @isEncrypted, @isAutoFill,
+                @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable, @isAuditable, @isEncrypted, @isAutoFill, @isHidden,
                 @fid, @settings, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
 
@@ -407,6 +407,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 isAuditable = field.IsAuditable,
                 isEncrypted = field.IsEncrypted,
                 isAutoFill = field.IsAutoFill,
+                isHidden = field.IsHidden,
                 fid = field.Fid,
                 settings = field.Settings,
                 displayOrder = field.DisplayOrder,
