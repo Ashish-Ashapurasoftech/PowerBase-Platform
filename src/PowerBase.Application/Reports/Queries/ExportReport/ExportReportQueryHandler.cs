@@ -94,7 +94,7 @@ public class ExportReportQueryHandler
         var safeName = string.Concat(report.Name.Split(Path.GetInvalidFileNameChars()));
 
         if (report.ReportType is "Summary" or "Chart")
-            return await ExportSummaryAsync(table, allFields, access, definition, safeName, query.Format, ct);
+            return await ExportSummaryAsync(table, allFields, access, definition, safeName, query.Format, filterTree, ct);
 
         return await ExportTableAsync(table, allFields, access, definition, safeName, query.Format, filterTree, sortFields, ct);
     }
@@ -154,7 +154,8 @@ public class ExportReportQueryHandler
         var hasFormulaSorts = sortFields.Any(s => formulaFids.Contains(s.FieldId));
         IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
 
-        var rows = await _recordRepo.ListAsync(table, allFields, 1, 50_000, physicalFilterTree, sqlSorts,
+        // Every matching record — no row cap, so the export is never silently cut short.
+        var rows = await _recordRepo.ListAllMatchingAsync(table, allFields, physicalFilterTree, sqlSorts,
             restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
         var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
             await _relationalProjector.ProjectAsync(table, allFields, rows, ct));
@@ -180,6 +181,7 @@ public class ExportReportQueryHandler
         ReportDefinition definition,
         string safeName,
         string format,
+        FilterGroup? filterTree,
         CancellationToken ct)
     {
         var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
@@ -204,10 +206,33 @@ public class ExportReportQueryHandler
         }
 
         var summarySort = RunReport.RunReportQueryHandler.ResolveSummarySort(definition, rowGroupSpecs, visibleAggregations);
-        var rows = await _recordRepo.SummarizeAsync(
-            table, rowGroupSpecs, visibleAggregations, allFields,
-            filterTree: access.ViewFilter, restrictToCreatedBy: access.RestrictToCreatedBy,
-            seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", sort: summarySort, ct: ct);
+        var seriesMode = definition.Chart?.SeriesMode ?? "EqualValues";
+
+        // The exported summary honours the report's own saved filter (as the on-screen report and the Table
+        // export do) AND the role's record filter — it used to apply only the latter.
+        var summaryFilterTree = filterTree;
+        if (access.ViewFilter != null)
+        {
+            summaryFilterTree = filterTree == null
+                ? access.ViewFilter
+                : new FilterGroup
+                {
+                    Logic = "and",
+                    Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = access.ViewFilter }]
+                };
+        }
+
+        // Formula/Lookup/Summary fields have no column to group or aggregate in SQL — summarize those in memory
+        // (see RunReportQueryHandler.RunSummaryAsync).
+        var rows = InMemorySummarizer.IsRequired(rowGroupSpecs, visibleAggregations, seriesField, allFields, summaryFilterTree)
+            ? await InMemorySummarizer.SummarizeAsync(
+                _recordRepo, _relationalProjector, _formulaProjector,
+                table, rowGroupSpecs, visibleAggregations, allFields,
+                summaryFilterTree, access.RestrictToCreatedBy, seriesField, seriesMode, summarySort, ct)
+            : await _recordRepo.SummarizeAsync(
+                table, rowGroupSpecs, visibleAggregations, allFields,
+                filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
+                seriesField: seriesField, seriesMode: seriesMode, sort: summarySort, ct: ct);
 
         // Build alias→unique-key map and percent set (same logic as RunSummaryAsync — see its
         // comment: a user can aggregate the SAME field with several different functions, e.g.

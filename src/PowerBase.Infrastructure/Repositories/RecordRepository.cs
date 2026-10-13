@@ -133,8 +133,84 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
-        
+
         // Use mutable Dictionary so DecryptRowsAsync can mutate values in-place
+        var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
+
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        await enc.DecryptRowsAsync(mutableRows, fields, ct);
+
+        return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllMatchingAsync(
+        AppTable table, IReadOnlyList<AppField> fields,
+        FilterGroup? filterTree = null,
+        IReadOnlyList<SortSpec>? sortFields = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default)
+    {
+        var parameters = new DynamicParameters();
+        var fieldLookup = BuildFieldLookup(fields);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+        // Same ORDER BY rules as ListAsync: computed fields have no column and are skipped; Id when nothing sortable remains.
+        var orderBy = sortFields?.Count > 0
+            ? string.Join(", ", sortFields
+                .Where(s => !fieldLookup.TryGetValue(s.FieldId, out var sf2) || !PhysicalNaming.IsComputedTypeCode(sf2.TypeCode))
+                .Select(s =>
+                {
+                    var colName = fieldLookup.TryGetValue(s.FieldId, out var sf)
+                        ? ResolveColumnName(sf, s.FieldId)
+                        : PhysicalNaming.ColumnName((int)s.FieldId);
+                    return $"{colName} {(s.Desc ? "DESC" : "ASC")}";
+                })
+                .DefaultIfEmpty("Id"))
+            : "Id";
+
+        var sql = $"""
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0{filterWhere}
+            ORDER BY {orderBy}
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        // commandTimeout 0 = no timeout: a report over every record can legitimately take longer than
+        // SqlClient's 30 s default. The request's cancellation token still aborts it.
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
+        var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
+
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        await enc.DecryptRowsAsync(mutableRows, fields, ct);
+
+        return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListBatchAfterIdAsync(
+        AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default)
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("afterId", afterId);
+        parameters.Add("batchSize", batchSize);
+        var fieldLookup = BuildFieldLookup(fields);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+
+        // Keyset paging (Id > @afterId) rather than OFFSET: every batch costs the same however deep into
+        // the table it is, so a summary over millions of records doesn't slow down as it goes.
+        var sql = $"""
+            SELECT TOP (@batchSize) Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND Id > @afterId{filterWhere}
+            ORDER BY Id
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
         var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
 
         var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
@@ -178,7 +254,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         var sql = $"SELECT {string.Join(", ", selects)} FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var row = (IDictionary<string, object?>)(await connection.QuerySingleAsync<dynamic>(new CommandDefinition(sql, parameters, cancellationToken: ct)));
+        var row = (IDictionary<string, object?>)(await connection.QuerySingleAsync<dynamic>(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct)));
 
         var rowCount = Convert.ToInt64(row["totalRows"] ?? 0L);
         foreach (var f in targets)
@@ -214,6 +290,32 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         long? restrictToCreatedBy = null,
         CancellationToken ct = default)
     {
+        // Encrypted columns hold ciphertext, so a ViewFilter condition on one (e.g. "Assigned User is the
+        // current user" in an encrypted app) can never match in SQL — the record would look hidden to
+        // the very user the rule is meant to show it to. Judge such a filter in memory against the
+        // decrypted row instead, the same way RunReport does for lists. Filters that touch no
+        // encrypted field keep the SQL path below.
+        bool appEncrypted;
+        await using (var encConnection = await ConnectionFactory.CreateAsync(ct))
+            appEncrypted = (await GetEncryptionContextAsync(encConnection, table.AppId, null, ct)).IsAppEncrypted;
+
+        if (EncryptedRowFilter.TouchesEncrypted(viewFilter, fields, appEncrypted))
+        {
+            IReadOnlyDictionary<string, object?> row;
+            try { row = await GetByPublicIdAsync(table, fields, publicId, ct: ct); }
+            catch (NotFoundException) { return false; }
+
+            if (restrictToCreatedBy.HasValue
+                && !(row.TryGetValue("CreatedBy", out var createdBy) && createdBy is not null
+                     && Convert.ToInt64(createdBy, System.Globalization.CultureInfo.InvariantCulture) == restrictToCreatedBy.Value))
+                return false;
+
+            // The SQL path skips a condition on a computed (Formula/Lookup/Summary) field — it has no column —
+            // so drop those here too, otherwise they'd read as "no value" and wrongly reject the record.
+            var inMemoryFilter = PruneComputedConditions(viewFilter, fields);
+            return inMemoryFilter is null || EncryptedRowFilter.MatchingIds([row], fields, inMemoryFilter).Count > 0;
+        }
+
         var parameters = new DynamicParameters();
         parameters.Add("publicId", publicId);
 
@@ -240,6 +342,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+    }
+
+    /// <summary>The tree without conditions on computed fields (and without groups left empty by that);
+    /// null when nothing remains. Mirrors BuildConditionClause, which emits no SQL for such a condition.</summary>
+    private static FilterGroup? PruneComputedConditions(FilterGroup? group, IReadOnlyList<AppField> fields)
+    {
+        if (group is null) return null;
+        var nodes = new List<FilterNode>();
+        foreach (var node in group.Nodes)
+        {
+            if (node.Condition is { } c)
+            {
+                var field = fields.FirstOrDefault(f => f.Fid == c.FieldId);
+                if (field is not null && PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
+                nodes.Add(node);
+            }
+            else if (PruneComputedConditions(node.Group, fields) is { } sub)
+            {
+                nodes.Add(new FilterNode { Group = sub });
+            }
+        }
+        return nodes.Count == 0 ? null : new FilterGroup { Logic = group.Logic, Nodes = nodes };
     }
 
     public async Task<IReadOnlyList<long>> GetIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default)
@@ -1575,7 +1699,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
 
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        // commandTimeout 0 = no timeout: grouping a large table (Median re-scans it per group) can outlast
+        // SqlClient's 30 s default. The request's cancellation token still aborts it.
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
         var rawRows = rows.Select(ToDictionary).ToList();
         var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         if (!enc.IsActive) return rawRows;
@@ -2237,6 +2363,31 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             };
         }
 
+        // "is equal to" / "is not equal to" on a multi-value field compares the SET of values. The stored text is a
+        // JSON array or a comma list, so comparing the column to the comma-joined picks only ever matched a list
+        // stored exactly that way; here it is: every picked value is in the list, and the list holds no others.
+        if ((cond.Operator is "eq" or "ne") && lookupCol is null && string.IsNullOrWhiteSpace(cond.SubField)
+            && resolvedField is { TypeCode: "MultiSelect" or "MultiUser" })
+        {
+            var wanted = (cond.Value ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(v => v.ToLowerInvariant()).Distinct().ToList();
+            if (wanted.Count > 0)
+            {
+                var split = $"STRING_SPLIT(REPLACE(REPLACE(REPLACE({stringColExpr}, '[', ','), ']', ','), '\"', ','), ',')";
+                var checks = new List<string>(wanted.Count + 1);
+                for (var k = 0; k < wanted.Count; k++)
+                {
+                    var tokenParam = $"{pname}_{k}";
+                    p.Add(tokenParam, wanted[k]);
+                    checks.Add($"EXISTS (SELECT 1 FROM {split} s WHERE LOWER(LTRIM(RTRIM(s.value))) = @{tokenParam})");
+                }
+                checks.Add($"(SELECT COUNT(DISTINCT LOWER(LTRIM(RTRIM(s.value)))) FROM {split} s WHERE LTRIM(RTRIM(s.value)) <> '') = {wanted.Count}");
+                var sameSet = $"({string.Join(" AND ", checks)})";
+                return cond.Operator == "eq" ? sameSet : $"NOT {sameSet}";
+            }
+        }
+
         switch (cond.Operator)
         {
             case "eq":
@@ -2303,6 +2454,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             case "startsWith":     p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) LIKE @{pname}";
             case "notStartsWith":  p.Add(pname, $"{cond.Value?.ToLower()}%");  return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
             case "endsWith":       p.Add(pname, $"%{cond.Value?.ToLower()}");  return $"LOWER({stringColExpr}) LIKE @{pname}";
+            case "notEndsWith":    p.Add(pname, $"%{cond.Value?.ToLower()}");  return $"LOWER({stringColExpr}) NOT LIKE @{pname}";
             case "wildcard":
             {
                 p.Add(pname, TranslateWildcardPattern(cond.Value ?? "").ToLower());
@@ -2321,9 +2473,24 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 // form so a boundary-anchored LIKE can't false-positive-match a substring of a
                 // different element (e.g. "includes Red" must not match a stored "Bred").
                 var normalizedExpr = $"(',' + REPLACE(REPLACE(REPLACE({stringColExpr}, '[', ','), ']', ','), '\"', ',') + ',')";
-                p.Add(pname, $"%,{cond.Value?.ToLower()},%");
                 var op = cond.Operator == "includes" ? "LIKE" : "NOT LIKE";
-                return $"LOWER({normalizedExpr}) {op} @{pname}";
+                // The filter builder joins several picked users/choices with commas. "includes" then means the
+                // list holds ANY of them, "does not include" that it holds NONE — matching the comma-joined text
+                // as one sequence would only ever find lists holding them side by side, in that order.
+                var tokens = (cond.Value ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (tokens.Length <= 1)
+                {
+                    p.Add(pname, $"%,{(tokens.Length == 1 ? tokens[0] : cond.Value)?.ToLower()},%");
+                    return $"LOWER({normalizedExpr}) {op} @{pname}";
+                }
+                var parts = new List<string>(tokens.Length);
+                for (var t = 0; t < tokens.Length; t++)
+                {
+                    var tokenParam = t == 0 ? pname : $"{pname}_{t}";
+                    p.Add(tokenParam, $"%,{tokens[t].ToLower()},%");
+                    parts.Add($"LOWER({normalizedExpr}) {op} @{tokenParam}");
+                }
+                return $"({string.Join(cond.Operator == "includes" ? " OR " : " AND ", parts)})";
             }
             // '' only means blank in a column that stores text. Anywhere else SQL Server converts
             // it instead: a DECIMAL column throws ("Error converting data type varchar to

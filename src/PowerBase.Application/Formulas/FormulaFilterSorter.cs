@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -27,10 +29,35 @@ public static class FormulaFilterSorter
         if (tree == null) return false;
         foreach (var node in tree.Nodes)
         {
-            if (node.Condition != null && formulaFids.Contains(node.Condition.FieldId)) return true;
+            if (node.Condition != null && TouchesFields(node.Condition, formulaFids)) return true;
             if (node.Group != null && TreeContainsFormulaField(node.Group, formulaFids)) return true;
         }
         return false;
+    }
+
+    /// <summary>True when the condition filters on one of <paramref name="fids"/>, or compares a field to one of
+    /// them ("the value in the field" mode). SQL has no column for a computed field on either side, so such a
+    /// condition can only be judged in memory.</summary>
+    private static bool TouchesFields(FilterCondition c, HashSet<long> fids) =>
+        fids.Contains(c.FieldId)
+        || (string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && c.ValueFieldId is { } other && fids.Contains(other));
+
+    /// <summary>The field's type for filtering purposes: the generic "Formula" code is resolved to its
+    /// Formula_{ResultType} equivalent so a formula is treated like the stored field type it returns.</summary>
+    public static string? EffectiveTypeCode(AppField? field)
+    {
+        if (field is null) return null;
+        if (field.TypeCode != "Formula") return field.TypeCode;
+        return FormulaTypeMap.ParseSettings(field.Settings)?.ResultType?.ToLowerInvariant() switch
+        {
+            "number" => "Formula_Number",
+            "duration" => "Formula_Duration",
+            "bool" => "Formula_Bool",
+            "date" => "Formula_Date",
+            "datetime" => "Formula_DateTime",
+            "user" => "Formula_User",
+            _ => "Formula",
+        };
     }
 
     public static (FilterGroup? physical, FilterGroup? formulaTree)
@@ -141,7 +168,7 @@ public static class FormulaFilterSorter
             {
                 if (node.Condition != null)
                 {
-                    if (formulaFids.Contains(node.Condition.FieldId))
+                    if (TouchesFields(node.Condition, formulaFids))
                         formulaNodes.Add(node);
                     else
                         physicalNodes.Add(node);
@@ -185,16 +212,15 @@ public static class FormulaFilterSorter
         return (physicalGroup, formulaGroup);
     }
 
-    private static bool MatchesCondition((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p, FilterCondition c, Dictionary<long, AppField> fieldLookup)
+    /// <summary>The row's value for a field: a computed field's from the projected map, a stored one's from its column.</summary>
+    private static object? ReadValue((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p, long fieldId, AppField? field)
     {
-        fieldLookup.TryGetValue(c.FieldId, out var field);
-        object? val = null;
-
+        object? val;
         if (field != null && FormulaTypeMap.IsComputedField(field.TypeCode, field.Settings))
         {
-            p.Computed.TryGetValue(c.FieldId, out val);
+            p.Computed.TryGetValue(fieldId, out val);
         }
-        else if (c.FieldId == -1)
+        else if (fieldId == -1)
         {
             p.Row.TryGetValue("PublicId", out val);
         }
@@ -202,54 +228,275 @@ public static class FormulaFilterSorter
         {
             var colName = field != null && !string.IsNullOrWhiteSpace(field.PhysicalColumnName)
                 ? field.PhysicalColumnName
-                : (c.FieldId switch
+                : (fieldId switch
                 {
                     1 => "CreatedOn",
                     2 => "ModifiedOn",
                     3 => "Id",
                     4 => "CreatedBy",
                     5 => "ModifiedBy",
-                    _ => field?.Fid.HasValue == true ? PhysicalNaming.ColumnName(field.Fid.Value) : PhysicalNaming.ColumnName((int)c.FieldId)
+                    _ => field?.Fid.HasValue == true ? PhysicalNaming.ColumnName(field.Fid.Value) : PhysicalNaming.ColumnName((int)fieldId)
                 });
             p.Row.TryGetValue(colName, out val);
         }
+        return val;
+    }
+
+    private static bool IsDateType(string? typeCode) =>
+        typeCode is "Date" or "DateTime" or "Formula_Date" or "Formula_DateTime";
+
+    private static bool MatchesCondition((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p, FilterCondition c, Dictionary<long, AppField> fieldLookup)
+    {
+        fieldLookup.TryGetValue(c.FieldId, out var field);
+        var val = ReadValue(p, c.FieldId, field);
+        var kind = EffectiveTypeCode(field);
+        var isDate = IsDateType(kind);
+
+        // An address sub-field ("city", "zip"…) filters one part of the stored JSON address.
+        if (!string.IsNullOrWhiteSpace(c.SubField)) val = ReadSubField(val, c.SubField);
 
         // A list-valued formula (Formula_ListUser / Formula_MultiSelect) is matched as its
         // ", "-joined text, so contains/startsWith/isEmpty behave on the items rather than on
-        // the collection's type name.
+        // the collection's type name. The items themselves serve includes/notIncludes.
+        List<string>? items = null;
         if (val is System.Collections.IEnumerable and not string)
-            val = string.Join(", ", ((System.Collections.IEnumerable)val).Cast<object?>().Select(i => i?.ToString()));
+        {
+            items = ((System.Collections.IEnumerable)val).Cast<object?>().Select(i => i?.ToString() ?? string.Empty).ToList();
+            val = string.Join(", ", items);
+        }
+
+        // "is equal to" / "is not equal to" on a multi-value field compares the SET of values (order doesn't matter,
+        // and the list must hold no others) — the same rule RecordRepository applies to a stored one. A blank list
+        // is the empty set.
+        if (kind is "MultiSelect" or "MultiUser" or "Formula_MultiSelect" or "Formula_ListUser"
+            && c.Operator is "eq" or "ne" && string.IsNullOrWhiteSpace(c.SubField))
+        {
+            var want = SplitElements(c.Value).Select(e => e.ToLowerInvariant()).ToHashSet();
+            if (want.Count > 0)
+            {
+                var have = (items ?? SplitElements(val?.ToString())).Select(e => e.Trim().ToLowerInvariant()).Where(e => e.Length > 0).ToHashSet();
+                var sameSet = have.SetEquals(want);
+                return c.Operator == "eq" ? sameSet : !sameSet;
+            }
+        }
+
+        // SQL's negative operators never match a blank (NULL) value; a formula follows the same rule so it filters
+        // exactly like a stored field.
+        if (val is null && c.Operator is "ne" or "notContains" or "notStartsWith" or "notEndsWith" or "notWildcard"
+            or "notIncludes" or "notIn" or "date_ne"
+            && !string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // "the value in the field": compare to another field of the same record instead of a literal.
+        if (string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && c.ValueFieldId is { } otherFid)
+        {
+            fieldLookup.TryGetValue(otherFid, out var otherField);
+            return MatchesFieldToField(c.Operator, val, ReadValue(p, otherFid, otherField), isDate || IsDateType(EffectiveTypeCode(otherField)));
+        }
+
+        // How the value reads on screen, for the text-style operators (a number without trailing zeros).
+        var text = AsShown(val);
+
+        // A formula date/datetime is ISO text; compare it as a date so the date operators and ordering work.
+        var dateVal = val as DateTime? ?? (isDate ? ToDate(val) : null);
+        if (dateVal is { } parsedDate) val = parsedDate;
 
         return c.Operator switch
         {
-            "isEmpty"       => val is null || val.ToString() == string.Empty,
-            "isNotEmpty"    => val is not null && val.ToString() != string.Empty,
-            "eq"            => CompareValues(val, c.Value) == 0,
-            "ne"            => CompareValues(val, c.Value) != 0,
-            "gt"            => CompareValues(val, c.Value) > 0,
-            "gte"           => CompareValues(val, c.Value) >= 0,
-            "lt"            => CompareValues(val, c.Value) < 0,
-            "lte"           => CompareValues(val, c.Value) <= 0,
-            "contains"      => val?.ToString()?.Contains(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
-            "notContains"   => val?.ToString()?.Contains(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
-            "startsWith"    => val?.ToString()?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
-            "notStartsWith" => val?.ToString()?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
+            "isEmpty"       => text is null || text == string.Empty,
+            "isNotEmpty"    => text is not null && text != string.Empty,
+            "eq" or "ne" or "gt" or "gte" or "lt" or "lte" => MatchesComparison(c.Operator, val, dateVal, isDate, c.Value),
+            "contains"      => text?.Contains(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
+            "notContains"   => text?.Contains(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
+            "startsWith"    => text?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
+            "notStartsWith" => text?.StartsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
+            "endsWith"      => text?.EndsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true,
+            "notEndsWith"   => text?.EndsWith(c.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase) != true,
+            "wildcard"      => text is not null && WildcardMatches(text, c.Value ?? string.Empty),
+            "notWildcard"   => !(text is not null && WildcardMatches(text, c.Value ?? string.Empty)),
+            "includes"      => IncludesItem(items, text, c.Value),
+            "notIncludes"   => !IncludesItem(items, text, c.Value),
             // date_* operators compare a calendar day, not an instant — c.Value is the exact UTC
             // instant of the picked day's local midnight (see RecordRepository's date_* SQL cases),
             // so the window [dv, dv+1day) is the local day the user picked, regardless of which UTC
             // calendar day the row's own timestamp falls on. `dt.Date == dv.Date` truncated both
             // sides to their raw UTC calendar day instead, which is not the same thing.
-            "date_eq"       => val is DateTime dtEq && DateTime.TryParse(c.Value, out var dvEq) && dtEq >= dvEq && dtEq < dvEq.AddDays(1),
-            "date_ne"       => !(val is DateTime dtNe && DateTime.TryParse(c.Value, out var dvNe) && dtNe >= dvNe && dtNe < dvNe.AddDays(1)),
-            "date_gt"       => val is DateTime dtGt && DateTime.TryParse(c.Value, out var dvGt) && dtGt >= dvGt.AddDays(1),
-            "date_gte"      => val is DateTime dtGte && DateTime.TryParse(c.Value, out var dvGte) && dtGte >= dvGte,
-            "date_lt"       => val is DateTime dtLt && DateTime.TryParse(c.Value, out var dvLt) && dtLt < dvLt,
-            "date_lte"      => val is DateTime dtLte && DateTime.TryParse(c.Value, out var dvLte) && dtLte < dvLte.AddDays(1),
+            "date_eq" or "date_ne" or "date_gt" or "date_gte" or "date_lt" or "date_lte" => MatchesDateOperator(c.Operator, dateVal, c.Value),
             "in"            => ParseValueList(c.Value).Any(v => CompareValues(val, v) == 0),
             "notIn"         => !ParseValueList(c.Value).Any(v => CompareValues(val, v) == 0),
             _               => true,
         };
     }
+
+    /// <summary>eq/ne/gt/gte/lt/lte. A date compared with a plain "yyyy-MM-dd" means that whole day, not its
+    /// midnight — what RecordRepository does for a Date &amp; Time column — so "is on or before 2026-10-05" still
+    /// includes records during that day.</summary>
+    private static bool MatchesComparison(string op, object? val, DateTime? dateVal, bool isDate, string? value)
+    {
+        if (dateVal is { } dv && DateTime.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+        {
+            return op switch
+            {
+                "eq" => dv >= day && dv < day.AddDays(1),
+                "ne" => dv < day || dv >= day.AddDays(1),
+                "gt" => dv >= day.AddDays(1),
+                "gte" => dv >= day,
+                "lt" => dv < day,
+                _ => dv < day.AddDays(1),   // lte
+            };
+        }
+
+        // A blank date satisfies nothing but "is not equal to".
+        if (isDate && dateVal is null) return op == "ne";
+
+        var cmp = CompareValues(val, value);
+        return op switch
+        {
+            "eq" => cmp == 0,
+            "ne" => cmp != 0,
+            "gt" => cmp > 0,
+            "gte" => cmp >= 0,
+            "lt" => cmp < 0,
+            _ => cmp <= 0,
+        };
+    }
+
+    private static bool MatchesDateOperator(string op, DateTime? val, string? raw)
+    {
+        var parsed = TryParseInstant(raw, out var dv);
+        if (op == "date_ne") return !(val is { } n && parsed && n >= dv && n < dv.AddDays(1));
+        if (val is not { } v || !parsed) return false;
+        return op switch
+        {
+            "date_eq" => v >= dv && v < dv.AddDays(1),
+            "date_gt" => v >= dv.AddDays(1),
+            "date_gte" => v >= dv,
+            "date_lt" => v < dv,
+            _ => v < dv.AddDays(1),   // date_lte
+        };
+    }
+
+    /// <summary>Same operators SQL supports between two fields (eq/ne/gt/gte/lt/lte/date_eq); a blank on either
+    /// side matches nothing, as in SQL.</summary>
+    private static bool MatchesFieldToField(string op, object? a, object? b, bool dateLike)
+    {
+        if (a is null || b is null) return false;
+
+        int cmp;
+        if ((dateLike || a is DateTime || b is DateTime) && ToDate(a) is { } da && ToDate(b) is { } db)
+        {
+            if (op == "date_eq") return da.Date == db.Date;
+            cmp = da.CompareTo(db);
+        }
+        else if (op == "date_eq")
+        {
+            return false;
+        }
+        else if (ToDecimal(a) is { } na && ToDecimal(b) is { } nb)
+        {
+            cmp = na.CompareTo(nb);
+        }
+        else
+        {
+            cmp = string.Compare(a.ToString(), b.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        return op switch
+        {
+            "eq" => cmp == 0,
+            "ne" => cmp != 0,
+            "gt" => cmp > 0,
+            "gte" => cmp >= 0,
+            "lt" => cmp < 0,
+            "lte" => cmp <= 0,
+            _ => true,
+        };
+    }
+
+    /// <summary>A number as it reads on screen ("5.5", not "5.50") — SQL's NumberAsShownExpr — so text-style
+    /// operators match what the user sees; everything else as its own text.</summary>
+    private static string? AsShown(object? v) => v switch
+    {
+        null => null,
+        decimal d => d.ToString("0.############################", CultureInfo.InvariantCulture),
+        IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
+        _ => v.ToString(),
+    };
+
+    /// <summary>"*" = any run of characters, "?" = any one character; everything else literal, whole-value,
+    /// case-insensitive — the same convention as RecordRepository.TranslateWildcardPattern.</summary>
+    internal static bool WildcardMatches(string text, string pattern)
+    {
+        var regex = "^" + string.Concat(pattern.Select(ch => ch switch
+        {
+            '*' => ".*",
+            '?' => ".",
+            _ => Regex.Escape(ch.ToString()),
+        })) + "$";
+        try
+        {
+            return Regex.IsMatch(text, regex, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline, TimeSpan.FromMilliseconds(250));
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>includes/notIncludes on a multi-value field: the value must equal one of the items. Items come
+    /// from a list-valued formula, or from stored text — a JSON array ("["Red","Blue"]") or comma list.</summary>
+    /// <summary>The elements of a multi-value text: a JSON array ("["Red","Blue"]") or a comma list ("Red, Blue").</summary>
+    private static List<string> SplitElements(string? text) =>
+        (text ?? string.Empty).Split(['[', ']', '"', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    /// <summary>One part of a stored JSON object (an address's "city", "zip"…); null when the value isn't JSON or lacks it.</summary>
+    private static object? ReadSubField(object? value, string subField)
+    {
+        if (value is not string json || string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            foreach (var prop in doc.RootElement.EnumerateObject())
+                if (string.Equals(prop.Name, subField, StringComparison.OrdinalIgnoreCase))
+                    return prop.Value.ValueKind == JsonValueKind.Null ? null : prop.Value.ToString();
+        }
+        catch (JsonException) { /* not JSON */ }
+        return null;
+    }
+
+    private static bool IncludesItem(List<string>? items, string? text, string? value)
+    {
+        var elements = items ?? SplitElements(text);
+        // Several picked values arrive comma-joined: the list must hold any one of them.
+        var targets = (value ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return elements.Any(e => targets.Any(t => string.Equals(e.Trim(), t, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    /// <summary>The value's date: a DateTime as is, ISO text parsed (invariant culture).</summary>
+    private static DateTime? ToDate(object? v) => v switch
+    {
+        null => null,
+        DateTime d => d,
+        DateTimeOffset o => o.UtcDateTime,
+        string s => DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed) ? parsed : null,
+        _ => null,
+    };
+
+    /// <summary>Parses a filter's date value the way the SQL path does: invariant culture, an instant with an
+    /// offset becomes UTC and a plain date means that day at midnight.</summary>
+    private static bool TryParseInstant(string? raw, out DateTime value) =>
+        DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out value);
+
+    private static decimal? ToDecimal(object? v) => v switch
+    {
+        null => null,
+        decimal d => d,
+        long or int or short or byte => Convert.ToDecimal(v, CultureInfo.InvariantCulture),
+        double d => double.IsFinite(d) ? (decimal)d : null,
+        string s => decimal.TryParse(s, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed) ? parsed : null,
+        _ => null,
+    };
 
     /// <summary>Mirrors RecordRepository.ParseValueList — the "in"/"notIn" wire format is a JSON
     /// string array in FilterCondition.Value, falling back to a comma split.</summary>
@@ -274,6 +521,12 @@ public static class FormulaFilterSorter
         return raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
     }
 
+    private static bool TryParseBit(string raw, out bool value)
+    {
+        value = raw == "1";
+        return raw is "1" or "0";
+    }
+
     private static int CompareValues(object? a, string? b)
     {
         if (a is null && b is null) return 0;
@@ -284,13 +537,16 @@ public static class FormulaFilterSorter
                 System.Globalization.CultureInfo.InvariantCulture, out var db))
             return d.CompareTo(db);
 
-        if (a is decimal dec && decimal.TryParse(b, out var decb))
-            return dec.CompareTo(decb);
+        // decimal, and the integer ids (record id, user id) — ordered numerically, not as text ("9" < "10").
+        if (a is decimal or long or int or short or byte && ToDecimal(a) is { } num
+            && decimal.TryParse(b, NumberStyles.Number, CultureInfo.InvariantCulture, out var numb))
+            return num.CompareTo(numb);
 
-        if (a is DateTime dt && DateTime.TryParse(b, out var dtb))
+        if (a is DateTime dt && TryParseInstant(b, out var dtb))
             return dt.CompareTo(dtb);
 
-        if (a is bool bl && bool.TryParse(b, out var blb))
+        // A checkbox filter value arrives as "true"/"false" or, from some callers, "1"/"0".
+        if (a is bool bl && (bool.TryParse(b, out var blb) || TryParseBit(b, out blb)))
             return bl.CompareTo(blb);
 
         return string.Compare(a.ToString(), b, StringComparison.OrdinalIgnoreCase);
