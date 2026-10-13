@@ -99,12 +99,16 @@ constraint problem). `read = inserted + updated + skipped + errored`. A bad row 
 
 #### Which columns a table is offered
 
-For every file import, and every table, a destination table is offered only the file columns that **fit it**: the heading matches one of the table's importable
-fields (ignoring case, spaces, underscores and punctuation, so `Employee ID` = `employee_id`; Record ID#, system, formula and unsupported fields never match) **and** the
-data fits the field's type. The server decides (`ImportColumnFit`, `POST import-files/{fileId}/column-fit`, one call per table for all its sheets): it reads the first 200 data rows
-of each sheet and tries every filled cell with the run's own conversion and format checks (max length, regex, email / phone / URL); one failing cell hides the column, blank cells
-are ignored, and a column with no filled cell fits. The screen lists a note such as "3 columns hidden" with the reason for each; there is no override. A saved mapping is never dropped
-by this. Formulas and virtual columns can still use every column of the sheet. If the check cannot be made, every column is listed and the run reports rows that do not convert.
+Every column of the file is listed as a source, so any of them can be mapped by hand. What is mapped **by itself** is a column whose heading matches one of the table's importable fields (ignoring case, spaces, underscores and punctuation, so
+`Employee ID` = `employee_id`; Record ID#, system, formula and unsupported fields never match) **and** whose data fits that field's type. What a column can be mapped to **by hand** is every field its data fits, whatever its heading says
+(a column of numbers goes to a number or a text field, not to a date or a checkbox). The server decides (`ImportColumnFit`, `POST import-files/{fileId}/column-fit`, one call per table for all its sheets; each column answers with `fieldFid` /
+`fits` for its heading's field and `fitsFields` for the rest): it reads the first 200 data rows of each sheet and tries every filled cell with the run's own conversion and format checks (max length, regex, email / phone / URL); one failing
+cell takes the field out, blank cells are ignored, and a column with no filled cell fits every field. Fields of one type with no format share one answer, so a table with hundreds of fields costs a few checks per column.
+A saved mapping is never dropped by this. Formulas and virtual columns can use every column. If the check cannot be made, every column and every field is offered, and the run reports rows that do not convert.
+When a workbook is mapped **sheet by sheet** (below), a table is built from the columns whose heading matches one of its fields, so only those are used there.
+
+**Find each column by.** *Its heading*: a column is found again by its heading in each new file, so it can move, and it is mapped by name. *Its position*: a column is the one in the same place in every file, whatever its heading says (it can change).
+The columns are then named **Column 1, Column 2...** in the mapping, in formulas and in messages (`ImportFileColumns.NamedBy`), nothing is mapped by name, and the user maps each column to a field by hand. Sheets cannot be picked by field in this mode.
 
 #### Sheets mapped separately, per table
 

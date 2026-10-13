@@ -58,7 +58,7 @@ public sealed class ImportDefinitionChecker(
         if (isFile)
         {
             if (ImportConfigMapper.ToConfig(def, Guid.Empty).File is not { } fileOptions) return Cap("The file settings of this import are missing.");
-            sourceFields = ImportFileColumns.ToFields(ImportFileValidation.SavedSource(fileOptions).Columns);
+            sourceFields = ImportFileColumns.ToFields(ImportFileColumns.NamedBy(ImportFileValidation.SavedSource(fileOptions).Columns, fileOptions.ColumnBy));
         }
         else
         {
@@ -116,7 +116,7 @@ public sealed class ImportDefinitionChecker(
         {
             var settings = options.Sheets.FirstOrDefault(s => string.Equals(s.Name, sheet.Sheet, StringComparison.OrdinalIgnoreCase));
             if (settings is null) return $"Sheet '{sheet.Sheet}' has no saved settings.";
-            IReadOnlyList<AppField> fields = ImportFileColumns.ToFields(ImportFileValidation.SavedSheetSource(options, settings).Columns);
+            IReadOnlyList<AppField> fields = ImportFileColumns.ToFields(ImportFileColumns.NamedBy(ImportFileValidation.SavedSheetSource(options, settings).Columns, options.ColumnBy));
             var (virtuals, virtualError) = ImportVirtual.Resolve(sheet.VirtualColumns, fields, formulaEngine);
             if (virtualError is not null) return $"Sheet '{sheet.Sheet}': {virtualError}";
             if (virtuals.Count > 0) fields = fields.Concat(virtuals.Select(v => v.Field)).ToList();

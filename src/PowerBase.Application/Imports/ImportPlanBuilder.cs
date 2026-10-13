@@ -132,7 +132,7 @@ public sealed class ImportPlanBuilder(
         var source = file is null
             ? await tables.GetByPublicIdAsync(cfg.SourceTableId, ct)
             : new AppTable { Id = 0, PublicId = Guid.Empty, AppId = destination.AppId, Name = file.FileName };
-        IReadOnlyList<AppField> sourceFields = file is null ? await fields.ListByTableAsync(source.Id, ct) : ImportFileColumns.ToFields(file.Columns);
+        IReadOnlyList<AppField> sourceFields = file is null ? await fields.ListByTableAsync(source.Id, ct) : ImportFileColumns.ToFields(ImportFileColumns.NamedBy(file.Columns, file.Options.ColumnBy));
         var destFields = source.Id == destination.Id ? sourceFields : await fields.ListByTableAsync(destination.Id, ct);
 
         // A file has no source table, so there is no role on it to apply; the destination's rules apply as always.
