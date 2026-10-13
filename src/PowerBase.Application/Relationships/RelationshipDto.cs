@@ -21,7 +21,8 @@ public sealed class RelationshipDto
     public IReadOnlyList<string> Warnings { get; init; } = [];
 }
 
-/// <summary>A field participating in a relationship. <paramref name="Role"/> is "reference", "lookup" or "summary".</summary>
+/// <summary>A field participating in a relationship. <paramref name="Role"/> is "reference", "key", "proxy", "lookup",
+/// "summary", "reportlink" or "addrecord" (the parent's auto "Add {child}" Formula URL).</summary>
 public sealed record RelationshipFieldDto(Guid PublicId, int Fid, string Name, string Role, string TypeCode = "")
 {
     /// <summary>"TableName: FieldName" for the source field.

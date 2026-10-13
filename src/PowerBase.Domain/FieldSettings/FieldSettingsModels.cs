@@ -203,6 +203,9 @@ public sealed class UrlSettings
 /// </summary>
 public sealed class FormulaUrlSettings
 {
+    /// <summary>When auto-created for a relationship (the parent's "Add {child}" link), the relationship's numeric Id.</summary>
+    public long? RelationshipId { get; set; }
+
     /// <summary>The Quickbase-style formula expression text; must evaluate to Text.</summary>
     public string? Template { get; set; }
 
