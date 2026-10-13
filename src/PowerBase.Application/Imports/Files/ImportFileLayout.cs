@@ -21,6 +21,13 @@ public static class ImportFileColumns
 
     public static int FidOf(int position) => FidBase + position;
 
+    /// <summary>When an import finds a column by its place, the heading means nothing (it can change): the columns are "Column 1", "Column 2"...
+    /// everywhere they are named (the mapping, formulas, messages). By name, the columns are as they are.</summary>
+    public static IReadOnlyList<ImportFileColumn> NamedBy(IReadOnlyList<ImportFileColumn> columns, string? columnBy) =>
+        columnBy == ImportSourceKinds.ColumnByPosition
+            ? columns.Select(c => c with { Name = $"Column {c.Position}", UniqueName = $"Column {c.Position}", Duplicate = false }).ToList()
+            : columns;
+
     /// <summary>Names the columns from a header row (null = the file has none). A blank name becomes "Column N", and a name that
     /// appears twice keeps its first place: mapping by name always finds the first column of that name.</summary>
     public static IReadOnlyList<ImportFileColumn> FromHeader(string?[]? header, int width)

@@ -71,6 +71,43 @@ public class ImportColumnFitTests
 
     private static ImportColumnFitColumn Of(IReadOnlyList<ImportColumnFitColumn> columns, string name) => columns.Single(c => c.Name == name);
 
+    // ---- where a column can go by hand ----
+
+    [Fact]
+    public async Task A_column_whose_heading_matches_no_field_still_lists_every_field_its_data_fits()
+    {
+        var columns = await Fit(Csv("Code,Years,Joined,Notes\nE1,5,2020-01-02,hello\nE2,7,2021-03-04,there\n"));
+
+        var years = Of(columns, "Years");
+        years.FieldFid.Should().BeNull("no field is called Years");
+        years.Fits.Should().BeFalse();
+        years.FitsFields.Should().Contain([6, 7, 8, 9], "numbers fit text and number fields").And.NotContain([10, 11], "not a date, not a checkbox");
+        Of(columns, "Joined").FitsFields.Should().Contain([6, 10]).And.NotContain(9);
+        Of(columns, "Notes").FitsFields.Should().Contain([6, 7, 8]).And.NotContain([9, 10, 11], "words are not numbers, dates or checkboxes");
+    }
+
+    [Fact]
+    public async Task A_column_with_no_filled_cell_fits_every_field_and_a_matched_column_still_says_which_field_it_matched()
+    {
+        var columns = await Fit(Csv("Age,Empty\n5,\n6,\n"));
+
+        Of(columns, "Empty").FitsFields.Should().HaveCount(6, "there is nothing against any field");
+        var age = Of(columns, "Age");
+        age.FieldFid.Should().Be(9);
+        age.Fits.Should().BeTrue();
+        age.FitsFields.Should().Contain(9);
+    }
+
+    [Fact]
+    public void Fields_of_one_type_with_no_format_share_one_answer()
+    {
+        var fields = Enumerable.Range(1, 200).Select(i => F(100 + i, "Text " + i, "Text")).ToList();
+
+        var fitting = ImportColumnFit.FieldsFitting(["a", "b"], fields);
+
+        fitting.Should().HaveCount(200);
+    }
+
     // ---- the heading ----
 
     [Fact]

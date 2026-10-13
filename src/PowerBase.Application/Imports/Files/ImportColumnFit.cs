@@ -19,7 +19,9 @@ public sealed record ImportColumnFitRequest(Guid TableId, List<ImportSheetReques
 /// <param name="Sampled">Filled cells looked at.</param>
 /// <param name="Failed">Of those, how many do not fit the field.</param>
 /// <param name="Example">The first value that does not fit (shortened), to say why.</param>
-public sealed record ImportColumnFitColumn(int Fid, string Name, int? FieldFid, string? FieldName, bool Fits, string Reason, int Sampled, int Failed, string? Example);
+/// <param name="FitsFields">Every field of the table this column's data fits, whatever its heading is: where it can be mapped by hand.</param>
+public sealed record ImportColumnFitColumn(
+    int Fid, string Name, int? FieldFid, string? FieldName, bool Fits, string Reason, int Sampled, int Failed, string? Example, IReadOnlyList<int>? FitsFields = null);
 
 /// <param name="Error">Why the sheet could not be read (its row of column names is missing), instead of columns.</param>
 public sealed record ImportSheetFit(string? Sheet, IReadOnlyList<ImportColumnFitColumn> Columns, string? Error = null);
@@ -84,18 +86,36 @@ public static class ImportColumnFit
         var result = new List<ImportColumnFitColumn>(columns.Count);
         foreach (var column in columns)
         {
+            var at = column.Position - 1;
+            var sample = rows.Select(r => at < r.Length ? r[at] : null).ToList();
+            var fitting = FieldsFitting(sample, candidates);
             var field = FieldFor(column.Name, candidates);
             if (field is null)
             {
-                result.Add(new ImportColumnFitColumn(column.Fid, column.UniqueName, null, null, false, "noField", 0, 0, null));
+                result.Add(new ImportColumnFitColumn(column.Fid, column.UniqueName, null, null, false, "noField", 0, 0, null, fitting));
                 continue;
             }
-            var at = column.Position - 1;
-            var (sampled, failed, example) = Check(field, rows.Select(r => at < r.Length ? r[at] : null));
+            var (sampled, failed, example) = Check(field, sample);
             var fits = failed == 0;
-            result.Add(new ImportColumnFitColumn(column.Fid, column.UniqueName, field.Fid, ImportTypeCompatibility.DisplayName(field), fits, fits ? "none" : "type", sampled, failed, example));
+            result.Add(new ImportColumnFitColumn(column.Fid, column.UniqueName, field.Fid, ImportTypeCompatibility.DisplayName(field), fits, fits ? "none" : "type", sampled, failed, example, fitting));
         }
         return result;
+    }
+
+    /// <summary>The fields a column's data fits, wherever the heading says it goes: every filled cell of the sample converts to the field and passes its format.
+    /// Fields of one type with no format share an answer, so a table with hundreds of fields costs a few checks per column.</summary>
+    public static IReadOnlyList<int> FieldsFitting(IReadOnlyList<string?> sample, IReadOnlyList<AppField> candidates)
+    {
+        var byKind = new Dictionary<string, bool>();
+        var fitting = new List<int>();
+        foreach (var field in candidates)
+        {
+            if (field.Fid is not int fid) continue;
+            var key = ImportFieldFormat.For(field) is null ? $"{field.TypeCode}|{field.MaxLength}" : $"#{field.Id}";
+            if (!byKind.TryGetValue(key, out var fits)) byKind[key] = fits = Check(field, sample).Failed == 0;
+            if (fits) fitting.Add(fid);
+        }
+        return fitting;
     }
 
     /// <summary>The columns of a sheet and its first filled data rows, read once and streamed.</summary>
