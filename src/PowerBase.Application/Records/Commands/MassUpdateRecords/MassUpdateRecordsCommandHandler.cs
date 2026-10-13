@@ -207,19 +207,18 @@ public class MassUpdateRecordsCommandHandler
                     {
                         var colKey = PhysicalNaming.GetPhysicalColumnName(f);
                         var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
-                        beforeValues[f.Id] = oldVal;
+                        // Keyed by FID only. Also writing each value under the field's internal id put two number spaces in one
+                        // dictionary: an internal id equal to ANOTHER field's FID overwrote that field's value (e.g. Record ID# showing a date).
                         beforeValues[f.Fid.Value] = oldVal;
                         oldValuesByFid[f.Fid.Value] = oldVal;
 
                         if (triggerValues.TryGetValue(f.Fid.Value, out var newVal))
                         {
-                            afterValues[f.Id] = newVal;
                             afterValues[f.Fid.Value] = newVal;
                             changedFieldIds.Add(f.Id);
                         }
                         else
                         {
-                            afterValues[f.Id] = oldVal;
                             afterValues[f.Fid.Value] = oldVal;
                         }
                     }
@@ -256,13 +255,15 @@ public class MassUpdateRecordsCommandHandler
         await _uow.BeginAsync(ct);
         try
         {
+            affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), effectiveValues, ct, indexMessages.Add, _uow.Transaction);
+
+            // After the write (inside the same transaction, like a single-record update does): the events re-read each record to compute its
+            // Formula / Lookup / Summary values, and those have to be computed from the UPDATED record, not the one before the change.
             if (recordChanges.Count > 0)
             {
                 await _triggerInterceptor.InterceptBulkAsync(
                     table, fields, recordChanges, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
             }
-
-            affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), effectiveValues, ct, indexMessages.Add, _uow.Transaction);
 
             await _auditRepo.LogActivityAsync(
                 AuditActions.Updated, AuditEntityTypes.Record, table.PublicId.ToString(),

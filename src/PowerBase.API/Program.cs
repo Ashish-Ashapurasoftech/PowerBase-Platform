@@ -433,6 +433,7 @@ builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelineR
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelineRuns.ListAppPipelineRunsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineRunSteps.GetPipelineRunStepsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineActivity.GetPipelineActivityQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetCopyFailedRecords.GetCopyFailedRecordsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.ListPipelinesForPicker.ListPipelinesForPickerQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Queries.GetPipelineSchedule.GetPipelineScheduleQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.Commands.UpdatePipelineSchedule.UpdatePipelineScheduleCommandHandler>();

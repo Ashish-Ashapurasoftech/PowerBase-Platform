@@ -194,6 +194,10 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         UPDATE meta.AppTable SET RecordCount = RecordCount + 1 WHERE Id = @id
         """;
 
+    private const string IncrementRecordCountBySql = """
+        UPDATE meta.AppTable SET RecordCount = RecordCount + @count WHERE Id = @id
+        """;
+
     private const string DecrementRecordCountSql = """
         UPDATE meta.AppTable SET RecordCount = RecordCount - 1 WHERE Id = @id AND RecordCount > 0
         """;
@@ -427,6 +431,20 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(IncrementRecordCountSql, new { id }, cancellationToken: ct));
+    }
+
+    public async Task IncrementRecordCountByAsync(long id, int count, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        if (count <= 0) return;
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(IncrementRecordCountBySql, new { id, count }, transaction, cancellationToken: ct));
+            return;
+        }
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(IncrementRecordCountBySql, new { id, count }, cancellationToken: ct));
     }
 
     public async Task DecrementRecordCountAsync(long id, CancellationToken ct = default)

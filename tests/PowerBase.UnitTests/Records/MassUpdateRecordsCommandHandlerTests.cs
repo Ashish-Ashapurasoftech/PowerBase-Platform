@@ -43,6 +43,41 @@ public class MassUpdateRecordsCommandHandlerTests
             .Returns(call => new App { Id = call.ArgAt<long>(0) });
     }
 
+    [Fact]
+    public async Task MassUpdate_EventValues_AreKeyedByFid_SoCollidingInternalIdsDoNotSwapFieldValues()
+    {
+        // The real shape of a table (A1): internal ids and FIDs are different numbers that coincide —
+        // Record ID# is id 1 / FID 3, Date Created id 2 / FID 1, Date Modified id 3 / FID 2.
+        var table = MakeTable(); var recordId = Guid.NewGuid();
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 3, Name = "S_recordId", Label = "Record ID#", TypeCode = "Number", IsSystem = true, PhysicalColumnName = "Id" },
+            new() { Id = 2, Fid = 1, Name = "S_dateCreated", Label = "Date Created", TypeCode = "DateTime", IsSystem = true, PhysicalColumnName = "CreatedOn" },
+            new() { Id = 3, Fid = 2, Name = "S_dateModified", Label = "Date Modified", TypeCode = "DateTime", IsSystem = true, PhysicalColumnName = "ModifiedOn" },
+            new() { Id = 6, Fid = 6, Name = "C_city", Label = "City", TypeCode = "Text", PhysicalColumnName = "f_6" },
+        };
+        var created = new DateTime(2026, 10, 9, 10, 9, 17, DateTimeKind.Utc);
+        _tableRepo.GetByPublicIdAsync(table.PublicId, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+        _recordRepo.GetIdsByPublicIdsMapAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [recordId] = 25 });
+        _recordRepo.GetByPublicIdAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordId, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<string, object?> { ["Id"] = 25L, ["CreatedOn"] = created, ["ModifiedOn"] = null, ["f_6"] = "Rajkot" });
+        _uow.Transaction.Returns(Substitute.For<IDbTransaction>());
+        IReadOnlyList<PipelineRecordChange>? changes = null;
+        await _triggerInterceptor.InterceptBulkAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Do<IReadOnlyList<PipelineRecordChange>>(c => changes = c), Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
+
+        await CreateSut().HandleAsync(new MassUpdateRecordsCommand(table.PublicId, new[] { recordId }, new Dictionary<long, object?> { [6] = "Ra" }));
+
+        var change = changes!.Single();
+        change.AfterValues[3].Should().Be(25L);            // Record ID# — not Date Modified's value
+        change.AfterValues[1].Should().Be(created);        // Date Created — not Record ID#'s value
+        change.AfterValues[6].Should().Be("Ra");
+        change.BeforeValues[3].Should().Be(25L);
+        change.BeforeValues[6].Should().Be("Rajkot");
+        change.ChangedFieldIds.Should().Contain(6);        // changed fields stay internal ids, as the interceptor expects
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -84,7 +119,8 @@ public class MassUpdateRecordsCommandHandlerTests
         var command = new MassUpdateRecordsCommand(table.PublicId, new[] { recordId }, new Dictionary<long, object?> { [1] = "after" });
         if (failCommit) await Assert.ThrowsAsync<OperationCanceledException>(() => CreateSut().HandleAsync(command));
         else Assert.Equal(1, await CreateSut().HandleAsync(command));
-        Assert.Equal(new[] { "begin", "outbox", "write", "commit", failCommit ? "rollback" : "publish" }, events);
+        // The events are written after the update (same transaction), so the Formula / Lookup / Summary values they carry come from the UPDATED record.
+        Assert.Equal(new[] { "begin", "write", "outbox", "commit", failCommit ? "rollback" : "publish" }, events);
     }
 
     [Fact]
