@@ -1639,6 +1639,7 @@ public partial class PipelineEngine : IPipelineEngine
         IPipelineRecordSearchService recordSearchService,
         CancellationToken ct)
     {
+        await PrefetchUserTokenDataAsync(step.ConfigJson, payloadJson, executionPath, allSteps, ct);
         var subtype = step.Subtype?.ToLowerInvariant();
         var executionPathHash = ComputeSha256Hash(executionPath);
         Guid messageGuid = contextDict.TryGetValue("_MessageId", out var msgObj) && msgObj is Guid msgGuid ? msgGuid : Guid.Empty;
@@ -4453,6 +4454,73 @@ public partial class PipelineEngine : IPipelineEngine
         CancellationToken ct)
         => (await ResolveTokenSourceFieldAsync(token, payloadJson, allSteps, fieldRepo, tableRepo, ct)).Category;
 
+    /// <summary>A User / MultiUser field offers its person's details as sub-fields in the field picker (Id, Name, First name, Last name, Email),
+    /// the way Quickbase does: <c>{{trigger.fid_4.email}}</c>. The field itself carries only the user id, so these are looked up.</summary>
+    private static readonly Regex UserSubTokenRegex = new(
+        @"\{\{\s*([^{}]*?\.fid_\d+)\.(id|name|first_name|last_name|email)\s*\}\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, UserTokenInfo> _userTokenInfo = new();
+
+    private sealed record UserTokenInfo(string Name, string FirstName, string LastName, string Email);
+
+    private static List<long> ParseUserIds(string? raw)
+    {
+        var ids = new List<long>();
+        if (string.IsNullOrWhiteSpace(raw)) return ids;
+        foreach (var part in raw.Trim().TrimStart('[').TrimEnd(']').Split(',', StringSplitOptions.RemoveEmptyEntries))
+            if (long.TryParse(part.Trim().Trim('"'), out var id)) ids.Add(id);
+        return ids;
+    }
+
+    /// <summary>Loads the people behind every <c>{{…fid_N.email}}</c>-style token of a step before it runs, so token evaluation (which is
+    /// synchronous) can answer from memory.</summary>
+    private async Task PrefetchUserTokenDataAsync(string? configJson, string payloadJson, string? executionPath, List<PipelineStep>? allSteps, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(configJson) || !configJson.Contains(".fid_", StringComparison.OrdinalIgnoreCase)) return;
+        var matches = UserSubTokenRegex.Matches(configJson);
+        if (matches.Count == 0) return;
+        var userRepo = CurrentStepServices.GetService<IUserRepository>();
+        if (userRepo == null) return;
+        var wanted = new HashSet<long>();
+        foreach (Match match in matches)
+        {
+            try { foreach (var id in ParseUserIds(EvaluateTokens("{{" + match.Groups[1].Value + "}}", payloadJson, executionPath, allSteps))) wanted.Add(id); }
+            catch (Exception) { /* the token's own evaluation reports an unresolvable reference */ }
+        }
+        foreach (var id in wanted)
+        {
+            try
+            {
+                var user = await userRepo.GetByIdAsync(id, ct);
+                var first = user.FirstName?.Trim() ?? string.Empty;
+                var last = user.LastName?.Trim() ?? string.Empty;
+                var name = $"{first} {last}".Trim();
+                _userTokenInfo[id] = new UserTokenInfo(name.Length > 0 ? name : user.Email, first, last, user.Email);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning("User {UserId} referenced by a token could not be loaded: {Message}", id, ex.Message);
+            }
+        }
+    }
+
+    private string ExpandUserSubTokens(string input, string payloadJson, string? executionPath, List<PipelineStep>? allSteps)
+        => UserSubTokenRegex.Replace(input, match =>
+        {
+            string raw;
+            try { raw = EvaluateTokens("{{" + match.Groups[1].Value + "}}", payloadJson, executionPath, allSteps); }
+            catch (Exception) { return match.Value; }
+            var ids = ParseUserIds(raw);
+            if (ids.Count == 0) return string.IsNullOrWhiteSpace(raw) ? string.Empty : match.Value; // not a user id: an ordinary object property
+            var property = match.Groups[2].Value.ToLowerInvariant();
+            return string.Join(", ", ids.Select(id =>
+            {
+                if (property == "id") return id.ToString(CultureInfo.InvariantCulture);
+                if (!_userTokenInfo.TryGetValue(id, out var info)) return string.Empty;
+                return property switch { "email" => info.Email, "first_name" => info.FirstName, "last_name" => info.LastName, _ => info.Name };
+            }));
+        });
+
     /// <summary>A User / MultiUser field (Record Owner, Last Modified By, a picked user) is stored and carried through steps as a user id.
     /// Mapped into a text-like field, that id would read as "40021"; this swaps each such token for the person's name, as the record
     /// table shows it. Mapped into a User field the id is kept, since that is what the field stores.</summary>
@@ -4491,6 +4559,9 @@ public partial class PipelineEngine : IPipelineEngine
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(token)) return ("TEXT", null);
+        var userSub = token.Trim();
+        if (UserSubTokenRegex.Match(userSub) is { Success: true } userSubMatch && userSubMatch.Length == userSub.Length)
+            return (userSubMatch.Groups[2].Value.Equals("id", StringComparison.OrdinalIgnoreCase) ? "NUMBER" : "TEXT", null);
 
         var trimmedToken = token.Trim();
         bool isDynamicToken = System.Text.RegularExpressions.Regex.IsMatch(trimmedToken, @"\{\{\s*(?:steps\.|trigger\.|variables\.|[a-zA-Z0-9_]+\.)");
@@ -4744,6 +4815,7 @@ public partial class PipelineEngine : IPipelineEngine
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
         if (string.IsNullOrEmpty(payloadJson)) return input;
+        if (input.Contains(".fid_", StringComparison.OrdinalIgnoreCase)) input = ExpandUserSubTokens(input, payloadJson, executionPath, allSteps);
         // Callable metadata is part of its durable output; HTTP request metadata is stored separately.
         if (input.Contains("._metadata.", StringComparison.Ordinal))
         {
