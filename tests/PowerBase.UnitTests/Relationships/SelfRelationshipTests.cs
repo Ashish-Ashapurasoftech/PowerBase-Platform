@@ -33,7 +33,7 @@ public class SelfRelationshipTests
             _fieldRepo, _fieldTypeRepo, _schemaEngine, _formRepo, _queryContext, _nameResolver);
 
         _handler = new CreateRelationshipCommandHandler(
-            _tableRepo, _fieldRepo, _fieldTypeRepo, _relRepo, fieldFactory, _auditRepo, _appRepo);
+            _tableRepo, _fieldRepo, _fieldTypeRepo, _relRepo, fieldFactory, _auditRepo, _appRepo, NSubstitute.Substitute.For<PowerBase.Application.Common.Interfaces.ISchemaEngineService>(), NSubstitute.Substitute.For<PowerBase.Application.Common.Interfaces.IRecordRepository>(), NSubstitute.Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>(), NSubstitute.Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>());
 
         var deptTable = new AppTable { Id = DeptTableId, PublicId = DeptPublicId, AppId = AppId, Name = "Department" };
         _tableRepo.GetByPublicIdAsync(DeptPublicId, Arg.Any<CancellationToken>()).Returns(deptTable);

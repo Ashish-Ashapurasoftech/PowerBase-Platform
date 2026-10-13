@@ -28,12 +28,12 @@ public sealed class FormulaEngine
     /// a <see cref="CompiledFormula"/>; inspect <see cref="CompiledFormula.HasErrors"/> before
     /// evaluating.
     /// </summary>
-    public CompiledFormula Compile(string expression, IFieldSchema schema, FormulaType? expectedType = null, ITableAliasSchema? aliasSchema = null)
+    public CompiledFormula Compile(string expression, IFieldSchema schema, FormulaType? expectedType = null, ITableAliasSchema? aliasSchema = null, IVariableSchema? variableSchema = null)
     {
         var parse = Parser.Parse(expression);
         var diagnostics = new List<FormulaDiagnostic>(parse.Diagnostics);
 
-        var referencedFids = Binder.Bind(parse.Root, schema, diagnostics, aliasSchema);
+        var referencedFids = Binder.Bind(parse.Root, schema, diagnostics, aliasSchema, variableSchema);
         var resultType = new TypeChecker(_functions, diagnostics).Check(parse.Root);
 
         if (expectedType is { } expected && resultType != FormulaType.Null && resultType != expected)
@@ -44,12 +44,13 @@ public sealed class FormulaEngine
                 parse.Root.Span));
         }
 
-        return new CompiledFormula(expression, resultType, parse.Root, diagnostics, referencedFids);
+        return new CompiledFormula(expression, resultType, parse.Root, diagnostics, referencedFids,
+            expectedType, Binding.DynamicReferenceScanner.Uses(parse.Root));
     }
 
     /// <summary>Compile and return only the diagnostics — drives the authoring UI's inline errors.</summary>
-    public IReadOnlyList<FormulaDiagnostic> Validate(string expression, IFieldSchema schema, FormulaType? expectedType = null, ITableAliasSchema? aliasSchema = null)
-        => Compile(expression, schema, expectedType, aliasSchema).Diagnostics;
+    public IReadOnlyList<FormulaDiagnostic> Validate(string expression, IFieldSchema schema, FormulaType? expectedType = null, ITableAliasSchema? aliasSchema = null, IVariableSchema? variableSchema = null)
+        => Compile(expression, schema, expectedType, aliasSchema, variableSchema).Diagnostics;
 
     /// <summary>Evaluate a previously compiled formula against one record's values.</summary>
     /// <exception cref="Evaluation.FormulaEvaluationException">If the formula has compile errors.</exception>
@@ -58,6 +59,22 @@ public sealed class FormulaEngine
         if (compiled.Root is null || compiled.HasErrors)
             throw new Evaluation.FormulaEvaluationException("Formula has errors and cannot be evaluated.");
 
-        return new Evaluator(_functions).Eval(compiled.Root, context, options);
+        // A formula that reads a field chosen per record couldn't have its types fully checked when it was
+        // compiled, so they are verified as it runs. Every other formula takes the unchanged path.
+        if (!compiled.UsesDynamicFieldReference)
+            return new Evaluator(_functions).Eval(compiled.Root, context, options);
+
+        try
+        {
+            var value = new Evaluator(_functions, verifyTypes: true).Eval(compiled.Root, context, options);
+            if (compiled.ExpectedType is { } expected && value.Type != FormulaType.Null && value.Type != expected)
+                throw new Evaluation.FormulaEvaluationException($"Formula returns {value.Type} but {expected} is required.");
+            return value;
+        }
+        catch (InvalidCastException)
+        {
+            // A value of an unexpected type reached something that assumes another; never let that escape as a crash.
+            throw new Evaluation.FormulaEvaluationException("A value has a different type than this formula expects.");
+        }
     }
 }

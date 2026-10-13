@@ -160,7 +160,7 @@ public sealed class TypeChecker
         return result.Value;
     }
 
-    private static FormulaType? ResolveArithmetic(BinaryOp op, FormulaType l, FormulaType r)
+    internal static FormulaType? ResolveArithmetic(BinaryOp op, FormulaType l, FormulaType r)
     {
         static bool N(FormulaType t) => t == FormulaType.Number;
         static bool D(FormulaType t) => t == FormulaType.Duration;
@@ -244,6 +244,17 @@ public sealed class TypeChecker
     private FormulaType CheckCall(FunctionCallExpr c)
     {
         var argTypes = c.Args.Select(Check).ToList();
+
+        // GetFieldValue(<id>) is typed as the field it names (set by the binder). Null — "unknown, accept
+        // anywhere" — when the ID is only known per record (checked as the formula runs), or when the
+        // binder already reported why it couldn't resolve, so one mistake gives one error.
+        if (Binding.FieldValueCall.IsCall(c))
+        {
+            if (c.IsDynamicFieldValue && argTypes[0] is not (FormulaType.Number or FormulaType.Text or FormulaType.Null))
+                Mismatch(c.Args[0].Span, $"{Binding.FieldValueCall.Name} argument 1 expects Number or Text but got {argTypes[0]}.");
+            return c.ResolvedField?.Type ?? FormulaType.Null;
+        }
+
         if (_functions.TryGet(c.Name, out var fn) && fn is not null)
             return fn.CheckTypes(argTypes, c.Span, _diags);
 
@@ -251,17 +262,54 @@ public sealed class TypeChecker
         return FormulaType.Null;
     }
 
-    private static bool IsOrderable(FormulaType t) =>
+    internal static bool IsOrderable(FormulaType t) =>
         t is FormulaType.Number or FormulaType.Date or FormulaType.DateTime or FormulaType.Time or FormulaType.Duration or FormulaType.Text;
 
-    private static bool IsEquatable(FormulaType t) =>
+    internal static bool IsEquatable(FormulaType t) =>
         t is FormulaType.Number or FormulaType.Text or FormulaType.Bool
           or FormulaType.Date or FormulaType.DateTime or FormulaType.Time or FormulaType.Duration or FormulaType.User;
+
+    /// <summary>The message for applying a binary operator to operands of these types, or null if allowed —
+    /// the same rules and wording as the checks above. Used to verify, as a formula runs, operands whose
+    /// type wasn't known when it was compiled (see <c>GetFieldValue</c> with a per-record field ID).</summary>
+    internal static string? BinaryTypeError(BinaryOp op, FormulaType lt, FormulaType rt)
+    {
+        switch (op)
+        {
+            case BinaryOp.Add or BinaryOp.Subtract or BinaryOp.Multiply or BinaryOp.Divide or BinaryOp.Power:
+                return ResolveArithmetic(op, lt, rt) is null ? $"Operator '{Sym(op)}' cannot be applied to {lt} and {rt}." : null;
+            case BinaryOp.Concat:
+                return lt == FormulaType.Text && rt == FormulaType.Text
+                    ? null
+                    : $"'&' requires text on both sides (got {lt} and {rt}); wrap non-text values in ToText().";
+            case BinaryOp.Less or BinaryOp.Greater or BinaryOp.LessEqual or BinaryOp.GreaterEqual:
+                return (lt == rt && IsOrderable(lt)) || IsNumberDurationPair(lt, rt) ? null : $"Operator '{Sym(op)}' cannot compare {lt} and {rt}.";
+            case BinaryOp.Equal or BinaryOp.NotEqual:
+                return (lt == rt && IsEquatable(lt)) || IsNumberDurationPair(lt, rt) ? null : $"Operator '{Sym(op)}' cannot compare {lt} and {rt}.";
+            case BinaryOp.And or BinaryOp.Or:
+                return lt == FormulaType.Bool && rt == FormulaType.Bool
+                    ? null
+                    : $"Operator '{Sym(op)}' requires boolean operands (got {lt} and {rt}).";
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>The message for applying a unary operator to an operand of this type, or null if allowed.</summary>
+    internal static string? UnaryTypeError(UnaryOp op, FormulaType t) => op switch
+    {
+        UnaryOp.Negate or UnaryOp.Plus => t is FormulaType.Number or FormulaType.Duration ? null : $"Operator '{Sym(op)}' cannot be applied to {t}.",
+        UnaryOp.Not => t is FormulaType.Bool ? null : $"Operator '{Sym(op)}' cannot be applied to {t}.",
+        _ => null,
+    };
+
+    private static bool IsNumberDurationPair(FormulaType lt, FormulaType rt) =>
+        (lt == FormulaType.Number && rt == FormulaType.Duration) || (lt == FormulaType.Duration && rt == FormulaType.Number);
 
     private void Mismatch(TextSpan span, string message) =>
         _diags.Add(new FormulaDiagnostic(FormulaErrorCode.TypeMismatch, message, span));
 
-    private static string Sym(BinaryOp op) => op switch
+    internal static string Sym(BinaryOp op) => op switch
     {
         BinaryOp.Add => "+", BinaryOp.Subtract => "-", BinaryOp.Multiply => "*", BinaryOp.Divide => "/",
         BinaryOp.Power => "^", BinaryOp.Concat => "&",
@@ -271,7 +319,7 @@ public sealed class TypeChecker
         _ => "?",
     };
 
-    private static string Sym(UnaryOp op) => op switch
+    internal static string Sym(UnaryOp op) => op switch
     {
         UnaryOp.Negate => "-",
         UnaryOp.Plus => "+",

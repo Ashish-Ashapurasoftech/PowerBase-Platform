@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Formulas;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 
@@ -14,9 +15,12 @@ public class GetFieldQueryHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly IAppVariableRepository? _variableRepo;
 
-    public GetFieldQueryHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo)
+    public GetFieldQueryHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
+        IAppVariableRepository? variableRepo = null)
     {
+        _variableRepo = variableRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -32,6 +36,16 @@ public class GetFieldQueryHandler
         // named in the route (and thus than the one the permission check above just authorized).
         if (field.AppTableId != table.Id)
             throw new NotFoundException("Field", query.FieldPublicId);
+
+        // Formulas are stored by field ID (see FormulaCanonicalizer); show names typed by name as the
+        // field's current label so the editor reads — and a rename shows up — naturally. This copy
+        // of the row is only returned, never saved back.
+        if (FormulaTypeMap.IsFormulaComputed(field.TypeCode, field.Settings) && !string.IsNullOrWhiteSpace(field.Settings))
+        {
+            var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
+            var variables = await FormulaVariables.LoadAsync(_variableRepo, table.AppId, ct);
+            field.Settings = new FormulaCanonicalizer(tableFields, variables: variables).ToDisplaySettings(field.TypeCode, field.Settings);
+        }
 
         var hasRecords = await _recordRepo.HasAnyRecordsAsync(table, ct);
         return new GetFieldResult(field, hasRecords);

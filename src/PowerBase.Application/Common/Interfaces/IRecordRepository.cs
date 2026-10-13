@@ -119,6 +119,12 @@ public interface IRecordRepository
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllRowsDecryptedAsync(
         AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
 
+    /// <summary>Encrypts <paramref name="plainByRowId"/> (row Id → text) the way a stored value of
+    /// <paramref name="field"/> is encrypted on write — unchanged when that field's column isn't encrypted (app and
+    /// field both unencrypted, or an encryption-exempt type). Used to refill a column with ciphertext in bulk.</summary>
+    Task<IReadOnlyDictionary<long, string>> EncryptColumnTextsAsync(
+        AppTable table, AppField field, IReadOnlyDictionary<long, string> plainByRowId, CancellationToken ct = default);
+
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
         FilterGroup? filterTree = null,

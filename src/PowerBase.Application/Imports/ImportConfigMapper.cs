@@ -8,7 +8,8 @@ namespace PowerBase.Application.Imports;
 /// JSON columns are read and written in exactly one place.</summary>
 public static class ImportConfigMapper
 {
-    private sealed record Options(string? ConstraintPolicy, List<string>? NotifyEmails, ImportFileOptions? File = null, List<ImportTargetConfig>? AdditionalTargets = null, List<ImportVirtualColumn>? VirtualColumns = null, FilterGroup? TableConditions = null);
+    private sealed record Options(string? ConstraintPolicy, List<string>? NotifyEmails, ImportFileOptions? File = null, List<ImportTargetConfig>? AdditionalTargets = null, List<ImportVirtualColumn>? VirtualColumns = null, FilterGroup? TableConditions = null,
+        List<ImportSheetMapping>? SheetMappings = null);
 
     public static ImportDefinitionConfig ToConfig(ImportDefinition def, Guid sourceTableId) => new()
     {
@@ -18,6 +19,7 @@ public static class ImportConfigMapper
         AdditionalTargets = ImportJson.Deserialize<Options>(def.OptionsJson)?.AdditionalTargets ?? [],
         VirtualColumns = ImportJson.Deserialize<Options>(def.OptionsJson)?.VirtualColumns ?? [],
         TableConditions = ImportJson.Deserialize<Options>(def.OptionsJson)?.TableConditions,
+        SheetMappings = ImportJson.Deserialize<Options>(def.OptionsJson)?.SheetMappings ?? [],
         SourceTableId = sourceTableId,
         ImportType = def.ImportType,
         MergeKeyFid = def.MergeKeyFid,
@@ -42,11 +44,11 @@ public static class ImportConfigMapper
             ? ImportJson.Serialize(cfg.ColumnRules.Where(r => r.RemoveDuplicates || r.RequireField || r.IgnoreBlanks)) : null;
         var notify = ImportNotify.Normalize(cfg.NotifyEmails);
         var file = cfg.SourceKind == ImportSourceKinds.File ? cfg.File : null;
-        entity.OptionsJson = cfg.ConstraintPolicy == ImportConstraintPolicy.ImportValid && notify.Count == 0 && file is null && cfg.AdditionalTargets.Count == 0 && cfg.VirtualColumns.Count == 0 && cfg.TableConditions is not { Nodes.Count: > 0 }
+        entity.OptionsJson = cfg.ConstraintPolicy == ImportConstraintPolicy.ImportValid && notify.Count == 0 && file is null && cfg.AdditionalTargets.Count == 0 && cfg.VirtualColumns.Count == 0 && cfg.TableConditions is not { Nodes.Count: > 0 } && cfg.SheetMappings.Count == 0
             ? null
             : ImportJson.Serialize(new Options(
                 cfg.ConstraintPolicy == ImportConstraintPolicy.ImportValid ? null : cfg.ConstraintPolicy, notify.Count == 0 ? null : notify, file,
                 cfg.AdditionalTargets.Count == 0 ? null : cfg.AdditionalTargets, cfg.VirtualColumns.Count == 0 ? null : cfg.VirtualColumns,
-                cfg.TableConditions is { Nodes.Count: > 0 } ? cfg.TableConditions : null));
+                cfg.TableConditions is { Nodes.Count: > 0 } ? cfg.TableConditions : null, cfg.SheetMappings.Count == 0 ? null : cfg.SheetMappings));
     }
 }

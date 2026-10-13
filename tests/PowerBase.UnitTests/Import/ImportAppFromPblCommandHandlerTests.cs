@@ -96,7 +96,7 @@ public class ImportAppFromPblCommandHandlerTests
         var relationshipFieldFactory = new PowerBase.Application.Relationships.RelationshipFieldFactory(
             _fieldRepo, _fieldTypeRepo, _schemaEngine, _formRepo, _queryContext, _fieldNameResolver);
         var createRelationshipHandler = new CreateRelationshipCommandHandler(
-            _tableRepo, _fieldRepo, _fieldTypeRepo, _relRepo, relationshipFieldFactory, _auditRepo, _appRepo);
+            _tableRepo, _fieldRepo, _fieldTypeRepo, _relRepo, relationshipFieldFactory, _auditRepo, _appRepo, NSubstitute.Substitute.For<PowerBase.Application.Common.Interfaces.ISchemaEngineService>(), NSubstitute.Substitute.For<PowerBase.Application.Common.Interfaces.IRecordRepository>(), NSubstitute.Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>(), NSubstitute.Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>());
 
         var createFormHandler = new CreateFormCommandHandler(_tableRepo, _formRepo, _queryContext, _auditRepo);
         var saveFormLayoutHandler = new SaveFormLayoutCommandHandler(_formRepo, _fieldRepo, _queryContext, _auditRepo);

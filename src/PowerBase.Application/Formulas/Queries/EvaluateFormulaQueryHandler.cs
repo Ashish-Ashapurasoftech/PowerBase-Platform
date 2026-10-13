@@ -1,6 +1,7 @@
 using System.Globalization;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Formula;
+using PowerBase.Formula.Diagnostics;
 using PowerBase.Formula.Evaluation;
 using PowerBase.Formula.Types;
 
@@ -35,6 +36,7 @@ public sealed class EvaluateFormulaQueryHandler
     private readonly IRecordRepository _recordRepo;
     private readonly IAppRepository _appRepo;
     private readonly IUserRepository _userRepo;
+    private readonly IAppVariableRepository? _variableRepo;
 
     public EvaluateFormulaQueryHandler(
         IAppTableRepository tableRepo,
@@ -44,8 +46,10 @@ public sealed class EvaluateFormulaQueryHandler
         IFormulaRuntimeContext runtime,
         IRecordRepository recordRepo,
         IAppRepository appRepo,
-        IUserRepository userRepo)
+        IUserRepository userRepo,
+        IAppVariableRepository? variableRepo = null)
     {
+        _variableRepo = variableRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _engine = engine;
@@ -63,11 +67,12 @@ public sealed class EvaluateFormulaQueryHandler
         var schema = new AppFieldSchema(fields);
 
         var aliasSchema = await AppTableAliasSchema.BuildAsync(_tableRepo, table.AppId, ct);
-        var compiled = _engine.Compile(query.Expression ?? string.Empty, schema, FormulaTypeMap.ParseExpected(query.ExpectedType), aliasSchema);
+        var variableSchema = new AppVariableSchema(await FormulaVariables.LoadAsync(_variableRepo, table.AppId, ct));
+        var compiled = _engine.Compile(query.Expression ?? string.Empty, schema, FormulaTypeMap.ParseExpected(query.ExpectedType), aliasSchema, variableSchema);
         var diagnostics = compiled.Diagnostics.Select(FormulaDiagnosticDto.From).ToList();
 
         if (compiled.HasErrors)
-            return new EvaluateFormulaResult { Valid = false, ResultType = compiled.ResultType.ToString(), Value = null, Diagnostics = diagnostics };
+            return new EvaluateFormulaResult { Valid = false, ResultType = FormulaTypeMap.ResultTypeName(compiled), Value = null, Diagnostics = diagnostics };
 
         var crossTable = new CrossTableQueryContext(_tableRepo, _fieldRepo, _recordRepo, table);
         var context = new CrossTableRecordContext(new ValuesRecordContext(query.Values), crossTable);
@@ -75,6 +80,7 @@ public sealed class EvaluateFormulaQueryHandler
         var options = new EvaluationOptions
         {
             UtcNow = DateTime.UtcNow,
+            FieldTypes = FormulaTypeMap.FieldTypesByFid(fields),
             CurrentUser = _queryContext.UserId > 0
                 ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail, _queryContext.UserName)
                 : null,
@@ -86,14 +92,25 @@ public sealed class EvaluateFormulaQueryHandler
 
         object? value;
         try { value = FormulaRawValue.ToRaw(_engine.Evaluate(compiled, context, options)); }
-        catch (FormulaEvaluationException) { value = null; }
+        catch (FormulaEvaluationException ex)
+        {
+            value = null;
+            // A formula that reads a field chosen per record is type-checked as it runs, so this is where its
+            // type errors ("Formula returns Date but Number is required") surface. Other formulas fail soft as before.
+            if (compiled.UsesDynamicFieldReference)
+            {
+                diagnostics.Add(FormulaDiagnosticDto.From(new FormulaDiagnostic(
+                    FormulaErrorCode.TypeMismatch, ex.Message, TextSpan.FromBounds(0, (query.Expression ?? string.Empty).Length))));
+                return new EvaluateFormulaResult { Valid = false, ResultType = FormulaTypeMap.ResultTypeName(compiled), Value = null, Diagnostics = diagnostics };
+            }
+        }
 
         // A User / User List result evaluates to bare user ids — show names in the live preview,
         // the same as a saved Formula_User / Formula_ListUser record read does.
         if (compiled.ResultType is FormulaType.User or FormulaType.UserList)
             value = await ResolveUserNamesAsync(value, ct);
 
-        return new EvaluateFormulaResult { Valid = true, ResultType = compiled.ResultType.ToString(), Value = value, Diagnostics = diagnostics };
+        return new EvaluateFormulaResult { Valid = true, ResultType = FormulaTypeMap.ResultTypeName(compiled), Value = value, Diagnostics = diagnostics };
     }
 
     /// <summary>Replaces numeric user ids in a User/User List value with display names. Ids that

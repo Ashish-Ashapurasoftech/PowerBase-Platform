@@ -61,7 +61,10 @@ public class DeleteTableCommandHandler
         var relationships = await _relRepo.ListByTableAsync(table.Id, ct);
         foreach (var rel in relationships)
         {
-            await _deleteRelationshipHandler.HandleAsync(new DeleteRelationshipCommand(rel.PublicId, Force: true), ct);
+            // The deleted table's own columns go with it; but when it is the PARENT, the child table lives on, so its
+            // reference field is rebuilt as text rather than left as meaningless Record IDs (best effort — never blocks).
+            var restore = rel.ChildTableId == table.Id ? OriginalFieldRestore.None : OriginalFieldRestore.BestEffort;
+            await _deleteRelationshipHandler.HandleAsync(new DeleteRelationshipCommand(rel.PublicId, Force: true, Restore: restore), ct);
         }
 
         await _tableRepo.DeleteAsync(command.PublicId, ct);

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Domain.Constants;
+using PowerBase.Domain.Entities;
 using PowerBase.Domain.FieldSettings;
 using PowerBase.Formula.Types;
 
@@ -37,6 +38,22 @@ internal static class FormulaTypeMap
         _ when typeCode.StartsWith("Formula_", StringComparison.Ordinal) => FormulaVariantResultType(typeCode),
         _ => null,
     };
+
+    /// <summary>The result type to show for a compiled formula. A formula whose result is a field chosen per
+    /// record (<c>GetFieldValue([Config])</c>) has no type until it runs, so it reports "Dynamic".</summary>
+    public static string ResultTypeName(PowerBase.Formula.CompiledFormula compiled) =>
+        compiled.ResultType == FormulaType.Null && compiled.UsesDynamicFieldReference ? "Dynamic" : compiled.ResultType.ToString();
+
+    /// <summary>The formula type of every field a formula can read, by Fid — handed to the evaluator so
+    /// <c>GetFieldValue</c> can read a field whose ID is only known per record.</summary>
+    public static IReadOnlyDictionary<long, FormulaType> FieldTypesByFid(IReadOnlyList<AppField> fields)
+    {
+        var types = new Dictionary<long, FormulaType>();
+        foreach (var f in fields)
+            if (f.Fid.HasValue && FieldType(f.TypeCode, f.Settings) is { } type)
+                types[f.Fid.Value] = type;
+        return types;
+    }
 
     /// <summary>The FormulaType a Formula_{X} variant field presents when referenced from
     /// another formula — derived from the TypeCode suffix (no ResultType stored per-variant,

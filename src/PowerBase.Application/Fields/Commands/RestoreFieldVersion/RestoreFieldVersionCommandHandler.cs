@@ -2,6 +2,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Versioning;
+using PowerBase.Application.Formulas;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -30,6 +31,7 @@ public class RestoreFieldVersionCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAzureSearchService _searchService;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IAppVariableRepository? _variableRepo;
 
     public RestoreFieldVersionCommandHandler(
         IAppTableRepository tableRepo,
@@ -44,9 +46,11 @@ public class RestoreFieldVersionCommandHandler
         IMessagePublisher messagePublisher,
         IQueryContext queryContext,
         IAzureSearchService searchService,
-        IFieldReferenceIndexer? refIndexer = null)
+        IFieldReferenceIndexer? refIndexer = null,
+        IAppVariableRepository? variableRepo = null)
     {
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
+        _variableRepo = variableRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _versionRepo = versionRepo;
@@ -102,6 +106,12 @@ public class RestoreFieldVersionCommandHandler
 
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
         _guard.ValidateActionButtonTargets(existing.TypeCode, target.Settings, tableFields, existing.Id);
+
+        // A snapshot taken before formulas were stored by ID still holds [Name] text — convert it so
+        // the restored formula follows renames like any other (a no-op for already-converted text).
+        var variables = await FormulaVariables.LoadAsync(_variableRepo, table.AppId, ct);
+        target = target with { Settings = new FormulaCanonicalizer(tableFields, variables: variables).ToStoredSettings(existing.TypeCode, target.Settings) };
+
         await _guard.ValidateRequiredHasDefaultOrNoRestrictedRolesAsync(existing.Id, label, target.IsRequired, target.DefaultValue, ct);
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, target.IsUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, target.IsEncrypted, ct);

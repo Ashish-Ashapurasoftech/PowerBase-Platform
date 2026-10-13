@@ -4,6 +4,7 @@ using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
 using PowerBase.Application.Fields.Versioning;
+using PowerBase.Application.Formulas;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -28,6 +29,7 @@ public class UpdateFieldCommandHandler
     private readonly IAzureSearchService _searchService;
     private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IAppVariableRepository? _variableRepo;
 
     /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
     /// "Display As" Behavior Setting is allowed to switch between (see NumericDisplayAs).</summary>
@@ -47,9 +49,11 @@ public class UpdateFieldCommandHandler
         IQueryContext queryContext,
         IAzureSearchService searchService,
         IRelationshipRepository relRepo,
-        IFieldReferenceIndexer? refIndexer = null)
+        IFieldReferenceIndexer? refIndexer = null,
+        IAppVariableRepository? variableRepo = null)
     {
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
+        _variableRepo = variableRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -115,6 +119,9 @@ public class UpdateFieldCommandHandler
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
             : command.Settings;
 
+        if (!existing.IsSystem && PowerBase.Formula.Binding.FieldIdReference.IsReservedLabel(label))
+            throw new ValidationException(new Dictionary<string, string[]> { ["Label"] = [CreateField.CreateFieldCommandValidator.ReservedLabelMessage(label)] });
+
         if (await _fieldRepo.LabelExistsInTableAsync(table.Id, label, excludeFieldId: existing.Id, ct: ct))
             throw new DuplicateException("Field", "label", label);
 
@@ -123,6 +130,18 @@ public class UpdateFieldCommandHandler
 
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
+
+        // Formula text is stored by field ID so a rename can't break it (see FormulaCanonicalizer).
+        // The label being saved right now is also accepted as a name, so a formula can reference a
+        // field by the new label in the same save that renames it.
+        if (settings is not null)
+        {
+            var renamedTo = existing.Fid.HasValue && !string.Equals(label, existing.Label, StringComparison.Ordinal)
+                ? new Dictionary<string, long> { [label] = existing.Fid.Value }
+                : null;
+            settings = new FormulaCanonicalizer(tableFields, renamedTo, await FormulaVariables.LoadAsync(_variableRepo, table.AppId, ct))
+                .ToStoredSettings(existing.TypeCode, settings);
+        }
 
         // ── Numeric family "Display As" type switch ─────────────────────────────
         // Number/Currency/Percent/Rating share one settings shape (NumericSettings) with a

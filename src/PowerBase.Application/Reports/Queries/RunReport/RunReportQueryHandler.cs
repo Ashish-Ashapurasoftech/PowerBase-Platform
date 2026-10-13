@@ -499,7 +499,8 @@ public class RunReportQueryHandler
                 physicalFilterTree, sqlSorts,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
-            var allRelational = await _relationalProjector.ProjectAsync(table, allFields, allRows, ct);
+            var allRelational = Relationships.ReferenceOriginalFallback.Apply(allFields, allRows,
+                await _relationalProjector.ProjectAsync(table, allFields, allRows, ct));
             var allComputed = _formulaProjector.Project(allFields, allRows, allRelational, table);
             var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
 
@@ -530,7 +531,8 @@ public class RunReportQueryHandler
             total = await _recordRepo.CountAsync(table, allFields, filterTree,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
-            var relational = await _relationalProjector.ProjectAsync(table, allFields, rows, ct);
+            var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
+                await _relationalProjector.ProjectAsync(table, allFields, rows, ct));
             var computed = _formulaProjector.Project(allFields, rows, relational, table);
             var userNames = await ResolveUserNamesAsync(rows, allFields, _userRepo, ct, computed);
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();

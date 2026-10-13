@@ -8,6 +8,7 @@ public class UpdateAppVariableCommandValidator : AbstractValidator<UpdateAppVari
     {
         RuleFor(x => x.AppPublicId).NotEmpty();
         RuleFor(x => x.PublicId).NotEmpty();
+        // The name can't change once created (see the handler), so the rules for choosing one apply only at creation.
         RuleFor(x => x.Name).NotEmpty().MaximumLength(100);
         RuleFor(x => x.Value).NotEmpty().MaximumLength(500);
         RuleFor(x => x.Description).MaximumLength(500).When(x => x.Description is not null);

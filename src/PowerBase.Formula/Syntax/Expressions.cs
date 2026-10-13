@@ -55,6 +55,12 @@ public sealed class FieldRefExpr : Expr
     /// (<c>[_DBID_FILE_TYPES]</c>) rather than a field — the target table's id, to be evaluated as
     /// a Text literal. Null for an ordinary field reference. See <see cref="Binding.ITableAliasSchema"/>.</summary>
     public string? TableAliasId { get; internal set; }
+
+    /// <summary>Set by the binder when this bracket token resolved as an app variable rather than a field —
+    /// the variable's id, and its value (always text), evaluated as a Text constant. Null for an ordinary field.</summary>
+    public long? VariableId { get; internal set; }
+
+    public string? VariableValue { get; internal set; }
 }
 
 public sealed class UnaryExpr : Expr
@@ -97,6 +103,14 @@ public sealed class FunctionCallExpr : Expr
     public string Name { get; }
 
     public IReadOnlyList<Expr> Args { get; }
+
+    /// <summary>Set by the binder for <c>GetFieldValue(&lt;field id&gt;)</c> once the ID resolves to a field,
+    /// so the call types and evaluates as that field. Null for every other function.</summary>
+    public Binding.FieldRef? ResolvedField { get; internal set; }
+
+    /// <summary>Set by the binder for <c>GetFieldValue(&lt;expr&gt;)</c> whose ID is only known when the
+    /// formula runs (it comes from a field or a computed value). Such a call is resolved per record.</summary>
+    public bool IsDynamicFieldValue { get; internal set; }
 }
 
 /// <summary>A reference to a variable declared earlier in the same formula, written <c>$name</c>.</summary>

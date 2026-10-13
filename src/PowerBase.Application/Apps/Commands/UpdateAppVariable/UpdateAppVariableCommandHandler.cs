@@ -38,13 +38,15 @@ public class UpdateAppVariableCommandHandler
         if (existing == null)
             throw new NotFoundException("AppVariable", command.PublicId);
 
-        // Check uniqueness excluding self
-        if (!string.Equals(existing.Name, command.Name, StringComparison.OrdinalIgnoreCase))
-        {
-            if (await _variableRepo.NameExistsAsync(appId, command.Name, ct))
-                throw new DuplicateException("AppVariable", "name", command.Name);
-        }
+        // A variable's name is fixed when it is created: formulas and other settings refer to it by that name, so
+        // only its value and description can change. The name is still sent with an update (the API shape is
+        // unchanged); it just has to be the one the variable already has.
+        if (!string.Equals(existing.Name, command.Name, StringComparison.Ordinal))
+            throw new ValidationException(new Dictionary<string, string[]>
+            {
+                ["Name"] = ["A variable's name can't be changed once it is created."]
+            });
 
-        await _variableRepo.UpdateAsync(appId, command.PublicId, command.Name, command.Value, command.Description, ct);
+        await _variableRepo.UpdateAsync(appId, command.PublicId, existing.Name, command.Value, command.Description, ct);
     }
 }

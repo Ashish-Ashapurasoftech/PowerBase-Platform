@@ -3,6 +3,7 @@ using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Commands;
 using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Application.Formulas;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -40,6 +41,7 @@ public class CreateFieldCommandHandler
     private readonly IFieldNameResolver _fieldNameResolver;
     private readonly FieldSettingsGuard _guard;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IAppVariableRepository? _variableRepo;
 
     public CreateFieldCommandHandler(
         IAppTableRepository tableRepo,
@@ -52,9 +54,11 @@ public class CreateFieldCommandHandler
         FieldSettingsValidatorRegistry settingsRegistry,
         IFieldNameResolver fieldNameResolver,
         FieldSettingsGuard guard,
-        IFieldReferenceIndexer? refIndexer = null)
+        IFieldReferenceIndexer? refIndexer = null,
+        IAppVariableRepository? variableRepo = null)
     {
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
+        _variableRepo = variableRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _fieldTypeRepo = fieldTypeRepo;
@@ -120,6 +124,9 @@ public class CreateFieldCommandHandler
         var advancedDefaults = FieldAdvancedSettingsCapability.Resolve(fieldType.Code, command.Settings)
             ?? new FieldAdvancedSettingsCapability.Defaults(Searchable: false, Sortable: true, Reportable: true, Filterable: true, Auditable: false);
 
+        // Formula text is stored by field ID so a later rename can't break it (see FormulaCanonicalizer).
+        var canonicalizer = new FormulaCanonicalizer(existingFields, variables: await FormulaVariables.LoadAsync(_variableRepo, table.AppId, ct));
+
         var field = new AppField
         {
             AppTableId = table.Id,
@@ -131,7 +138,7 @@ public class CreateFieldCommandHandler
             IsRequired = command.IsRequired,
             DefaultValue = command.DefaultValue,
             Fid = nextFid,
-            Settings = command.Settings,
+            Settings = canonicalizer.ToStoredSettings(fieldType.Code, command.Settings),
             CreatedBy = _queryContext.UserId,
             IsSearchable = advancedDefaults.Searchable,
             IsSortable = advancedDefaults.Sortable,
@@ -189,7 +196,7 @@ public class CreateFieldCommandHandler
             IsRequired = field.IsRequired,
             IsAuditable = field.IsAuditable,
             Fid = field.Fid,
-            Settings = field.Settings,
+            Settings = canonicalizer.ToDisplaySettings(field.TypeCode, field.Settings),
             CreatedOn = DateTime.UtcNow,
             IsEncrypted = field.IsEncrypted,
             IsAutoFill = field.IsAutoFill,

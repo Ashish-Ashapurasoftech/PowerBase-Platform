@@ -16,14 +16,26 @@ public sealed class CompiledFormula
         FormulaType resultType,
         Expr? root,
         IReadOnlyList<FormulaDiagnostic> diagnostics,
-        IReadOnlyList<long> referencedFieldIds)
+        IReadOnlyList<long> referencedFieldIds,
+        FormulaType? expectedType = null,
+        bool usesDynamicFieldReference = false)
     {
         Expression = expression;
         ResultType = resultType;
         Root = root;
         Diagnostics = diagnostics;
         ReferencedFieldIds = referencedFieldIds;
+        ExpectedType = expectedType;
+        UsesDynamicFieldReference = usesDynamicFieldReference;
     }
+
+    /// <summary>The result type the formula was compiled to produce, if one was required.</summary>
+    internal FormulaType? ExpectedType { get; }
+
+    /// <summary>True when the formula reads a field chosen per record (<c>GetFieldValue</c> with an ID that
+    /// is only known when it runs). Such a formula's real dependencies can't be listed in
+    /// <see cref="ReferencedFieldIds"/>, and its types are verified as it runs.</summary>
+    public bool UsesDynamicFieldReference { get; }
 
     public string Expression { get; }
 

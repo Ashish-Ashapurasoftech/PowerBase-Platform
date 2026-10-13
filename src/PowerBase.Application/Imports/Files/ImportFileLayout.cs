@@ -62,6 +62,8 @@ public sealed record ImportFilePreview(
 public static class ImportFileInspector
 {
     public const int PreviewRows = 10;
+    /// <summary>The most rows a preview may be asked to return.</summary>
+    public const int MaxPreviewRows = 500;
 
     public static IImportRowReader Open(Stream stream, ImportFileLayout layout) => layout.Format switch
     {
@@ -91,13 +93,15 @@ public static class ImportFileInspector
         return ImportFileColumns.FromHeader(header, width);
     }
 
-    public static ImportFilePreview Preview(Stream stream, ImportFileLayout layout)
+    /// <param name="take">How many of the first rows to return (the file is still read once, to count them all).</param>
+    public static ImportFilePreview Preview(Stream stream, ImportFileLayout layout, int take = PreviewRows)
     {
+        take = Math.Clamp(take, 1, MaxPreviewRows);
         var delimiter = layout.Format == ImportFileFormats.Csv ? layout.Delimiter ?? ImportCsvReader.DetectDelimiter(stream) : (char?)null;
         layout = layout with { Delimiter = delimiter };
         string?[]? header = null;
         var width = 0;
-        var rows = new List<string?[]>(PreviewRows);
+        var rows = new List<string?[]>(Math.Min(take, 64));
         long count = 0, last = 0;
         using var reader = Open(stream, layout);
         while (reader.Read(out var rowNumber, out var cells))
@@ -107,7 +111,7 @@ public static class ImportFileInspector
             count++;
             last = rowNumber;
             width = Math.Max(width, cells.Length);
-            if (rows.Count < PreviewRows) rows.Add(cells);
+            if (rows.Count < take) rows.Add(cells);
         }
         if (layout.HeaderRow > 0 && header is null) throw new ImportFileHeaderMissingException($"Row {layout.HeaderRow}, which should hold the column names, is not in the file.");
         var columns = ImportFileColumns.FromHeader(header, width);
