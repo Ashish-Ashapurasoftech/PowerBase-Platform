@@ -40,9 +40,10 @@ public static class RecordConstraintValidator
         long? excludeRecordId,
         CancellationToken ct,
         string? appDateFormat = null,
-        System.Data.IDbTransaction? transaction = null)
+        System.Data.IDbTransaction? transaction = null,
+        Func<AppField, object, bool?>? isDuplicate = null)
     {
-        var violations = await CollectViolationsAsync(table, fields, effectiveValues, recordRepo, isCreate, excludeRecordId, ct, appDateFormat: appDateFormat, transaction: transaction);
+        var violations = await CollectViolationsAsync(table, fields, effectiveValues, recordRepo, isCreate, excludeRecordId, ct, appDateFormat: appDateFormat, transaction: transaction, isDuplicate: isDuplicate);
         if (violations.Count > 0)
             // Grouped (not a plain ToDictionary) because a single field can now fail more than one
             // check in the same write (e.g. both Unique and Max Length) — a flat ToDictionary would
@@ -67,7 +68,8 @@ public static class RecordConstraintValidator
         CancellationToken ct,
         Guid recordId = default,
         string? appDateFormat = null,
-        System.Data.IDbTransaction? transaction = null)
+        System.Data.IDbTransaction? transaction = null,
+        Func<AppField, object, bool?>? isDuplicate = null)
     {
         var violations = new List<RecordConstraintViolation>();
 
@@ -96,7 +98,12 @@ public static class RecordConstraintValidator
 
             if (field.IsUnique && !isBlank && !PhysicalNaming.IsRangeTypeCode(field.TypeCode))
             {
-                if (await recordRepo.HasValueDuplicateAsync(table, field, value!, excludeRecordId, transaction, ct))
+                // A caller that already knows which values are taken (Copy Records checks a whole page of rows with
+                // one query) supplies the answer instead of this per-value lookup; it must match what the lookup says.
+                // A null answer means "I don't know": ask the database as usual.
+                var duplicate = isDuplicate?.Invoke(field, value!)
+                    ?? await recordRepo.HasValueDuplicateAsync(table, field, value!, excludeRecordId, transaction, ct);
+                if (duplicate)
                     violations.Add(new RecordConstraintViolation(recordId, fid, "Unique", $"'{label}' must be unique — this value is already in use."));
             }
 

@@ -1368,7 +1368,10 @@ public class PipelineTriggersAndExternalActionsTests
 
         // Verify snapshots are captured with correct before values and stable FIDs and pass the user context (101L)
         await triggerInterceptor.Received(1).InterceptBulkAsync(
-            table, fields, Arg.Is<IReadOnlyList<PowerBase.Application.Common.Models.PipelineRecordChange>>(list => list.Count == 1 && list[0].BeforeValues[10] as string == "New"), Arg.Any<Guid>(), Arg.Any<Guid>(), 101L, Arg.Any<CancellationToken>());
+            table, fields, Arg.Is<IReadOnlyList<PowerBase.Application.Common.Models.PipelineRecordChange>>(list => list.Count == 1
+                && list[0].BeforeValues[101] as string == "New"
+                // Keyed by FID only: an internal id (10) can equal another field's FID and would overwrite its value.
+                && !list[0].BeforeValues.ContainsKey(10)), Arg.Any<Guid>(), Arg.Any<Guid>(), 101L, Arg.Any<CancellationToken>());
     }
 
     [Fact]

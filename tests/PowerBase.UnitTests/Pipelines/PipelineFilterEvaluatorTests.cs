@@ -432,5 +432,24 @@ public class PipelineFilterEvaluatorTests
         PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [2] = "10", [3] = "10" }, _fields).Should().BeTrue();
         PipelineFilterEvaluator.EvaluateFilterGroup(tree, new Dictionary<long, object?> { [2] = "10", [3] = "20" }, _fields).Should().BeFalse();
     }
+
+    [Fact]
+    public void EvaluateGroup_FidRule_WhenAnotherFieldsInternalIdCollides_UsesFieldWithThatFid()
+    {
+        // "Other" has internal Id 9 but FID 12; "Target" is FID 9. A rule on fid_9 must read Target.
+        var fields = new List<AppField>
+        {
+            new() { Id = 9, Fid = 12, Name = "Other", TypeCode = "TEXT" },
+            new() { Id = 50, Fid = 9, Name = "Target", TypeCode = "TEXT" }
+        };
+        var group = new TriggerFilterGroup
+        {
+            LogicalOp = "AND",
+            Rules = new List<TriggerFilterRule> { new() { Field = "fid_9", Operator = "is", Value = "yes" } }
+        };
+
+        PipelineFilterEvaluator.EvaluateGroup(group, new Dictionary<long, object?> { [9] = "yes", [12] = "no" }, fields).Should().BeTrue();
+        PipelineFilterEvaluator.EvaluateGroup(group, new Dictionary<long, object?> { [9] = "no", [12] = "yes" }, fields).Should().BeFalse();
+    }
 }
 

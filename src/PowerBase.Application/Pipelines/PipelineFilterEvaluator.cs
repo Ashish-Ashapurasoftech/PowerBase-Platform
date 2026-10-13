@@ -640,11 +640,23 @@ public static class PipelineFilterEvaluator
         return raw.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim()).ToList();
     }
 
+    /// <summary>The field a trigger rule names ("fid_9", or its name). "fid_N" is a FID: it is matched against FIDs first, and only
+    /// then against an internal id — the two number spaces coincide, and a single combined match picked whichever field came first
+    /// (a rule on "fid_9" could end up reading the field whose internal id is 9).</summary>
+    private static AppField? ResolveRuleField(IEnumerable<AppField> fields, string fieldRef)
+    {
+        var list = fields as IReadOnlyCollection<AppField> ?? fields.ToList();
+        return list.FirstOrDefault(f => $"fid_{f.Fid}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase))
+            ?? list.FirstOrDefault(f => f.Name.Equals(fieldRef, StringComparison.OrdinalIgnoreCase))
+            ?? list.FirstOrDefault(f => $"fid_{f.Id}".Equals(fieldRef, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static string ReadFieldValue(AppField field, IReadOnlyDictionary<long, object?> valuesSource)
     {
         object? valObj = null;
-        if (valuesSource.TryGetValue(field.Id, out var directVal)) valObj = directVal;
-        else if (field.Fid.HasValue && valuesSource.TryGetValue(field.Fid.Value, out var fidVal)) valObj = fidVal;
+        // FID first: a change is keyed by FID, or by FID and internal id alike; an internal id can coincide with ANOTHER field's FID.
+        if (field.Fid.HasValue && valuesSource.TryGetValue(field.Fid.Value, out var fidVal)) valObj = fidVal;
+        else if (valuesSource.TryGetValue(field.Id, out var directVal)) valObj = directVal;
         return valObj?.ToString() ?? string.Empty;
     }
 
@@ -701,10 +713,7 @@ public static class PipelineFilterEvaluator
 
         if (string.IsNullOrEmpty(rule.Field)) return true;
 
-        var field = fields.FirstOrDefault(f =>
-            f.Name.Equals(rule.Field, StringComparison.OrdinalIgnoreCase) ||
-            $"fid_{f.Id}".Equals(rule.Field, StringComparison.OrdinalIgnoreCase) ||
-            $"fid_{f.Fid}".Equals(rule.Field, StringComparison.OrdinalIgnoreCase));
+        var field = ResolveRuleField(fields, rule.Field);
 
         if (field == null)
         {
@@ -713,13 +722,14 @@ public static class PipelineFilterEvaluator
         }
 
         object? valObj = null;
-        if (valuesSource.TryGetValue(field.Id, out var directVal))
-        {
-            valObj = directVal;
-        }
-        else if (field.Fid.HasValue && valuesSource.TryGetValue(field.Fid.Value, out var fidVal))
+        // FID first (see ReadFieldValue): an internal id can coincide with another field's FID.
+        if (field.Fid.HasValue && valuesSource.TryGetValue(field.Fid.Value, out var fidVal))
         {
             valObj = fidVal;
+        }
+        else if (valuesSource.TryGetValue(field.Id, out var directVal))
+        {
+            valObj = directVal;
         }
 
         var leftVal = valObj?.ToString() ?? string.Empty;
@@ -781,10 +791,7 @@ public static class PipelineFilterEvaluator
             return;
         }
 
-        var field = fields.FirstOrDefault(f =>
-            f.Name.Equals(rule.Field, StringComparison.OrdinalIgnoreCase) ||
-            $"fid_{f.Id}".Equals(rule.Field, StringComparison.OrdinalIgnoreCase) ||
-            $"fid_{f.Fid}".Equals(rule.Field, StringComparison.OrdinalIgnoreCase));
+        var field = ResolveRuleField(fields, rule.Field);
 
         if (field == null)
         {

@@ -57,18 +57,26 @@ public class ListAppPipelineRunsQueryHandler
             }
         }
 
-        var items = runs.Select(r => new AppPipelineRunDto(
-            r.Run.PublicId,
-            r.PipelinePublicId,
-            r.PipelineName,
-            r.Run.Status,
-            r.Run.TriggerType,
-            r.Run.StartedOn,
-            r.Run.CompletedOn,
-            r.Run.TriggeredBy == 0 ? "System" : (userNames.TryGetValue(r.Run.TriggeredBy, out var name) ? name : $"User {r.Run.TriggeredBy}"),
-            r.Run.ErrorMessage,
-            r.Run.AttemptCount
-        )).ToList();
+        var triggerRefs = await _pipelineRepo.GetTriggerRecordRefsByRunIdsAsync(runs.Select(r => r.Run.Id).ToList(), ct);
+
+        var items = runs.Select(r =>
+        {
+            triggerRefs.TryGetValue(r.Run.Id, out var triggerRef);
+            return new AppPipelineRunDto(
+                r.Run.PublicId,
+                r.PipelinePublicId,
+                r.PipelineName,
+                r.Run.Status,
+                r.Run.TriggerType,
+                r.Run.StartedOn,
+                r.Run.CompletedOn,
+                r.Run.TriggeredBy == 0 ? "System" : (userNames.TryGetValue(r.Run.TriggeredBy, out var name) ? name : $"User {r.Run.TriggeredBy}"),
+                r.Run.ErrorMessage,
+                r.Run.AttemptCount,
+                triggerRef?.RecordId,
+                triggerRef?.RecordPublicId
+            );
+        }).ToList();
 
         return new AppPipelineRunsResult(items, totalCount, page, pageSize);
     }

@@ -49,6 +49,8 @@ public interface IAppTableRepository
     Task SetDefaultRecordPickerFieldsAsync(long tableId, long? field1Id, long? field2Id, long? field3Id, CancellationToken ct = default);
     Task DeleteAsync(Guid publicId, CancellationToken ct = default);
     Task IncrementRecordCountAsync(long id, CancellationToken ct = default);
+    /// <summary>Adds <paramref name="count"/> to the table's record count in one statement; inside <paramref name="transaction"/> when given.</summary>
+    Task IncrementRecordCountByAsync(long id, int count, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task DecrementRecordCountAsync(long id, CancellationToken ct = default);
     Task DecrementRecordCountByAsync(long id, int count, CancellationToken ct = default);
 }

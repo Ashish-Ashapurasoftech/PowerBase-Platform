@@ -21,7 +21,9 @@ public class SaveFormLayoutCommandValidator : AbstractValidator<SaveFormLayoutCo
 
         RuleForEach(x => x.Sections).ChildRules(section =>
         {
-            section.RuleFor(s => s.Name).NotEmpty().MaximumLength(200);
+            // A section may have no title — the form renderer then shows just its collapse toggle.
+            // (Name is NOT NULL in meta.FormSection, so an empty string is stored, never null.)
+            section.RuleFor(s => s.Name).NotNull().MaximumLength(200);
 
             section.RuleFor(s => s.Blocks)
                 .NotNull()

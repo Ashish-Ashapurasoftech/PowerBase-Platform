@@ -340,11 +340,8 @@ public class CopyRecordsTests
     {
         using var harness = new Harness();
         harness.Config.TerminateOnError = "No";
-        harness.Records.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(),
-            Arg.Any<FilterGroup>(), null, null, Arg.Any<CancellationToken>()).Returns(new[] {
-                (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["PublicId"] = Guid.NewGuid() },
-                new Dictionary<string, object?> { ["PublicId"] = Guid.NewGuid() }
-            });
+        harness.Records.FindRecordsByFieldValuesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(object? Value, Guid PublicId)> { ("none", Guid.NewGuid()), ("none", Guid.NewGuid()) });
         var result = JsonDocument.Parse(await harness.Run()).RootElement;
         Assert.Equal(1, result.GetProperty("ErrorCount").GetInt32());
         Assert.Equal(0, result.GetProperty("InsertedCount").GetInt32());
@@ -363,9 +360,8 @@ public class CopyRecordsTests
         harness.Config.MergeField = "fid_42";
         harness.Config.DestinationFields = new() { "fid_42" };
         var id = Guid.NewGuid();
-        harness.Records.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 2,
-            Arg.Is<FilterGroup>(f => f.Nodes[0].Condition!.FieldId == 42), null, null, Arg.Any<CancellationToken>())
-            .Returns(new[] { (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["PublicId"] = id } });
+        harness.Records.FindRecordsByFieldValuesAsync(Arg.Any<AppTable>(), Arg.Is<AppField>(f => f.Fid == 42), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(object? Value, Guid PublicId)> { ("none", id) });
         var result = JsonDocument.Parse(await harness.Run()).RootElement;
         Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
         await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), id,
@@ -416,9 +412,9 @@ public class CopyRecordsTests
     {
         using var harness = new Harness();
         var id = Guid.NewGuid();
-        harness.Records.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 2,
-            Arg.Is<FilterGroup>(f => f.Nodes[0].Condition!.FieldId == 9 && f.Nodes[0].Condition!.Value == "none"),
-            null, null, Arg.Any<CancellationToken>()).Returns(new List<IReadOnlyDictionary<string, object?>> { new Dictionary<string, object?> { ["PublicId"] = id } });
+        harness.Records.FindRecordsByFieldValuesAsync(Arg.Any<AppTable>(), Arg.Is<AppField>(f => f.Fid == 9),
+            Arg.Is<IReadOnlyCollection<object>>(k => k.Count == 1 && Equals(k.First(), "none")), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(object? Value, Guid PublicId)> { ("none", id) });
         var result = JsonDocument.Parse(await harness.Run()).RootElement;
         Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
         await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), id,
@@ -671,7 +667,7 @@ public class CopyRecordsTests
             await Task.CompletedTask;
             yield return Enumerable.Range(0, count).Select(i => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
             {
-                ["f_6"] = "none",
+                ["f_6"] = "none" + Guid.NewGuid().ToString("N"),   // distinct merge values: two rows with one value would merge into one record
                 ["PublicId"] = Guid.NewGuid()
             }).ToList();
         }
@@ -805,6 +801,658 @@ public class CopyRecordsTests
         Assert.Single(harness.Search.ReceivedCalls());
     }
 
+    // ── Batch (whole page) write path ───────────────────────────────────────────────────────
+    // A destination with nothing that makes one row depend on another (no unique / reference field, no data rule) is written a
+    // page at a time: one insert for the page, one lookup of the merge values, one receipt write, one audit write, one count update.
+
+    private const int RowByRowGuardFid = 99;
+
+    private static Harness BatchHarness(int rows)
+    {
+        var harness = new Harness();
+        harness.DestinationFields.RemoveAll(f => f.Fid == RowByRowGuardFid);   // nothing but the merge field is unique: the batch path
+        harness.SourceValues.Clear();
+        harness.SourceValues.AddRange(Enumerable.Range(0, rows).Select(i => "key" + i));
+        return harness;
+    }
+
+    private static int Calls(Harness harness, string method) => harness.Records.ReceivedCalls().Count(c => c.GetMethodInfo().Name == method);
+
+    [Fact]
+    public async Task Batch_WritesWholePagesWithoutPerRowCalls()
+    {
+        using var harness = BatchHarness(600);   // pages of 250, 250 and 100
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(600, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(0, result.GetProperty("ErrorCount").GetInt32());
+        Assert.Equal(3, Calls(harness, "CreateManyAsync"));
+        Assert.Equal(3, Calls(harness, "FindRecordsByFieldValuesAsync"));   // one merge lookup per page, not per row
+        Assert.Equal(0, Calls(harness, "CreateAsync"));
+        Assert.Equal(0, Calls(harness, "ListAsync"));
+        Assert.Equal(0, Calls(harness, "GetActiveRecordIdByPublicIdAsync"));
+        var audits = harness.Audit.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "LogActivitiesAsync").ToList();
+        Assert.Equal(3, audits.Count);
+        Assert.Equal(600, audits.Sum(c => ((IReadOnlyCollection<string>)c.GetArguments()[2]!).Count));
+        Assert.DoesNotContain(harness.Audit.ReceivedCalls(), c => c.GetMethodInfo().Name == "LogActivityAsync");
+        var counts = harness.Tables.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "IncrementRecordCountByAsync").Select(c => (int)c.GetArguments()[1]!).ToList();
+        Assert.Equal(new[] { 250, 250, 100 }, counts);
+        await harness.Tables.DidNotReceive().IncrementRecordCountAsync(Arg.Any<long>(), Arg.Any<CancellationToken>());
+        // The created records' events are handed over a page at a time (3 pages), not one call per record.
+        var added = harness.Interceptor.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "InterceptAddedManyAsync").ToList();
+        Assert.Equal(3, added.Count);
+        Assert.Equal(600, added.Sum(c => ((System.Collections.ICollection)c.GetArguments()[2]!).Count));
+        Assert.DoesNotContain(harness.Interceptor.ReceivedCalls(), c => c.GetMethodInfo().Name == "InterceptAsync");
+    }
+
+    [Fact]
+    public async Task Batch_ReplayReadsReceiptsAndWritesNothingAgain()
+    {
+        using var harness = BatchHarness(300);
+        var first = await harness.Run();
+        var second = await harness.Run();
+
+        Assert.Equal(first, second);
+        Assert.Equal(2, Calls(harness, "CreateManyAsync"));   // 250 + 50, only from the first run
+    }
+
+    [Fact]
+    public async Task Batch_InterruptedAfterSomePagesResumesOnlyTheRest()
+    {
+        using var harness = BatchHarness(500);
+        var attempts = 0;
+        harness.Records.CreateManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+            .Returns(c =>
+            {
+                // The second page fails in the batch AND in the row-by-row retry (a database that is down), so the step fails and is retried.
+                if (++attempts == 2) throw new InvalidOperationException("Transient database failure");
+                return Task.FromResult((IReadOnlyList<Guid>)c.Arg<IReadOnlyList<IReadOnlyDictionary<long, object?>>>().Select(_ => Guid.NewGuid()).ToList());
+            });
+        var createCalls = 0;
+        harness.Records.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(),
+            Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+            .Returns(_ => ++createCalls == 1 ? throw new InvalidOperationException("Transient database failure") : Task.FromResult(Guid.NewGuid()));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(harness.Run);
+        harness.SourceValues.Clear();   // the retry must use the saved snapshot
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(500, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(0, result.GetProperty("ErrorCount").GetInt32());
+        // Page 1 was committed by the first run; the retry did not insert it again.
+        Assert.Equal(3, Calls(harness, "CreateManyAsync"));   // page 1, page 2 (failed), page 2 again on the retry
+        Assert.Equal(1, createCalls);                      // the row-by-row attempt of the failed page
+    }
+
+    [Fact]
+    public async Task Batch_RowRejectedByValidationIsAnErrorAndTheRestAreStored()
+    {
+        using var harness = BatchHarness(0);
+        harness.Config.TerminateOnError = "No";
+        harness.DestinationField.IsRequired = true;
+        harness.SourceValues.AddRange(new[] { "a", "", "b" });
+        IReadOnlyList<IReadOnlyDictionary<long, object?>>? written = null;
+        harness.Records.CreateManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Do<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(r => written = r),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+            .Returns(c => (IReadOnlyList<Guid>)c.Arg<IReadOnlyList<IReadOnlyDictionary<long, object?>>>().Select(_ => Guid.NewGuid()).ToList());
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(2, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("ErrorCount").GetInt32());
+        Assert.Equal(new object?[] { "a", "b" }, written!.Select(r => r[9]).ToArray());
+        Assert.Equal(0, Calls(harness, "CreateAsync"));
+        var again = JsonDocument.Parse(await harness.Run()).RootElement;   // the rejected row's receipt is stored too
+        Assert.Equal(1, again.GetProperty("ErrorCount").GetInt32());
+        Assert.Equal(1, Calls(harness, "CreateManyAsync"));
+    }
+
+    [Fact]
+    public async Task Batch_FailureOfTheBatchRedoesThePageRowByRow()
+    {
+        using var harness = BatchHarness(3);
+        harness.Records.CreateManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+            .Returns<IReadOnlyList<Guid>>(_ => throw new PowerBase.Domain.Exceptions.ConflictException("unique value in use"));
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(3, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(3, Calls(harness, "CreateAsync"));
+        await harness.Audit.DidNotReceive().LogActivitiesAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IReadOnlyCollection<string>>(), Arg.Any<string?>(), Arg.Any<long?>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await harness.Tables.DidNotReceive().IncrementRecordCountByAsync(Arg.Any<long>(), Arg.Any<int>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Batch_MatchedRecordIsUpdatedAndNewOnesAreInserted()
+    {
+        using var harness = BatchHarness(3);   // key0, key1, key2
+        var existing = Guid.NewGuid();
+        harness.Records.FindRecordsByFieldValuesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(object? Value, Guid PublicId)> { ("KEY1 ", existing) });   // same value as key1: case and trailing spaces do not matter
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(2, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
+        await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), existing,
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+        Assert.Equal(1, Calls(harness, "CreateManyAsync"));
+    }
+
+    [Fact]
+    public async Task Batch_DuplicateMatchesInTheDestinationRejectOnlyThatRow()
+    {
+        using var harness = BatchHarness(2);
+        harness.Config.TerminateOnError = "No";
+        harness.Records.FindRecordsByFieldValuesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(object? Value, Guid PublicId)> { ("key0", Guid.NewGuid()), ("key0", Guid.NewGuid()) });
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(1, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("ErrorCount").GetInt32());
+        Assert.Empty(harness.Writes.ReceivedCalls());
+    }
+
+    [Fact]
+    public async Task Batch_TwoNewRowsWithTheSameMergeValueAreDoneRowByRowSoTheSecondUpdatesTheFirst()
+    {
+        using var harness = BatchHarness(0);
+        harness.SourceValues.AddRange(new[] { "same", "same" });
+        var created = Guid.NewGuid();
+        harness.Records.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(),
+            Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>()).Returns(created);
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(1, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
+        Assert.Equal(0, Calls(harness, "CreateManyAsync"));
+        await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), created,
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+    }
+
+    [Fact]
+    public async Task Batch_UniqueDestinationFieldDoesNotForceTheRowByRowPath()
+    {
+        using var harness = BatchHarness(5);
+        harness.DestinationFields.Add(Field(RowByRowGuardFid, "other", unique: true));   // a second unique field: checked per page, so the batch path still applies
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(5, result.GetProperty("InsertedCount").GetInt32());
+        Assert.True(Calls(harness, "CreateManyAsync") > 0);
+        Assert.Equal(0, Calls(harness, "CreateAsync"));
+    }
+
+    [Fact]
+    public async Task Batch_ReferenceFieldPointingAtAnotherTableDoesNotForceTheRowByRowPath()
+    {
+        using var harness = BatchHarness(5);
+        harness.DestinationFields.Add(new AppField { Id = 500, Fid = RowByRowGuardFid, Name = "Related", TypeCode = "Reference", Settings = "{\"parentTableId\":77}" });
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(5, result.GetProperty("InsertedCount").GetInt32());
+        Assert.True(Calls(harness, "CreateManyAsync") > 0);
+        Assert.Equal(0, Calls(harness, "CreateAsync"));
+    }
+
+    [Fact]
+    public async Task Batch_ReferenceFieldPointingAtTheDestinationKeepsTheRowByRowPath()
+    {
+        using var harness = BatchHarness(5);
+        harness.DestinationFields.Add(new AppField { Id = 500, Fid = RowByRowGuardFid, Name = "Parent", TypeCode = "Reference", Settings = "{\"parentTableId\":2}" });
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(5, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(0, Calls(harness, "CreateManyAsync"));
+        Assert.Equal(5, Calls(harness, "CreateAsync"));
+    }
+
+    // ── Unique destination fields on the batch path ─────────────────────────────────────────
+    // A unique field other than the merge field is checked a page at a time (one query for the page's values, plus the values earlier rows of the
+    // same page are about to take) — or, for a field stored encrypted, against one in-memory copy of its values — instead of one table scan per record.
+
+    /// <summary>Source rows "a1", "b1", ... mapped to the merge field (distinct) and, through <paramref name="uniqueOf"/>, to a unique destination field "name".</summary>
+    private static Harness UniqueHarness(IEnumerable<string> rows, Func<string, string> uniqueOf, bool encrypted = false, bool batch = true)
+    {
+        var harness = batch ? BatchHarness(0) : new Harness();
+        harness.SourceValues.Clear();
+        harness.SourceValues.AddRange(rows);
+        harness.SourceFields.Add(Field(7, "src name"));
+        var unique = Field(10, "name", unique: true);
+        unique.IsEncrypted = encrypted;
+        harness.DestinationFields.Add(unique);
+        harness.Config.SourceFields = new() { "fid_6", "fid_7" };
+        harness.Config.DestinationFields = new() { "fid_9", "fid_10" };
+        harness.Config.TerminateOnError = "No";
+        harness.ColumnValue = (fid, value) => fid == 7 ? uniqueOf(value) : value;
+        return harness;
+    }
+
+    private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement;
+
+    /// <summary>Per-record database checks of one unique destination field (the merge field is still checked by the database, as before).</summary>
+    private static int DuplicateChecks(Harness harness, int fid) => harness.Records.ReceivedCalls()
+        .Count(c => c.GetMethodInfo().Name == "HasValueDuplicateAsync" && ((AppField)c.GetArguments()[1]!).Fid == fid);
+
+    private static string ReceiptKey(string path) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(path)));
+
+    [Fact]
+    public async Task BatchUnique_ValueAlreadyInTheTableIsRejectedAndTheRestAreInserted()
+    {
+        using var harness = UniqueHarness(new[] { "a1", "b1", "c1" }, v => v[..1]);   // unique values a, b, c
+        harness.Records.GetExistingValueIndexesAsync(Arg.Any<AppTable>(), Arg.Is<AppField>(f => f.Fid == 10), Arg.Any<IReadOnlyList<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(c => (IReadOnlySet<int>)c.Arg<IReadOnlyList<object>>().Select((v, i) => (v, i)).Where(x => (string)x.v == "b").Select(x => x.i).ToHashSet());
+
+        var result = Parse(await harness.Run());
+
+        Assert.Equal(2, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("ErrorCount").GetInt32());
+        Assert.Contains("'name' must be unique", result.GetProperty("Errors")[0].GetString());
+        Assert.True(Calls(harness, "CreateManyAsync") > 0);
+        Assert.Equal(0, Calls(harness, "CreateAsync"));
+        Assert.Equal(1, Calls(harness, "GetExistingValueIndexesAsync"));   // one query for the whole page, not one per record
+        Assert.Equal(0, DuplicateChecks(harness, 10));
+        var failed = result.GetProperty("FailedRecords");
+        Assert.Equal(1, failed.GetArrayLength());
+        Assert.Equal("b1", failed[0].GetProperty("MergeValue").GetString());
+        Assert.Contains("'name' must be unique", failed[0].GetProperty("Reason").GetString());
+    }
+
+    [Fact]
+    public async Task BatchUnique_ValueRepeatedInTheSamePageIsRejected()
+    {
+        using var harness = UniqueHarness(new[] { "a1", "a2", "b1" }, v => v[..1]);   // unique values a, a, b
+
+        var result = Parse(await harness.Run());
+
+        Assert.Equal(2, result.GetProperty("InsertedCount").GetInt32());   // a1 and b1
+        Assert.Equal(1, result.GetProperty("ErrorCount").GetInt32());      // a2 repeats a1's value
+        Assert.Equal("a2", result.GetProperty("FailedRecords")[0].GetProperty("MergeValue").GetString());
+        Assert.True(Calls(harness, "CreateManyAsync") > 0);
+        Assert.Equal(0, Calls(harness, "CreateAsync"));
+    }
+
+    [Fact]
+    public async Task BatchUnique_ValueWrittenByAnEarlierPageIsSeenByLaterPages()
+    {
+        var written = new HashSet<string>();
+        using var harness = UniqueHarness(Enumerable.Range(0, 300).Select(i => "k" + i), v => "u" + int.Parse(v[1..]) % 260);   // rows 260..299 repeat rows 0..39
+        harness.Records.CreateManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+            .Returns(c =>
+            {
+                var rows = c.Arg<IReadOnlyList<IReadOnlyDictionary<long, object?>>>();
+                foreach (var row in rows) written.Add((string)row[10]!);
+                return (IReadOnlyList<Guid>)rows.Select(_ => Guid.NewGuid()).ToList();
+            });
+        harness.Records.GetExistingValueIndexesAsync(Arg.Any<AppTable>(), Arg.Is<AppField>(f => f.Fid == 10), Arg.Any<IReadOnlyList<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(c => (IReadOnlySet<int>)c.Arg<IReadOnlyList<object>>().Select((v, i) => (v, i)).Where(x => written.Contains((string)x.v)).Select(x => x.i).ToHashSet());
+
+        var result = Parse(await harness.Run());
+
+        Assert.Equal(260, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(40, result.GetProperty("ErrorCount").GetInt32());
+        Assert.Equal(2, Calls(harness, "GetExistingValueIndexesAsync"));   // two pages, one query each
+    }
+
+    [Fact]
+    public async Task BatchUnique_EncryptedField_IsReadOnceAndCheckedInMemoryAcrossPages()
+    {
+        using var harness = UniqueHarness(Enumerable.Range(0, 300).Select(i => "k" + i), v => "u" + int.Parse(v[1..]) % 260, encrypted: true);
+        harness.Records.GetAllValuesForUniqueCheckAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(_ => (IReadOnlyList<string>)new List<string> { "u5" });   // already in the table
+
+        var result = Parse(await harness.Run());
+
+        // u5 is taken (row 5), and rows 260..299 repeat u0..u39 which pages 1 wrote — except u5, which row 265 finds taken in the table.
+        Assert.Equal(259, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(41, result.GetProperty("ErrorCount").GetInt32());
+        Assert.Equal(1, Calls(harness, "GetAllValuesForUniqueCheckAsync"));   // the column is decrypted once for the whole run
+        Assert.Equal(0, DuplicateChecks(harness, 10));            // never one decrypting scan per record
+        Assert.Equal(0, Calls(harness, "GetExistingValueIndexesAsync"));
+        Assert.True(Calls(harness, "CreateManyAsync") > 0);
+        Assert.Equal(0, Calls(harness, "CreateAsync"));
+    }
+
+    [Fact]
+    public async Task RowByRowUnique_EncryptedField_IsCheckedInMemoryToo()
+    {
+        using var harness = UniqueHarness(new[] { "a1", "a2", "b1" }, v => v[..1], encrypted: true, batch: false);   // the self-pointing Reference keeps it row by row
+
+        var result = Parse(await harness.Run());
+
+        Assert.Equal(2, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("ErrorCount").GetInt32());
+        Assert.Equal(2, Calls(harness, "CreateAsync"));
+        Assert.Equal(0, DuplicateChecks(harness, 10));
+        Assert.Equal(1, Calls(harness, "GetAllValuesForUniqueCheckAsync"));
+    }
+
+    [Fact]
+    public async Task BatchUnique_AnUpdateThatMayChangeAUniqueValueMakesTheIndexBeReadAgainBeforeItIsTrusted()
+    {
+        using var harness = UniqueHarness(new[] { "a1", "b1" }, v => v[..1], encrypted: true);
+        var existing = Guid.NewGuid();
+        harness.Records.FindRecordsByFieldValuesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(object? Value, Guid PublicId)> { ("a1", existing) });   // a1 already exists: it is updated, b1 is new
+
+        var result = Parse(await harness.Run());
+
+        Assert.Equal(1, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
+        Assert.Equal(0, result.GetProperty("ErrorCount").GetInt32());
+        Assert.True(DuplicateChecks(harness, 10) > 0);   // until the index is read again, the database answers
+    }
+
+    [Fact]
+    public async Task Batch_WritesOneReceiptPerPage_AndAReplayDoesNotWriteTheRowsAgain()
+    {
+        using var harness = BatchHarness(600);   // 3 pages
+
+        var first = Parse(await harness.Run());
+
+        Assert.Equal(600, first.GetProperty("InsertedCount").GetInt32());
+        await harness.Idempotency.DidNotReceive().InsertManyAsync(Arg.Any<IReadOnlyCollection<PipelineStepIdempotencyLog>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+        Assert.All(new[] { 0, 1, 2 }, page => Assert.True(harness.Logs.ContainsKey(ReceiptKey($"root/copy/page/{page}"))));
+        Assert.Equal(3 + 1 + 3 + 1, harness.Logs.Count);   // 3 snapshot pages, the snapshot manifest, 3 page receipts, the summary — and no per-row receipts
+        // The run is interrupted just before it finished: its summary is gone, its page receipts are not.
+        harness.Logs.Remove(ReceiptKey("root/copy/complete"));
+        harness.Records.ClearReceivedCalls();
+
+        var replay = Parse(await harness.Run());
+
+        Assert.Equal(600, replay.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(0, Calls(harness, "CreateManyAsync"));   // nothing was written a second time
+        Assert.Equal(0, Calls(harness, "CreateAsync"));
+    }
+
+    [Fact]
+    public async Task FailedRecords_AreKeptInPages_AndTheOutputCarriesOnlyAPreview()
+    {
+        using var harness = UniqueHarness(Enumerable.Range(0, 600).Select(i => "k" + i), v => "same");
+        harness.Records.GetExistingValueIndexesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyList<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(c => (IReadOnlySet<int>)Enumerable.Range(0, c.Arg<IReadOnlyList<object>>().Count).ToHashSet());   // every value is taken
+
+        var result = Parse(await harness.Run());
+
+        Assert.Equal(0, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(600, result.GetProperty("ErrorCount").GetInt32());
+        Assert.Equal(CopyFailedRecordStore.PreviewCount, result.GetProperty("FailedRecords").GetArrayLength());
+        Assert.Equal(3, result.GetProperty("FailedRecordPages").GetInt32());
+        Assert.Equal(600, result.GetProperty("FailedRecordsStored").GetInt64());
+        var counts = Enumerable.Range(0, 3)
+            .Select(i => JsonSerializer.Deserialize<List<CopyFailedRecord>>(harness.Logs[ReceiptKey("root/copy" + CopyFailedRecordStore.PageSuffix(i))])!).ToList();
+        Assert.Equal(new[] { 250, 250, 100 }, counts.Select(c => c.Count));
+        var first = counts[0][0];
+        Assert.Equal("k0", first.MergeValue);
+        Assert.Contains("'name' must be unique", first.Reason);
+        Assert.NotEqual(Guid.Empty.ToString(), first.SourcePublicId);
+        Assert.Equal("same", first.Values!["src name"]);
+        Assert.Equal(600, counts.SelectMany(c => c).Select(c => c.SourcePublicId).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task FailedRecords_TerminateOnError_ThrowsTheSameExceptionTypeCarryingTheDetails()
+    {
+        using var harness = UniqueHarness(new[] { "a1", "a2" }, v => "same");
+        harness.Config.TerminateOnError = "Yes";
+        harness.Records.GetExistingValueIndexesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyList<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(c => (IReadOnlySet<int>)Enumerable.Range(0, c.Arg<IReadOnlyList<object>>().Count).ToHashSet());
+
+        var ex = await Assert.ThrowsAsync<PipelineNonRetryableException>(harness.Run);   // exactly this type, as before
+
+        Assert.Contains("2 records could not be copied", ex.Message);
+        Assert.NotNull(ex.FailureDetails);
+        Assert.Equal(2L, ex.FailureDetails!["ErrorCount"]);
+        Assert.Equal(1, ex.FailureDetails["FailedRecordPages"]);
+        Assert.Equal(2, ((List<CopyFailedRecord>)ex.FailureDetails["FailedRecords"]!).Count);
+    }
+
+    [Fact]
+    public async Task FailedRecords_ARunThatRejectsNothingStoresNoFailedPages()
+    {
+        using var harness = UniqueHarness(new[] { "a1", "b1" }, v => v[..1]);
+
+        var result = Parse(await harness.Run());
+
+        Assert.Equal(0, result.GetProperty("ErrorCount").GetInt32());
+        Assert.Equal(0, result.GetProperty("FailedRecordPages").GetInt32());
+        Assert.DoesNotContain(harness.Logs.Keys, k => k == ReceiptKey("root/copy" + CopyFailedRecordStore.PageSuffix(0)));
+    }
+
+    [Fact]
+    public void FailedRecordStore_KeysAreTheExecutorsOwnReceiptNamespace()
+    {
+        Assert.Equal("root/ref_1/copy", CopyFailedRecordStore.Prefix("root/ref_1"));
+        Assert.Equal("/failed/7", CopyFailedRecordStore.PageSuffix(7));
+        Assert.Equal(ReceiptKey("abc"), Convert.ToHexString(CopyFailedRecordStore.Hash("abc")));
+    }
+
+    [Fact]
+    public async Task Batch_RejectedRecordsDoNotAbortThePage_AndAreNotWritten()
+    {
+        using var harness = UniqueHarness(Enumerable.Range(0, 5).Select(i => "k" + i), v => "u" + v[1..]);
+        // Required Text field left blank by the source for every other row.
+        var required = Field(11, "must have", "Text"); required.IsRequired = true;
+        harness.DestinationFields.Add(required);
+        harness.SourceFields.Add(Field(8, "src req"));
+        harness.Config.SourceFields = new() { "fid_6", "fid_7", "fid_8" };
+        harness.Config.DestinationFields = new() { "fid_9", "fid_10", "fid_11" };
+        harness.ColumnValue = (fid, value) => fid == 7 ? "u" + value[1..] : fid == 8 ? (int.Parse(value[1..]) % 2 == 0 ? "" : "x") : value;
+
+        var result = Parse(await harness.Run());
+
+        Assert.Equal(2, result.GetProperty("InsertedCount").GetInt32());   // k1 and k3
+        Assert.Equal(3, result.GetProperty("ErrorCount").GetInt32());      // k0, k2, k4
+        Assert.All(result.GetProperty("FailedRecords").EnumerateArray(), f => Assert.Contains("'must have' is required", f.GetProperty("Reason").GetString()));
+    }
+
+    [Fact]
+    public async Task BatchTriggers_AreHandedOverOncePerPage_WithEveryCreatedRecord()
+    {
+        using var harness = BatchHarness(600);
+
+        await harness.Run();
+
+        var calls = harness.Interceptor.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "InterceptAddedManyAsync").ToList();
+        Assert.Equal(new[] { 250, 250, 100 }, calls.Select(c => ((System.Collections.ICollection)c.GetArguments()[2]!).Count));
+        var ids = calls.SelectMany(c => (IReadOnlyList<(Guid RecordPublicId, IReadOnlyDictionary<long, object?> Values)>)c.GetArguments()[2]!).Select(r => r.RecordPublicId).ToList();
+        Assert.Equal(600, ids.Distinct().Count());
+        Assert.DoesNotContain(ids, id => id == Guid.Empty);
+    }
+
+    [Fact]
+    public async Task RowByRow_TriggersStillFirePerRecord()
+    {
+        using var harness = UniqueHarness(new[] { "a1", "b1", "c1" }, v => v[..1], batch: false);
+
+        await harness.Run();
+
+        Assert.Equal(3, harness.Interceptor.ReceivedCalls().Count(c => c.GetMethodInfo().Name == "InterceptAsync"));
+        Assert.DoesNotContain(harness.Interceptor.ReceivedCalls(), c => c.GetMethodInfo().Name == "InterceptAddedManyAsync");
+    }
+
+    [Fact]
+    public async Task Batch_RecordIdIsReadBackForTheTriggersAndMatchedByNumber()
+    {
+        using var harness = BatchHarness(0);
+        harness.SourceValues.AddRange(new[] { "1", "2" });
+        var idField = new AppField { Id = 3 + 100, Fid = 3, Name = "Record ID#", TypeCode = "Number", IsSystem = true, IsPrimary = true, PhysicalColumnName = "Id" };
+        harness.DestinationFields.Add(idField);
+        harness.SourceFields.Add(new AppField { Id = 3 + 100, Fid = 3, Name = "Record ID#", TypeCode = "Number", IsSystem = true, PhysicalColumnName = "Id" });
+        harness.DestinationField.IsPrimary = false;
+        harness.DestinationField.IsUnique = false;   // the Record ID# is the only key: the batch path
+        harness.Config.MergeField = "fid_3";
+        var ids = new Dictionary<Guid, long>();
+        harness.Records.CreateManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+            .Returns(c =>
+            {
+                var created = c.Arg<IReadOnlyList<IReadOnlyDictionary<long, object?>>>().Select(_ => Guid.NewGuid()).ToList();
+                foreach (var (id, n) in created.Select((id, n) => (id, n))) ids[id] = 500 + n;
+                return (IReadOnlyList<Guid>)created;
+            });
+        harness.Records.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(c => (IReadOnlyDictionary<Guid, long>)c.Arg<IReadOnlyCollection<Guid>>().ToDictionary(g => g, g => ids[g]));
+        harness.Config.SourceFields = new() { "fid_6", "fid_3" };
+        harness.Config.DestinationFields = new() { "fid_9", "fid_3" };
+
+        await harness.Run();
+
+        var eventRecords = harness.Interceptor.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "InterceptAddedManyAsync")
+            .SelectMany(c => (IReadOnlyList<(Guid RecordPublicId, IReadOnlyDictionary<long, object?> Values)>)c.GetArguments()[2]!).ToList();
+        Assert.Equal(2, eventRecords.Count);
+        Assert.All(eventRecords, r => Assert.True(r.Values.ContainsKey(3) && (Convert.ToInt64(r.Values[3]) == 500 || Convert.ToInt64(r.Values[3]) == 501)));
+    }
+
+    [Fact]
+    public async Task Batch_NumberMergeValuesMatchByValueNotByText()
+    {
+        using var harness = BatchHarness(0);
+        harness.DestinationField.TypeCode = "Number";
+        harness.SourceFields[0].TypeCode = "Number";
+        harness.SourceValues.AddRange(new[] { "5", "6" });
+        var existing = Guid.NewGuid();
+        harness.Records.FindRecordsByFieldValuesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(object? Value, Guid PublicId)> { (5.0000m, existing) });   // the database returns DECIMAL(18,4)
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("InsertedCount").GetInt32());
+        await harness.Records.Received(1).FindRecordsByFieldValuesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(),
+            Arg.Is<IReadOnlyCollection<object>>(k => k.All(x => x is decimal)), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Batch_RowMatchingTheRecordIdOfAnEarlierNewRowOfThePageIsDoneRowByRow()
+    {
+        // Row by row, the second source row (Record ID# 500) matches the record the first row just created as #500 and updates it.
+        using var harness = BatchHarness(0);
+        harness.SourceValues.AddRange(new[] { "501", "500" });
+        var idField = new AppField { Id = 103, Fid = 3, Name = "Record ID#", TypeCode = "Number", IsSystem = true, IsPrimary = true, PhysicalColumnName = "Id" };
+        harness.DestinationFields.Add(idField);
+        harness.SourceFields.Add(new AppField { Id = 103, Fid = 3, Name = "Record ID#", TypeCode = "Number", IsSystem = true, PhysicalColumnName = "Id" });
+        harness.DestinationField.IsPrimary = false;
+        harness.DestinationField.IsUnique = false;
+        harness.Config.MergeField = "fid_3";
+        harness.Config.SourceFields = new() { "fid_6", "fid_3" };
+        harness.Config.DestinationFields = new() { "fid_9", "fid_3" };
+        var ids = new Dictionary<Guid, long>();
+        long nextId = 500;
+        harness.Records.CreateManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+            .Returns(c =>
+            {
+                var created = c.Arg<IReadOnlyList<IReadOnlyDictionary<long, object?>>>().Select(_ => Guid.NewGuid()).ToList();
+                foreach (var id in created) ids[id] = nextId++;
+                return (IReadOnlyList<Guid>)created;
+            });
+        harness.Records.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(c => (IReadOnlyDictionary<Guid, long>)c.Arg<IReadOnlyCollection<Guid>>().ToDictionary(g => g, g => ids[g]));
+        var createdByRow = new List<Guid>();
+        long rowId = 500;
+        harness.Records.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(),
+            Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+            .Returns(_ => { var g = Guid.NewGuid(); createdByRow.Add(g); return g; });
+        harness.Records.GetActiveRecordIdByPublicIdAsync(Arg.Any<AppTable>(), Arg.Any<Guid>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+            .Returns(_ => rowId++);
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(1, Calls(harness, "CreateManyAsync"));   // the batch was tried, found to depend on row order and thrown away
+        Assert.Equal(1, Calls(harness, "CreateAsync"));
+        Assert.Equal(1, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
+        await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), createdByRow[0],
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+    }
+
+    [Fact]
+    public async Task Batch_EncryptedMergeFieldUsesTheInMemoryIndexAndStillWritesPages()
+    {
+        using var harness = BatchHarness(3);
+        harness.DestinationField.IsEncrypted = true;
+        var existing = Guid.NewGuid();
+        harness.Records.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, Arg.Any<int>(), Arg.Any<FilterGroup>(), null, null, Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>> { new Dictionary<string, object?> { ["f_9"] = "key2", ["PublicId"] = existing } });
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(2, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
+        Assert.Equal(0, Calls(harness, "FindRecordsByFieldValuesAsync"));
+        Assert.Equal(1, Calls(harness, "CreateManyAsync"));
+    }
+
+    [Fact]
+    public async Task Batch_SearchIndexUpdatesAreQueuedOncePerPageAfterTheCommit()
+    {
+        using var harness = BatchHarness(3);
+        harness.Records.CreateManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(),
+            Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+            .Returns(c =>
+            {
+                var created = c.Arg<IReadOnlyList<IReadOnlyDictionary<long, object?>>>().Select(_ => Guid.NewGuid()).ToList();
+                var callback = c.Arg<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>();
+                foreach (var id in created) callback(new PowerBase.Application.Common.Models.SearchIndexMessage { RecordPublicId = id });
+                return (IReadOnlyList<Guid>)created;
+            });
+
+        await harness.Run();
+
+        var published = harness.Publisher.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "PublishBatchAsync").ToList();
+        Assert.Single(published);
+        Assert.Equal(3, ((IEnumerable<PowerBase.Application.Common.Models.SearchIndexMessage>)published[0].GetArguments()[0]!).Count());
+    }
+
+    [Fact]
+    public async Task Batch_NoPipelineListensToTheDestination_TriggersAreAskedOncePerPageAndNeverFiredPerRecord()
+    {
+        using var harness = BatchHarness(600);   // 3 pages
+        harness.Interceptor.HasActiveSubscriptionsAsync(Arg.Any<AppTable>(), Arg.Any<CancellationToken>()).Returns(false);
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(600, result.GetProperty("InsertedCount").GetInt32());
+        await harness.Interceptor.Received(3).HasActiveSubscriptionsAsync(Arg.Any<AppTable>(), Arg.Any<CancellationToken>());
+        Assert.DoesNotContain(harness.Interceptor.ReceivedCalls(), c => c.GetMethodInfo().Name == "InterceptAsync");
+    }
+
+    [Fact]
+    public async Task RowByRow_NoPipelineListensToTheDestination_TriggersAreAskedOncePerPageAndNeverFiredPerRecord()
+    {
+        using var harness = new Harness();   // a unique field besides the merge field keeps it on the row-by-row path
+        harness.SourceValues.Clear();
+        harness.SourceValues.AddRange(Enumerable.Range(0, 300).Select(i => "key" + i));   // 2 pages
+        harness.Interceptor.HasActiveSubscriptionsAsync(Arg.Any<AppTable>(), Arg.Any<CancellationToken>()).Returns(false);
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(300, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Equal(300, Calls(harness, "CreateAsync"));
+        await harness.Interceptor.Received(2).HasActiveSubscriptionsAsync(Arg.Any<AppTable>(), Arg.Any<CancellationToken>());
+        Assert.DoesNotContain(harness.Interceptor.ReceivedCalls(), c => c.GetMethodInfo().Name == "InterceptAsync");
+    }
+
+    [Fact]
+    public async Task RowByRow_SomePipelineListens_EveryCreatedRecordFiresItsEvent()
+    {
+        using var harness = new Harness();
+        harness.SourceValues.Clear();
+        harness.SourceValues.AddRange(Enumerable.Range(0, 5).Select(i => "key" + i));
+
+        await harness.Run();
+
+        Assert.Equal(5, harness.Interceptor.ReceivedCalls().Count(c => c.GetMethodInfo().Name == "InterceptAsync"));
+    }
+
     private sealed class Harness : IDisposable
     {
         public CopyRecordsDefinition Config { get; } = CopyRecordsTests.Config();
@@ -813,31 +1461,62 @@ public class CopyRecordsTests
         public IRecordWriteService Writes { get; } = Substitute.For<IRecordWriteService>();
         public IPipelineRecordSearchService Search { get; } = Substitute.For<IPipelineRecordSearchService>();
         public IAzureSearchService AzureSearch { get; } = Substitute.For<IAzureSearchService>();
+        public IAuditRepository Audit { get; } = Substitute.For<IAuditRepository>();
+        public IAppTableRepository Tables { get; } = Substitute.For<IAppTableRepository>();
+        public IPipelineTriggerInterceptor Interceptor { get; } = Substitute.For<IPipelineTriggerInterceptor>();
+        public IMessagePublisher Publisher { get; } = Substitute.For<IMessagePublisher>();
         public List<string> SourceValues { get; } = new() { "none" };
         public List<AppField> SourceFields { get; } = new() { Field(6, "Source key") };
         public List<AppField> DestinationFields { get; } = new();
         public AppTable Source { get; }
+        /// <summary>Lets a test give a source column a value other than the row's own (fid, row value -> column value), e.g. to repeat a unique value.</summary>
+        public Func<int, string, string>? ColumnValue { get; set; }
+        /// <summary>Every receipt written so far, by the hex of its execution-path hash.</summary>
+        public Dictionary<string, string> Logs { get; } = new();
+        public IPipelineStepIdempotencyRepository Idempotency { get; } = Substitute.For<IPipelineStepIdempotencyRepository>();
         private readonly ServiceProvider provider;
         private readonly Guid step = Guid.NewGuid(), message = Guid.NewGuid();
         public Harness()
         {
-            var tables = Substitute.For<IAppTableRepository>();
+            var tables = Tables;
+            Interceptor.HasActiveSubscriptionsAsync(Arg.Any<AppTable>(), Arg.Any<CancellationToken>()).Returns(true);   // someone listens, unless a test says otherwise
             var fields = Substitute.For<IAppFieldRepository>();
+            Records.FindRecordsByFieldValuesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+                .Returns(new List<(object? Value, Guid PublicId)>());
+            Records.GetExistingValueIndexesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyList<object>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+                .Returns(_ => (IReadOnlySet<int>)new HashSet<int>());   // nothing is taken, unless a test says otherwise
+            Records.GetAllValuesForUniqueCheckAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+                .Returns(_ => (IReadOnlyList<string>)new List<string>());
+            Records.CreateManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(),
+                Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>>())
+                .Returns(c => (IReadOnlyList<Guid>)c.Arg<IReadOnlyList<IReadOnlyDictionary<long, object?>>>().Select(_ => Guid.NewGuid()).ToList());
             var source = Source = new AppTable { Id = 1, AppId = 1, PublicId = Guid.Parse(Config.SourceTable) };
             var destination = new AppTable { Id = 2, AppId = 1, PublicId = Guid.Parse(Config.DestinationTable) };
             tables.GetByPublicIdAsync(source.PublicId, Arg.Any<CancellationToken>()).Returns(source);
             tables.GetByPublicIdAsync(destination.PublicId, Arg.Any<CancellationToken>()).Returns(destination);
             DestinationFields.Add(DestinationField);
+            // A Reference field that points back at the destination itself (never mapped) keeps these tests on the row-by-row path, because such a
+            // field can tie one row to another written in the same page; BatchHarness removes it.
+            DestinationFields.Add(new AppField { Id = RowByRowGuardFid + 100, Fid = RowByRowGuardFid, Name = "Row-by-row guard", TypeCode = "Reference", Settings = "{\"parentTableId\":2}" });
             fields.ListByTableAsync(1, Arg.Any<CancellationToken>()).Returns(_ => SourceFields);
             fields.ListByTableAsync(2, Arg.Any<CancellationToken>()).Returns(_ => DestinationFields);
             var enforcer = Substitute.For<IRolePermissionEnforcer>();
             enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>()).Returns(new TableAccessContext { Unrestricted = true });
-            var idempotency = Substitute.For<IPipelineStepIdempotencyRepository>();
-            var logs = new Dictionary<string, string>();
+            var idempotency = Idempotency;
+            var logs = Logs;
             idempotency.GetByExecutionKeyAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<byte[]>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
                 .Returns(c => logs.GetValueOrDefault(Convert.ToHexString(c.Arg<byte[]>())));
             idempotency.InsertAsync(Arg.Any<PipelineStepIdempotencyLog>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
                 .Returns(c => { var log = c.Arg<PipelineStepIdempotencyLog>(); logs.Add(Convert.ToHexString(log.ExecutionPathHash), log.OutputJson); return Task.CompletedTask; });
+            idempotency.GetManyByExecutionKeysAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyCollection<byte[]>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+                .Returns(c => (IReadOnlyDictionary<string, string>)c.Arg<IReadOnlyCollection<byte[]>>()
+                    .Select(Convert.ToHexString).Where(logs.ContainsKey).ToDictionary(h => h, h => logs[h]));
+            idempotency.InsertManyAsync(Arg.Any<IReadOnlyCollection<PipelineStepIdempotencyLog>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+                .Returns(c =>
+                {
+                    foreach (var log in c.Arg<IReadOnlyCollection<PipelineStepIdempotencyLog>>()) logs.Add(Convert.ToHexString(log.ExecutionPathHash), log.OutputJson);
+                    return Task.CompletedTask;
+                });
             var encryption = Substitute.For<IEncryptionService>();
             encryption.GenerateAndWrapDekAsync(Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns("key");
             encryption.EncryptDataAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(c => c.ArgAt<string>(0));
@@ -857,17 +1536,17 @@ public class CopyRecordsTests
             provider = new ServiceCollection().AddSingleton(tables).AddSingleton(fields).AddSingleton(Records).AddSingleton(Writes).AddSingleton(Search)
                 .AddSingleton(Substitute.For<IAppAccessService>()).AddSingleton(enforcer).AddSingleton(Substitute.For<IQueryContext>())
                 .AddSingleton(idempotency).AddSingleton(Substitute.For<ITenantUnitOfWork>()).AddSingleton(encryption)
-                .AddSingleton(Substitute.For<IUserRepository>()).AddSingleton(Substitute.For<IAuditRepository>())
+                .AddSingleton(Substitute.For<IUserRepository>()).AddSingleton(Audit)
                 .AddSingleton(Substitute.For<IRelationshipRepository>())
                 .AddSingleton(relationalProjector).AddSingleton(formulaProjector).AddSingleton(AzureSearch)
-                .AddSingleton(Substitute.For<IPipelineTriggerInterceptor>()).AddSingleton<FormulaEngine>().BuildServiceProvider();
+                .AddSingleton(Interceptor).AddSingleton(Publisher).AddSingleton<FormulaEngine>().BuildServiceProvider();
         }
         private async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> Page()
         {
             await Task.CompletedTask;
             foreach (var page in SourceValues.Chunk(250))
                 yield return page.Select(value => {
-                    var row = SourceFields.ToDictionary(f => PhysicalNaming.GetPhysicalColumnName(f), f => (object?)value);
+                    var row = SourceFields.ToDictionary(f => PhysicalNaming.GetPhysicalColumnName(f), f => (object?)(ColumnValue?.Invoke(f.Fid!.Value, value) ?? value));
                     row["PublicId"] = Guid.NewGuid();
                     return (IReadOnlyDictionary<string, object?>)row;
                 }).ToList();

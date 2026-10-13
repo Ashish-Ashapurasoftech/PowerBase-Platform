@@ -5,6 +5,7 @@ using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.FieldSettings;
 using PowerBase.Formula;
+using PowerBase.Formula.Binding;
 using PowerBase.Formula.Evaluation;
 using PowerBase.Formula.Types;
 
@@ -26,12 +27,14 @@ public sealed class FormulaProjector : IFormulaProjector
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IAppRepository _appRepo;
+    private readonly IAppVariableRepository? _variableRepo;
 
     public FormulaProjector(
         FormulaEngine engine, IQueryContext queryContext, IFormulaRuntimeContext runtime,
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
-        IAppRepository appRepo)
+        IAppRepository appRepo, IAppVariableRepository? variableRepo = null)
     {
+        _variableRepo = variableRepo;
         _engine = engine;
         _queryContext = queryContext;
         _runtime = runtime;
@@ -53,6 +56,7 @@ public sealed class FormulaProjector : IFormulaProjector
             return seed ?? rows.Select(_ => EmptyMap).ToList();
 
         var schema = new AppFieldSchema(fields);
+        var variableSchema = LoadVariableSchema(fields, formulaFields, table);
 
         // Compile each formula once; a formula with compile errors evaluates to null.
         var compiled = new List<(long Fid, CompiledFormula? Formula)>(formulaFields.Count);
@@ -62,7 +66,7 @@ public sealed class FormulaProjector : IFormulaProjector
             var exprAndType = FormulaTypeMap.ExpressionAndType(f.TypeCode, f.Settings);
             if (exprAndType is { } et)
             {
-                var c = _engine.Compile(et.Expression, schema, et.Type);
+                var c = _engine.Compile(et.Expression, schema, et.Type, variableSchema: variableSchema);
                 formula = c.HasErrors ? null : c;
             }
             compiled.Add(((long)f.Fid!.Value, formula));
@@ -72,6 +76,25 @@ public sealed class FormulaProjector : IFormulaProjector
         var sorted = new List<(long Fid, CompiledFormula? Formula)>(compiled.Count);
         var visited = new HashSet<long>();
         var visiting = new HashSet<long>();
+
+        // Whether formula `start` reads formula `target`, directly or through other formulas.
+        bool ReadsTransitively(long start, long target)
+        {
+            var seen = new HashSet<long>();
+            var pending = new Stack<long>();
+            pending.Push(start);
+            while (pending.Count > 0)
+            {
+                var current = pending.Pop();
+                if (!seen.Add(current) || !compiledDict.TryGetValue(current, out var node) || node.Formula is null) continue;
+                foreach (var dep in node.Formula.ReferencedFieldIds)
+                {
+                    if (dep == target) return true;
+                    pending.Push(dep);
+                }
+            }
+            return false;
+        }
 
         void Visit(long fid)
         {
@@ -87,6 +110,17 @@ public sealed class FormulaProjector : IFormulaProjector
                     foreach (var depFid in item.Formula.ReferencedFieldIds)
                     {
                         Visit(depFid);
+                    }
+
+                    // A formula that reads a field chosen per record can't list what it depends on, so it
+                    // runs after every plain formula — except any that read its own result back.
+                    if (item.Formula.UsesDynamicFieldReference)
+                    {
+                        foreach (var (otherFid, other) in compiledDict)
+                        {
+                            if (otherFid != fid && other.Formula is { UsesDynamicFieldReference: false } && !ReadsTransitively(otherFid, fid))
+                                Visit(otherFid);
+                        }
                     }
                 }
 
@@ -106,7 +140,7 @@ public sealed class FormulaProjector : IFormulaProjector
             Visit(item.Fid);
         }
 
-        var options = BuildOptions(table);
+        var options = BuildOptions(table, fields);
         // Shared across rows so cross-table (GetRecords/…) metadata is resolved once and budgeted.
         var crossTable = new CrossTableQueryContext(_tableRepo, _fieldRepo, _recordRepo, table);
         var fidToColMap = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value, f => f.PhysicalColumnName ?? string.Empty);
@@ -197,6 +231,21 @@ public sealed class FormulaProjector : IFormulaProjector
         return output;
     }
 
+    /// <summary>The app's variables, when any formula here names one. A saved formula names a variable by id
+    /// ([var_5|Tax]), so a table with no such formula never pays for the lookup.</summary>
+    private IVariableSchema? LoadVariableSchema(IReadOnlyList<AppField> fields, IReadOnlyList<AppField> formulaFields, AppTable? table)
+    {
+        if (_variableRepo is null) return null;
+
+        var usesVariable = formulaFields.Any(f =>
+            FormulaTypeMap.ExpressionAndType(f.TypeCode, f.Settings) is { } et
+            && et.Expression.Contains("[" + VariableIdReference.Prefix, StringComparison.OrdinalIgnoreCase));
+        if (!usesVariable) return null;
+
+        var appId = table?.AppId ?? Block(_tableRepo.GetByIdAsync(fields[0].AppTableId)).AppId;
+        return new AppVariableSchema(Block(_variableRepo.ListAsync(appId)));
+    }
+
     public IReadOnlySet<long>? GetFormulaDependencies(IReadOnlyList<AppField> fields, IEnumerable<long> formulaFids)
     {
         var schema = new AppFieldSchema(fields);
@@ -213,14 +262,17 @@ public sealed class FormulaProjector : IFormulaProjector
             if (exprAndType is not { } et) return null;
             var compiled = _engine.Compile(et.Expression, schema, et.Type);
             if (compiled.HasErrors) return null;
+            // A field chosen per record can't be listed up front — the same "unknown, project everything" answer.
+            if (compiled.UsesDynamicFieldReference) return null;
             foreach (var dep in compiled.ReferencedFieldIds) pending.Push(dep);
         }
         return result;
     }
 
-    private EvaluationOptions BuildOptions(AppTable? table) => new()
+    private EvaluationOptions BuildOptions(AppTable? table, IReadOnlyList<AppField> fields) => new()
     {
         UtcNow = DateTime.UtcNow,
+        FieldTypes = FormulaTypeMap.FieldTypesByFid(fields),
         CurrentUser = _queryContext.UserId > 0
             ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail, _queryContext.UserName)
             : null,

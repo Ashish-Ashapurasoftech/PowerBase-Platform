@@ -27,6 +27,11 @@ public sealed class EvaluationOptions
     /// <summary>The page that triggered this evaluation, surfaced by <c>Rurl()</c> for "return here" links. Empty when unknown.</summary>
     public string ReturnUrl { get; init; } = string.Empty;
 
+    /// <summary>The formula type of each readable field of the table the formula runs in, by Fid — what
+    /// <c>GetFieldValue</c> needs to read a field whose ID is only known per record. Left null by hosts
+    /// that don't supply it, in which case such a read yields blank.</summary>
+    public IReadOnlyDictionary<long, FormulaType>? FieldTypes { get; init; }
+
     /// <summary>The current date in <see cref="TimeZone"/>, derived from <see cref="UtcNow"/>.</summary>
     public DateOnly Today => DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(UtcNow, TimeZone));
 

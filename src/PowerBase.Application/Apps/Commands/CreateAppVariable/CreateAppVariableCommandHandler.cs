@@ -35,10 +35,6 @@ public class CreateAppVariableCommandHandler
 
         var appId = await _appRepo.GetIdByPublicIdAsync(command.AppPublicId, ct);
 
-        var count = await _variableRepo.CountAsync(appId, ct);
-        if (count >= 10)
-            throw new ConflictException("App variables limit of 10 reached.");
-
         if (await _variableRepo.NameExistsAsync(appId, command.Name, ct))
             throw new DuplicateException("AppVariable", "name", command.Name);
 

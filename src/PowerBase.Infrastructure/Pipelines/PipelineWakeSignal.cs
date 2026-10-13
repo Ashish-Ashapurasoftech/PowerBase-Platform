@@ -4,7 +4,6 @@ using System.Threading.Tasks;
 
 namespace PowerBase.Infrastructure.Pipelines;
 
-/// <summary>Coalesces notifications and retains a wake received while the worker is busy.</summary>
 public sealed class PipelineWakeSignal : IDisposable
 {
     private readonly SemaphoreSlim _signal = new(0, 1);
@@ -13,6 +12,9 @@ public sealed class PipelineWakeSignal : IDisposable
 
     public void Wake()
     {
+        // A wake is already pending: nothing to do. Checked first because releasing a full semaphore THROWS, and every record
+        // written by a Copy Records page calls this — hundreds of first-chance exceptions per commit (~30 ms each under a debugger).
+        if (_signal.CurrentCount > 0) return;
         try { _signal.Release(); }
         catch (SemaphoreFullException) { /* A wake is already pending. */ }
     }

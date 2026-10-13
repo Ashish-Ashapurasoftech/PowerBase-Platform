@@ -95,7 +95,6 @@ public class BulkDeleteRecordsCommandHandler
                             var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                             if (valuesDict.TryGetValue(colKey, out var val))
                             {
-                                beforeValues[f.Id] = val;
                                 beforeValues[f.Fid.Value] = val;
                             }
                         }

@@ -18,9 +18,12 @@ public sealed class ValidateFormulaQueryHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly FormulaEngine _engine;
+    private readonly IAppVariableRepository? _variableRepo;
 
-    public ValidateFormulaQueryHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, FormulaEngine engine)
+    public ValidateFormulaQueryHandler(IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, FormulaEngine engine,
+        IAppVariableRepository? variableRepo = null)
     {
+        _variableRepo = variableRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _engine = engine;
@@ -33,12 +36,14 @@ public sealed class ValidateFormulaQueryHandler
         var schema = new AppFieldSchema(fields);
         var aliasSchema = await AppTableAliasSchema.BuildAsync(_tableRepo, table.AppId, ct);
 
-        var compiled = _engine.Compile(query.Expression ?? string.Empty, schema, FormulaTypeMap.ParseExpected(query.ExpectedType), aliasSchema);
+        var variableSchema = new AppVariableSchema(await FormulaVariables.LoadAsync(_variableRepo, table.AppId, ct));
+
+        var compiled = _engine.Compile(query.Expression ?? string.Empty, schema, FormulaTypeMap.ParseExpected(query.ExpectedType), aliasSchema, variableSchema);
 
         return new ValidateFormulaResult
         {
             Valid = !compiled.HasErrors,
-            ResultType = compiled.ResultType.ToString(),
+            ResultType = FormulaTypeMap.ResultTypeName(compiled),
             Diagnostics = compiled.Diagnostics.Select(FormulaDiagnosticDto.From).ToList(),
         };
     }

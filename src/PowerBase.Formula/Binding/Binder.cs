@@ -1,3 +1,4 @@
+using PowerBase.Formula.Builtins;
 using PowerBase.Formula.Diagnostics;
 using PowerBase.Formula.Syntax;
 using PowerBase.Formula.Types;
@@ -21,40 +22,89 @@ public static class Binder
         public bool TryResolve(string alias, out string tableId) { tableId = string.Empty; return false; }
     }
 
-    public static IReadOnlyList<long> Bind(Expr root, IFieldSchema schema, List<FormulaDiagnostic> diagnostics, ITableAliasSchema? aliasSchema = null)
+    public static IReadOnlyList<long> Bind(Expr root, IFieldSchema schema, List<FormulaDiagnostic> diagnostics, ITableAliasSchema? aliasSchema = null, IVariableSchema? variableSchema = null)
     {
         var fids = new List<long>();
-        Walk(root, schema, aliasSchema ?? NoAliasSchema.Instance, diagnostics, fids);
+        Walk(root, schema, aliasSchema ?? NoAliasSchema.Instance, variableSchema, diagnostics, fids, new Dictionary<string, LiteralExpr>(StringComparer.OrdinalIgnoreCase));
         return fids.Distinct().ToList();
     }
 
-    private static void Walk(Expr expr, IFieldSchema schema, ITableAliasSchema aliasSchema, List<FormulaDiagnostic> diagnostics, List<long> fids)
+    /// <param name="constants">Variables declared so far whose value is a plain literal, by name — so
+    /// <c>GetFieldValue($cfg)</c> can resolve when <c>cfg</c> was set to <c>14</c>.</param>
+    private static void Walk(Expr expr, IFieldSchema schema, ITableAliasSchema aliasSchema, IVariableSchema? variableSchema, List<FormulaDiagnostic> diagnostics, List<long> fids,
+        Dictionary<string, LiteralExpr> constants)
     {
         switch (expr)
         {
             case FieldRefExpr f:
-                Resolve(f, schema, aliasSchema, diagnostics, fids);
+                Resolve(f, schema, aliasSchema, variableSchema, diagnostics, fids);
                 break;
             case UnaryExpr u:
-                Walk(u.Operand, schema, aliasSchema, diagnostics, fids);
+                Walk(u.Operand, schema, aliasSchema, variableSchema, diagnostics, fids, constants);
                 break;
             case BinaryExpr b:
-                Walk(b.Left, schema, aliasSchema, diagnostics, fids);
-                Walk(b.Right, schema, aliasSchema, diagnostics, fids);
+                Walk(b.Left, schema, aliasSchema, variableSchema, diagnostics, fids, constants);
+                Walk(b.Right, schema, aliasSchema, variableSchema, diagnostics, fids, constants);
                 break;
             case FunctionCallExpr c:
-                foreach (var arg in c.Args) Walk(arg, schema, aliasSchema, diagnostics, fids);
+                foreach (var arg in c.Args) Walk(arg, schema, aliasSchema, variableSchema, diagnostics, fids, constants);
+                if (FieldValueCall.IsCall(c)) ResolveFieldValueCall(c, schema, constants, diagnostics, fids);
                 break;
             case LetExpr l:
-                foreach (var decl in l.Declarations) Walk(decl.Value, schema, aliasSchema, diagnostics, fids);
-                Walk(l.Body, schema, aliasSchema, diagnostics, fids);
+                foreach (var decl in l.Declarations)
+                {
+                    Walk(decl.Value, schema, aliasSchema, variableSchema, diagnostics, fids, constants);
+                    if (!string.IsNullOrEmpty(decl.Name) && FieldValueCall.TryGetLiteral(decl.Value, constants, out var literal))
+                        constants.TryAdd(decl.Name, literal);
+                }
+                Walk(l.Body, schema, aliasSchema, variableSchema, diagnostics, fids, constants);
                 break;
             // LiteralExpr, VariableRefExpr, ErrorExpr: nothing to bind — a variable resolves
             // against the formula's own declarations in the type checker, not the field schema.
         }
     }
 
-    private static void Resolve(FieldRefExpr f, IFieldSchema schema, ITableAliasSchema aliasSchema, List<FormulaDiagnostic> diagnostics, List<long> fids)
+    /// <summary>Resolves <c>GetFieldValue(14)</c> against the schema as the field <c>fid_14</c>. An ID that is
+    /// known up front (a literal, or a variable set to one) is bound now; one that is only known when the
+    /// formula runs marks the call dynamic and is resolved per record by the evaluator.</summary>
+    private static void ResolveFieldValueCall(FunctionCallExpr c, IFieldSchema schema, IReadOnlyDictionary<string, LiteralExpr> constants,
+        List<FormulaDiagnostic> diagnostics, List<long> fids)
+    {
+        if (c.Args.Count != 1)
+        {
+            Fn.RequireArity(FieldValueCall.Name, c.Args.Count, 1, 1, c.Span, diagnostics);
+            return;
+        }
+
+        if (!FieldValueCall.TryGetLiteral(c.Args[0], constants, out var literal))
+        {
+            c.IsDynamicFieldValue = true;
+            return;
+        }
+
+        if (!FieldValueCall.TryGetFieldNumber(literal.Value, out var fid))
+        {
+            diagnostics.Add(new FormulaDiagnostic(
+                FormulaErrorCode.InvalidArgument,
+                $"{FieldValueCall.Name} expects a field ID like 14 or \"fid_14\".",
+                c.Args[0].Span));
+            return;
+        }
+
+        if (schema.TryResolve($"{FieldIdReference.Prefix}{fid}", out var field))
+        {
+            c.ResolvedField = field;
+            fids.Add(field.Fid);
+            return;
+        }
+
+        diagnostics.Add(new FormulaDiagnostic(
+            FormulaErrorCode.UnknownField,
+            $"Unknown field [{FieldIdReference.Prefix}{fid}].",
+            c.Args[0].Span));
+    }
+
+    private static void Resolve(FieldRefExpr f, IFieldSchema schema, ITableAliasSchema aliasSchema, IVariableSchema? variableSchema, List<FormulaDiagnostic> diagnostics, List<long> fids)
     {
         if (f.Name.StartsWith("old.", StringComparison.OrdinalIgnoreCase))
         {
@@ -62,6 +112,27 @@ public static class Binder
                 FormulaErrorCode.UnsupportedReference,
                 "Referencing a field's previous value ([old.*]) is not supported yet.",
                 f.Span));
+            return;
+        }
+
+        // An app variable wins over a field of the same name — Quickbase's rule, so a Quickbase formula means
+        // the same here. It is a constant of type Text (a formula converts it: ToNumber([Tax])), not a field,
+        // so it adds no field dependency. Saved formulas name a variable by id ([var_5|Tax]), so a variable or
+        // field added later can't change what an existing formula refers to.
+        if (variableSchema is not null && variableSchema.TryResolve(f.Name, out var variable))
+        {
+            f.VariableId = variable.Id;
+            f.VariableValue = variable.Value;
+            f.IsBound = true;
+            f.Type = FormulaType.Text;
+
+            // Typed by name while a field of that name is on this table too: say which one wins, always.
+            if (!VariableIdReference.TryParse(f.Name, out _) && schema.TryResolve(f.Name, out _))
+                diagnostics.Add(new FormulaDiagnostic(
+                    FormulaErrorCode.AmbiguousReference,
+                    $"Note: [{f.Name}] is both an App Variable and a Field on this table. This formula will use the App Variable.",
+                    f.Span,
+                    FormulaSeverity.Warning));
             return;
         }
 

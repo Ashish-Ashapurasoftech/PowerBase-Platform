@@ -28,6 +28,17 @@ public interface IAuditRepository
         string? newValues = null,
         CancellationToken ct = default);
 
+    /// <summary>Writes one activity-log row per entity id (same action, type, title and app) with multi-row inserts. When a
+    /// transaction is supplied the rows are written inside it, so they commit or roll back with the records they describe.</summary>
+    Task LogActivitiesAsync(
+        string action,
+        string entityType,
+        IReadOnlyCollection<string> entityIds,
+        string? entityTitle = null,
+        long? appId = null,
+        System.Data.IDbTransaction? transaction = null,
+        CancellationToken ct = default);
+
     Task<(IReadOnlyList<ActivityLog> Items, int Total)> QueryActivityLogsAsync(
         ActivityLogFilter filter,
         CancellationToken ct = default);

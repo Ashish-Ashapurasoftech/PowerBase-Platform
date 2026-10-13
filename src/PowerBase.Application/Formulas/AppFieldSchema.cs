@@ -6,12 +6,16 @@ namespace PowerBase.Application.Formulas;
 /// <summary>
 /// An <see cref="IFieldSchema"/> built from a table's <see cref="AppField"/> list.
 /// Name matching is case-insensitive but space-sensitive (Quickbase semantics).
+/// A field can also be referenced by its stable ID — <c>[fid_14]</c> — which keeps
+/// resolving after the field is renamed. A real field name always wins over the
+/// <c>fid_</c> spelling (labels of that shape are rejected on save, so none should exist).
 /// Fields whose type is not referenceable in a scalar formula are simply absent,
 /// so the binder reports them as unknown.
 /// </summary>
 public sealed class AppFieldSchema : IFieldSchema
 {
     private readonly Dictionary<string, FieldRef> _byName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<long, FieldRef> _byFid = new();
 
     public AppFieldSchema(IReadOnlyList<AppField> fields)
     {
@@ -22,6 +26,7 @@ public sealed class AppFieldSchema : IFieldSchema
             if (type is null) continue;
 
             var fid = (long)f.Fid.Value;
+            _byFid[fid] = new FieldRef(fid, string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label, type.Value);
             // Always register by internal name.
             _byName[f.Name] = new FieldRef(fid, f.Name, type.Value);
             // Also register by label when it differs, so [Label] and [Name] both resolve.
@@ -30,5 +35,11 @@ public sealed class AppFieldSchema : IFieldSchema
         }
     }
 
-    public bool TryResolve(string fieldName, out FieldRef field) => _byName.TryGetValue(fieldName, out field!);
+    public bool TryResolve(string fieldName, out FieldRef field)
+    {
+        if (_byName.TryGetValue(fieldName, out field!)) return true;
+        if (FieldIdReference.TryParse(fieldName, out var fid) && _byFid.TryGetValue(fid, out field!)) return true;
+        field = null!;
+        return false;
+    }
 }
