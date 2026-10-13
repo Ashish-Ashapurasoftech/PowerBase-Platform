@@ -201,6 +201,95 @@ public class PipelineFormulaFieldTests
         Assert.True(h.Payload().GetProperty("SelectedFieldValues").TryGetProperty($"fid_{FormulaFid}", out JsonElement _));
     }
 
+    // Mass update, bulk delete and Commit Upsert describe a record under BOTH key styles — the field's internal id and its FID — and set a
+    // formula field to null under both (it has no stored value). The projected formula value has to replace it under both, or whichever key
+    // the event payload reads first still says "no value" (the "Order no" that never reached a Create Record step).
+    private static List<AppField> FieldsWithDistinctInternalIds(string formulaTypeCode) => new()
+    {
+        new() { Id = 206, Fid = (int)NameFid, Name = "Name", TypeCode = "Text" },
+        new() { Id = 208, Fid = (int)FormulaFid, Name = "CustomerNumber", TypeCode = formulaTypeCode, Settings = "{\"expression\":\"1\"}" }
+    };
+
+    private static IReadOnlyDictionary<long, object?> DualKeyed(object? name, object? formula) => new Dictionary<long, object?>
+    {
+        [206] = name, [NameFid] = name, [208] = formula, [FormulaFid] = formula
+    };
+
+    [Theory]
+    [MemberData(nameof(Variants))]
+    public async Task Event_BulkModified_DualKeyedChange_FormulaValueReplacesTheNullUnderBothKeys(string typeCode, object match, object _, string op, string operand)
+    {
+        var fields = FieldsWithDistinctInternalIds(typeCode);
+        var h = new InterceptorHarness(op, operand);
+        var id = Guid.NewGuid();
+        h.Computes(new Dictionary<Guid, object?> { [id] = match });
+        var change = new PipelineRecordChange(id, DualKeyed("row", null), DualKeyed("row", null), new List<long> { 206 }, PipelineRecordEventType.Modified);
+
+        await h.Interceptor.InterceptBulkAsync(Table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), 1, default);
+
+        Assert.Single(h.Outbox);
+        var expected = JsonSerializer.Serialize(match).Trim('"');
+        foreach (var section in new[] { "NewValues", "SelectedFieldValues" })
+        {
+            Assert.True(h.Payload().GetProperty(section).TryGetProperty($"fid_{FormulaFid}", out var value), section);
+            Assert.NotEqual(JsonValueKind.Null, value.ValueKind);
+            Assert.Equal(expected, value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText());
+        }
+        Assert.Equal("row", h.Payload().GetProperty("NewValues").GetProperty($"fid_{NameFid}").GetString());   // everything else untouched
+    }
+
+    [Fact]
+    public async Task Event_BulkDeleted_DualKeyedChange_FormulaValueIsInTheOldValues()
+    {
+        var fields = FieldsWithDistinctInternalIds("Formula_Text");
+        var h = new InterceptorHarness("is", "x", onDeleted: true, withFilter: false);
+        var id = Guid.NewGuid();
+        h.Computes(new Dictionary<Guid, object?> { [id] = "CST00014" });
+        var change = new PipelineRecordChange(id, DualKeyed("row", null), new Dictionary<long, object?>(), new List<long>(), PipelineRecordEventType.Deleted);
+
+        await h.Interceptor.InterceptBulkAsync(Table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), 1, default);
+
+        Assert.Single(h.Outbox);
+        Assert.Equal("CST00014", h.Payload().GetProperty("OldValues").GetProperty($"fid_{FormulaFid}").GetString());
+    }
+
+    [Fact]
+    public async Task Event_BulkModified_SingleKeyedChange_StillWorks()
+    {
+        // Single-record writes report FIDs only: no internal-id key to keep in step.
+        var fields = FieldsWithDistinctInternalIds("Formula_Text");
+        var h = new InterceptorHarness("is", "CST00014");
+        var id = Guid.NewGuid();
+        h.Computes(new Dictionary<Guid, object?> { [id] = "CST00014" });
+        var change = new PipelineRecordChange(id, new Dictionary<long, object?> { [NameFid] = "row" }, new Dictionary<long, object?> { [NameFid] = "row" }, new List<long>(), PipelineRecordEventType.Modified);
+
+        await h.Interceptor.InterceptBulkAsync(Table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), 1, default);
+
+        Assert.Equal("CST00014", h.Payload().GetProperty("NewValues").GetProperty($"fid_{FormulaFid}").GetString());
+    }
+
+    [Fact]
+    public async Task Event_BulkModified_AnotherFieldsInternalIdThatEqualsAFormulaFid_IsNotOverwritten()
+    {
+        // Internal ids and FIDs are different number spaces that can coincide: the formula field's internal id (6) is also the Name field's FID.
+        var fields = new List<AppField>
+        {
+            new() { Id = 206, Fid = (int)NameFid, Name = "Name", TypeCode = "Text" },
+            new() { Id = (int)NameFid, Fid = (int)FormulaFid, Name = "CustomerNumber", TypeCode = "Formula_Text", Settings = "{\"expression\":\"1\"}" }
+        };
+        var h = new InterceptorHarness("is", "CST00014");
+        var id = Guid.NewGuid();
+        h.Computes(new Dictionary<Guid, object?> { [id] = "CST00014" });
+        var values = new Dictionary<long, object?> { [206] = "row", [NameFid] = "row", [FormulaFid] = null };
+        var change = new PipelineRecordChange(id, values, values, new List<long>(), PipelineRecordEventType.Modified);
+
+        await h.Interceptor.InterceptBulkAsync(Table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), 1, default);
+
+        var payload = h.Payload().GetProperty("NewValues");
+        Assert.Equal("row", payload.GetProperty($"fid_{NameFid}").GetString());               // Name was not replaced by the formula's value
+        Assert.Equal("CST00014", payload.GetProperty($"fid_{FormulaFid}").GetString());
+    }
+
     [Theory]
     [MemberData(nameof(Variants))]
     public async Task Event_RecordAdded_FormulaFilterDoesNotMatch_NoEvent(string typeCode, object _, object noMatch, string op, string operand)

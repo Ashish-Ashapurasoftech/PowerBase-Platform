@@ -25,6 +25,9 @@ public class SchedulerMetadataDto
     public IReadOnlyList<PipelineSchedule> ActiveSchedules { get; set; } = Array.Empty<PipelineSchedule>();
 }
 
+/// <summary>The record that triggered a pipeline run: its public id plus numeric Record ID (null if the record is gone).</summary>
+public record PipelineTriggerRecordRef(Guid RecordPublicId, long? RecordId);
+
 public interface IPipelineRepository
 {
     Task<PipelineStatistics> GetStatisticsAsync(long pipelineId, DateTime asOfUtc, CancellationToken ct = default);
@@ -75,6 +78,11 @@ public interface IPipelineRepository
     Task<IReadOnlyList<(PipelineRun Run, string PipelineName, Guid PipelinePublicId)>> GetRunsByAppIdAsync(long appId, long? pipelineId, DateTime? fromDate, DateTime? toDate, int page, int pageSize, CancellationToken ct = default);
     Task<int> CountRunsByAppIdAsync(long appId, long? pipelineId, DateTime? fromDate, DateTime? toDate, CancellationToken ct = default);
 
+    /// <summary>For each run, the record that triggered it (read from the trigger step's stored input):
+    /// its public id and its numeric Record ID (RID). Runs with no triggering record (manual, scheduled,
+    /// bulk) are simply absent. <c>RecordId</c> is null when the record can no longer be found.</summary>
+    Task<IReadOnlyDictionary<long, PipelineTriggerRecordRef>> GetTriggerRecordRefsByRunIdsAsync(IReadOnlyCollection<long> runIds, CancellationToken ct = default);
+
     // Staging table operations for On New Bulk Event
     Task InsertBulkEventRecordsAsync(List<PipelineBulkEventRecord> records, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineBulkEventRecord>> GetBulkEventRecordsPreviewAsync(Guid bulkEventId, int limit, CancellationToken ct = default);
@@ -113,6 +121,8 @@ public interface IPipelineRepository
     Task<bool> UpdateScheduleLastAndNextRunOnAsync(long scheduleId, DateTime? oldLastRun, DateTime newLastRun, DateTime? newNextRun, byte[] rowVersion, CancellationToken ct = default);
     
     Task<long> CreateOutboxItemAsync(PipelineOutboxItem item, IDbTransaction? transaction = null, CancellationToken ct = default);
+    /// <summary>Writes many outbox items with multi-row inserts (one statement per chunk instead of one per item).</summary>
+    Task CreateOutboxItemsAsync(IReadOnlyList<PipelineOutboxItem> items, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineOutboxItem>> ClaimOutboxItemsAsync(string workerId, CancellationToken ct = default, int batchSize = 50);
     Task UpdateOutboxItemStatusAsync(long id, string workerId, byte status, DateTime? publishedOn = null, DateTime? failedOn = null, string? error = null, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task PruneOutboxItemsAsync(DateTime olderThan, CancellationToken ct = default);

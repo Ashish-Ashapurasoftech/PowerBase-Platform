@@ -35,6 +35,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
     private readonly Dictionary<Guid, (AppTable Table, List<AppField> Fields)> _storedMetadata = new();
     private readonly Dictionary<Guid, string> _connectionCache = new();
     private readonly Dictionary<Guid, string> _recordDisplayCache = new();
+    private readonly Dictionary<Guid, long> _recordIdCache = new();
     private readonly Dictionary<long, string> _stepLabelCache = new();
 
     public PipelineAuditFormatter(
@@ -276,6 +277,65 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
         catch {}
 
         return recordPublicId.ToString();
+    }
+
+    /// <summary>Numeric Record ID (RID) for a record's public id, or null if it can't be resolved
+    /// (e.g. the record was deleted). Mirrors what Quickbase shows as "Record ID" on record steps.</summary>
+    private async Task<long?> GetOrFetchRecordNumericIdAsync(AppTable table, Guid recordPublicId, CancellationToken ct)
+    {
+        if (_recordIdCache.TryGetValue(recordPublicId, out var cached))
+            return cached;
+
+        try
+        {
+            using (var suppressScope = new System.Transactions.TransactionScope(System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled))
+            {
+                var ids = await _recordRepo.GetActiveRecordIdsByPublicIdsAsync(table, new[] { recordPublicId }, null, ct);
+                if (ids.TryGetValue(recordPublicId, out var id))
+                {
+                    _recordIdCache[recordPublicId] = id;
+                    suppressScope.Complete();
+                    return id;
+                }
+            }
+        }
+        catch {}
+
+        return null;
+    }
+
+    /// <summary>Resolves a "fid_N" key to its field. N is a field id (FID), so match on <c>Fid</c> only; the
+    /// internal <c>AppField.Id</c> is a different number space and is used solely for a field that has no Fid —
+    /// matching it alongside Fid made fid_1 resolve to "Record ID#" (internal Id 1) instead of "Date Created".</summary>
+    /// <summary>A field named as "fid_N" or by name: FID first, then name, then (legacy) internal id — never whichever happens to come first.</summary>
+    private static AppField? FindFieldByReference(List<AppField> fields, string reference)
+        => fields.FirstOrDefault(f => $"fid_{f.Fid}".Equals(reference, StringComparison.OrdinalIgnoreCase))
+           ?? fields.FirstOrDefault(f => f.Name.Equals(reference, StringComparison.OrdinalIgnoreCase))
+           ?? fields.FirstOrDefault(f => $"fid_{f.Id}".Equals(reference, StringComparison.OrdinalIgnoreCase));
+
+    private static AppField? FindFieldByFid(List<AppField> fields, int fid)
+        => fields.FirstOrDefault(f => f.Fid == fid) ?? fields.FirstOrDefault(f => !f.Fid.HasValue && f.Id == fid);
+
+    private static readonly HashSet<string> RawRecordAliasKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CreatedRecordPublicId", "UpdatedRecordPublicId", "RecordPublicId", "PublicId", "Id",
+        "CreatedOn", "CreatedBy", "ModifiedOn", "ModifiedBy", "FieldCount"
+    };
+
+    /// <summary>A step's raw record output minus the engine's internal alias keys (Id, CreatedOn, ...): those
+    /// duplicate the labelled system fields (Record ID#, Date Created, ...) and would show up twice.</summary>
+    private static Dictionary<string, object?> WithoutRawAliases(Dictionary<string, object?> raw)
+        => raw.Where(kv => !RawRecordAliasKeys.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
+
+    /// <summary>Reads a numeric record id out of a step's raw output (<c>Id</c> / <c>fid_3</c> / the given keys).</summary>
+    private static long? ReadNumericRecordId(Dictionary<string, object?> dict, params string[] keys)
+    {
+        foreach (var key in keys.Concat(new[] { "Id", "fid_3" }))
+        {
+            if (dict.TryGetValue(key, out var v) && v != null && long.TryParse(v.ToString(), out var id) && id > 0)
+                return id;
+        }
+        return null;
     }
 
     public (string InputContextJson, string OutputContextJson, string LogMessage) FormatStepRun(
@@ -582,6 +642,16 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     ? AsDictionary(inputDict.TryGetValue("OldValues", out var ov2) ? ov2 : null) 
                     : AsDictionary(inputDict.TryGetValue("NewValues", out var nv2) ? nv2 : null);
 
+                // Record ID (RID) of the record that fired this trigger — shown on both Input and Output, as Quickbase does.
+                long? triggerRid = ReadNumericRecordId(valuesSource);
+                if (triggerRid == null && tableMeta != null && Guid.TryParse(recordGuidStr, out var triggerRecordGuid))
+                    triggerRid = GetOrFetchRecordNumericIdAsync(tableMeta, triggerRecordGuid, ct).GetAwaiter().GetResult();
+                if (triggerRid != null)
+                {
+                    friendlyInput["record_id"] = triggerRid;
+                    friendlyOutput["Record ID"] = triggerRid;
+                }
+
                 var outputRecord = MapFieldValuesToUserFriendly(fields, valuesSource);
                 foreach (var kvp in outputRecord)
                 {
@@ -641,6 +711,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 technicalDetails["AppPublicId"] = inputDict.TryGetValue("AppPublicId", out var appPubId) ? appPubId : null;
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["RecordPublicId"] = recordGuidStr;
+                technicalDetails["RecordId"] = triggerRid;
 
                 logMessage = $@"Record ""{recordDisplayName}"" was {eventTypeStr?.ToLowerInvariant() ?? "added"} to {tableName} and triggered this PowerFlow.";
             }
@@ -668,10 +739,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 string friendlyFilterField = filterField ?? string.Empty;
                 if (!string.IsNullOrEmpty(filterField))
                 {
-                    var matchedField = fields.FirstOrDefault(f => 
-                        f.Name.Equals(filterField, StringComparison.OrdinalIgnoreCase) || 
-                        $"fid_{f.Id}".Equals(filterField, StringComparison.OrdinalIgnoreCase) ||
-                        $"fid_{f.Fid}".Equals(filterField, StringComparison.OrdinalIgnoreCase));
+                    var matchedField = FindFieldByReference(fields, filterField);
                     if (matchedField != null)
                     {
                         friendlyFilterField = !string.IsNullOrWhiteSpace(matchedField.Label) ? matchedField.Label : matchedField.Name;
@@ -740,6 +808,12 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 friendlyInput["Lookup Value"] = $"Record equals {recordLabel}";
                 friendlyInput["Compare with app local time"] = compareLocalTime;
 
+                var lookedUpRid = ReadNumericRecordId(outputDict);
+                if (lookedUpRid != null)
+                {
+                    friendlyInput["Record ID"] = lookedUpRid;
+                    friendlyOutput["Record ID"] = lookedUpRid;
+                }
                 friendlyOutput["Record"] = MapFieldValuesToUserFriendly(fields, outputDict);
 
                 metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
@@ -781,15 +855,20 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     }
                 }
 
+                var createdRid = ReadNumericRecordId(outputDict);
+                friendlyOutput["Record ID"] = createdRid;
                 friendlyOutput["Record"] = recordDisplayName;
                 friendlyOutput["CreatedRecordPublicId"] = createdRecordGuidStr;
                 friendlyOutput["Status"] = "Created";
+                // Full created record (every field value Quickbase lists under the step's output).
+                friendlyOutput["Fields"] = MapFieldValuesToUserFriendly(fields, WithoutRawAliases(outputDict));
 
                 metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
                 metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["CreatedRecordPublicId"] = createdRecordGuidStr;
+                technicalDetails["CreatedRecordId"] = createdRid;
 
                 logMessage = $@"Created record ""{recordDisplayName}"" in {tableName}.";
             }
@@ -817,22 +896,35 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     }
                 }
 
+                long? updatedRid = ReadNumericRecordId(outputDict);
+                if (updatedRid == null && Guid.TryParse(tableGuidStr, out var updTableGuid) && Guid.TryParse(targetRecordGuidStr, out var updRecordGuid))
+                {
+                    var updMeta = GetOrFetchTableMetadataAsync(updTableGuid, ct).GetAwaiter().GetResult();
+                    if (updMeta != null)
+                        updatedRid = GetOrFetchRecordNumericIdAsync(updMeta.Value.Table, updRecordGuid, ct).GetAwaiter().GetResult();
+                }
+
                 friendlyInput["Table"] = tableName;
+                friendlyInput["Record ID"] = updatedRid;
                 friendlyInput["Record"] = recordDisplayName;
                 if (inputDict.TryGetValue("FieldMappings", out var fmObj) && fmObj != null)
                 {
                     friendlyInput["Fields"] = MapFieldValuesToUserFriendly(fields, AsDictionary(fmObj));
                 }
 
+                friendlyOutput["Record ID"] = updatedRid;
                 friendlyOutput["Record"] = recordDisplayName;
                 friendlyOutput["UpdatedRecordPublicId"] = targetRecordGuidStr;
                 friendlyOutput["Status"] = "Updated";
+                // Full record after the update, not only the submitted fields.
+                friendlyOutput["Fields"] = MapFieldValuesToUserFriendly(fields, WithoutRawAliases(outputDict));
 
                 metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
                 metadata["field_labels"] = BuildFieldLabelMap(fields);
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["TargetRecordPublicId"] = targetRecordGuidStr;
+                technicalDetails["TargetRecordId"] = updatedRid;
 
                 logMessage = $@"Updated record ""{recordDisplayName}"" in {tableName}.";
             }
@@ -863,14 +955,20 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     }
                 }
 
+                // The record is gone by now; the engine captured its numeric id before deleting.
+                long? deletedRid = outputDict.TryGetValue("DeletedRecordId", out var delRidObj) && long.TryParse(delRidObj?.ToString(), out var delRid) ? delRid : null;
+
                 friendlyInput["Table"] = tableName;
+                friendlyInput["Record ID"] = deletedRid;
                 friendlyInput["Record"] = recordDisplayName;
 
+                friendlyOutput["Record ID"] = deletedRid;
                 friendlyOutput["Status"] = "Deleted";
                 friendlyOutput["Record"] = recordDisplayName;
 
                 technicalDetails["TablePublicId"] = tableGuidStr;
                 technicalDetails["TargetRecordPublicId"] = targetRecordGuidStr;
+                technicalDetails["TargetRecordId"] = deletedRid;
 
                 logMessage = $@"Deleted record ""{recordDisplayName}"" from {tableName}.";
             }
@@ -1030,10 +1128,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 string friendlyMergeKey = mergeKeyFid ?? string.Empty;
                 if (!string.IsNullOrEmpty(mergeKeyFid))
                 {
-                    var matchedField = fields.FirstOrDefault(f => 
-                        f.Name.Equals(mergeKeyFid, StringComparison.OrdinalIgnoreCase) || 
-                        $"fid_{f.Id}".Equals(mergeKeyFid, StringComparison.OrdinalIgnoreCase) ||
-                        $"fid_{f.Fid}".Equals(mergeKeyFid, StringComparison.OrdinalIgnoreCase));
+                    var matchedField = FindFieldByReference(fields, mergeKeyFid);
                     if (matchedField != null)
                     {
                         friendlyMergeKey = !string.IsNullOrWhiteSpace(matchedField.Label) ? matchedField.Label : matchedField.Name;
@@ -1229,27 +1324,63 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 metadata["source_field_labels"] = BuildFieldLabelMap(source.Fields);
                 metadata["destination_field_labels"] = BuildFieldLabelMap(destination.Fields);
 
+                long ReadCopyCount(string pascal, string snake) =>
+                    long.TryParse((outputDict.TryGetValue(pascal, out var v) ? v : outputDict.GetValueOrDefault(snake))?.ToString(), out var n) ? n : 0;
+
+                // Every source record that was rejected, with the reason — so a failed copy says WHICH records and why, not just how many.
+                // Source Record ID# first, then the merge value it was matched on, then what the record carried.
+                void AddFailedRecords()
+                {
+                    var failed = AsList(outputDict.GetValueOrDefault("FailedRecords"));
+                    if (failed.Count == 0) return;
+                    friendlyOutput["Failed Records"] = failed.Select(item =>
+                    {
+                        var f = AsDictionary(item);
+                        var entry = new Dictionary<string, object?>();
+                        if (f.GetValueOrDefault("SourceRecordId") is { } sid) entry["Source Record ID#"] = sid;
+                        if (f.GetValueOrDefault("MergeValue") is { } mv) entry["Merge Value"] = mv;
+                        entry["Reason"] = f.GetValueOrDefault("Reason");
+                        var carried = AsDictionary(f.GetValueOrDefault("Values"));
+                        if (carried.Count > 0) entry["Source Values"] = carried;
+                        if (f.GetValueOrDefault("SourcePublicId") is { } pid) entry["Source Record Public ID"] = pid;
+                        return (object?)entry;
+                    }).ToList();
+                    var shown = failed.Count;
+                    var total = ReadCopyCount("ErrorCount", "error_count");
+                    var stored = ReadCopyCount("FailedRecordsStored", "failed_records_stored");
+                    if (total > shown)
+                        friendlyOutput["Failed Records Note"] = stored > shown
+                            ? $"Showing the first {shown} of {total} rejected records here. Every rejected record is listed under \"All failed records\" below."
+                            : $"Showing the first {shown} of {total} rejected records.";
+                }
+
                 var copyError = outputDict.TryGetValue("ErrorMessage", out var ceObj) ? ceObj?.ToString() : null;
                 if (string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(copyError))
                 {
                     friendlyOutput["Status"] = "Failed";
                     friendlyOutput["Error"] = PipelineEngine.SanitizeErrorMessage(copyError);
+                    if (outputDict.ContainsKey("InsertedCount"))
+                    {
+                        friendlyOutput["Inserted Record Count"] = ReadCopyCount("InsertedCount", "inserted_count");
+                        friendlyOutput["Updated Record Count"] = ReadCopyCount("UpdatedCount", "updated_count");
+                        friendlyOutput["Error Count"] = ReadCopyCount("ErrorCount", "error_count");
+                    }
+                    AddFailedRecords();
                     if (outputDict.TryGetValue("ExceptionType", out var ceType) && ceType != null)
                         friendlyOutput["ExceptionType"] = ceType.ToString();
                     logMessage = $"Copy Records failed: {friendlyOutput["Error"]}";
                 }
                 else
                 {
-                    long ReadCount(string pascal, string snake) =>
-                        long.TryParse((outputDict.TryGetValue(pascal, out var v) ? v : outputDict.GetValueOrDefault(snake))?.ToString(), out var n) ? n : 0;
-                    var insertedCount = ReadCount("InsertedCount", "inserted_count");
-                    var updatedCount = ReadCount("UpdatedCount", "updated_count");
-                    var errorCount = ReadCount("ErrorCount", "error_count");
+                    var insertedCount = ReadCopyCount("InsertedCount", "inserted_count");
+                    var updatedCount = ReadCopyCount("UpdatedCount", "updated_count");
+                    var errorCount = ReadCopyCount("ErrorCount", "error_count");
                     friendlyOutput["Inserted Record Count"] = insertedCount;
                     friendlyOutput["Updated Record Count"] = updatedCount;
                     friendlyOutput["Error Count"] = errorCount;
                     if (outputDict.TryGetValue("Errors", out var errsObj) && errsObj != null && errorCount > 0)
                         friendlyOutput["Errors"] = errsObj;
+                    if (errorCount > 0) AddFailedRecords();
                     friendlyOutput["Status"] = errorCount > 0 ? "Completed with errors" : "Copied";
                     logMessage = $"Copied records from {source.Name} to {destination.Name}: {insertedCount} inserted, {updatedCount} updated, {errorCount} errors.";
                 }
@@ -1321,7 +1452,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
         };
 
         var inputJson = SerializeAndTruncate(finalInputContext, step.Subtype == "make-request" ? int.MaxValue : 32000);
-        var outputJson = SerializeAndTruncate(finalOutputContext, step.Subtype == "make-request" ? int.MaxValue : 32000);
+        var outputJson = SerializeAndTruncate(finalOutputContext, step.Subtype == "make-request" ? int.MaxValue : step.Subtype == "copy-records" ? 1_000_000 : 32000);
 
         return (inputJson, outputJson, logMessage);
     }
@@ -1337,7 +1468,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             AppField? matchedField = null;
             if (key.StartsWith("fid_", StringComparison.OrdinalIgnoreCase) && int.TryParse(key.Substring(4), out var num))
             {
-                matchedField = fields.FirstOrDefault(f => f.Fid == num || f.Id == num);
+                matchedField = FindFieldByFid(fields, num);
             }
             
             if (matchedField == null)
@@ -1465,7 +1596,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 var suffix = key.Substring(4);
                 if (int.TryParse(suffix, out var num))
                 {
-                    matchedField = fields.FirstOrDefault(f => f.Fid == num || f.Id == num);
+                    matchedField = FindFieldByFid(fields, num);
                 }
             }
             

@@ -701,6 +701,45 @@ public class PipelinesController : ControllerBase
         return Ok(new ApiListResponse<PipelineStepRunDto>(result.Items, result.TotalCount, result.Page, result.PageSize));
     }
 
+    /// <summary>Same access rule as <see cref="GetRunSteps"/>: the caller must be able to read the run's PowerFlow.</summary>
+    private async Task<IActionResult?> DenyUnlessRunReadableAsync(Guid runPublicId, IAppAccessService appAccessService, IPipelineRepository pipelineRepo, CancellationToken ct)
+    {
+        var run = await pipelineRepo.GetRunByPublicIdAsync(runPublicId, ct);
+        if (run == null)
+            return NotFound(new { error = new { code = "NOT_FOUND", message = $"PowerFlow run {runPublicId} not found." } });
+        var pipeline = await pipelineRepo.GetByIdAsync(run.PipelineId, ct);
+        if (pipeline == null)
+            return NotFound(new { error = new { code = "NOT_FOUND", message = "Parent PowerFlow not found." } });
+        try
+        {
+            await appAccessService.RequirePermissionByPipelinePublicIdAsync(pipeline.PublicId, PermissionCodes.PowerFlowsRead, ct);
+        }
+        catch (PowerBase.Domain.Exceptions.UnauthorizedActionException ex)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = new { code = "FORBIDDEN", message = ex.Message } });
+        }
+        return null;
+    }
+
+    /// <summary>Every record a Copy Records step rejected (with the reason), one stored page of 250 at a time.</summary>
+    [HttpGet("pipelines/runs/{runPublicId:guid}/steps/{stepRunId:long}/failed-records")]
+    [ProducesResponseType(typeof(ApiListResponse<PowerBase.Application.Pipelines.CopyFailedRecord>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetCopyFailedRecords(
+        Guid runPublicId, long stepRunId,
+        [FromServices] PowerBase.Application.Pipelines.Queries.GetCopyFailedRecords.GetCopyFailedRecordsQueryHandler handler,
+        [FromServices] IAppAccessService appAccessService,
+        [FromServices] IPipelineRepository pipelineRepo,
+        [FromQuery] int page = 1,
+        CancellationToken ct = default)
+    {
+        var denied = await DenyUnlessRunReadableAsync(runPublicId, appAccessService, pipelineRepo, ct);
+        if (denied != null) return denied;
+        var result = await handler.HandleAsync(new PowerBase.Application.Pipelines.Queries.GetCopyFailedRecords.GetCopyFailedRecordsQuery(runPublicId, stepRunId, page), ct);
+        return Ok(new ApiListResponse<PowerBase.Application.Pipelines.CopyFailedRecord>(result.Items, (int)Math.Min(result.Total, int.MaxValue), result.Page, result.PageSize));
+    }
+
     /// <summary>Get list of all tenants accessible to the logged-in user for pipeline connection setup.</summary>
     [HttpGet("pipelines/available-tenants")]
     [RequireAuth]

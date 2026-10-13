@@ -1266,6 +1266,67 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             new CommandDefinition(CountRunsByAppSql, new { appId, pipelineId, fromDate, toDate }, cancellationToken: ct));
     }
 
+    private const string TriggerRecordRefsSql = """
+        SELECT sr.PipelineRunId AS RunId,
+               CASE WHEN ISJSON(sr.InputContext) = 1 THEN JSON_VALUE(sr.InputContext, '$.TechnicalDetails.TablePublicId') END AS TablePublicId,
+               CASE WHEN ISJSON(sr.InputContext) = 1 THEN JSON_VALUE(sr.InputContext, '$.TechnicalDetails.RecordPublicId') END AS RecordPublicId
+        FROM audit.PipelineStepRun sr
+        WHERE sr.PipelineRunId IN @runIds
+          AND sr.Id = (SELECT MIN(x.Id) FROM audit.PipelineStepRun x WHERE x.PipelineRunId = sr.PipelineRunId)
+        """;
+
+    private sealed class TriggerRecordRefRow
+    {
+        public long RunId { get; set; }
+        public string? TablePublicId { get; set; }
+        public string? RecordPublicId { get; set; }
+    }
+
+    public async Task<IReadOnlyDictionary<long, PipelineTriggerRecordRef>> GetTriggerRecordRefsByRunIdsAsync(IReadOnlyCollection<long> runIds, CancellationToken ct = default)
+    {
+        var result = new Dictionary<long, PipelineTriggerRecordRef>();
+        if (runIds.Count == 0) return result;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = (await connection.QueryAsync<TriggerRecordRefRow>(
+            new CommandDefinition(TriggerRecordRefsSql, new { runIds }, cancellationToken: ct))).AsList();
+
+        var refs = new List<(long RunId, Guid TablePublicId, Guid RecordPublicId)>();
+        foreach (var row in rows)
+        {
+            if (Guid.TryParse(row.TablePublicId, out var tablePublicId) && Guid.TryParse(row.RecordPublicId, out var recordPublicId))
+                refs.Add((row.RunId, tablePublicId, recordPublicId));
+        }
+
+        foreach (var byTable in refs.GroupBy(r => r.TablePublicId))
+        {
+            var recordIds = new Dictionary<Guid, long>();
+            try
+            {
+                var tableId = await connection.QuerySingleOrDefaultAsync<long?>(new CommandDefinition(
+                    "SELECT Id FROM meta.AppTable WHERE PublicId = @publicId", new { publicId = byTable.Key }, cancellationToken: ct));
+                if (tableId.HasValue)
+                {
+                    var publicIds = byTable.Select(r => r.RecordPublicId).Distinct().ToList();
+                    // Deleted records are deliberately included: history of a "record deleted" run should still show its RID.
+                    var found = await connection.QueryAsync<(Guid PublicId, long Id)>(new CommandDefinition(
+                        $"SELECT PublicId, Id FROM {PowerBase.Domain.Constants.PhysicalNaming.FullTableName(tableId.Value)} WHERE PublicId IN @publicIds",
+                        new { publicIds }, cancellationToken: ct));
+                    foreach (var f in found) recordIds[f.PublicId] = f.Id;
+                }
+            }
+            catch (Exception)
+            {
+                // Table dropped / not resolvable — still show the public id, just without a numeric RID.
+            }
+
+            foreach (var r in byTable)
+                result[r.RunId] = new PipelineTriggerRecordRef(r.RecordPublicId, recordIds.TryGetValue(r.RecordPublicId, out var rid) ? rid : null);
+        }
+
+        return result;
+    }
+
     public async Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineReferencesForFieldAsync(int fid, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -1570,6 +1631,47 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<long>(
             new CommandDefinition(sql, item, cancellationToken: ct));
+    }
+
+    public async Task CreateOutboxItemsAsync(IReadOnlyList<PipelineOutboxItem> items, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        if (items.Count == 0) return;
+        // 12 parameters per row; SQL Server allows 2,100 per statement.
+        const int rowsPerStatement = 150;
+        IDbConnection? own = null;
+        try
+        {
+            var connection = transaction?.Connection ?? (own = await ConnectionFactory.CreateAsync(ct));
+            foreach (var chunk in items.Chunk(rowsPerStatement))
+            {
+                var parameters = new DynamicParameters();
+                var tuples = new string[chunk.Length];
+                for (var i = 0; i < chunk.Length; i++)
+                {
+                    var item = chunk[i];
+                    tuples[i] = $"(@p{i}, @e{i}, @j{i}, @u{i}, @t{i}, @c{i}, @d{i}, @h{i}, @m{i}, @b{i}, @v{i}, SYSUTCDATETIME(), 0)";
+                    parameters.Add("p" + i, item.PipelineId);
+                    parameters.Add("e" + i, item.TriggerEvent);
+                    parameters.Add("j" + i, item.TriggerPayloadJson);
+                    parameters.Add("u" + i, item.TriggeredBy);
+                    parameters.Add("t" + i, item.TriggerTablePublicId);
+                    parameters.Add("c" + i, item.CorrelationId);
+                    parameters.Add("d" + i, item.Depth);
+                    parameters.Add("h" + i, item.PipelineChain);
+                    parameters.Add("m" + i, item.MessageId);
+                    parameters.Add("b" + i, item.BatchId);
+                    parameters.Add("v" + i, item.PayloadVersion);
+                }
+                var sql = """
+                    INSERT INTO meta.PipelineOutbox (
+                        PipelineId, TriggerEvent, TriggerPayloadJson, TriggeredBy, TriggerTablePublicId,
+                        CorrelationId, Depth, PipelineChain, MessageId, BatchId, PayloadVersion, CreatedOn, Published
+                    ) VALUES
+                    """ + string.Join(",", tuples);
+                await connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct));
+            }
+        }
+        finally { own?.Dispose(); }
     }
 
     public async Task<IReadOnlyList<PipelineOutboxItem>> ClaimOutboxItemsAsync(

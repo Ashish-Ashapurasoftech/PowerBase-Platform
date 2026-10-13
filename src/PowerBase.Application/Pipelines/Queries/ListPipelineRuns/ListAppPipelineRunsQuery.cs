@@ -24,7 +24,9 @@ public record AppPipelineRunDto(
     DateTime? CompletedOn,
     string TriggeredByUser,
     string? ErrorMessage,
-    int AttemptCount
+    int AttemptCount,
+    long? TriggerRecordId = null,
+    Guid? TriggerRecordPublicId = null
 );
 
 public record AppPipelineRunsResult(

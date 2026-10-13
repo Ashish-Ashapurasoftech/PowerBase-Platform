@@ -110,6 +110,56 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         await InterceptBulkAsync(table, fields, new[] { change }, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, ct);
     }
 
+    /// <summary>The (trigger subtype, record-limit) of each active listener of <paramref name="table"/>, or null when they cannot be read cheaply (no control database, or it failed).</summary>
+    protected virtual async Task<IReadOnlyList<(string? Subtype, bool LimitRecords)>?> ListSubscriptionsAsync(AppTable table, CancellationToken ct)
+    {
+        if (_controlConnFactory == null) return null;
+        try
+        {
+            using var suppressScope = new System.Transactions.TransactionScope(System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled);
+            await using var controlConn = _controlConnFactory.Create();
+            await controlConn.OpenAsync(ct);
+            return (await controlConn.QueryAsync<TriggerSubscription>(new CommandDefinition("""
+                SELECT * FROM meta.PipelineTriggerSubscription
+                WHERE TargetTenantId = @TargetTenantId AND TargetTablePublicId = @TargetTablePublicId AND IsActive = 1
+                """, new { TargetTenantId = _queryContext.TenantId, TargetTablePublicId = table.PublicId }, cancellationToken: ct))).Select(s => (s.TriggerSubtype, s.LimitRecords)).ToList();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not read the trigger subscriptions of table {TableId}; intercepting the records one by one.", table.Id);
+            return null;
+        }
+    }
+
+    public async Task InterceptAddedManyAsync(
+        AppTable table,
+        IReadOnlyList<AppField> fields,
+        IReadOnlyList<(Guid RecordPublicId, IReadOnlyDictionary<long, object?> Values)> records,
+        CancellationToken ct = default)
+    {
+        if (records.Count == 0) return;
+
+        // Which listeners are there, and do any of them see a batch differently from single records?
+        var singleRecordOnly = false;
+        if (records.Count > 1)
+        {
+            var subscriptions = await ListSubscriptionsAsync(table, ct);
+            singleRecordOnly = subscriptions != null && subscriptions.All(s => s.Subtype != "new-bulk-event" && !s.LimitRecords);
+        }
+
+        if (!singleRecordOnly)
+        {
+            foreach (var (recordPublicId, values) in records)
+                await InterceptAsync(table, fields, recordPublicId, values, "record-added", ct);
+            return;
+        }
+
+        var changes = records
+            .Select(r => new PipelineRecordChange(r.RecordPublicId, new Dictionary<long, object?>(), r.Values, new List<long>(), PipelineRecordEventType.Added))
+            .ToList();
+        await InterceptBulkCoreAsync(table, fields, changes, Guid.NewGuid(), Guid.NewGuid(), _queryContext.UserId, batchOutbox: true, ct);
+    }
+
     private bool RequiresComputedValuesNow(IReadOnlyList<TriggerSubscription> subscriptions, IReadOnlyList<AppField> fields) =>
         PowerBase.Application.Pipelines.PipelineEventComputedValues.Required(
             subscriptions.Select(sub => new PowerBase.Application.Pipelines.PipelineEventListener(
@@ -176,6 +226,9 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         var referenceFids = filterReferenceFids ?? Array.Empty<long>();
         if (!hasComputed && referenceFids.Count == 0) return changes;
 
+        var fidSet = fields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
+        var internalIdByFid = fields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First().Id);
+
         try
         {
             var result = new List<PipelineRecordChange>(changes.Count);
@@ -231,10 +284,21 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
             return changes;
         }
 
-        static IReadOnlyDictionary<long, object?> Merge(IReadOnlyDictionary<long, object?> source, IReadOnlyDictionary<long, object?> computed)
+        // A change may describe a record under BOTH key styles — the field's internal id and its FID (mass update, bulk delete and Commit Upsert
+        // all do) — with a formula field's "no stored value" as null under each. The projected value has to replace it under both: the event payload
+        // reads the internal-id key first, so a value written only under the FID left the field empty in the event (and in every step after it).
+        // A key is only treated as an internal id when it is not also some other field's FID (the two number spaces can coincide).
+
+        IReadOnlyDictionary<long, object?> Merge(IReadOnlyDictionary<long, object?> source, IReadOnlyDictionary<long, object?> computed)
         {
             var merged = new Dictionary<long, object?>(source);
-            foreach (var kvp in computed) merged[kvp.Key] = kvp.Value;
+            foreach (var kvp in computed)
+            {
+                merged[kvp.Key] = kvp.Value;
+                if (internalIdByFid.TryGetValue(kvp.Key, out var internalId) && internalId != kvp.Key
+                    && !fidSet.Contains(internalId) && source.ContainsKey(internalId))
+                    merged[internalId] = kvp.Value;
+            }
             return merged;
         }
     }
@@ -252,13 +316,48 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         suppressScope.Complete();
     }
 
-    public async Task InterceptBulkAsync(
+    public async Task<bool> HasActiveSubscriptionsAsync(AppTable table, CancellationToken ct = default)
+    {
+        // Without a control database the listeners are read through the pipeline repository on every write: cannot tell cheaply.
+        if (_controlConnFactory == null) return true;
+        try
+        {
+            using var suppressScope = new System.Transactions.TransactionScope(System.Transactions.TransactionScopeOption.Suppress, System.Transactions.TransactionScopeAsyncFlowOption.Enabled);
+            await using var controlConn = _controlConnFactory.Create();
+            await controlConn.OpenAsync(ct);
+            return await controlConn.ExecuteScalarAsync<int>(new CommandDefinition("""
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM meta.PipelineTriggerSubscription
+                    WHERE TargetTenantId = @TargetTenantId AND TargetTablePublicId = @TargetTablePublicId AND IsActive = 1) THEN 1 ELSE 0 END
+                """, new { TargetTenantId = _queryContext.TenantId, TargetTablePublicId = table.PublicId }, cancellationToken: ct)) == 1;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not check the trigger subscriptions of table {TableId}; assuming there are some.", table.Id);
+            return true;
+        }
+    }
+
+    public Task InterceptBulkAsync(
         AppTable table,
         IReadOnlyList<AppField> fields,
         IReadOnlyList<PipelineRecordChange> recordChanges,
         Guid batchId,
         Guid correlationId,
         long? triggeredBy,
+        CancellationToken ct = default)
+        => InterceptBulkCoreAsync(table, fields, recordChanges, batchId, correlationId, triggeredBy, batchOutbox: false, ct);
+
+    /// <param name="batchOutbox">True only for Copy Records pages: same-tenant "new event" outbox items are then written with one multi-row
+    /// insert at the end instead of one insert per record. Every other caller keeps the per-item insert exactly as before.</param>
+    private async Task InterceptBulkCoreAsync(
+        AppTable table,
+        IReadOnlyList<AppField> fields,
+        IReadOnlyList<PipelineRecordChange> recordChanges,
+        Guid batchId,
+        Guid correlationId,
+        long? triggeredBy,
+        bool batchOutbox,
         CancellationToken ct = default)
     {
         if (recordChanges == null || recordChanges.Count == 0) return;
@@ -687,6 +786,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                 // BRANCH B: On New Event Execution (Single record flow)
                 else
                 {
+                    // Same-tenant events are written to the outbox together, after the loop: one insert for the whole batch instead of one per record.
+                    var outboxBatch = new List<PipelineOutboxItem>();
                     foreach (var change in matchingChanges)
                     {
                         var msgId = Guid.NewGuid();
@@ -754,7 +855,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                                 Published = 0
                             };
 
-                            await _pipelineRepo.CreateOutboxItemAsync(outboxItem, _uow.Transaction, ct);
+                            if (batchOutbox) outboxBatch.Add(outboxItem);
+                            else await _pipelineRepo.CreateOutboxItemAsync(outboxItem, _uow.Transaction, ct);
                         }
                         else
                         {
@@ -808,6 +910,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                             }
                         }
                     }
+                    if (outboxBatch.Count > 0)
+                        await _pipelineRepo.CreateOutboxItemsAsync(outboxBatch, _uow.Transaction, ct);
                 }
 
                 if (isSameTenant)
@@ -842,10 +946,13 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         {
             if (f.Fid.HasValue)
             {
-                if (values.TryGetValue(f.Id, out var val))
-                    result[$"fid_{f.Fid.Value}"] = val;
-                else if (values.TryGetValue(f.Fid.Value, out var valByFid))
+                // Every producer keys a change by the FID, or by both the FID and the internal id with the same value. The FID is read first:
+                // an internal id can coincide with ANOTHER field's FID (different number spaces), and reading it first handed this field that
+                // other field's value.
+                if (values.TryGetValue(f.Fid.Value, out var valByFid))
                     result[$"fid_{f.Fid.Value}"] = valByFid;
+                else if (values.TryGetValue(f.Id, out var val))
+                    result[$"fid_{f.Fid.Value}"] = val;
             }
         }
         return result;

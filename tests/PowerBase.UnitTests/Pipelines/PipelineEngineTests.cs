@@ -959,6 +959,48 @@ public class PipelineEngineTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_AFailedStepWithDetails_HandsTheDetailsToTheHistory_AndAnOrdinaryFailureStaysAsBefore()
+    {
+        var tableId = Guid.NewGuid();
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(101, Arg.Any<CancellationToken>()).Returns(new Pipeline { IsActive = true, IsDeleted = false });
+        _pipelineRepo.GetStepsByPipelineIdAsync(101, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>
+        {
+            new() { Id = 1, Type = "trigger", Subtype = "new-event", RefId = "trg_1" },
+            new() { Id = 2, PublicId = Guid.NewGuid(), Type = "action", Subtype = "create-record", RefId = "ref_2",
+                ConfigJson = JsonSerializer.Serialize(new { tableId = tableId.ToString(), fieldMappings = Array.Empty<object>() }) }
+        });
+        var details = new Dictionary<string, object?> { ["InsertedCount"] = 5L, ["ErrorCount"] = 600L, ["FailedRecordPages"] = 3 };
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>())
+            .Returns<PowerBase.Domain.Entities.AppTable>(_ => throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Copy Records: 600 records could not be copied", details));
+        var task = new PipelineExecutionTask { PipelineId = 101, TenantId = 1, TriggerEvent = "new-event", TriggerPayloadJson = "{}" };
+
+        await _engine.Invoking(e => e.ExecuteAsync(task, CancellationToken.None)).Should().ThrowAsync<PowerBase.Domain.Exceptions.PipelineNonRetryableException>();
+
+        string? failedOutput = null;
+        foreach (var call in _auditFormatter.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "FormatStepRun" && (string?)c.GetArguments()[3] == "Failed"))
+            failedOutput = (string?)call.GetArguments()[2];
+        failedOutput.Should().NotBeNull();
+        using var parsed = JsonDocument.Parse(failedOutput!);
+        parsed.RootElement.GetProperty("ErrorMessage").GetString().Should().Contain("600 records");
+        parsed.RootElement.GetProperty("ExceptionType").GetString().Should().Be("PipelineNonRetryableException");
+        parsed.RootElement.GetProperty("ErrorCount").GetInt64().Should().Be(600);        // the details travel with the failure
+        parsed.RootElement.GetProperty("InsertedCount").GetInt64().Should().Be(5);
+        parsed.RootElement.GetProperty("FailedRecordPages").GetInt32().Should().Be(3);
+
+        // An ordinary failure carries no extra keys.
+        _auditFormatter.ClearReceivedCalls();
+        _tableRepo.GetByPublicIdAsync(tableId, Arg.Any<CancellationToken>())
+            .Returns<PowerBase.Domain.Entities.AppTable>(_ => throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("plain failure"));
+        await _engine.Invoking(e => e.ExecuteAsync(task, CancellationToken.None)).Should().ThrowAsync<PowerBase.Domain.Exceptions.PipelineNonRetryableException>();
+        foreach (var call in _auditFormatter.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "FormatStepRun" && (string?)c.GetArguments()[3] == "Failed"))
+            failedOutput = (string?)call.GetArguments()[2];
+        using var plain = JsonDocument.Parse(failedOutput!);
+        plain.RootElement.GetProperty("ErrorMessage").GetString().Should().Contain("plain failure");
+        plain.RootElement.TryGetProperty("ErrorCount", out _).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task ExecuteAsync_FormatterFailure_DoesNotInterruptSuccessfulPipeline()
     {
         // Arrange
