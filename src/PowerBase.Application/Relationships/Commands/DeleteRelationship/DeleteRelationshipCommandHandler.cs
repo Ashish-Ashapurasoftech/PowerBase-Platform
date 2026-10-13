@@ -106,6 +106,10 @@ public class DeleteRelationshipCommandHandler
             && FormulaTypeMap.ParseReportLinkSettings(f.Settings)?.RelationshipId == rel.Id))
             await _fieldRepo.DeleteAsync(f.PublicId, parent.Id, ct);
 
+        foreach (var f in parentFields.Where(f => f.TypeCode == RelationshipFieldFactory.FormulaUrlTypeCode
+            && FormulaTypeMap.ParseFormulaUrlSettings(f.Settings)?.RelationshipId == rel.Id))
+            await _fieldRepo.DeleteAsync(f.PublicId, parent.Id, ct);
+
         // The hidden "Embedded for {Parent}" report(s) the wizard created for this relationship go with it.
         if (_reportRepo is not null)
         {

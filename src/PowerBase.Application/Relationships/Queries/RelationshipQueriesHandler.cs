@@ -164,6 +164,11 @@ public class RelationshipQueriesHandler
                 });
             }
 
+            // The auto "Add {child}" Formula URL (parent) for this relationship.
+            foreach (var f in parentFields.Where(f => f.TypeCode == RelationshipFieldFactory.FormulaUrlTypeCode
+                && FormulaTypeMap.ParseFormulaUrlSettings(f.Settings)?.RelationshipId == rel.Id))
+                fields.Add(new(f.PublicId, f.Fid ?? 0, f.Label ?? f.Name, "addrecord", f.TypeCode));
+
             var proxyFid = rel.ProxyFieldId.HasValue
                 ? childFields.FirstOrDefault(f => f.Id == rel.ProxyFieldId.Value)?.Fid
                 : null;
