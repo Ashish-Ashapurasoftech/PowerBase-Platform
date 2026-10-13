@@ -285,12 +285,51 @@ public class EvaluatorTests
     }
 
     [Fact]
-    public void UserToName_is_empty_when_the_host_supplied_no_name()
+    public void UserToName_is_empty_when_the_host_supplied_no_name_and_no_lookup()
     {
-        // A user value read from a record is only an identifier, so there is no name to give
-        // back — same as UserToEmail already behaves in that case.
+        // A user value read from a record is only an identifier; with no host lookup there is
+        // no name to give back — same as UserToEmail.
         var opt = new EvaluationOptions { CurrentUser = new UserRef("u1") };
         FormulaEval.Const("UserToName(User())", opt).AsText().Should().BeEmpty();
+        FormulaEval.Const("UserToEmail(User())", opt).AsText().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void User_functions_resolve_an_id_only_user_through_the_host_lookup()
+    {
+        // What a record's stored user (e.g. Record Owner) looks like: id only.
+        var opt = new EvaluationOptions
+        {
+            UserLookup = id => id == "7" ? new UserRef("7", "ada@b.com", "Ada Lovelace") : null,
+        };
+        FormulaEval.Const("UserToName(ToUser(\"7\"))", opt).AsText().Should().Be("Ada Lovelace");
+        FormulaEval.Const("UserToEmail(ToUser(\"7\"))", opt).AsText().Should().Be("ada@b.com");
+        FormulaEval.Const("UserToName(ToUser(\"7\")) & UserToEmail(ToUser(\"7\"))", opt).AsText().Should().Be("Ada Lovelaceada@b.com");
+        FormulaEval.Const("UserToID(ToUser(\"7\"))", opt).AsText().Should().Be("7");
+    }
+
+    [Fact]
+    public void User_functions_are_blank_for_an_id_the_lookup_does_not_know()
+    {
+        var opt = new EvaluationOptions { UserLookup = _ => null };
+        FormulaEval.Const("UserToName(ToUser(\"99\"))", opt).AsText().Should().BeEmpty();
+        FormulaEval.Const("UserToID(ToUser(\"99\"))", opt).AsText().Should().Be("99");
+    }
+
+    [Fact]
+    public void ToUser_of_an_email_carries_that_email()
+    {
+        FormulaEval.Const("UserToEmail(ToUser(\"a@b.com\"))").AsText().Should().Be("a@b.com");
+    }
+
+    [Fact]
+    public void Join_of_a_user_list_uses_the_host_lookup_for_emails()
+    {
+        var opt = new EvaluationOptions
+        {
+            UserLookup = id => new UserRef(id, $"u{id}@b.com", $"User {id}"),
+        };
+        FormulaEval.Const("Join(ToUserList(\"1;2\"), \", \")", opt).AsText().Should().Be("u1@b.com, u2@b.com");
     }
 
     [Fact]

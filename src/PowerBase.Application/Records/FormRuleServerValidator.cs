@@ -796,7 +796,7 @@ public static class FormRuleServerValidator
         if (compiled.HasErrors) return false;
 
         var crossTable = new CrossTableQueryContext(tableRepo, fieldRepo, recordRepo, table);
-        var context = new CrossTableRecordContext(new ValuesRecordContext(effectiveValues), crossTable);
+        var context = new CrossTableRecordContext(new StructuredValueContext(new ValuesRecordContext(effectiveValues), fields), crossTable);
         var options = new EvaluationOptions { TableId = table.PublicId.ToString() };
 
         try { return engine.Evaluate(compiled, context, options).AsBool(); }
@@ -830,7 +830,7 @@ public static class FormRuleServerValidator
         if (compiled.HasErrors) return null;
 
         var crossTable = new CrossTableQueryContext(tableRepo, fieldRepo, recordRepo, table);
-        var context = new CrossTableRecordContext(new ValuesRecordContext(effectiveValues), crossTable);
+        var context = new CrossTableRecordContext(new StructuredValueContext(new ValuesRecordContext(effectiveValues), fields), crossTable);
         var options = new EvaluationOptions { TableId = table.PublicId.ToString() };
 
         try

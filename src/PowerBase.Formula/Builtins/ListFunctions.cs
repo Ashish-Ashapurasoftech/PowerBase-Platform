@@ -17,7 +17,7 @@ internal static class ListFunctions
         r.Add(Fn.Exact("Split", FormulaType.TextList, new[] { P.Text, P.Text },
             (a, _) => FormulaValue.TextList(Split(a[0].AsText(), a[1].AsText()))));
         r.Add(Fn.Exact("Join", FormulaType.Text, new[] { P.List, P.Text },
-            (a, _) => FormulaValue.Text(string.Join(a[1].AsText(), AsStrings(a[0])))));
+            (a, opt) => FormulaValue.Text(string.Join(a[1].AsText(), AsStrings(a[0], opt)))));
         r.Add(Fn.Exact("Count", FormulaType.Number, new[] { P.List },
             (a, _) => FormulaValue.Number(ListLength(a[0]))));
         r.Add(Fn.Exact("Size", FormulaType.Number, new[] { P.List },
@@ -30,10 +30,12 @@ internal static class ListFunctions
     private static IReadOnlyList<string> Split(string s, string sep)
         => sep.Length == 0 ? new[] { s } : s.Split(sep);
 
-    private static IReadOnlyList<string> AsStrings(FormulaValue v) => v.Type switch
+    private static IReadOnlyList<string> AsStrings(FormulaValue v, EvaluationOptions opt) => v.Type switch
     {
         FormulaType.TextList => v.AsTextList(),
-        FormulaType.UserList => v.IsNull ? Array.Empty<string>() : v.AsUserList().Select(u => u.Email ?? u.UserId).ToList(),
+        FormulaType.UserList => v.IsNull
+            ? Array.Empty<string>()
+            : v.AsUserList().Select(u => UserFunctions.Resolve(u, opt)).Select(u => u.Email ?? u.UserId).ToList(),
         _ => Array.Empty<string>(),
     };
 

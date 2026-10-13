@@ -39,6 +39,7 @@ public sealed class ActionButtonValueResolver : IActionButtonValueResolver
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
+    private readonly FormulaUserDirectory? _users;
 
     public ActionButtonValueResolver(
         FormulaEngine engine,
@@ -47,8 +48,10 @@ public sealed class ActionButtonValueResolver : IActionButtonValueResolver
         IAppRepository appRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
-        IRecordRepository recordRepo)
+        IRecordRepository recordRepo,
+        IUserRepository? userRepo = null)
     {
+        _users = userRepo is null ? null : new FormulaUserDirectory(userRepo);
         _engine = engine;
         _queryContext = queryContext;
         _runtime = runtime;
@@ -108,7 +111,7 @@ public sealed class ActionButtonValueResolver : IActionButtonValueResolver
 
         var fidToColMap = fields.Where(f => f.Fid.HasValue)
             .ToDictionary(f => (long)f.Fid!.Value, f => f.PhysicalColumnName ?? string.Empty);
-        var recordCtx = new RowRecordContext(row, fidToColMap);
+        var recordCtx = new StructuredValueContext(new RowRecordContext(row, fidToColMap), fields);
         var crossTable = new CrossTableQueryContext(_tableRepo, _fieldRepo, _recordRepo, table);
         var evalCtx = new CrossTableRecordContext(recordCtx, crossTable);
 
@@ -116,8 +119,9 @@ public sealed class ActionButtonValueResolver : IActionButtonValueResolver
         var options = new EvaluationOptions
         {
             UtcNow = DateTime.UtcNow,
+            UserLookup = _users is null ? null : _users.Lookup,
             CurrentUser = _queryContext.UserId > 0
-                ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail)
+                ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail, _queryContext.UserName)
                 : null,
             AppId = appPublicId.ToString(),
             TableId = table.PublicId.ToString(),
