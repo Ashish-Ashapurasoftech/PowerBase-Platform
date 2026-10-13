@@ -6254,6 +6254,11 @@ public partial class PipelineEngine : IPipelineEngine
                     }
 
 
+                    // contains / starts with / ends with are SQL LIKE patterns: "%", "_" and "[" typed by the user are text, not
+                    // wildcards ("contains a_b" must not match "axb") — the same escaping the advanced query applies.
+                    if (dbOp is "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" && evaluatedValue != null)
+                        evaluatedValue = PipelineComputedFilter.EscapeLike(evaluatedValue);
+
                     dbGroup.Nodes.Add(new FilterNode
                     {
                         Condition = new FilterCondition

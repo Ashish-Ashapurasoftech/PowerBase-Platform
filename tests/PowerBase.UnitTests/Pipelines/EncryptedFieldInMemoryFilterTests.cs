@@ -116,6 +116,77 @@ public class EncryptedFieldInMemoryFilterTests
         PipelineMatches(6, "gt", "Name9").Should().Equal(999, 9000, 9999);
     }
 
+    // ───────────── operators the in-memory filter was missing or mis-reading ─────────────
+
+    private static string[] NameMatches(string op, string value, params string[] names)
+    {
+        var rows = names.Select((n, i) => ((IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["Id"] = (long)i, ["f_6"] = n },
+            (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()));
+        return PipelineComputedFilter.Apply(rows, Where(6, op, value), Fields).Select(p => (string)p.Row["f_6"]!).ToArray();
+    }
+
+    [Fact]
+    public void EndsWith_MatchesOnlyTheEnding_InsteadOfEveryRecord()
+    {
+        NameMatches("endsWith", "kot", "Rajkot", "Surat", "KOT", "Kotdwar").Should().Equal("Rajkot", "KOT");
+        NameMatches("notEndsWith", "kot", "Rajkot", "Surat", "KOT", "Kotdwar").Should().Equal("Surat", "Kotdwar");
+    }
+
+    [Theory]
+    [InlineData("contains", "a[_]b", new[] { "xa_bx" })]           // advanced query CT.'a_b'
+    [InlineData("startsWith", "50[%]", new[] { "50% off" })]      // advanced query SW.'50%'
+    [InlineData("endsWith", "[[]1]", new[] { "item[1]" })]
+    [InlineData("notContains", "a[_]b", new[] { "axb", "50% off", "item[1]" })]
+    public void LikeEscapedValues_AreComparedAsPlainText(string op, string value, string[] expected) =>
+        NameMatches(op, value, "xa_bx", "axb", "50% off", "item[1]").Should().Equal(expected);
+
+    [Fact]
+    public void Wildcard_EscapedStar_IsALiteralStar()
+    {
+        NameMatches("wildcard", "a\\*b", "a*b", "axxb").Should().Equal("a*b");
+        NameMatches("wildcard", "a*b", "a*b", "axxb", "ab").Should().Equal("a*b", "axxb", "ab");
+        NameMatches("wildcard", "R?jkot", "Rajkot", "Rjkot").Should().Equal("Rajkot");
+    }
+
+    [Theory]
+    [InlineData("50%_off[1]")]
+    [InlineData("plain")]
+    [InlineData("[[]")]
+    [InlineData("a[%]b")]
+    public void EscapeLike_RoundTrips(string text) =>
+        PipelineComputedFilter.UnescapeLike(PipelineComputedFilter.EscapeLike(text)).Should().Be(text);
+
+    [Fact]
+    public void LookupOfAnEncryptedNumber_ComparesAsANumber()
+    {
+        var lookup = new AppField { Id = 20, Fid = 20, Name = "Parent Number", TypeCode = "Lookup",
+            Settings = "{\"relationshipId\":1,\"referenceFid\":9,\"sourceFid\":7,\"sourceTypeCode\":\"Number\"}" };
+        var fields = Fields.Append(lookup).ToList();
+        var rows = new[] { "9000", "10001", "700011" }.Select((v, i) => (
+            (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["Id"] = (long)i },
+            (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?> { [20] = v }));
+        PipelineFilterEvaluator.GetTypeCategory(lookup).Should().Be("NUMBER");
+
+        var matched = PipelineComputedFilter.Apply(rows, Where(20, "gt", "10000"), fields).Select(p => (string)p.Computed[20]!).ToArray();
+
+        matched.Should().Equal("10001", "700011");
+    }
+
+    [Theory]
+    [InlineData("Number", "8000", "8000.0000")]
+    [InlineData("Number", " 8000.50 ", "8000.5")]
+    [InlineData("Currency", "12", "12.00")]
+    public void CopyRecords_EncryptedNumberMergeKey_MatchesByValue(string typeCode, string a, string b) =>
+        CopyRecordsExecutor.EncryptedMergeKey(new AppField { TypeCode = typeCode }, a)
+            .Should().Be(CopyRecordsExecutor.EncryptedMergeKey(new AppField { TypeCode = typeCode }, b));
+
+    [Theory]
+    [InlineData("Text", "Abc ", "Abc ")]
+    [InlineData("Text", "8000.0000", "8000.0000")]
+    [InlineData("Number", "not a number", "not a number")]
+    public void CopyRecords_EncryptedMergeKey_LeavesTextAsItIs(string typeCode, string key, string expected) =>
+        CopyRecordsExecutor.EncryptedMergeKey(new AppField { TypeCode = typeCode }, key).Should().Be(expected);
+
     [Theory]
     [InlineData("Number", "12.5", 12.5)]
     [InlineData("Currency", "700011.0000", 700011)]
