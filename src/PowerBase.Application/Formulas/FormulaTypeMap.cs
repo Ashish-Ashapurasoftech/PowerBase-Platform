@@ -139,6 +139,13 @@ internal static class FormulaTypeMap
         catch (JsonException) { return null; }
     }
 
+    public static FormulaUrlSettings? ParseFormulaUrlSettings(string? settingsJson)
+    {
+        if (string.IsNullOrWhiteSpace(settingsJson)) return null;
+        try { return JsonSerializer.Deserialize<FormulaUrlSettings>(settingsJson, JsonOpts); }
+        catch (JsonException) { return null; }
+    }
+
     /// <summary>The template of a Formula_Url field, or null when absent/blank.</summary>
     public static string? FormulaUrlTemplate(string? settingsJson)
     {
