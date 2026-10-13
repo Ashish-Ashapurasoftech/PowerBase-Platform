@@ -1020,6 +1020,7 @@ public partial class PipelineEngine : IPipelineEngine
 
         foreach (var step in siblings)
         {
+            var stepIterationStart = System.Diagnostics.Stopwatch.GetTimestamp();
             var pipeline = await _pipelineRepo.GetByIdAsync(step.PipelineId, ct);
             if (pipeline != null && pipeline.IsDeleted)
             {
@@ -1092,7 +1093,10 @@ public partial class PipelineEngine : IPipelineEngine
             try
             {
                 var contextJson = JsonSerializer.Serialize(contextDict);
+                var stepStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                System.Threading.Interlocked.Add(ref LoopBatchProfile.PreStepTicks, stepStart - stepIterationStart);
                 var output = await ExecuteStepAsync(step, contextJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, currentPath, ct);
+                System.Threading.Interlocked.Add(ref LoopBatchProfile.StepTicks, System.Diagnostics.Stopwatch.GetTimestamp() - stepStart);
 
                 // The action itself may already have committed its own transaction. Audit/idempotency
                 // bookkeeping after that boundary must never turn a successful write into a false
@@ -2025,6 +2029,9 @@ public partial class PipelineEngine : IPipelineEngine
                     }
 
                     var ordinal = workset.DiscoveredCount;
+                    // Where the time of a SQL-discovered search goes: reading + filtering, building the staged rows, writing them.
+                    var discoveryClock = System.Diagnostics.Stopwatch.StartNew();
+                    var buildTicks = 0L; var stageTicks = 0L; var scannedRows = 0L;
                     if (!aiFilled && (!limit.HasValue || ordinal < limit.Value))
                     {
                         // Slim scan: when the in-memory half of the filter reads only stored fields (typically encrypted
@@ -2121,6 +2128,8 @@ public partial class PipelineEngine : IPipelineEngine
                                 if (stagedComputed != null)
                                     recordsToStage = recordsToStage.Select((r, i) => MergeComputed(r, stagedComputed[i])).ToList();
                             }
+                            scannedRows += pageRows.Count;
+                            var buildStart = System.Diagnostics.Stopwatch.GetTimestamp();
                             var staged = new List<PipelineBulkEventRecord>(recordsToStage.Count);
                             long lastRecordId = workset.LastRecordId;
                             foreach (var record in recordsToStage)
@@ -2145,13 +2154,25 @@ public partial class PipelineEngine : IPipelineEngine
                             // The checkpoint moves past every row scanned on this page — including the ones the in-memory
                             // condition rejected — unless the limit cut the page short of its own matches.
                             if (matchedCount <= remaining) lastRecordId = scannedUpTo;
+                            var stageStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                            buildTicks += stageStart - buildStart;
                             await _pipelineRepo.AppendSearchWorksetPageAsync(workset, staged, lastRecordId, ct);
+                            stageTicks += System.Diagnostics.Stopwatch.GetTimestamp() - stageStart;
                             workset.LastRecordId = lastRecordId;
                             workset.DiscoveredCount = ordinal;
                             if (limit.HasValue && ordinal >= limit.Value) break;
                         }
                     }
                     await _pipelineRepo.CompleteSearchWorksetDiscoveryAsync(worksetId, ct);
+                    if (scannedRows > 0)
+                    {
+                        var totalMs = discoveryClock.ElapsedMilliseconds;
+                        var buildMs = (long)(buildTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+                        var stageMs = (long)(stageTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+                        _logger.LogInformation(
+                            "[SearchRecords] Discovered {Matched} of {Scanned} scanned records of table {TableId} in {TotalMs} ms: read+filter {ReadMs} ms, build {BuildMs} ms, stage {StageMs} ms.",
+                            ordinal, scannedRows, table.Id, totalMs, totalMs - buildMs - stageMs, buildMs, stageMs);
+                    }
                 }
 
                 stepRun.InputContext = SerializeAndSanitizeAudit(new {
@@ -2270,8 +2291,10 @@ public partial class PipelineEngine : IPipelineEngine
 
             _logger.LogInformation("Create Record step {StepId} started for Table {TableId}.", step.Id, config.TableId);
 
+            var phaseMark = System.Diagnostics.Stopwatch.GetTimestamp();
             var tableGuid = Guid.Parse(config.TableId);
             var (table, fields) = await GetRecordStepMetadataAsync(tableRepo, fieldRepo, tableGuid, ct);
+            LoopBatchProfile.Phase("metadata", ref phaseMark);
 
             var values = new Dictionary<long, object?>();
             var resolvedMappings = new Dictionary<string, object?>();
@@ -2296,6 +2319,7 @@ public partial class PipelineEngine : IPipelineEngine
                 }
             }
 
+            LoopBatchProfile.Phase("mappings", ref phaseMark);
             stepRun.InputContext = SerializeAndSanitizeAudit(new {
                 TableId = config.TableId,
                 FieldMappings = resolvedMappings,
@@ -2310,8 +2334,10 @@ public partial class PipelineEngine : IPipelineEngine
             foreach (var kvp in refOverrides)
                 values[kvp.Key] = kvp.Value;
 
+            LoopBatchProfile.Phase("audit+references", ref phaseMark);
             Guid recordPublicId;
             await uow.BeginAsync(ct);
+            LoopBatchProfile.Phase("begin-transaction", ref phaseMark);
             try
             {
                 var cachedOutput = await idempotencyRepo.GetByExecutionKeyAsync(messageGuid, step.PublicId, executionPathHash, uow.Transaction, ct);
@@ -2323,13 +2349,18 @@ public partial class PipelineEngine : IPipelineEngine
 
                 // Same rules as adding the record by hand: defaults, Required / Unique / format, Custom Data Rule. After the receipt check
                 // above, so a retry of a step that already wrote its record returns that result instead of reporting its own record as a duplicate.
+                LoopBatchProfile.Phase("receipt-check", ref phaseMark);
                 await PipelineCreateRecordRules.ApplyDefaultsAsync(fields, values, StepActingUserId, CurrentStepServices, ct);
+                LoopBatchProfile.Phase("defaults", ref phaseMark);
                 await PipelineCreateRecordRules.ValidateAsync(table, fields, values, recordRepo, tableRepo, fieldRepo, CurrentStepServices, uow.Transaction, ct);
 
+                LoopBatchProfile.Phase("validate", ref phaseMark);
                 recordPublicId = await recordRepo.CreateAsync(table, fields, values, uow.Transaction, ct);
+                LoopBatchProfile.Phase("insert", ref phaseMark);
                 _logger.LogInformation("Create Record step {StepId} succeeded. Created record: {RecordPublicId}.", step.Id, recordPublicId);
                 var recordId = await recordRepo.GetActiveRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
                 values[3] = recordId;
+                LoopBatchProfile.Phase("lookup-id", ref phaseMark);
 
                 // Date Created / Record Owner are system-managed — never present in values,
                 // since nothing submits them — so a pipeline trigger firing off this Create
@@ -2355,13 +2386,16 @@ public partial class PipelineEngine : IPipelineEngine
                     var createdComputed = await ProjectComputedAsync(table, fields, [persistedRecord], ct, inWriteTransaction: true);
                     if (createdComputed != null) persistedRecord = MergeComputed(persistedRecord, createdComputed[0]);
                 }
+                LoopBatchProfile.Phase("read-back+computed", ref phaseMark);
                 var output = BuildCreatedRecordOutput(recordPublicId, recordId, fields, values, persistedRecord);
                 // Publish the same complete snapshot exposed by this step, including persisted
                 // defaults and explicit nulls. Submitted mappings alone omit valid fields and
                 // make a downstream callable reference fail depending on the created record.
                 var triggerValues = fields.Where(field => field.Fid.HasValue)
                     .ToDictionary(field => (long)field.Fid!.Value, field => output[$"fid_{field.Fid!.Value}"]);
+                LoopBatchProfile.Phase("build-output", ref phaseMark);
                 await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, triggerValues, "record-added", ct);
+                LoopBatchProfile.Phase("triggers", ref phaseMark);
                 var outputJson = JsonSerializer.Serialize(output);
 
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
@@ -2373,7 +2407,9 @@ public partial class PipelineEngine : IPipelineEngine
                     OutputJson = outputJson
                 }, uow.Transaction, ct);
 
+                LoopBatchProfile.Phase("receipt-insert", ref phaseMark);
                 await uow.CommitAsync(ct);
+                LoopBatchProfile.Phase("commit", ref phaseMark);
                 return outputJson;
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
@@ -4460,6 +4496,7 @@ public partial class PipelineEngine : IPipelineEngine
         @"\{\{\s*([^{}]*?\.fid_\d+)\.(id|name|first_name|last_name|email)\s*\}\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, UserTokenInfo> _userTokenInfo = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, AppField?> _tokenSourceFieldCache = new();
 
     private sealed record UserTokenInfo(string Name, string FirstName, string LastName, string Email);
 
@@ -4533,9 +4570,14 @@ public partial class PipelineEngine : IPipelineEngine
         var tokens = Regex.Matches(input, @"\{\{[^{}]*\}\}").Select(m => m.Value).Distinct().ToList();
         foreach (var token in tokens)
         {
-            AppField? source;
-            try { source = (await ResolveTokenSourceFieldAsync(token, payloadJson, allSteps, fieldRepo, tableRepo, ct)).Field; }
-            catch (Exception) { continue; } // an unresolvable source is reported by the normal token evaluation
+            // Which field a token reads is fixed by the pipeline, not by the record, so it is worked out once per run (a loop
+            // evaluates the same mapping for every record).
+            if (!_tokenSourceFieldCache.TryGetValue(token, out var source))
+            {
+                try { source = (await ResolveTokenSourceFieldAsync(token, payloadJson, allSteps, fieldRepo, tableRepo, ct)).Field; }
+                catch (Exception) { continue; } // an unresolvable source is reported by the normal token evaluation
+                _tokenSourceFieldCache[token] = source;
+            }
             if (source?.TypeCode is not ("User" or "MultiUser" or "Formula_User" or "Formula_ListUser")) continue;
 
             var raw = EvaluateTokens(token, payloadJson, executionPath, allSteps);

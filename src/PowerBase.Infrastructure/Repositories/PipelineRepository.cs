@@ -1271,8 +1271,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                CASE WHEN ISJSON(sr.InputContext) = 1 THEN JSON_VALUE(sr.InputContext, '$.TechnicalDetails.TablePublicId') END AS TablePublicId,
                CASE WHEN ISJSON(sr.InputContext) = 1 THEN JSON_VALUE(sr.InputContext, '$.TechnicalDetails.RecordPublicId') END AS RecordPublicId
         FROM audit.PipelineStepRun sr
-        WHERE sr.PipelineRunId IN @runIds
-          AND sr.Id = (SELECT MIN(x.Id) FROM audit.PipelineStepRun x WHERE x.PipelineRunId = sr.PipelineRunId)
+        WHERE sr.Id IN (SELECT MIN(x.Id) FROM audit.PipelineStepRun x WHERE x.PipelineRunId IN @runIds GROUP BY x.PipelineRunId)
         """;
 
     private sealed class TriggerRecordRefRow
@@ -2049,17 +2048,44 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             new CommandDefinition(insertSql, new { worksetId, runMessageId, stepRefId, snapshotMaxRecordId }, cancellationToken: ct));
     }
 
+    /// <summary>Stages discovered search records, a few hundred rows per statement. One statement per row (Dapper's behaviour for a list)
+    /// costs a round trip per record: a 500-record page was 500 of them.</summary>
+    private static async Task InsertSearchStagingRowsAsync(
+        IDbConnection connection, IDbTransaction transaction, IReadOnlyList<PipelineBulkEventRecord> records, CancellationToken ct)
+    {
+        if (records.Count == 0) return;
+        // 6 parameters per row; SQL Server allows 2,100 per statement.
+        const int rowsPerStatement = 300;
+        foreach (var chunk in records.Chunk(rowsPerStatement))
+        {
+            var parameters = new DynamicParameters();
+            var tuples = new string[chunk.Length];
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                var record = chunk[i];
+                tuples[i] = $"(@b{i}, @w{i}, @o{i}, @r{i}, 'Search', @a{i}, 0, @c{i})";
+                parameters.Add("b" + i, record.BulkEventId);
+                parameters.Add("w" + i, record.SearchWorksetId);
+                parameters.Add("o" + i, record.Ordinal);
+                parameters.Add("r" + i, record.RecordPublicId);
+                parameters.Add("a" + i, record.AfterValuesJson);
+                parameters.Add("c" + i, record.CreatedOn);
+            }
+            var sql = """
+                INSERT INTO meta.PipelineBulkEventRecord
+                    (BulkEventId, SearchWorksetId, Ordinal, RecordPublicId, EventType, AfterValuesJson, Processed, CreatedOn)
+                VALUES
+                """ + string.Join(",", tuples);
+            await connection.ExecuteAsync(new CommandDefinition(sql, parameters, transaction, cancellationToken: ct));
+        }
+    }
+
     public async Task AppendSearchWorksetPageAsync(
         PipelineSearchWorkset workset, List<PipelineBulkEventRecord> records, long lastRecordId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
-        const string insertSql = """
-            INSERT INTO meta.PipelineBulkEventRecord
-                (BulkEventId, SearchWorksetId, Ordinal, RecordPublicId, EventType, AfterValuesJson, Processed, CreatedOn)
-            VALUES (@BulkEventId, @SearchWorksetId, @Ordinal, @RecordPublicId, 'Search', @AfterValuesJson, 0, @CreatedOn);
-            """;
         const string updateSql = """
             UPDATE meta.PipelineSearchWorkset
             SET LastRecordId = @lastRecordId,
@@ -2074,8 +2100,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                     worksetId = workset.WorksetId }, transaction, cancellationToken: ct));
             if (updated != 1)
                 throw new InvalidOperationException($"Search workset {workset.WorksetId} checkpoint changed concurrently.");
-            if (records.Count > 0)
-                await connection.ExecuteAsync(new CommandDefinition(insertSql, records, transaction, cancellationToken: ct));
+            await InsertSearchStagingRowsAsync(connection, transaction, records, ct);
             await transaction.CommitAsync(ct);
         }
         catch
@@ -2111,11 +2136,6 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
-        const string insertSql = """
-            INSERT INTO meta.PipelineBulkEventRecord
-                (BulkEventId, SearchWorksetId, Ordinal, RecordPublicId, EventType, AfterValuesJson, Processed, CreatedOn)
-            VALUES (@BulkEventId, @SearchWorksetId, @Ordinal, @RecordPublicId, 'Search', @AfterValuesJson, 0, @CreatedOn);
-            """;
         const string updateSql = """
             UPDATE meta.PipelineSearchWorkset
             SET LastSearchCursor = @nextCursor,
@@ -2130,8 +2150,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
                     worksetId = workset.WorksetId }, transaction, cancellationToken: ct));
             if (updated != 1)
                 throw new InvalidOperationException($"Search workset {workset.WorksetId} AI cursor changed concurrently.");
-            if (records.Count > 0)
-                await connection.ExecuteAsync(new CommandDefinition(insertSql, records, transaction, cancellationToken: ct));
+            await InsertSearchStagingRowsAsync(connection, transaction, records, ct);
             await transaction.CommitAsync(ct);
         }
         catch

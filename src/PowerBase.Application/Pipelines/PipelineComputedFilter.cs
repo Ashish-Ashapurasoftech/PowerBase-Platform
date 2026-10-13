@@ -5,6 +5,7 @@ using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Constants;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Common.Filtering;
 
 namespace PowerBase.Application.Pipelines;
 
@@ -111,7 +112,8 @@ public static class PipelineComputedFilter
             return p.Computed.TryGetValue(fieldId, out var cv) ? cv : null;
         if (field?.TypeCode == "Reference" && p.Computed.TryGetValue(fieldId, out var label) && label is not null)
             return label;
-        return ReadRaw(p, fieldId, field);
+        // An encrypted field is decrypted to text: compare it as the field's own type (number, date, checkbox).
+        return StoredValueCoercion.ToFieldType(ReadRaw(p, fieldId, field), field);
     }
 
     private static object? ReadRaw((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p,
