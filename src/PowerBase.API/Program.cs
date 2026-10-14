@@ -378,6 +378,9 @@ builder.Services.AddScoped<PowerBase.Application.Imports.ImportMultiTargetRunner
 builder.Services.AddScoped<PowerBase.Application.Imports.ImportRunProcessor>();
 builder.Services.AddScoped<PowerBase.Application.Imports.SaveImportDefinitionHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListImportDefinitionsHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.ListPowerFlowImportTemplatesHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.IPowerFlowImportActions, PowerBase.Application.Imports.PowerFlowImportActions>();
+builder.Services.AddScoped<PowerBase.Application.Imports.StartPowerFlowImportHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListAppImportDefinitionsHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ValidateImportFormulaHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListImportHistoryHandler>();
