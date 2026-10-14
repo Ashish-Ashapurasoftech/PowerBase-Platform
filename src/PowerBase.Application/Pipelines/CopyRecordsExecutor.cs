@@ -387,7 +387,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             if (string.IsNullOrEmpty(keyStr)) return null;
             if (merge.IsEncrypted)
             {
-                if (!mergeIndex!.TryGetValue(keyStr, out var matches)) return null;
+                if (!mergeIndex!.TryGetValue(EncryptedMergeKey(merge, keyStr), out var matches)) return null;
                 if (matches.Count > 1) throw CopyRecordsDefinition.Error("The destination merge value matches more than one record.");
                 return matches[0];
             }
@@ -412,8 +412,9 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             if (string.IsNullOrEmpty(keyStr)) return;
             if (merge.IsEncrypted)
             {
-                if (!mergeIndex!.TryGetValue(keyStr, out var list))
-                    mergeIndex[keyStr] = list = new List<IReadOnlyDictionary<string, object?>>();
+                var encryptedKey = EncryptedMergeKey(merge, keyStr);
+                if (!mergeIndex!.TryGetValue(encryptedKey, out var list))
+                    mergeIndex[encryptedKey] = list = new List<IReadOnlyDictionary<string, object?>>();
                 list.Add(new Dictionary<string, object?> { ["PublicId"] = publicId });
             }
             else if (mergeBatchable && MergeKey(keyStr) is { } normalized && mergeLooked!.Contains(normalized))
@@ -684,7 +685,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                         continue;
                     }
                     // Two new rows with the same merge value: the second one must update the first, which only the row-by-row path does.
-                    if (!string.IsNullOrEmpty(keyStr) && !pageKeys.Add(merge.IsEncrypted ? keyStr : MergeKey(keyStr) ?? keyStr))
+                    if (!string.IsNullOrEmpty(keyStr) && !pageKeys.Add(merge.IsEncrypted ? EncryptedMergeKey(merge, keyStr) : MergeKey(keyStr) ?? keyStr))
                         throw new FastPageNotApplicableException();
                     newRows.Add((rowKey, values, keyStr));
                     // This row is going in: later rows of the page must now see its unique values as taken.
@@ -930,6 +931,17 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
     /// encrypted merge field's plaintext value, case-insensitively, so per-row merge matching
     /// during Copy Records doesn't run an "=" SQL comparison against ciphertext (which can never
     /// match) and doesn't re-scan the whole table per row.</summary>
+    /// <summary>The key an encrypted merge value is matched by. An encrypted field holds its value as text, so a Number written as
+    /// "8000" by one path and "8000.0000" by another would be two different keys — a copy then created a second record instead of
+    /// updating the first. Numbers are keyed by value, as SQL compares an unencrypted merge field; any other text as it is.</summary>
+    public static string EncryptedMergeKey(AppField merge, string key)
+    {
+        if (PipelineFilterEvaluator.GetTypeCategory(merge) == "NUMBER" &&
+            decimal.TryParse(key.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
+            return (number / 1.0000000000000000000000000000m).ToString(CultureInfo.InvariantCulture);
+        return key;
+    }
+
     private static async Task<Dictionary<string, List<IReadOnlyDictionary<string, object?>>>> BuildEncryptedMergeIndexAsync(
         IRecordRepository records, AppTable destination, IReadOnlyList<AppField> destinationFields, AppField merge, CancellationToken ct)
     {
@@ -945,6 +957,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                 if (!row.TryGetValue(col, out var val) || val == null) continue;
                 var key = Convert.ToString(val, CultureInfo.InvariantCulture);
                 if (string.IsNullOrEmpty(key)) continue;
+                key = EncryptedMergeKey(merge, key);
                 if (!index.TryGetValue(key, out var list))
                     index[key] = list = new List<IReadOnlyDictionary<string, object?>>();
                 list.Add(row);

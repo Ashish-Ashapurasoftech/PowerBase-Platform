@@ -1,6 +1,7 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Pipelines;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -19,6 +20,7 @@ public class DeleteRelationshipCommandHandler
     private readonly IFieldTypeRepository? _fieldTypeRepo;
     private readonly ISchemaEngineService? _schemaEngine;
     private readonly IFormRepository? _formRepo;
+    private readonly IPipelineRepository? _pipelineRepo;
 
     // Stored types a converted field is put back to as itself, filled from the parent's key text. A Formula is put back
     // as the formula (it recomputes). Any other original type comes back as a Text field holding that text.
@@ -37,8 +39,10 @@ public class DeleteRelationshipCommandHandler
         IFieldReferenceIndexer? refIndexer = null,
         IFieldTypeRepository? fieldTypeRepo = null,
         ISchemaEngineService? schemaEngine = null,
-        IFormRepository? formRepo = null)
+        IFormRepository? formRepo = null,
+        IPipelineRepository? pipelineRepo = null)
     {
+        _pipelineRepo = pipelineRepo;
         _formRepo = formRepo;
         _fieldTypeRepo = fieldTypeRepo;
         _schemaEngine = schemaEngine;
@@ -62,6 +66,8 @@ public class DeleteRelationshipCommandHandler
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
 
         var refField = childFields.FirstOrDefault(f => f.Id == rel.ReferenceFieldId);
+
+        await EnsurePipelinesDoNotUseAsync(rel, null, ct);
 
         // Restrict: deleting the reference field would orphan child links.
         if (!command.Force && refField is not null && await _recordRepo.HasAnyDataAsync(child, refField, ct))
@@ -130,6 +136,37 @@ public class DeleteRelationshipCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),
             $"Relationship deleted: {child.Name} → {parent.Name}", appId: rel.AppId, ct: ct);
+    }
+
+    /// <summary>
+    /// Deleting a relationship removes the fields it created (the reference field when it was auto-created, plus its Lookup,
+    /// Summary, Report Link and Formula-URL fields). Blocks the delete when a PowerFlow uses any of them.
+    /// <paramref name="ignoreTableId"/> is a table that is itself being deleted — its own fields are covered by the table check.
+    /// </summary>
+    public async Task EnsurePipelinesDoNotUseAsync(Relationship rel, long? ignoreTableId, CancellationToken ct)
+    {
+        if (_pipelineRepo is null) return;
+
+        var child = await _tableRepo.GetByIdAsync(rel.ChildTableId, ct);
+        var parent = await _tableRepo.GetByIdAsync(rel.ParentTableId, ct);
+        var childFields = await _fieldRepo.ListByTableAsync(child.Id, ct);
+        var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
+
+        var removedFromChild = new List<AppField>();
+        var refField = childFields.FirstOrDefault(f => f.Id == rel.ReferenceFieldId);
+        if (refField is not null && !rel.ReferenceFieldIsExisting) removedFromChild.Add(refField);
+        removedFromChild.AddRange(childFields.Where(f => f.TypeCode == "Lookup"
+            && FormulaTypeMap.ParseLookupSettings(f.Settings)?.RelationshipId == rel.Id));
+
+        var removedFromParent = parentFields.Where(f =>
+            (f.TypeCode == "Summary" && FormulaTypeMap.ParseSummarySettings(f.Settings)?.RelationshipId == rel.Id) ||
+            (f.TypeCode == "ReportLink" && FormulaTypeMap.ParseReportLinkSettings(f.Settings)?.RelationshipId == rel.Id) ||
+            (f.TypeCode == RelationshipFieldFactory.FormulaUrlTypeCode && FormulaTypeMap.ParseFormulaUrlSettings(f.Settings)?.RelationshipId == rel.Id)).ToList();
+
+        if (child.Id != ignoreTableId)
+            await PipelineDependencyGuard.EnsureFieldsNotUsedAsync(_pipelineRepo, child, removedFromChild, ct);
+        if (parent.Id != ignoreTableId)
+            await PipelineDependencyGuard.EnsureFieldsNotUsedAsync(_pipelineRepo, parent, removedFromParent, ct);
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Pipelines;
 using PowerBase.Application.Relationships.Queries;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
@@ -16,14 +17,17 @@ public class RemoveRelationshipFieldCommandHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly RelationshipQueriesHandler _queries;
     private readonly IAuditRepository _auditRepo;
+    private readonly IPipelineRepository? _pipelineRepo;
 
     public RemoveRelationshipFieldCommandHandler(
         IRelationshipRepository relRepo,
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         RelationshipQueriesHandler queries,
-        IAuditRepository auditRepo)
+        IAuditRepository auditRepo,
+        IPipelineRepository? pipelineRepo = null)
     {
+        _pipelineRepo = pipelineRepo;
         _relRepo = relRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -44,6 +48,9 @@ public class RemoveRelationshipFieldCommandHandler
             {
                 ["field"] = ["The reference field can't be removed on its own — delete the relationship instead."],
             });
+
+        var fieldTable = await _tableRepo.GetByIdAsync(field.AppTableId, ct);
+        await PipelineDependencyGuard.EnsureFieldsNotUsedAsync(_pipelineRepo, fieldTable, new[] { field }, ct);
 
         // If this is the reference proxy, hand the proxy role to another lookup (or clear it).
         if (rel.ProxyFieldId == field.Id)
