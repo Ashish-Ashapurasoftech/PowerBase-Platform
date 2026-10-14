@@ -45,7 +45,7 @@ public static class CustomDataRuleValidator
         }
 
         var crossTable = new CrossTableQueryContext(tableRepo, fieldRepo, recordRepo, table);
-        var context = new CrossTableRecordContext(new ValuesRecordContext(effectiveValues), crossTable);
+        var context = new CrossTableRecordContext(new StructuredValueContext(new ValuesRecordContext(effectiveValues), fields), crossTable);
         var options = new EvaluationOptions { TableId = table.PublicId.ToString() };
 
         FormulaValue result;

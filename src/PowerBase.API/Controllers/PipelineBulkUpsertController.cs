@@ -32,7 +32,8 @@ public class PipelineBulkUpsertController : ControllerBase
         await scope.GetRequiredService<IAppAccessService>()
             .RequirePermissionByTablePublicIdAsync(tableId, PermissionCodes.PowerFlowsRead, ct);
         var table = await scope.GetRequiredService<IAppTableRepository>().GetByPublicIdAsync(tableId, ct);
-        var fields = await scope.GetRequiredService<IAppFieldRepository>().ListByTableAsync(table.Id, ct);
+        var fields = PowerBase.Application.Relationships.HelperFields.Visible(
+            await scope.GetRequiredService<IAppFieldRepository>().ListByTableAsync(table.Id, ct));
         return Ok(new { data = fields.Select(f => new
         {
             f.PublicId, f.Name, f.Label, f.TypeCode, f.Fid,

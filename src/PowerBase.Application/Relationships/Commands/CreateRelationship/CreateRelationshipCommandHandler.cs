@@ -4,6 +4,7 @@ using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.FieldSettings;
+using PowerBase.Formula.Binding;
 
 namespace PowerBase.Application.Relationships.Commands.CreateRelationship;
 
@@ -269,9 +270,26 @@ public class CreateRelationshipCommandHandler
                 OpenInNewWindow = false,
             }, ct);
         createdFields.Add(new(reportLink.PublicId, reportLink.Fid!.Value, reportLink.Label ?? reportLink.Name, "reportlink", reportLink.TypeCode));
-        parentAddFids.Add(reportLink.Fid!.Value);
+        // No longer appended to forms automatically: the "{child} details" section (added by the wizard via
+        // AddRelationshipFormSectionCommandHandler) shows the child records, so the link field itself stays off the form.
+        // parentAddFids.Add(reportLink.Fid!.Value);
 
-        // 6. Auto-append new fields to forms that opt in.
+        // 6. Auto-create a Formula URL on the parent: "Add {child.Name}" — opens a new child record with the
+        //    reference pre-filled to this parent (Quickbase's "Add Child" URL formula). Not appended to forms:
+        //    the embedded child records there already have their own Add button.
+        var addRecordLabel = $"Add {child.Name}";
+        var addRecordLink = await _fieldFactory.CreateAsync(parent, FieldTypeCodeNames.FormulaUrl, addRecordLabel, false,
+            new FormulaUrlSettings
+            {
+                RelationshipId = relId,
+                Template = AddRecordUrlTemplate(child, refField.Fid!.Value, parentFields),
+                LinkText = addRecordLabel,
+                DisplayAsButton = true,
+                OpenTarget = UrlOpenTargets.SamePage,
+            }, ct);
+        createdFields.Add(new(addRecordLink.PublicId, addRecordLink.Fid!.Value, addRecordLink.Label ?? addRecordLink.Name, "addrecord", addRecordLink.TypeCode));
+
+        // 7. Auto-append new fields to forms that opt in.
         await _fieldFactory.AppendToAutoAddFormsAsync(child.PublicId, childAddFids, ct);
         await _fieldFactory.AppendToAutoAddFormsAsync(parent.PublicId, parentAddFids, ct);
 
@@ -371,7 +389,7 @@ public class CreateRelationshipCommandHandler
             {
                 var label = $"{existing.Label ?? existing.Name} (original)";
                 originalField = await _fieldFactory.CreateAsync(child, nameof(Domain.Enums.FieldTypeCode.Text), label, false,
-                    new Dictionary<string, bool> { [HelperFields.HiddenMarkerProperty] = true }, ct, isEncrypted: !isFormula && existing.IsEncrypted, hidden: true);
+                    new Dictionary<string, bool>(), ct, isEncrypted: !isFormula && existing.IsEncrypted, hidden: true);
                 preserve = new PreservedOriginal(originalField,
                     isFormula ? unmatchedRows.ToDictionary(p => p.Key, p => p.Value) : null);
                 warning += $"The original values are kept in the hidden field \"{label}\".";
@@ -453,6 +471,21 @@ public class CreateRelationshipCommandHandler
             });
     }
 
+    /// <summary>
+    /// The "Add {child}" link's formula: the child's new-record page with the reference pre-filled
+    /// (<c>?prefill_{refFid}=</c>) to the current parent's Record ID#. Blank on an unsaved parent, which
+    /// has no Record ID# to link back to. The child table is written as its PublicId (not a
+    /// <c>[_DBID_*]</c> alias, which the record-read projector doesn't resolve), so a rename never breaks it;
+    /// Record ID# is stored by Fid like any formula reference (see <see cref="Formulas.FormulaCanonicalizer"/>).
+    /// </summary>
+    private static string AddRecordUrlTemplate(AppTable child, int referenceFid, IReadOnlyList<AppField> parentFields)
+    {
+        var recordIdField = parentFields.FirstOrDefault(f => f.Fid == 3);
+        var recordIdLabel = string.IsNullOrWhiteSpace(recordIdField?.Label) ? recordIdField?.Name ?? "Record ID#" : recordIdField.Label;
+        var recordId = $"[{FieldIdReference.Prefix}3{FieldIdReference.SnapshotSeparator}{recordIdLabel}]";
+        return $"If(IsNull({recordId}), \"\", URLRoot() & \"/app/\" & AppID() & \"/tables/{child.PublicId}/records/new?prefill_{referenceFid}=\" & ToText({recordId}))";
+    }
+
     private static string Serialize(object settings) => JsonSerializer.Serialize(settings, JsonOpts);
 
     // Compile-time guard that the field-type code strings match the enum.
@@ -462,5 +495,6 @@ public class CreateRelationshipCommandHandler
         public const string Lookup = nameof(Domain.Enums.FieldTypeCode.Lookup);
         public const string Summary = nameof(Domain.Enums.FieldTypeCode.Summary);
         public const string ReportLink = nameof(Domain.Enums.FieldTypeCode.ReportLink);
+        public const string FormulaUrl = RelationshipFieldFactory.FormulaUrlTypeCode;
     }
 }

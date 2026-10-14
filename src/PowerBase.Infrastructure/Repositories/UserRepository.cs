@@ -127,6 +127,18 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
         return rows.ToDictionary(r => r.Id, r => r.Name);
     }
 
+    public async Task<IReadOnlyDictionary<long, UserIdentity>> GetIdentitiesByIdsAsync(IEnumerable<long> ids, CancellationToken ct = default)
+    {
+        var idList = ids.Distinct().ToList();
+        if (idList.Count == 0) return new Dictionary<long, UserIdentity>();
+        await using var connection = ConnectionFactory.Create();
+        var rows = await connection.QueryAsync<(long Id, string Name, string Email)>(
+            new CommandDefinition(
+                "SELECT Id, Name, Email FROM core.[User] WHERE Id IN @ids AND IsDeleted = 0",
+                new { ids = idList }, cancellationToken: ct));
+        return rows.ToDictionary(r => r.Id, r => new UserIdentity(r.Name ?? string.Empty, r.Email ?? string.Empty));
+    }
+
     public async Task<IReadOnlyDictionary<long, Guid>> GetPublicIdsByIdsAsync(IEnumerable<long> ids, CancellationToken ct = default)
     {
         var idList = ids.Distinct().ToList();

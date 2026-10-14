@@ -9,6 +9,32 @@ namespace PowerBase.Application.Reports.Queries.RunReport.OData;
 
 public static class ODataFilterBuilder
 {
+    private static readonly HashSet<string> SupportedOperators = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "isEmpty", "isNotEmpty", "eq", "ne", "gt", "gte", "lt", "lte",
+        "contains", "notContains", "startsWith", "notStartsWith", "in", "notIn",
+    };
+
+    /// <summary>True when every condition of the tree can be written as an Azure AI Search filter. A condition on
+    /// an address sub-field, one that compares to another field, or one using an operator <see cref="Build"/>
+    /// has no translation for would otherwise be silently dropped or widened (a "City" condition would search
+    /// the whole address) — so a tree holding one must be run through SQL instead.</summary>
+    public static bool CanExpress(FilterGroup? group)
+    {
+        if (group is null) return true;
+        foreach (var node in group.Nodes)
+        {
+            if (node.Condition is { } c)
+            {
+                if (!string.IsNullOrWhiteSpace(c.SubField)) return false;
+                if (!SupportedOperators.Contains(c.Operator)) return false;
+                if (!string.IsNullOrWhiteSpace(c.ValueMode) && !string.Equals(c.ValueMode, "literal", StringComparison.OrdinalIgnoreCase)) return false;
+            }
+            if (node.Group is not null && !CanExpress(node.Group)) return false;
+        }
+        return true;
+    }
+
     public static string? Build(FilterGroup? group, IReadOnlyList<AppField> allFields)
     {
         if (group == null || group.Nodes.Count == 0) return null;

@@ -36,7 +36,7 @@ public static class PipelineRecordDisplayName
             }
         }
         
-        foreach (var field in fields)
+        foreach (var field in fields.Where(f => !f.IsHidden))
         {
             if (field.Fid.HasValue && field.TypeCode.ToUpperInvariant() == "TEXT")
             {
@@ -50,7 +50,7 @@ public static class PipelineRecordDisplayName
 
         // No display field / Name / Title / Text value: use the first plain stored value (auto-number, number, date, choice…)
         // so history reads "Order 1042" rather than a GUID. Computed, boolean and structured values are not a name.
-        foreach (var field in fields.Where(f => f.Fid.HasValue && !f.IsDeleted && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode)
+        foreach (var field in fields.Where(f => f.Fid.HasValue && !f.IsDeleted && !f.IsHidden && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode)
                      && !string.Equals(f.TypeCode, "Boolean", StringComparison.OrdinalIgnoreCase)
                      && !string.Equals(f.TypeCode, "Reference", StringComparison.OrdinalIgnoreCase)))
         {

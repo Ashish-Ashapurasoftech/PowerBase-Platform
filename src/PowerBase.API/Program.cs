@@ -382,6 +382,7 @@ builder.Services.AddScoped<PowerBase.Application.Imports.ListAppImportDefinition
 builder.Services.AddScoped<PowerBase.Application.Imports.ValidateImportFormulaHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.ListImportHistoryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.Files.ColumnFitHandler>();
+builder.Services.AddScoped<PowerBase.Application.Imports.IReferenceOriginalFields, PowerBase.Application.Imports.ReferenceOriginalFields>();
 builder.Services.AddScoped<PowerBase.Application.Imports.Files.PreviewImportSheetsHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.GetImportSourceFileHandler>();
 builder.Services.AddScoped<PowerBase.Application.Imports.DeleteImportDefinitionsHandler>();
@@ -557,6 +558,7 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateSu
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.RemoveRelationshipField.RemoveRelationshipFieldCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateDisplayKey.UpdateDisplayKeyCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateReferenceFilter.UpdateReferenceFilterCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.AddFormSection.AddRelationshipFormSectionCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipFieldFactory>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipKeyCarryOverService>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();

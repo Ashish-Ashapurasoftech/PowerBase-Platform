@@ -61,7 +61,7 @@ public sealed class CopyRecordsDefinition
 
     public static bool IsPrimaryField(AppField field) => field.IsPrimary ||
         (field.IsSystem && string.Equals(field.PhysicalColumnName, "Id", StringComparison.OrdinalIgnoreCase));
-    public static bool IsWritable(AppField field) => (IsPrimaryField(field) || !field.IsSystem) && !PhysicalNaming.IsComputedTypeCode(field.TypeCode) && !IsAttachment(field);
+    public static bool IsWritable(AppField field) => !field.IsHidden && (IsPrimaryField(field) || !field.IsSystem) && !PhysicalNaming.IsComputedTypeCode(field.TypeCode) && !IsAttachment(field);
     public static bool IsAttachment(AppField field) =>
         field.TypeCode.Contains("File", StringComparison.OrdinalIgnoreCase) || field.TypeCode.Contains("Attachment", StringComparison.OrdinalIgnoreCase);
 

@@ -123,6 +123,22 @@ public class ImportFileRunTests
     }
 
     [Fact]
+    public async Task By_position_the_columns_are_named_by_place_so_a_formula_uses_Column_1_not_the_heading()
+    {
+        var cfg = Config(c =>
+        {
+            c.VirtualColumns = [new ImportVirtualColumn { Fid = ImportVirtual.FidBase, Name = "Label", Kind = ImportVirtual.Formula, Formula = "[Column 1] & " + (char)34 + "!" + (char)34 }];
+            c.Mappings = [new() { DestFid = 6, SourceFid = ImportVirtual.FidBase }, new() { DestFid = 7, SourceFid = Qty }];
+        }, columnBy: "position");
+        var h = Harness("Product,Count,Remark\nPen,1,a\n", cfg);
+
+        await h.RunAsync();
+
+        h.Completion!.Value.Status.Should().Be(ImportRunStatus.Success);
+        Value(h.Store.Inserted.Single(), 6).Should().Be("Pen!", "the heading says Product, but by position the first column is Column 1");
+    }
+
+    [Fact]
     public async Task By_position_a_file_with_too_few_columns_is_refused()
     {
         var h = Harness("Product,Count\nPen,1\n", Config(columnBy: "position"));

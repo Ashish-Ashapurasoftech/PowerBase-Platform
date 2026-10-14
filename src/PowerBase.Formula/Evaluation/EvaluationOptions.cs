@@ -13,6 +13,11 @@ public sealed class EvaluationOptions
 
     public UserRef? CurrentUser { get; init; }
 
+    /// <summary>Fills in the email/name of a user value that carries only an id (every user read from a
+    /// record does). The host supplies it; left null, <c>UserToName</c>/<c>UserToEmail</c> of such a value are blank.
+    /// Returns null when the id is unknown.</summary>
+    public Func<string, UserRef?>? UserLookup { get; init; }
+
     public TimeZoneInfo TimeZone { get; init; } = TimeZoneInfo.Utc;
 
     /// <summary>Identifier of the app the formula runs in, surfaced by <c>AppID()</c>. Empty when unknown.</summary>

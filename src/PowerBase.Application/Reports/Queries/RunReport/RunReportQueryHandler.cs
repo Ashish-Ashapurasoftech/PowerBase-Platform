@@ -164,7 +164,7 @@ public class RunReportQueryHandler
         // the plain long core.[User].Id the column actually stores before this tree reaches the
         // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
         var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
-        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct);
+        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId);
 
         // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
         // future) must resolve to an actual date freshly EVERY time the report runs, not once at
@@ -230,7 +230,7 @@ public class RunReportQueryHandler
         // against the same now-correct data — saved matches, ask doesn't, until this runs).
         if (query.RuntimeFilterTree is { Nodes.Count: > 0 })
         {
-            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct);
+            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId);
             resolvedRuntimeTree = ResolveDateValueModeConditions(resolvedRuntimeTree);
             filterTree = filterTree == null
                 ? resolvedRuntimeTree
@@ -322,7 +322,7 @@ public class RunReportQueryHandler
         }
         if (selectedFields.Count == 0)
         {
-            selectedFields = allFields.Where(f => f.Fid.HasValue && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
+            selectedFields = allFields.Where(f => f.Fid.HasValue && !f.IsHidden && visibleFieldIds.Contains((long)f.Fid!.Value)).ToList();
         }
 
         // Merge role record filter into the report's filter tree.
@@ -389,7 +389,7 @@ public class RunReportQueryHandler
             {
                 // Standard SQL LIKE fallback (used when AI Search is disabled, unhealthy, or returns 0 matches).
                 var textFields = allFields
-                    .Where(f => !PhysicalNaming.IsComputedTypeCode(f.TypeCode) &&
+                    .Where(f => !f.IsHidden && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) &&
                                 !f.TypeCode.Equals("File", StringComparison.OrdinalIgnoreCase) &&
                                 !f.TypeCode.Equals("Attachment", StringComparison.OrdinalIgnoreCase) &&
                                 !f.TypeCode.Equals("Signature", StringComparison.OrdinalIgnoreCase) &&
@@ -420,7 +420,10 @@ public class RunReportQueryHandler
         // Role ViewFilter is intentionally excluded from OData/AI Search routing — it is always
         // enforced via SQL below to guarantee correctness regardless of AI Search index freshness.
         // GAP #3: Only when IsGridSearchEnabled. GAP #4: Falls back to raw SQL tree on AI failure.
-        if (_searchService.IsGridSearchEnabled && userFilterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable))
+        // Only when the whole tree can be written as an AI Search filter — it replaces the tree entirely, so a
+        // condition it can't express (an address sub-field, "the value in the field", wildcard…) would be lost.
+        if (_searchService.IsGridSearchEnabled && userFilterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable)
+            && OData.ODataFilterBuilder.CanExpress(userFilterTree))
         {
             var odata = OData.ODataFilterBuilder.Build(userFilterTree, allFields);
             if (!string.IsNullOrWhiteSpace(odata))
@@ -493,9 +496,8 @@ public class RunReportQueryHandler
             // When sorts include formula fields, skip SQL ORDER BY (we'll re-sort everything in-memory).
             IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
 
-            // Fetch ALL rows matching the physical filters (no SQL pagination).
-            const int maxRows = 50_000;
-            var allRows = await _recordRepo.ListAsync(table, allFields, 1, maxRows,
+            // Fetch ALL rows matching the physical filters (no SQL pagination, no row cap).
+            var allRows = await _recordRepo.ListAllMatchingAsync(table, allFields,
                 physicalFilterTree, sqlSorts,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
 
@@ -549,11 +551,11 @@ public class RunReportQueryHandler
                 }
 
                 // Formula / encrypted columns have no SQL-aggregatable value, so evaluate them over
-                // every matching record in memory (same cap as the formula-filter path above).
+                // every matching record in memory.
                 var memoryCols = totalCols.Except(physicalCols).ToList();
                 if (memoryCols.Count > 0)
                 {
-                    var everyRow = await _recordRepo.ListAsync(table, allFields, 1, TotalsMaxRows, filterTree, [],
+                    var everyRow = await _recordRepo.ListAllMatchingAsync(table, allFields, filterTree, [],
                         restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
                     var everyRelational = await _relationalProjector.ProjectAsync(table, allFields, everyRow, ct);
                     var everyComputed = _formulaProjector.Project(allFields, everyRow, everyRelational, table);
@@ -586,9 +588,6 @@ public class RunReportQueryHandler
             Totals = totals,
         };
     }
-
-    /// <summary>Upper bound on records evaluated in memory for a formula/encrypted column's grand total.</summary>
-    private const int TotalsMaxRows = 50_000;
 
     /// <summary>True when this column opted into a Total/Average row (numeric family, Duration and
     /// their formula variants) or a checked-count row (checkbox) — the same opt-ins the grid reads.</summary>
@@ -914,9 +913,13 @@ public class RunReportQueryHandler
 
     // Static (the user repository passed in) so a summary field's matching criteria resolve exactly
     // like a report's filter — see RelationalProjector.ResolveCriteriaValuesAsync.
+    /// <param name="appUserRepo">When given (with <paramref name="appId"/>), contains / wildcard match on a user
+    /// field search the app's users by name or email and become a filter on the matching users' ids — a user
+    /// field stores an id, so the typed text could never be compared to it directly.</param>
     public static async Task<FilterGroup?> ResolveUserFieldValuesAsync(
         FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
-        Dictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct)
+        Dictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct,
+        IAppUserRepository? appUserRepo = null, long appId = 0)
     {
         if (group is null) return null;
         var nodes = new List<FilterNode>();
@@ -927,12 +930,25 @@ public class RunReportQueryHandler
             {
                 if (string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase))
                 {
-                    newCondition = new FilterCondition { FieldId = cond.FieldId, Operator = "eq", Value = currentUserId.ToString() };
+                    // On a list of users (MultiUser, Formula_ListUser) "is the current user" means the list contains
+                    // them — an exact match would only ever find lists holding nobody else.
+                    var isUserList = fieldLookup.TryGetValue(cond.FieldId, out var userField) && userField.TypeCode is "MultiUser" or "Formula_ListUser";
+                    newCondition = new FilterCondition { FieldId = cond.FieldId, Operator = isUserList ? "includes" : "eq", Value = currentUserId.ToString() };
+                }
+                else if (appUserRepo is not null
+                    && UserTextOperators.Contains(cond.Operator)
+                    && !string.IsNullOrWhiteSpace(cond.Value)
+                    && (cond.ValueMode is null || string.Equals(cond.ValueMode, "literal", StringComparison.OrdinalIgnoreCase))
+                    && fieldLookup.TryGetValue(cond.FieldId, out var textField)
+                    && FormulaFilterSorter.EffectiveTypeCode(textField) is "User" or "MultiUser" or "Formula_User" or "Formula_ListUser")
+                {
+                    newCondition = await ResolveUserTextConditionAsync(
+                        cond, FormulaFilterSorter.EffectiveTypeCode(textField)!, guidCache, userRepo, appUserRepo, appId, ct);
                 }
                 else if (!string.IsNullOrEmpty(cond.Value)
                     && (cond.ValueMode is null || string.Equals(cond.ValueMode, "literal", StringComparison.OrdinalIgnoreCase))
                     && fieldLookup.TryGetValue(cond.FieldId, out var field)
-                    && (field.TypeCode is "User" or "MultiUser"))
+                    && (FormulaFilterSorter.EffectiveTypeCode(field) is "User" or "MultiUser" or "Formula_User" or "Formula_ListUser"))
                 {
                     var parts = cond.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                     var resolvedParts = new List<string>(parts.Length);
@@ -940,21 +956,7 @@ public class RunReportQueryHandler
                     {
                         if (Guid.TryParse(part, out var guid))
                         {
-                            if (!guidCache.TryGetValue(guid, out var longId))
-                            {
-                                try
-                                {
-                                    var user = await userRepo.GetByPublicIdAsync(guid, ct);
-                                    longId = user.Id;
-                                }
-                                catch (Exception)
-                                {
-                                    // Unresolvable (deleted/unknown user) — leave the Guid text as-is;
-                                    // it simply won't match anything, which is the safe failure mode.
-                                    longId = -1;
-                                }
-                                guidCache[guid] = longId;
-                            }
+                            var longId = await LookupUserIdAsync(guid, guidCache, userRepo, ct);
                             resolvedParts.Add(longId == -1 ? part : longId.ToString());
                         }
                         else
@@ -973,10 +975,61 @@ public class RunReportQueryHandler
             nodes.Add(new FilterNode
             {
                 Condition = newCondition,
-                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, userRepo, ct),
+                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, userRepo, ct, appUserRepo, appId),
             });
         }
         return new FilterGroup { Logic = group.Logic, Nodes = nodes };
+    }
+
+    /// <summary>A user's public id → the numeric id a user column stores; -1 when the user can't be found
+    /// (deleted/unknown) — callers then leave the value as-is, which simply matches nothing.</summary>
+    private static async Task<long> LookupUserIdAsync(Guid publicId, Dictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct)
+    {
+        if (guidCache.TryGetValue(publicId, out var cached)) return cached;
+        long id;
+        try { id = (await userRepo.GetByPublicIdAsync(publicId, ct)).Id; }
+        catch (Exception) { id = -1; }
+        guidCache[publicId] = id;
+        return id;
+    }
+
+    private static readonly HashSet<string> UserTextOperators = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "contains", "notContains", "wildcard", "notWildcard",
+    };
+
+    /// <summary>contains / wildcard match on a user field. The user types a name or email; this finds the
+    /// app's users it matches and rewrites the condition onto their ids: a single user is "in" (or "not in") that
+    /// set, a list of users "includes" (or "does not include") any of them. No match at all becomes a condition
+    /// that matches nothing (or, for the negative operators, everything).</summary>
+    private static async Task<FilterCondition> ResolveUserTextConditionAsync(
+        FilterCondition cond, string userType, Dictionary<Guid, long> guidCache,
+        IUserRepository userRepo, IAppUserRepository appUserRepo, long appId, CancellationToken ct)
+    {
+        var wildcard = cond.Operator.Contains("ildcard", StringComparison.OrdinalIgnoreCase);
+        var negate = cond.Operator.StartsWith("not", StringComparison.OrdinalIgnoreCase);
+        var needle = cond.Value!.Trim();
+
+        bool Matches(string? text) => !string.IsNullOrEmpty(text)
+            && (wildcard ? FormulaFilterSorter.WildcardMatches(text, needle) : text.Contains(needle, StringComparison.OrdinalIgnoreCase));
+
+        var ids = new List<long>();
+        var users = await appUserRepo.ListByAppIdAsync(appId, ct);
+        foreach (var publicId in users.Where(u => Matches(u.UserName) || Matches(u.UserEmail)).Select(u => u.UserPublicId).Distinct())
+        {
+            var id = await LookupUserIdAsync(publicId, guidCache, userRepo, ct);
+            if (id != -1) ids.Add(id);
+        }
+        var idTexts = ids.Count == 0 ? new List<string> { "-1" } : ids.Select(i => i.ToString()).ToList();   // -1: no such user
+
+        var isList = userType is "MultiUser" or "Formula_ListUser";
+        return new FilterCondition
+        {
+            FieldId = cond.FieldId,
+            SubField = cond.SubField,
+            Operator = isList ? (negate ? "notIncludes" : "includes") : (negate ? "notIn" : "in"),
+            Value = isList ? string.Join(",", idTexts) : JsonSerializer.Serialize(idTexts),
+        };
     }
 
     internal static FilterGroup? MergeRuntimeFilters(
@@ -1014,19 +1067,24 @@ public class RunReportQueryHandler
             // segment), so an inexact/broken match here was silently breaking drilldown for any
             // numeric category field.
             var firstSubField = string.IsNullOrEmpty(group.Key.Item2) ? null : group.Key.Item2;
-            var operatorName = field?.TypeCode is "Date" or "DateTime"
+            // A formula behaves like the stored type it returns (a number formula is matched exactly, a date
+            // formula by day) — otherwise it would fall into "contains", an inexact substring match
+            // (clicking 10 would also match 110).
+            var filterType = FormulaFilterSorter.EffectiveTypeCode(field);
+            var operatorName = filterType is "Date" or "DateTime" or "Formula_Date" or "Formula_DateTime"
                 ? "date_eq"
-                : field?.TypeCode is "SingleSelect" or "Boolean" or "User" or "Address"
-                    or "Number" or "Currency" or "Percent" or "Rating" or "Duration" ? "eq" : "contains";
+                : filterType is "SingleSelect" or "Boolean" or "User" or "Address"
+                    or "Number" or "Currency" or "Percent" or "Rating" or "Duration"
+                    or "Formula_Number" or "Formula_Duration" or "Formula_Bool" or "Formula_User" ? "eq" : "contains";
 
             var values = group.Select(rf => rf.Value).ToList();
 
             // Defensively filter out unparseable values for numeric/date fields to prevent SQL cast errors
-            if (field?.TypeCode is "Number" or "Currency" or "Percent")
+            if (filterType is "Number" or "Currency" or "Percent" or "Formula_Number")
             {
                 values = values.Where(v => double.TryParse(v, out _)).ToList();
             }
-            else if (field?.TypeCode is "Date" or "DateTime")
+            else if (filterType is "Date" or "DateTime" or "Formula_Date" or "Formula_DateTime")
             {
                 values = values.Where(v => DateTime.TryParse(v, out _)).ToList();
             }
@@ -1136,10 +1194,18 @@ public class RunReportQueryHandler
             : [.. visibleAggregations, gaugeGoalAggregation];
 
         var summarySort = ResolveSummarySort(definition, rowGroupSpecs, aggregationsForQuery);
-        var rows = await _recordRepo.SummarizeAsync(
-            table, rowGroupSpecs, aggregationsForQuery, allFields,
-            filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
-            seriesField: seriesField, seriesMode: definition.Chart?.SeriesMode ?? "EqualValues", sort: summarySort, ct: ct);
+        var seriesMode = definition.Chart?.SeriesMode ?? "EqualValues";
+        // A Formula/Lookup/Summary field has no column, so SQL can't group by or aggregate it (it fails with
+        // "Invalid column name" and the report never loads) — those reports are summarized in memory instead.
+        var rows = InMemorySummarizer.IsRequired(rowGroupSpecs, aggregationsForQuery, seriesField, allFields, summaryFilterTree)
+            ? await InMemorySummarizer.SummarizeAsync(
+                _recordRepo, _relationalProjector, _formulaProjector,
+                table, rowGroupSpecs, aggregationsForQuery, allFields,
+                summaryFilterTree, access.RestrictToCreatedBy, seriesField, seriesMode, summarySort, ct)
+            : await _recordRepo.SummarizeAsync(
+                table, rowGroupSpecs, aggregationsForQuery, allFields,
+                filterTree: summaryFilterTree, restrictToCreatedBy: access.RestrictToCreatedBy,
+                seriesField: seriesField, seriesMode: seriesMode, sort: summarySort, ct: ct);
 
         // SummarizeAsync groups by the raw stored value — for a User field that's the numeric
         // user ID, not a display name (unlike RunTableAsync's rows, which already go through
@@ -1149,7 +1215,7 @@ public class RunReportQueryHandler
         var rowGroupUserNames = new List<IReadOnlyDictionary<long, string>?>();
         for (var i = 0; i < rowGroupSpecs.Count; i++)
         {
-            if (rowGroupSpecs[i].Field.TypeCode is not ("User" or "MultiUser")) { rowGroupUserNames.Add(null); continue; }
+            if (rowGroupSpecs[i].Field.TypeCode is not ("User" or "MultiUser" or "Formula_User")) { rowGroupUserNames.Add(null); continue; }
             var levelKeyName = $"GroupValue{i}";
             var ids = rows
                 .Select(r => r.TryGetValue(levelKeyName, out var v) ? v : null)
@@ -1159,7 +1225,7 @@ public class RunReportQueryHandler
             rowGroupUserNames.Add(ids.Count > 0 ? await _userRepo.GetNamesByIdsAsync(ids, ct) : new Dictionary<long, string>());
         }
         IReadOnlyDictionary<long, string>? seriesUserNames = null;
-        if (seriesField?.TypeCode is "User" or "MultiUser")
+        if (seriesField?.TypeCode is "User" or "MultiUser" or "Formula_User")
         {
             var ids = rows
                 .Select(r => r.TryGetValue("SeriesValue", out var v) ? v : null)

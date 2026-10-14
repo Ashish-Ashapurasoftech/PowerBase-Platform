@@ -32,6 +32,21 @@ public sealed class FakeStore : IImportDataStore
 
     public Task<long> GetMaxRecordIdAsync(AppTable table, CancellationToken ct = default) => Task.FromResult<long>(RowCount);
 
+    /// <summary>The records each table has (by table id), for the check that a Reference value is the Record ID# of one of them.</summary>
+    public Dictionary<long, HashSet<long>> ExistingRecordIds { get; } = new();
+    public int ParentChecks;
+    public List<(string Value, int Count)> DuplicateValues { get; } = new();
+
+    public Task<IReadOnlyList<(string Value, int Count)>> FindDuplicateValuesAsync(AppTable table, AppField field, int take, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<(string Value, int Count)>>(DuplicateValues.Take(take).ToList());
+
+    public Task<HashSet<long>> ExistingRecordIdsAsync(AppTable table, IReadOnlyCollection<long> ids, CancellationToken ct = default)
+    {
+        ParentChecks++;
+        var have = ExistingRecordIds.GetValueOrDefault(table.Id);
+        return Task.FromResult(ids.Where(id => have?.Contains(id) == true).ToHashSet());
+    }
+
     public async IAsyncEnumerable<object> StreamColumnValuesAsync(AppTable table, AppField field, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         foreach (var value in ColumnValues.GetValueOrDefault(field.Fid!.Value) ?? []) yield return value;
@@ -88,6 +103,12 @@ public sealed class HarnessDestination
     public string Name { get; init; } = "Other";
     public List<AppField> Fields { get; init; } = new();
     public long AppId { get; init; } = 1;
+    /// <summary>The field people know a record of this table by (the table's key), when it is not the Record ID#.</summary>
+    public long? KeyFieldId { get; init; }
+    /// <summary>Key text → Record ID#, as the table holds them (looked up without regard to case).</summary>
+    public Dictionary<string, long> KeyValues { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The table's records as a read returns them (decrypted), for a lookup in a field that is encrypted: Id and the field's column.</summary>
+    public List<IReadOnlyDictionary<string, object?>>? Rows { get; init; }
 }
 
 public sealed class HarnessOptions
@@ -101,6 +122,10 @@ public sealed class HarnessOptions
     public bool SameTable { get; set; }
     public bool LimitedDestination { get; set; }
     public bool DuplicateKeyValues { get; set; }
+    /// <summary>The relationships the destination table is the child of (a display field and the Reference behind it).</summary>
+    public List<Relationship> Relationships { get; set; } = new();
+    /// <summary>What makes the hidden "(original)" field of a Reference that has none (null: nothing does).</summary>
+    public PowerBase.Application.Imports.IReferenceOriginalFields? ReferenceOriginals { get; set; }
     public Action<List<AppField>>? ConfigureDestination { get; set; }
     public Action<List<AppField>>? ConfigureSource { get; set; }
     /// <summary>Makes the file storage throw, as a full disk or an unreachable blob service would.</summary>
@@ -209,7 +234,7 @@ public sealed class ImportHarness
         fields.ListByTableAsync(11, Arg.Any<CancellationToken>()).Returns(destFields);
         foreach (var extra in options.ExtraDestinations)
         {
-            var extraTable = new AppTable { Id = extra.Id, AppId = extra.AppId, PublicId = extra.PublicId, Name = extra.Name };
+            var extraTable = new AppTable { Id = extra.Id, AppId = extra.AppId, PublicId = extra.PublicId, Name = extra.Name, KeyFieldId = extra.KeyFieldId };
             tables.GetByPublicIdAsync(extra.PublicId, Arg.Any<CancellationToken>()).Returns(extraTable);
             tables.GetByIdAsync(extra.Id, Arg.Any<CancellationToken>()).Returns(extraTable);
             fields.ListByTableAsync(extra.Id, Arg.Any<CancellationToken>()).Returns(extra.Fields);
@@ -234,6 +259,25 @@ public sealed class ImportHarness
                 return (IReadOnlyList<IReadOnlyDictionary<string, object?>>)page;
             });
         records.HasDuplicatesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<CancellationToken>()).Returns(options.DuplicateKeyValues);
+        foreach (var extra in options.ExtraDestinations.Where(e => e.Rows is not null))
+        {
+            var table = extra;
+            records.ListAsync(Arg.Is<AppTable>(t => t.Id == table.Id), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup?>(),
+                    Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+                .Returns(call =>
+                {
+                    var after = call.ArgAt<FilterGroup>(4).Nodes.Where(n => n.Condition is { FieldId: 3 } && n.Condition.Operator == "gt")
+                        .Select(n => long.Parse(n.Condition!.Value!, CultureInfo.InvariantCulture)).FirstOrDefault();
+                    return (IReadOnlyList<IReadOnlyDictionary<string, object?>>)table.Rows!.Where(r => Convert.ToInt64(r["Id"]) > after).Take(call.ArgAt<int>(3)).ToList();
+                });
+        }
+        foreach (var extra in options.ExtraDestinations.Where(e => e.KeyValues.Count > 0))
+        {
+            var table = extra;
+            records.GetIdsByColumnValuesAsync(Arg.Is<AppTable>(t => t.Id == table.Id), Arg.Any<string>(), Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<CancellationToken>())
+                .Returns(call => (IReadOnlyDictionary<object, long>)call.ArgAt<IReadOnlyCollection<object>>(2)
+                    .Where(v => table.KeyValues.ContainsKey(v.ToString()!)).ToDictionary(v => v, v => table.KeyValues[v.ToString()!]));
+        }
         if (options.StoredRecords is { } stored)
             records.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
                 .Returns(call => (IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>)call.ArgAt<IReadOnlyCollection<long>>(2).ToDictionary(id => id, stored));
@@ -269,7 +313,9 @@ public sealed class ImportHarness
         var storage = Substitute.For<IFileStorageService>();
         var notifier = Substitute.For<IImportNotifier>();
         var engine = new FormulaEngine();
-        var planBuilder = new ImportPlanBuilder(tables, fields, Substitute.For<IAppAccessService>(), enforcer, Substitute.For<IUserRepository>(), Substitute.For<IQueryContext>(), records, engine);
+        var relationshipRepo = Substitute.For<IRelationshipRepository>();
+        relationshipRepo.ListByChildTableAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(options.Relationships);
+        var planBuilder = new ImportPlanBuilder(tables, fields, Substitute.For<IAppAccessService>(), enforcer, Substitute.For<IUserRepository>(), Substitute.For<IQueryContext>(), records, engine, store, relationshipRepo);
         var processor = new ImportRunProcessor(
             runs,
             planBuilder,
@@ -277,9 +323,9 @@ public sealed class ImportHarness
             store, records, tables, fields, engine, Substitute.For<IAuditRepository>(), storage, notifier, fileAccess ?? Substitute.For<PowerBase.Application.Imports.Files.IImportFileAccess>(),
             new ImportMultiTargetRunner(runs, planBuilder, new ImportSourceReader(records, Substitute.For<IRelationalProjector>(), Substitute.For<IFormulaProjector>()),
                 store, records, tables, fields, engine, Substitute.For<IAuditRepository>(), storage, fileAccess ?? Substitute.For<PowerBase.Application.Imports.Files.IImportFileAccess>(),
-                NullLogger<ImportMultiTargetRunner>.Instance),
+                NullLogger<ImportMultiTargetRunner>.Instance, options.ReferenceOriginals),
             Microsoft.Extensions.Options.Options.Create(new PowerBase.Application.Common.Configurations.ImportOptions()),
-            NullLogger<ImportRunProcessor>.Instance);
+            NullLogger<ImportRunProcessor>.Instance, options.ReferenceOriginals);
 
         var harness = new ImportHarness(processor, store, runs, run, notifier) { PlanBuilder = planBuilder, FileStorage = fileStorage, FileRepository = fileRepository };
         harness.Capture(runs, storage, notifier, options);

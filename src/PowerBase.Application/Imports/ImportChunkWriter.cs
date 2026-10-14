@@ -3,6 +3,7 @@ using PowerBase.Application.Reports;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Imports.Files;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Formula;
@@ -44,6 +45,8 @@ public sealed class ImportChunkWriter
     {
         public IReadOnlyDictionary<string, object?> Source { get; } = source;
         public long SourceId { get; } = sourceId;
+        /// <summary>Something worth saying about a row that was imported (shown in the details file), e.g. a reference left blank.</summary>
+        public string? Warning { get; set; }
         public Dictionary<long, object?> Values { get; } = values;
         /// <summary>Merge: the Record ID# of the destination record this row updates (null = insert a new record).</summary>
         public long? MatchedId { get; set; }
@@ -82,8 +85,9 @@ public sealed class ImportChunkWriter
     private readonly Dictionary<int, ImportFieldFormat> _formats;
 
     public ImportChunkWriter(ImportPlan plan, IImportDataStore store, IRecordRepository records, ImportDataRuleGate? gate,
-        FormulaEngine engine, long userId, ImportPassMode mode, ImportDuplicateTracker tracker, string? tableLabel = null)
+        FormulaEngine engine, long userId, ImportPassMode mode, ImportDuplicateTracker tracker, string? tableLabel = null, IReferenceOriginalFields? originals = null)
     {
+        _originals = originals;
         _tableLabel = tableLabel;
         _plan = plan; _store = store; _records = records; _gate = gate; _engine = engine; _userId = userId; _mode = mode; _tracker = tracker;
         _isMerge = plan.ImportType == ImportTypes.Merge;
@@ -139,9 +143,13 @@ public sealed class ImportChunkWriter
     }
 
     /// <summary>The destination's records as (Record ID#, decrypted value of <paramref name="field"/>), in Record ID# order, a chunk at a time.</summary>
-    private async IAsyncEnumerable<(long Id, object? Value)> ReadDecryptedAsync(AppField field, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    private IAsyncEnumerable<(long Id, object? Value)> ReadDecryptedAsync(AppField field, CancellationToken ct) => ReadDecryptedAsync(_plan.Destination, _plan.DestinationFields, field, ct);
+
+    /// <summary>The records of <paramref name="table"/> as (Record ID#, decrypted value of <paramref name="field"/>), in Record ID# order, a chunk at a time.</summary>
+    private async IAsyncEnumerable<(long Id, object? Value)> ReadDecryptedAsync(
+        AppTable table, IReadOnlyList<AppField> tableFields, AppField field, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
-        var fields = _plan.DestinationFields.Where(f => f.Fid == field.Fid || ImportTypeCompatibility.IsRecordId(f)).ToList();
+        var fields = tableFields.Where(f => f.Fid == field.Fid || ImportTypeCompatibility.IsRecordId(f)).ToList();
         var column = PhysicalNaming.GetPhysicalColumnName(field);
         long after = 0;
         while (true)
@@ -150,7 +158,7 @@ public sealed class ImportChunkWriter
             var filter = new FilterGroup();
             filter.Nodes.Add(new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "gt", Value = after.ToString(CultureInfo.InvariantCulture) } });
             filter.Nodes.Add(new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "lte", Value = long.MaxValue.ToString(CultureInfo.InvariantCulture) } });
-            var rows = await _records.ListAsync(_plan.Destination, fields, 1, EncryptedIndexChunk, filter, null, null, ct);
+            var rows = await _records.ListAsync(table, fields, 1, EncryptedIndexChunk, filter, null, null, ct);
             if (rows.Count == 0) yield break;
             foreach (var row in rows)
             {
@@ -187,6 +195,7 @@ public sealed class ImportChunkWriter
     {
         var feedback = new List<ImportFeedbackRow>();
         var rows = ApplyColumnRules(MapRows(chunk, feedback), feedback);
+        if (_plan.ReferenceTargets.Count > 0) await ResolveReferencesAsync(rows, ct);
         if (_key is not null) rows = await MatchExistingAsync(rows, feedback, ct);
 
         var matchedIds = rows.Where(r => r.MatchedId.HasValue).Select(r => r.MatchedId!.Value).ToList();
@@ -220,13 +229,13 @@ public sealed class ImportChunkWriter
             }
             updatedRows = await WriteAsync(updates, async batch =>
             {
-                await _store.UpdateAsync(_plan.Destination, _plan.DestinationFields,
+                await _store.UpdateAsync(_plan.Destination, WriteFields,
                     batch.Select(r => new ImportUpdateRow(r.MatchedId!.Value, r.Values)).ToList(), _userId, ct);
                 return null;
             }, feedback);
             insertedRows = await WriteAsync(inserts, async batch =>
             {
-                var ids = await _store.InsertAsync(_plan.Destination, _plan.DestinationFields,
+                var ids = await _store.InsertAsync(_plan.Destination, WriteFields,
                     batch.Select(r => (IReadOnlyDictionary<long, object?>)r.Values).ToList(), _userId, ct);
                 for (var i = 0; i < batch.Count && i < ids.Count; i++) batch[i].InsertedId = ids[i];
                 return ids;
@@ -243,10 +252,121 @@ public sealed class ImportChunkWriter
         return new ImportChunkOutcome(insertedRows.Count, updatedRows.Count, feedback.Count - errored, errored, feedback, unchanged.Count, written);
     }
 
+    /// <summary>For each Reference field, what each text from the source turned out to be: the Record ID# of a parent record, or null for none. Kept for the
+    /// run, so a parent used by many rows is looked up once.</summary>
+    private readonly Dictionary<int, Dictionary<string, long?>> _referenceCache = new();
+
+    private readonly IReferenceOriginalFields? _originals;
+    /// <summary>Hidden "(original)" fields made during this run for a Reference that had none (by the Reference's Fid): written along with the others.</summary>
+    private readonly Dictionary<int, AppField?> _madeOriginals = new();
+
+    /// <summary>The destination's fields as the store is to write them: the table's, and any "(original)" field this run made for a Reference.</summary>
+    private IReadOnlyList<AppField> WriteFields => _madeOriginals.Count == 0
+        ? _plan.DestinationFields
+        : _plan.DestinationFields.Concat(_madeOriginals.Values.OfType<AppField>()).ToList();
+
+    /// <summary>A Reference value from the source is the parent's key (what the relationship shows for a record, e.g. a course's title) or the Record ID#
+    /// of the parent record, as every Reference write accepts. Each is turned into the Record ID# the field stores. A value that finds no parent record
+    /// does not reject the row: its reference is left blank and the text is kept in the field's hidden "(original)" copy (shown in its place), or, when
+    /// the field has none, the details file says the text was not kept. Whatever is looked up is asked once per chunk, for all its rows.</summary>
+    private async Task ResolveReferencesAsync(List<Row> rows, CancellationToken ct)
+    {
+        foreach (var (fid, target) in _plan.ReferenceTargets)
+        {
+            var cache = _referenceCache.TryGetValue(fid, out var known) ? known : _referenceCache[fid] = new Dictionary<string, long?>(StringComparer.OrdinalIgnoreCase);
+            var unknown = rows.Select(r => (r.Values.GetValueOrDefault(fid) as string)?.Trim())
+                .Where(t => !string.IsNullOrEmpty(t) && !cache.ContainsKey(t!)).Select(t => t!).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (unknown.Count > 0) await LookUpParentsAsync(target, unknown, cache, ct);
+
+            var reference = _plan.Mappings.First(m => m.Destination.Fid == fid).Destination;
+            var label = ImportTypeCompatibility.DisplayName(reference);
+            // A Reference with no hidden copy to keep a value in gets one the first time a value finds no parent (when writing: a check writes nothing).
+            var copyFid = target.OriginalFid;
+            if (copyFid is null && _originals is not null)
+            {
+                if (_mode == ImportPassMode.Write && !_madeOriginals.ContainsKey(fid) && rows.Any(r => r.Values.GetValueOrDefault(fid) is string t && !string.IsNullOrWhiteSpace(t) && cache[t.Trim()] is null))
+                    _madeOriginals[fid] = await _originals.EnsureAsync(_plan.Destination, reference, ct);
+                copyFid = _madeOriginals.GetValueOrDefault(fid)?.Fid;
+            }
+            var willKeep = copyFid is not null || (_mode == ImportPassMode.Validate && _originals is not null && target.OriginalFid is null);
+            foreach (var row in rows)
+            {
+                if (row.Values.GetValueOrDefault(fid) is not string raw || string.IsNullOrWhiteSpace(raw)) continue;
+                var text = raw.Trim();
+                if (cache[text] is { } id)
+                {
+                    row.Values[fid] = id;
+                    if (copyFid is { } matchedCopy) row.Values[matchedCopy] = null; // it found its record: no stray text is kept
+                    continue;
+                }
+                row.Values[fid] = null;
+                if (copyFid is { } copy) row.Values[copy] = text;
+                else if (!willKeep) row.Warning = $"'{text}' matches no {target.Parent.Name} record (by {(target.DisplayKey is { } key ? ImportTypeCompatibility.DisplayName(key) : "Record ID#")}): '{label}' was left blank.";
+            }
+        }
+    }
+
+    /// <summary>The most parent records read to look values up in when the field they are looked up in is encrypted.</summary>
+    private const int MaxEncryptedParentIndex = 500_000;
+
+    private readonly Dictionary<long, Dictionary<string, long>> _encryptedParentIndex = new();
+
+    private async Task<Dictionary<string, long>> EncryptedParentIndexAsync(ImportReferenceTarget target, AppField key, CancellationToken ct)
+    {
+        if (_encryptedParentIndex.TryGetValue(target.Parent.Id, out var cached)) return cached;
+        var index = new Dictionary<string, long>(ImportKey.Comparer);
+        await foreach (var (id, value) in ReadDecryptedAsync(target.Parent, target.ParentFields, key, ct))
+        {
+            if (ImportKey.Normalize(value) is not { } text) continue;
+            index.TryAdd(text, id); // two records with the same value: the first one
+            if (index.Count > MaxEncryptedParentIndex)
+                throw new InvalidOperationException($"{target.Parent.Name} has more than {MaxEncryptedParentIndex:N0} records, too many to look a value up in when its '{ImportTypeCompatibility.DisplayName(key)}' is encrypted. Import their Record ID#s instead.");
+        }
+        return _encryptedParentIndex[target.Parent.Id] = index;
+    }
+
+    private async Task LookUpParentsAsync(ImportReferenceTarget target, List<string> texts, Dictionary<string, long?> cache, CancellationToken ct)
+    {
+        // 1. A Record ID# of a live record of the parent table (a number a spreadsheet wrote with a decimal point counts).
+        var candidates = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        foreach (var text in texts)
+            if (ImportNumber.TryParse(text, out var number) && number > 0 && number == decimal.Truncate(number) && number <= long.MaxValue) candidates[text] = (long)number;
+        var live = candidates.Count == 0 ? [] : await _store.ExistingRecordIdsAsync(target.Parent, candidates.Values.Distinct().ToList(), ct);
+        foreach (var (text, id) in candidates)
+            if (live.Contains(id)) cache[text] = id;
+
+        // 2. The parent's key: what is left is compared with it (case and surrounding spaces do not matter).
+        var rest = texts.Where(t => !cache.ContainsKey(t)).ToList();
+        if (rest.Count > 0 && target.DisplayKey is { IsEncrypted: true } encrypted)
+        {
+            // Stored as ciphertext: it cannot be searched in the database, so the parent's values are read decrypted, once, and searched here.
+            var index = await EncryptedParentIndexAsync(target, encrypted, ct);
+            foreach (var text in rest)
+                if (ImportKey.Normalize(text) is { } normalized && index.TryGetValue(normalized, out var id)) cache[text] = id;
+        }
+        else if (rest.Count > 0 && target.DisplayKey is { } key)
+        {
+            var typed = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            foreach (var text in rest)
+                if (KeyFieldResolver.ConvertToColumnType(key, text) is { } value) typed[text] = value;
+            if (typed.Count > 0)
+            {
+                var found = await _records.GetIdsByColumnValuesAsync(target.Parent, KeyFieldResolver.ColumnName(key), typed.Values.ToList(), ct);
+                foreach (var (text, value) in typed)
+                {
+                    var hit = found.FirstOrDefault(p => Equals(p.Key, value) || string.Equals(p.Key.ToString()?.Trim(), text, StringComparison.OrdinalIgnoreCase));
+                    if (hit.Key is not null) cache[text] = hit.Value;
+                }
+            }
+        }
+        foreach (var text in texts) cache.TryAdd(text, null);
+    }
+
     /// <summary>The destination fields the import writes (and the Record ID#): all that is needed to see whether a matched record would change.</summary>
     private IReadOnlyList<AppField> MappedFields()
     {
         var mapped = _plan.Mappings.Select(m => m.Destination.Fid).ToHashSet();
+        foreach (var target in _plan.ReferenceTargets.Values) if (target.OriginalFid is int original) mapped.Add(original);
         return _plan.DestinationFields.Where(f => f.Fid.HasValue && (mapped.Contains(f.Fid) || ImportTypeCompatibility.IsRecordId(f))).ToList();
     }
 
@@ -279,7 +399,8 @@ public sealed class ImportChunkWriter
     {
         var (rowRef, sheet) = RowRef(row);
         // The details file of a table read sheet by sheet has a Sheet column of its own.
-        return new ImportWrittenRow(rowRef, outcome, recordId, Carried(row), sheet is null || _plan.SheetName is not null ? null : $"Sheet '{sheet}'");
+        var sheetNote = sheet is null || _plan.SheetName is not null ? null : $"Sheet '{sheet}'";
+        return new ImportWrittenRow(rowRef, outcome, recordId, Carried(row), sheetNote is null ? row.Warning : row.Warning is null ? sheetNote : $"{sheetNote}. {row.Warning}");
     }
 
     /// <summary>The row's number in its file or sheet (a person is shown the row where they would look for it), and the sheet's name.</summary>

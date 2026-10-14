@@ -226,6 +226,32 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
             yield return reader.GetValue(0);
     }
 
+    public async Task<HashSet<long>> ExistingRecordIdsAsync(AppTable table, IReadOnlyCollection<long> ids, CancellationToken ct = default)
+    {
+        var found = new HashSet<long>();
+        if (ids.Count == 0) return found;
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        // In groups, so a chunk never goes over the number of parameters one statement may have.
+        foreach (var group in ids.Chunk(1000))
+        {
+            var rows = await conn.QueryAsync<long>(new CommandDefinition(
+                $"SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0 AND Id IN @ids", new { ids = group }, cancellationToken: ct));
+            foreach (var id in rows) found.Add(id);
+        }
+        return found;
+    }
+
+    public async Task<IReadOnlyList<(string Value, int Count)>> FindDuplicateValuesAsync(AppTable table, AppField field, int take, CancellationToken ct = default)
+    {
+        var column = PhysicalNaming.GetPhysicalColumnName(field);
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        var rows = await conn.QueryAsync<(string Value, int Count)>(new CommandDefinition(
+            $"SELECT TOP (@take) CAST({column} AS NVARCHAR(200)) AS Value, COUNT(*) AS Count FROM {PhysicalNaming.FullTableName(table.Id)} " +
+            $"WHERE IsDeleted = 0 AND {column} IS NOT NULL GROUP BY {column} HAVING COUNT(*) > 1 ORDER BY COUNT(*) DESC, {column}",
+            new { take }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
     public async Task AddRecordCountAsync(long tableId, int count, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);

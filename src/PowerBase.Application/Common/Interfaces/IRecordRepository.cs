@@ -132,6 +132,26 @@ public interface IRecordRepository
         long? restrictToCreatedBy = null,
         CancellationToken ct = default);
 
+    /// <summary>Every live row matching <paramref name="filterTree"/> in ONE query — no paging, no row cap and
+    /// no command timeout (the request's cancellation token still aborts it). Rows are decrypted. For reports
+    /// that must see every matching record to filter, sort or total computed (Formula) fields in memory.</summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllMatchingAsync(
+        AppTable table, IReadOnlyList<AppField> fields,
+        FilterGroup? filterTree = null,
+        IReadOnlyList<SortSpec>? sortFields = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default);
+
+    /// <summary>The next <paramref name="batchSize"/> live rows with Id greater than <paramref name="afterId"/>,
+    /// ordered by Id (keyset paging), decrypted, with no command timeout. Call repeatedly with the last Id
+    /// returned until a batch comes back short or empty to stream every matching record without holding them
+    /// all in memory — a summary over computed (Formula) fields accumulates its groups batch by batch.</summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListBatchAfterIdAsync(
+        AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default);
+
     Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 
     /// <summary>

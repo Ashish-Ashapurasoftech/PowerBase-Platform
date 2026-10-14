@@ -15,7 +15,7 @@ public static class CommonReportValidationHelpers
 {
     public static readonly HashSet<string> AllowedOperators = new(StringComparer.OrdinalIgnoreCase)
     {
-        "eq", "ne", "contains", "notContains", "startsWith", "notStartsWith",
+        "eq", "ne", "contains", "notContains", "startsWith", "notStartsWith", "endsWith", "notEndsWith",
         "gt", "gte", "lt", "lte", "in", "notIn", "isEmpty", "isNotEmpty", "date_eq",
         "wildcard", "notWildcard", "isCurrentUser", "includes", "notIncludes",
         // Date-only range-containment operators ("is during" / "is not during") — resolved

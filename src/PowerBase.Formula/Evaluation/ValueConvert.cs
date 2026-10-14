@@ -206,10 +206,34 @@ internal static class ValueConvert
         }
     }
 
+    /// <summary>A MultiUser cell is stored as a JSON array of ids (<c>[11,22]</c>); older or hand-built values are
+    /// delimited text (<c>11;22</c> / <c>11,22</c>), and a host may hand over a ready-made list.</summary>
     private static IReadOnlyList<UserRef> ParseUserList(object raw)
     {
-        var s = RawToString(raw);
-        if (string.IsNullOrWhiteSpace(s)) return Array.Empty<UserRef>();
+        if (raw is System.Collections.IEnumerable items && raw is not string)
+            return items.Cast<object?>()
+                        .Select(i => Convert.ToString(i, CultureInfo.InvariantCulture)?.Trim())
+                        .Where(p => !string.IsNullOrEmpty(p))
+                        .Select(p => new UserRef(p!))
+                        .ToList();
+
+        var s = RawToString(raw).Trim();
+        if (s.Length == 0) return Array.Empty<UserRef>();
+
+        if (s.StartsWith('['))
+        {
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<List<System.Text.Json.JsonElement>>(s) ?? new();
+                return parsed
+                    .Select(e => (e.ValueKind == System.Text.Json.JsonValueKind.String ? e.GetString() : e.GetRawText())?.Trim())
+                    .Where(p => !string.IsNullOrEmpty(p))
+                    .Select(p => new UserRef(p!))
+                    .ToList();
+            }
+            catch (System.Text.Json.JsonException) { /* not an array after all — treat as delimited text */ }
+        }
+
         return s.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(part => new UserRef(part))
                 .ToList();

@@ -28,13 +28,19 @@ public class ImportTypeCompatibilityTests
         (ImportTypeCompatibility.CheckMapping(F(from), F(to)) is null).Should().Be(allowed);
 
     [Theory]
-    [InlineData("Reference")]
     [InlineData("User")]
     [InlineData("File")]
     [InlineData("Formula")]
     [InlineData("Lookup")]
     public void Unsupported_and_computed_fields_are_not_writable(string type) =>
         ImportTypeCompatibility.IsWritable(F(type)).Should().BeFalse();
+
+    [Fact]
+    public void Hidden_helper_fields_are_not_writable()
+    {
+        ImportTypeCompatibility.IsWritable(F("Text")).Should().BeTrue();
+        ImportTypeCompatibility.IsWritable(new AppField { Fid = 9, Name = "F", TypeCode = "Text", IsHidden = true }).Should().BeFalse();
+    }
 
     [Fact]
     public void Text_to_number_rejects_non_numeric_values_instead_of_writing_null()

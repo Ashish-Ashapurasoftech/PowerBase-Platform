@@ -28,13 +28,15 @@ public sealed class FormulaProjector : IFormulaProjector
     private readonly IRecordRepository _recordRepo;
     private readonly IAppRepository _appRepo;
     private readonly IAppVariableRepository? _variableRepo;
+    private readonly FormulaUserDirectory? _users;
 
     public FormulaProjector(
         FormulaEngine engine, IQueryContext queryContext, IFormulaRuntimeContext runtime,
         IAppTableRepository tableRepo, IAppFieldRepository fieldRepo, IRecordRepository recordRepo,
-        IAppRepository appRepo, IAppVariableRepository? variableRepo = null)
+        IAppRepository appRepo, IAppVariableRepository? variableRepo = null, IUserRepository? userRepo = null)
     {
         _variableRepo = variableRepo;
+        _users = userRepo is null ? null : new FormulaUserDirectory(userRepo);
         _engine = engine;
         _queryContext = queryContext;
         _runtime = runtime;
@@ -145,6 +147,10 @@ public sealed class FormulaProjector : IFormulaProjector
         var crossTable = new CrossTableQueryContext(_tableRepo, _fieldRepo, _recordRepo, table);
         var fidToColMap = fields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value, f => f.PhysicalColumnName ?? string.Empty);
 
+        // UserToName/UserToEmail need the user directory, not just the id a record stores. Load every user the
+        // formulas read in one query up front instead of one blocking lookup per row.
+        PrefetchUsers(compiled, fields, fidToColMap, rows);
+
         // ── Compile ActionButton formula label/color once, reuse per row ────────────
         // Uses the same schema so formulas can reference any field on this table.
         // Compiled once here; evaluated inside the row loop below.
@@ -180,7 +186,7 @@ public sealed class FormulaProjector : IFormulaProjector
         for (var i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
-            var ctx = new RowRecordContext(row, fidToColMap);
+            var ctx = new StructuredValueContext(new RowRecordContext(row, fidToColMap), fields);
             // Seed with relational (Lookup/Summary) values so the final map carries them through
             // AND formulas can reference a lookup's value.
             var map = seed != null && i < seed.Count
@@ -269,9 +275,30 @@ public sealed class FormulaProjector : IFormulaProjector
         return result;
     }
 
+    private void PrefetchUsers(
+        IReadOnlyList<(long Fid, CompiledFormula? Formula)> compiled, IReadOnlyList<AppField> fields,
+        IReadOnlyDictionary<long, string> fidToColMap, IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    {
+        if (_users is null) return;
+
+        var anyDynamic = compiled.Any(c => c.Formula is { UsesDynamicFieldReference: true });
+        var referenced = compiled.Where(c => c.Formula is not null).SelectMany(c => c.Formula!.ReferencedFieldIds).ToHashSet();
+        var fieldTypes = FormulaTypeMap.FieldTypesByFid(fields);
+
+        foreach (var (fid, type) in fieldTypes)
+        {
+            if (type is not (FormulaType.User or FormulaType.UserList)) continue;
+            if (!anyDynamic && !referenced.Contains(fid)) continue;
+            // Same column resolution as RowRecordContext: the mapped physical column, else f_{fid}.
+            var col = fidToColMap.TryGetValue(fid, out var mapped) && mapped.Length > 0 ? mapped : PhysicalNaming.ColumnName((int)fid);
+            _users.Prefetch(rows.Select(r => r.TryGetValue(col, out var v) ? v : null));
+        }
+    }
+
     private EvaluationOptions BuildOptions(AppTable? table, IReadOnlyList<AppField> fields) => new()
     {
         UtcNow = DateTime.UtcNow,
+        UserLookup = _users is null ? null : _users.Lookup,
         FieldTypes = FormulaTypeMap.FieldTypesByFid(fields),
         CurrentUser = _queryContext.UserId > 0
             ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail, _queryContext.UserName)

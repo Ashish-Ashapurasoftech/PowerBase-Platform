@@ -18,6 +18,7 @@ public class DeleteRelationshipCommandHandler
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IFieldTypeRepository? _fieldTypeRepo;
     private readonly ISchemaEngineService? _schemaEngine;
+    private readonly IFormRepository? _formRepo;
 
     // Stored types a converted field is put back to as itself, filled from the parent's key text. A Formula is put back
     // as the formula (it recomputes). Any other original type comes back as a Text field holding that text.
@@ -35,8 +36,10 @@ public class DeleteRelationshipCommandHandler
         IReportRepository? reportRepo = null,
         IFieldReferenceIndexer? refIndexer = null,
         IFieldTypeRepository? fieldTypeRepo = null,
-        ISchemaEngineService? schemaEngine = null)
+        ISchemaEngineService? schemaEngine = null,
+        IFormRepository? formRepo = null)
     {
+        _formRepo = formRepo;
         _fieldTypeRepo = fieldTypeRepo;
         _schemaEngine = schemaEngine;
         _reportRepo = reportRepo;
@@ -106,11 +109,17 @@ public class DeleteRelationshipCommandHandler
             && FormulaTypeMap.ParseReportLinkSettings(f.Settings)?.RelationshipId == rel.Id))
             await _fieldRepo.DeleteAsync(f.PublicId, parent.Id, ct);
 
+        foreach (var f in parentFields.Where(f => f.TypeCode == RelationshipFieldFactory.FormulaUrlTypeCode
+            && FormulaTypeMap.ParseFormulaUrlSettings(f.Settings)?.RelationshipId == rel.Id))
+            await _fieldRepo.DeleteAsync(f.PublicId, parent.Id, ct);
+
         // The hidden "Embedded for {Parent}" report(s) the wizard created for this relationship go with it.
         if (_reportRepo is not null)
         {
             foreach (var reportId in await _reportRepo.ListPublicIdsByRelationshipAsync(rel.PublicId, ct))
             {
+                // The "{Child} details" Report element on the parent's forms points at this report - remove it too.
+                if (_formRepo is not null) await _formRepo.DeleteReportElementsAsync(reportId, ct);
                 await _reportRepo.DeleteAsync(reportId, ct);
                 await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Report, reportId, ct);
             }

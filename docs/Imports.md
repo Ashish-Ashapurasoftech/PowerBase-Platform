@@ -61,6 +61,19 @@ A fixed-value or formula row is a **virtual column**: it has a name and exists o
 * **Live formula check** (`POST apps/{appId}/import-formula/validate`, `ValidateImportFormulaHandler`): a formula typed on the mapping screen is compiled by the server against the source (a table's fields as the caller's role sees them, or a file's columns, all text) and every other virtual column, exactly as the import compiles it (no cross-table names). It reports every diagnostic, a formula that is too long or too deep, and, for a virtual column, a result it cannot hold. A virtual column that is broken is not offered to other formulas; a column cannot use itself or one that uses it. Members of the app only; a table source needs read access and must be in the app. The server still checks every formula when the import is saved and run.
 * Needs attention: a virtual column that no longer calculates (for example a column it uses was deleted) flags the import.
 
+### Reference fields (child → parent tables)
+
+A **Reference** field (the child side of a table relationship, e.g. Student → Course) can be a destination; Lookup and Summary fields are computed and never are, and a hidden helper field
+(`AppField.IsHidden`, such as a reference's hidden "(original)" text copy) is never offered. A relationship is kept on the parent's **Record ID#**; people know a parent record by its key.
+
+* **What is shown:** the Reference field itself, under its own name (e.g. "Department Name"), is the destination. Its display lookup (computed) and the hidden "(original)" copy are never destinations.
+* A value from the file or source table is the parent's **key** (the relationship's display key, else the parent table's key field, else - when no key was ever set - the field its reference picker labels records with: the table's first picker field, its display field, or its first ordinary stored field; e.g. a course's name) or its **Record ID#**, as every Reference write accepts.
+  A value that is a live Record ID# is taken as that record (as the form and API do); otherwise it is compared with the key (case and surrounding spaces do not matter). Whatever is looked up is asked once per chunk.
+  A parent with no field to look a value up in is matched on the Record ID# only. A key field that is **encrypted** (every field is, in an app with app-level encryption) cannot be searched in the database, so the parent's records are read decrypted once per run and searched in memory (up to 500,000 records; beyond that the run says to import Record ID#s instead). Two parent records with the same value: the first one.
+* A value that finds **no parent record does not reject the row**: the reference is left blank and the text is kept in the field's hidden "(original)" copy, which the grid and reports show in its place (the same as when a field was converted into a reference). A Reference created straight into a relationship has no such copy yet: the first import run that meets a value with no parent record **creates it** (the same hidden Text field a conversion makes, named "<label> (original)", encrypted when the app is, recorded in the Reference's settings), once, in the real run and never in the check before it, and only for a person who may create fields in the table; if it cannot be made, the row is still imported blank and the details file says the text was not kept. A required Reference that stays blank is rejected like any missing required value.
+  A value that matches is stored as the Record ID#, and any stale text in the "(original)" copy is cleared.
+* The person must be able to read the parent table. A Reference that only accepts some parent records (a dependent-dropdown rule) cannot be imported yet, and the import is refused with that message. A Reference is never what records are matched on. A fixed value can name the parent every row gets.
+
 ### The Record ID#
 
 The Record ID# is assigned by the system. It is **not offered** as a destination or a merge key, and the server refuses to save a *new* use of it (`ImportRecordIdRule`). An import that already wrote to it or merged on it keeps running and can be saved again as it is; the screen offers it only for such an import. System fields other than the Record ID# and formula fields were never writable.
@@ -86,12 +99,16 @@ constraint problem). `read = inserted + updated + skipped + errored`. A bad row 
 
 #### Which columns a table is offered
 
-For every file import, and every table, a destination table is offered only the file columns that **fit it**: the heading matches one of the table's importable
-fields (ignoring case, spaces, underscores and punctuation, so `Employee ID` = `employee_id`; Record ID#, system, formula and unsupported fields never match) **and** the
-data fits the field's type. The server decides (`ImportColumnFit`, `POST import-files/{fileId}/column-fit`, one call per table for all its sheets): it reads the first 200 data rows
-of each sheet and tries every filled cell with the run's own conversion and format checks (max length, regex, email / phone / URL); one failing cell hides the column, blank cells
-are ignored, and a column with no filled cell fits. The screen lists a note such as "3 columns hidden" with the reason for each; there is no override. A saved mapping is never dropped
-by this. Formulas and virtual columns can still use every column of the sheet. If the check cannot be made, every column is listed and the run reports rows that do not convert.
+Every column of the file is listed as a source, so any of them can be mapped by hand. What is mapped **by itself** is a column whose heading matches one of the table's importable fields (ignoring case, spaces, underscores and punctuation, so
+`Employee ID` = `employee_id`; Record ID#, system, formula and unsupported fields never match) **and** whose data fits that field's type. What a column can be mapped to **by hand** is every field its data fits, whatever its heading says
+(a column of numbers goes to a number or a text field, not to a date or a checkbox). The server decides (`ImportColumnFit`, `POST import-files/{fileId}/column-fit`, one call per table for all its sheets; each column answers with `fieldFid` /
+`fits` for its heading's field and `fitsFields` for the rest): it reads the first 200 data rows of each sheet and tries every filled cell with the run's own conversion and format checks (max length, regex, email / phone / URL); one failing
+cell takes the field out, blank cells are ignored, and a column with no filled cell fits every field. Fields of one type with no format share one answer, so a table with hundreds of fields costs a few checks per column.
+A saved mapping is never dropped by this. Formulas and virtual columns can use every column. If the check cannot be made, every column and every field is offered, and the run reports rows that do not convert.
+When a workbook is mapped **sheet by sheet** (below), a table is built from the columns whose heading matches one of its fields, so only those are used there.
+
+**Find each column by.** *Its heading*: a column is found again by its heading in each new file, so it can move, and it is mapped by name. *Its position*: a column is the one in the same place in every file, whatever its heading says (it can change).
+The columns are then named **Column 1, Column 2...** in the mapping, in formulas and in messages (`ImportFileColumns.NamedBy`), nothing is mapped by name, and the user maps each column to a field by hand. Sheets cannot be picked by field in this mode.
 
 #### Sheets mapped separately, per table
 

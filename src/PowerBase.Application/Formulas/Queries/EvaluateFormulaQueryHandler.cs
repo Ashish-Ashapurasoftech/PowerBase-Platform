@@ -75,11 +75,12 @@ public sealed class EvaluateFormulaQueryHandler
             return new EvaluateFormulaResult { Valid = false, ResultType = FormulaTypeMap.ResultTypeName(compiled), Value = null, Diagnostics = diagnostics };
 
         var crossTable = new CrossTableQueryContext(_tableRepo, _fieldRepo, _recordRepo, table);
-        var context = new CrossTableRecordContext(new ValuesRecordContext(query.Values), crossTable);
+        var context = new CrossTableRecordContext(new StructuredValueContext(new ValuesRecordContext(query.Values), fields), crossTable);
         var appPublicId = await _appRepo.GetPublicIdByIdAsync(table.AppId, ct);
         var options = new EvaluationOptions
         {
             UtcNow = DateTime.UtcNow,
+            UserLookup = new FormulaUserDirectory(_userRepo).Lookup,
             FieldTypes = FormulaTypeMap.FieldTypesByFid(fields),
             CurrentUser = _queryContext.UserId > 0
                 ? new UserRef(_queryContext.UserId.ToString(CultureInfo.InvariantCulture), _queryContext.UserEmail, _queryContext.UserName)

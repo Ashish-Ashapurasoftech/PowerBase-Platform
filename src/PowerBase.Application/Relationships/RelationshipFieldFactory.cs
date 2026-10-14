@@ -1,6 +1,7 @@
 using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
+using PowerBase.Application.Fields;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -8,7 +9,7 @@ using PowerBase.Domain.Exceptions;
 namespace PowerBase.Application.Relationships;
 
 /// <summary>
-/// Provisions a relationship field (Reference/Lookup/Summary) on a table — the shared
+/// Provisions a relationship field (Reference/Lookup/Summary/Report Link/"Add" Formula URL) on a table — the shared
 /// field-creation path used when growing a relationship (Add Lookup / Add Summary).
 /// Mirrors the inline logic in <c>CreateRelationshipCommandHandler</c>: resolves the
 /// field type, allocates a Fid, creates the meta row, and adds a physical column only
@@ -17,6 +18,9 @@ namespace PowerBase.Application.Relationships;
 public sealed class RelationshipFieldFactory
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+    /// <summary>The auto "Add {child}" link's type — a Formula_{X} variant, so no FieldTypeCode enum member.</summary>
+    public const string FormulaUrlTypeCode = "Formula_Url";
 
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IFieldTypeRepository _fieldTypeRepo;
@@ -45,7 +49,7 @@ public sealed class RelationshipFieldFactory
     }
 
     /// <param name="isEncrypted">Marks the field's column as encrypted (needed when its values are copied raw from an encrypted column).</param>
-    /// <param name="hidden">Keeps the field out of searches, sorts, filters and reports (it is also never auto-added to forms by this method).</param>
+    /// <param name="hidden">Sets <c>IsHidden</c> (kept out of field lists) and keeps the field out of searches, sorts, filters and reports (it is also never auto-added to forms by this method).</param>
     public async Task<AppField> CreateAsync(
         AppTable table, string typeCode, string label, bool isRequired, object settingsObj, CancellationToken ct,
         bool isEncrypted = false, bool hidden = false)
@@ -55,6 +59,7 @@ public sealed class RelationshipFieldFactory
         if (typeCode == nameof(Domain.Enums.FieldTypeCode.Lookup)
             || typeCode == nameof(Domain.Enums.FieldTypeCode.Reference)
             || typeCode == nameof(Domain.Enums.FieldTypeCode.ReportLink)
+            || typeCode == FormulaUrlTypeCode
             || hidden)   // a hidden helper field must never fail on a label clash (e.g. an earlier "(original)" left by a deleted relationship)
         {
             label = await ResolveUniqueLabelAsync(table.Id, label, ct);
@@ -65,6 +70,10 @@ public sealed class RelationshipFieldFactory
         }
 
         var name = await _fieldNameResolver.GenerateUniqueNameAsync(table.Id, label, isSystem: false, ct);
+
+        // The "Add {child}" link starts with the Advanced settings a hand-added Formula URL gets — not
+        // searchable/sortable/filterable, so a quick search for "app" doesn't match every record's URL.
+        var defaults = typeCode == FormulaUrlTypeCode ? FieldAdvancedSettingsCapability.Resolve(typeCode, null) : null;
 
         var fid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
         var field = new AppField
@@ -78,11 +87,12 @@ public sealed class RelationshipFieldFactory
             Fid = fid,
             Settings = Serialize(settingsObj),
             CreatedBy = _queryContext.UserId,
-            IsSearchable = !hidden,
-            IsSortable = !hidden,
-            IsFilterable = !hidden,
-            IsReportable = !hidden,
+            IsSearchable = !hidden && (defaults?.Searchable ?? true),
+            IsSortable = !hidden && (defaults?.Sortable ?? true),
+            IsFilterable = !hidden && (defaults?.Filterable ?? true),
+            IsReportable = !hidden && (defaults?.Reportable ?? true),
             IsEncrypted = isEncrypted,
+            IsHidden = hidden,
         };
 
         var (id, publicId) = await _fieldRepo.CreateAsync(field, ct);

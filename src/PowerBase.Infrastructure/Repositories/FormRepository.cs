@@ -725,6 +725,121 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
             new CommandDefinition(AppendFieldSql, new { formId, fieldId = fieldFid }, cancellationToken: ct));
     }
 
+    private const string DeleteReportElementsSql = """
+        UPDATE ra SET ra.TargetElementId = NULL
+        FROM meta.FormRuleAction ra
+        JOIN meta.FormElement fe ON fe.Id = ra.TargetElementId
+        WHERE fe.ElementType = 'Report' AND fe.ElementContent LIKE @pattern;
+
+        DELETE FROM meta.FormElement
+        WHERE ElementType = 'Report' AND ElementContent LIKE @pattern;
+        """;
+
+    public async Task DeleteReportElementsAsync(Guid reportPublicId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(DeleteReportElementsSql,
+            new { pattern = $"%{reportPublicId}%" }, cancellationToken: ct));
+    }
+
+    public async Task AppendSectionAsync(long formId, FormSection section, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        await conn.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        // Lands after the last section, on that section's page (null when the form isn't paged).
+        var last = await conn.QuerySingleOrDefaultAsync<(int? DisplayOrder, long? FormPageId)>(new CommandDefinition(
+            "SELECT TOP 1 DisplayOrder, FormPageId FROM meta.FormSection WHERE FormId = @formId ORDER BY DisplayOrder DESC",
+            new { formId }, tx, cancellationToken: ct));
+        var formPageId = last.FormPageId;
+
+        var sectionId = await conn.QuerySingleAsync<long>(new CommandDefinition(InsertSectionSql, new
+        {
+            publicId        = AsSuppliedPublicId(section.PublicId),
+            formId,
+            name            = section.Name,
+            columnCount     = section.Blocks.Count,
+            columnWidths    = (string?)null,
+            isCollapsed     = section.IsCollapsed,
+            displayOrder    = (last.DisplayOrder ?? 0) + 1,
+            gridCols        = section.GridCols,
+            formPageId,
+            isPinned        = section.IsPinned,
+            backgroundColor = section.BackgroundColor,
+            backgroundType  = section.BackgroundType,
+            backgroundImage = section.BackgroundImage,
+            borderColor     = section.BorderColor,
+            borderWidth     = section.BorderWidth,
+            showDividers    = section.ShowDividers,
+            dividerColor    = section.DividerColor,
+            dividerWidthPx  = section.DividerWidthPx,
+        }, tx, cancellationToken: ct));
+
+        for (var bi = 0; bi < section.Blocks.Count; bi++)
+        {
+            var block = section.Blocks[bi];
+            var blockId = await conn.QuerySingleAsync<long>(new CommandDefinition(InsertBlockSql, new
+            {
+                publicId        = AsSuppliedPublicId(block.PublicId),
+                formSectionId   = sectionId,
+                heading         = block.Heading,
+                backgroundColor = block.BackgroundColor,
+                width           = block.Width,
+                displayOrder    = bi + 1,
+                colStart        = block.ColStart,
+                colSpan         = block.ColSpan,
+                backgroundType  = block.BackgroundType,
+                backgroundImage = block.BackgroundImage,
+                dividerMode     = block.DividerMode,
+                dividerColor    = block.DividerColor,
+                dividerWidthPx  = block.DividerWidthPx,
+            }, tx, cancellationToken: ct));
+
+            for (var ei = 0; ei < block.Elements.Count; ei++)
+            {
+                var el = block.Elements[ei];
+                await conn.ExecuteAsync(new CommandDefinition(InsertElementSql, new
+                {
+                    publicId           = AsSuppliedPublicId(el.PublicId),
+                    formSectionId      = sectionId,
+                    formSectionBlockId = blockId,
+                    appFieldId         = el.AppFieldId,
+                    elementType        = el.ElementType,
+                    elementContent     = el.ElementContent,
+                    labelMode          = el.LabelMode,
+                    customLabel        = el.CustomLabel,
+                    showOnAdd          = el.ShowOnAdd,
+                    showOnEdit         = el.ShowOnEdit,
+                    showOnView         = el.ShowOnView,
+                    widthMode          = el.WidthMode,
+                    widthValue         = el.WidthValue,
+                    helpTextOverride   = el.HelpTextOverride,
+                    isReadOnly         = el.IsReadOnly,
+                    isRequired         = el.IsRequired,
+                    displayAs          = el.DisplayAs,
+                    displayOrder       = ei + 1,
+                    colStart           = el.ColStart,
+                    rowStart           = el.RowStart,
+                    colSpan            = el.ColSpan,
+                    rowSpan            = el.RowSpan,
+                    groupId            = el.GroupId,
+                    cloneGroupId       = el.CloneGroupId,
+                    formPageId,
+                    textStyle          = el.TextStyle,
+                    backgroundColor    = el.BackgroundColor,
+                    borderColor        = el.BorderColor,
+                    borderWidth        = el.BorderWidth,
+                    contentWidthMode   = el.ContentWidthMode,
+                    contentWidthValue  = el.ContentWidthValue,
+                    contentWidthUnit   = el.ContentWidthUnit,
+                }, tx, cancellationToken: ct));
+            }
+        }
+
+        await tx.CommitAsync(ct);
+    }
+
     public async Task<(long Id, Guid PublicId)> DuplicateAsync(Guid sourcePublicId, string newName, long userId, CancellationToken ct = default)
     {
         var source = await GetByPublicIdAsync(sourcePublicId, ct);
