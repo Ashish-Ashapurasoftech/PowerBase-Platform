@@ -35,7 +35,6 @@ public partial class PipelineEngine : IPipelineEngine
     /// have no compute-on-read (formula) fields — only encrypted-field in-memory filtering.</summary>
     private static readonly Dictionary<long, object?> EmptyComputedValues = new();
 
-
     /// <summary>Computes Formula/Lookup/Summary values for rows read by a step (they have no stored
     /// column). Returns null when the table has none or the projectors are unavailable.</summary>
     private async Task<IReadOnlyList<IReadOnlyDictionary<long, object?>>?> ProjectComputedAsync(
