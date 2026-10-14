@@ -519,6 +519,34 @@ public class PipelineFormulaFieldTests
         Assert.False(HasCondition(h.CapturedFilter, FormulaFid));
     }
 
+    [Theory]
+    [InlineData("contains", "contains")]
+    [InlineData("not-contains", "notContains")]
+    [InlineData("starts-with", "startsWith")]
+    [InlineData("ends-with", "endsWith")]
+    public async Task SearchRecords_TextPatternFilter_SendsPercentUnderscoreAndBracketAsText(string uiOperator, string dbOperator)
+    {
+        var h = new EngineHarness("Formula_Text");
+        h.SqlReturns(new List<IReadOnlyDictionary<string, object?>>(), "Formula_Text");
+
+        await h.RunStepAsync(SearchStep("fid_6", uiOperator, "50%_off[1]"));
+
+        var condition = h.CapturedFilter!.Nodes.Select(n => n.Condition).Single(c => c != null && c.FieldId == NameFid)!;
+        Assert.Equal(dbOperator, condition.Operator);
+        Assert.Equal("50[%][_]off[[]1]", condition.Value);
+    }
+
+    [Fact]
+    public async Task SearchRecords_EqualsFilter_IsNotEscaped()
+    {
+        var h = new EngineHarness("Formula_Text");
+        h.SqlReturns(new List<IReadOnlyDictionary<string, object?>>(), "Formula_Text");
+
+        await h.RunStepAsync(SearchStep("fid_6", "is", "50%_off"));
+
+        Assert.Equal("50%_off", h.CapturedFilter!.Nodes.Select(n => n.Condition).Single(c => c != null && c.FieldId == NameFid)!.Value);
+    }
+
     [Fact]
     public async Task SearchRecords_MaxResultsAppliesAfterFormulaFilter()
     {

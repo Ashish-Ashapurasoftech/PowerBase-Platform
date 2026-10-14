@@ -99,12 +99,16 @@ constraint problem). `read = inserted + updated + skipped + errored`. A bad row 
 
 #### Which columns a table is offered
 
-For every file import, and every table, a destination table is offered only the file columns that **fit it**: the heading matches one of the table's importable
-fields (ignoring case, spaces, underscores and punctuation, so `Employee ID` = `employee_id`; Record ID#, system, formula and unsupported fields never match) **and** the
-data fits the field's type. The server decides (`ImportColumnFit`, `POST import-files/{fileId}/column-fit`, one call per table for all its sheets): it reads the first 200 data rows
-of each sheet and tries every filled cell with the run's own conversion and format checks (max length, regex, email / phone / URL); one failing cell hides the column, blank cells
-are ignored, and a column with no filled cell fits. The screen lists a note such as "3 columns hidden" with the reason for each; there is no override. A saved mapping is never dropped
-by this. Formulas and virtual columns can still use every column of the sheet. If the check cannot be made, every column is listed and the run reports rows that do not convert.
+Every column of the file is listed as a source, so any of them can be mapped by hand. What is mapped **by itself** is a column whose heading matches one of the table's importable fields (ignoring case, spaces, underscores and punctuation, so
+`Employee ID` = `employee_id`; Record ID#, system, formula and unsupported fields never match) **and** whose data fits that field's type. What a column can be mapped to **by hand** is every field its data fits, whatever its heading says
+(a column of numbers goes to a number or a text field, not to a date or a checkbox). The server decides (`ImportColumnFit`, `POST import-files/{fileId}/column-fit`, one call per table for all its sheets; each column answers with `fieldFid` /
+`fits` for its heading's field and `fitsFields` for the rest): it reads the first 200 data rows of each sheet and tries every filled cell with the run's own conversion and format checks (max length, regex, email / phone / URL); one failing
+cell takes the field out, blank cells are ignored, and a column with no filled cell fits every field. Fields of one type with no format share one answer, so a table with hundreds of fields costs a few checks per column.
+A saved mapping is never dropped by this. Formulas and virtual columns can use every column. If the check cannot be made, every column and every field is offered, and the run reports rows that do not convert.
+When a workbook is mapped **sheet by sheet** (below), a table is built from the columns whose heading matches one of its fields, so only those are used there.
+
+**Find each column by.** *Its heading*: a column is found again by its heading in each new file, so it can move, and it is mapped by name. *Its position*: a column is the one in the same place in every file, whatever its heading says (it can change).
+The columns are then named **Column 1, Column 2...** in the mapping, in formulas and in messages (`ImportFileColumns.NamedBy`), nothing is mapped by name, and the user maps each column to a field by hand. Sheets cannot be picked by field in this mode.
 
 #### Sheets mapped separately, per table
 
@@ -183,6 +187,34 @@ POST /tables/{tableId}/import-files                -> multipart "file"; returns 
 ```
 
 Repeating a start with the same client token returns the first run (`200`, `replayed: true`) instead of starting another.
+
+### Listing imports for a PowerFlow
+
+`GET /apps/{appId}/powerflow/import-templates?tableId={guid}&templateId={guid}&sourceKind={file|table}` (`PowerFlowImportTemplatesController`, its own handler; read-only, nothing of the import screen or the run API is used or changed).
+For a step that picks an import: choose the app, then a table, and list the imports that fill it. All query parameters are optional and are combined with **AND**:
+
+| Parameter | Keeps |
+|---|---|
+| `tableId` | imports that fill that table, as their first table or any other (a table of another app is a **404**) |
+| `templateId` | that import (an id that is no import of the app is an empty list) |
+| `sourceKind` | imports that read a `file` or a `table` (any case, surrounding spaces ignored; blank = no filter; anything else is a **400**, `sourceKind` in the errors) |
+
+Responses: **200** `{ "data": [ { templateId, name, importType, sourceKind, tableId, tableName, tableIds[], needsAttention, attentionReason } ] }`; **400** a malformed or empty (all-zero) `appId` / `tableId` / `templateId`, or a bad `sourceKind`; **401** not signed in;
+**403** not a member of the app; **404** a `tableId` of another app. The order of checks is: who may ask, then what was asked, then the data, so a stranger learns nothing from a validation message. `templateId` is what `POST /apps/{appId}/imports/{templateId}/run` takes.
+It does not recheck imports (`needsAttention` is as last saved or checked), changes nothing, and sends `Cache-Control: no-store`. An import whose saved options are damaged is still listed, with its first table only. The list is not paged (an app has few imports).
+
+#### Starting and following an import from a PowerFlow
+
+All in `PowerFlowImportTemplatesController`, which calls none of the import screen's endpoints. The run is started by the same code as the import run API (`StartImportRunHandler`), so it is checked, queued and reported the same way; only the file upload is folded into the same call.
+
+* `POST /apps/{appId}/powerflow/import-templates/{templateId}/run` - **multipart/form-data** (shows a file picker in Swagger). Fields: `file` (a CSV or Excel .xlsx; **required for a file import, not allowed for a table import**) and `notifyEmails` (optional, addresses separated by commas or semicolons; replaces the people saved on the import for this run).
+  Optional header `X-PowerBase-Client-Token` (up to 200 characters) makes a retry safe: the same token returns the same run (**200**, `replayed: true`) and the file sent again is discarded. Otherwise **202** `{ "data": { "runId", "replayed" } }`.
+  A table import needs no body at all (an empty form). A file import uploads the file to the import's first table (needs the right to add records there, like the screen), runs it, and deletes it when the run ends; if the run is refused the upload is removed at once.
+* `GET /apps/{appId}/powerflow/import-runs/{runId}` - status (`status`, `progress`, `rowsRead`, `inserted`, `updated`, `skipped`, `errored`, `unchanged`, times, `errorDetail`, `hasFeedback`), poll until `success`, `partial`, `failed` or `cancelled`. Counts only.
+* `GET /apps/{appId}/powerflow/import-runs/{runId}/feedback` - CSV of the rows that were not imported (the person who started the run, or an admin).
+
+Errors: **400** no file for a file import, a file for a table import, a wrong / empty / too large file, a bad address list, an empty id, an overlong token or a failed pre-run check (e.g. a merge field with duplicates); **401** not signed in; **403** not a member of the app or no permission on the import's tables;
+**404** no such import in the app; **409** already running. Checks run in this order: who may ask, what was sent, then the data.
 
 ## Operations
 

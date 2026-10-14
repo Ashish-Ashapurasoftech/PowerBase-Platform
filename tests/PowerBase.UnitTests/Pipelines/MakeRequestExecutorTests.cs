@@ -51,6 +51,28 @@ public class MakeRequestExecutorTests
         Assert.Equal("2", Assert.IsType<Dictionary<string, List<string>>>(captured["QueryParameters"])["page"].Single());
     }
 
+    [Fact] public async Task ResultCarriesTheSentUrlAndBodyParametersWithTheApiKeyRedacted()
+    {
+        var c = Config(); c.Method = "POST"; c.Body = "{\"name\":\"example\",\"tags\":[1,2]}";
+        c.AuthType = "API Key"; c.ApiKeyName = "api_key"; c.ApiKeyValue = "private-value"; c.ApiKeyPlacement = "Query params";
+        c.QueryParams.Add(new() { Key = "page", Value = "2" });
+        c.QueryParams.Add(new() { Key = "tag", Value = "a" });
+        c.QueryParams.Add(new() { Key = "tag", Value = "b" });
+
+        var result = await Executor().ExecuteAsync(c, Resolve, default);
+
+        Assert.Equal("2", result.RequestUrlParams!["page"]);
+        Assert.Equal(new[] { "a", "b" }, Assert.IsType<string[]>(result.RequestUrlParams["tag"]));
+        Assert.Equal("[REDACTED]", result.RequestUrlParams["api_key"]);
+        Assert.Equal("example", Assert.IsType<JsonElement>(result.RequestBodyParams!["name"]).GetString());
+        Assert.Equal(2, Assert.IsType<JsonElement>(result.RequestBodyParams["tags"]).GetArrayLength());
+    }
+    [Fact] public async Task GetRequestHasNoBodyParameters()
+    {
+        var result = await Executor().ExecuteAsync(Config(), Resolve, default);
+        Assert.Empty(result.RequestBodyParams!);
+        Assert.Empty(result.RequestUrlParams!);
+    }
     [Fact] public void QueryPrecedencePreservesUnchangedValues()
     {
         var c = Config(); c.BaseUrl += "?keep=yes&override=base"; c.Path = "records?override=path";

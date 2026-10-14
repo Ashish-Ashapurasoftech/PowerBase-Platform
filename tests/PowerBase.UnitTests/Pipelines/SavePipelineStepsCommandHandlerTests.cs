@@ -30,6 +30,39 @@ public class SavePipelineStepsCommandHandlerTests
     }
 
     [Fact]
+    public async Task HandleAsync_StaleEditorConfig_KeepsLearnedParameterNamesAndDoesNotDeactivate()
+    {
+        var pipelineId = 321L;
+        var pipelinePublicId = Guid.NewGuid();
+        var stepPublicId = Guid.NewGuid();
+        var rowVersion = new byte[] { 9 };
+        _pipelineRepo.GetIdByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>()).Returns(pipelineId);
+        _pipelineRepo.GetByPublicIdAsync(pipelinePublicId, Arg.Any<CancellationToken>())
+            .Returns(new Pipeline { Id = pipelineId, PublicId = pipelinePublicId, IsActive = true });
+        // A request reached the webhook while the editor was open: the server learned url/body parameter names.
+        _pipelineRepo.GetStepsByPipelineIdAsync(pipelineId, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>
+        {
+            new() { PublicId = stepPublicId, RefId = "ref_1", Type = "trigger", Subtype = "webhook", DisplayOrder = 0,
+                ConfigJson = "{\"methodType\":\"POST\",\"responseFields\":[{\"id\":\"url_params\"}],\"sampleUrlParamKeys\":[\"id\"],\"sampleBodyParamKeys\":[\"email\"]}" }
+        });
+        IEnumerable<PipelineStep> captured = null!;
+        bool deactivated = true;
+        await _pipelineRepo.SaveStepsAsync(pipelineId, Arg.Do<IEnumerable<PipelineStep>>(s => captured = s), rowVersion,
+            Arg.Do<bool>(d => deactivated = d), _uow.Transaction, Arg.Any<CancellationToken>());
+
+        // The editor still holds the config from before that request.
+        await _handler.HandleAsync(new SavePipelineStepsCommand(pipelinePublicId, new List<SavePipelineStepDto>
+        {
+            new() { PublicId = stepPublicId, RefId = "ref_1", Type = "trigger", Subtype = "webhook", IsValidated = true,
+                ConfigJson = "{\"methodType\":\"POST\",\"responseFields\":[]}" }
+        }, rowVersion), CancellationToken.None);
+
+        var stored = captured.Single().ConfigJson!;
+        stored.Should().Contain("sampleUrlParamKeys").And.Contain("\"id\"").And.Contain("sampleBodyParamKeys").And.Contain("\"email\"");
+        deactivated.Should().BeFalse("only server-learned names / the derived field list differ, so the step was not edited");
+    }
+
+    [Fact]
     public async Task HandleAsync_ValidHierarchy_ShouldFlattenAndPreserveBranchNames()
     {
         // Arrange

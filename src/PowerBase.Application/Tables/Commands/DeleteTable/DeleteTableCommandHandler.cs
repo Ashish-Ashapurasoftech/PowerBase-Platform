@@ -36,29 +36,53 @@ public class DeleteTableCommandHandler
     {
         var table = await _tableRepo.GetByPublicIdAsync(command.PublicId, ct);
 
-        // Fetch all fields to check for active pipeline dependencies
+        // Fetch all fields to check for pipeline dependencies (active or inactive)
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
-        var blockedFieldsErrors = new Dictionary<string, string[]>();
-        foreach (var field in fields)
+        // Any PowerFlow step (active or inactive) that names the table (trigger, search, create, copy records…) blocks the delete, whether or
+        // not the step lists individual fields. The field-level pass only adds which fields (by label) each step uses.
+        var tableSteps = await _pipelineRepo.GetActivePipelineStepsUsingTableAsync(table.PublicId, ct);
+        if (tableSteps.Count > 0)
         {
-            if (field.Fid.HasValue)
-            {
-                var activeReferences = await _pipelineRepo.GetActivePipelineReferencesForFieldAsync(field.Fid.Value, ct);
-                if (activeReferences.Any())
+            var fieldsByFid = fields.Where(f => f.Fid.HasValue).GroupBy(f => f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
+            var fieldRefs = await _pipelineRepo.GetActivePipelineReferencesForTableFieldsAsync(fields.Where(f => f.Fid.HasValue).ToList(), table.PublicId, ct);
+
+            var details = tableSteps
+                .GroupBy(s => s.PipelineName)
+                .Select(g =>
                 {
-                    var refDetails = string.Join("; ", activeReferences.Select(r => $"PowerFlow '{r.PipelineName}' (Step: '{r.StepLabel}')"));
-                    blockedFieldsErrors[field.Name] = new[] { $"Cannot delete table because field '{field.Name}' is referenced in active PowerFlows: {refDetails}" };
-                }
-            }
+                    var stepLines = g.Select(s => s.StepLabel).Distinct().Select(stepLabel =>
+                    {
+                        var labels = fieldRefs
+                            .Where(r => r.PipelineName == g.Key && r.StepLabel == stepLabel)
+                            .Select(r => r.Fid).Distinct()
+                            .Select(fid => fieldsByFid[fid])
+                            .Select(f => string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label)
+                            .Distinct()
+                            .ToList();
+                        return labels.Count > 0 ? $"'{stepLabel}' (fields: {string.Join(", ", labels)})" : $"'{stepLabel}'";
+                    });
+                    return $"PowerFlow '{g.Key}' (Step: {string.Join(", ", stepLines)})";
+                });
+            throw new ValidationException(new Dictionary<string, string[]>
+            {
+                { "Table", new[] { $"Cannot delete table '{table.Name}' because it is used in PowerFlows. {string.Join("; ", details)}" } }
+            });
         }
 
-        if (blockedFieldsErrors.Any())
-        {
-            throw new ValidationException(blockedFieldsErrors);
-        }
+        if (await _pipelineRepo.GetCrossAccountTriggerCountAsync(table.PublicId, null, ct) > 0)
+            throw new ValidationException(new Dictionary<string, string[]>
+            {
+                { "Table", new[] { $"Cannot delete table '{table.Name}' because a PowerFlow in another account is triggered by it." } }
+            });
 
         // Fetch and force-delete all relationships involving this table to clean up orphaned fields
         var relationships = await _relRepo.ListByTableAsync(table.Id, ct);
+
+        // Deleting a relationship also removes lookup / summary fields on the OTHER table — check every relationship
+        // before removing any, so a PowerFlow using one of those fields never leaves the delete half done.
+        foreach (var rel in relationships)
+            await _deleteRelationshipHandler.EnsurePipelinesDoNotUseAsync(rel, table.Id, ct);
+
         foreach (var rel in relationships)
         {
             // The deleted table's own columns go with it; but when it is the PARENT, the child table lives on, so its

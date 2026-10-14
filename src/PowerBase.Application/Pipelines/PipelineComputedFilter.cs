@@ -5,6 +5,7 @@ using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Constants;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Common.Filtering;
 
 namespace PowerBase.Application.Pipelines;
 
@@ -107,11 +108,13 @@ public static class PipelineComputedFilter
     private static object? ReadValue((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p,
         long fieldId, AppField? field)
     {
+        // A Lookup of an encrypted parent field arrives as decrypted text too: compare it as the type it presents.
         if (field != null && PhysicalNaming.IsComputedTypeCode(field.TypeCode))
-            return p.Computed.TryGetValue(fieldId, out var cv) ? cv : null;
+            return p.Computed.TryGetValue(fieldId, out var cv) ? StoredValueCoercion.ToFieldType(cv, field) : null;
         if (field?.TypeCode == "Reference" && p.Computed.TryGetValue(fieldId, out var label) && label is not null)
             return label;
-        return ReadRaw(p, fieldId, field);
+        // An encrypted field is decrypted to text: compare it as the field's own type (number, date, checkbox).
+        return StoredValueCoercion.ToFieldType(ReadRaw(p, fieldId, field), field);
     }
 
     private static object? ReadRaw((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p,
@@ -136,6 +139,9 @@ public static class PipelineComputedFilter
     {
         var text = ToText(val);
         var needle = operand ?? string.Empty;
+        // The value of a contains / starts / ends condition is escaped for SQL LIKE ("a_b" is sent as "a[_]b"); here it is
+        // compared as plain text, so the escapes are taken off again.
+        var likeNeedle = UnescapeLike(needle);
         return op switch
         {
             "isEmpty"       => IsBlank(val),
@@ -146,10 +152,13 @@ public static class PipelineComputedFilter
             "gte"           => Compare(val, operand) >= 0,
             "lt"            => Compare(val, operand) < 0,
             "lte"           => Compare(val, operand) <= 0,
-            "contains"      => text?.Contains(needle, StringComparison.OrdinalIgnoreCase) == true,
-            "notContains"   => text?.Contains(needle, StringComparison.OrdinalIgnoreCase) != true,
-            "startsWith"    => text?.StartsWith(needle, StringComparison.OrdinalIgnoreCase) == true,
-            "notStartsWith" => text?.StartsWith(needle, StringComparison.OrdinalIgnoreCase) != true,
+            "contains"      => text?.Contains(likeNeedle, StringComparison.OrdinalIgnoreCase) == true,
+            "notContains"   => text?.Contains(likeNeedle, StringComparison.OrdinalIgnoreCase) != true,
+            "startsWith"    => text?.StartsWith(likeNeedle, StringComparison.OrdinalIgnoreCase) == true,
+            "notStartsWith" => text?.StartsWith(likeNeedle, StringComparison.OrdinalIgnoreCase) != true,
+            // Was missing: an unknown operator falls through to "true", so "ends with" matched every record.
+            "endsWith"      => text?.EndsWith(likeNeedle, StringComparison.OrdinalIgnoreCase) == true,
+            "notEndsWith"   => text?.EndsWith(likeNeedle, StringComparison.OrdinalIgnoreCase) != true,
             "wildcard"      => text is not null && Wildcard(text, needle),
             "notWildcard"   => text is null || !Wildcard(text, needle),
             "includes"      => Members(val).Any(m => string.Equals(m, needle.Trim(), StringComparison.OrdinalIgnoreCase)),
@@ -206,9 +215,29 @@ public static class PipelineComputedFilter
         }
     }
 
-    private static bool Wildcard(string text, string pattern) =>
-        Regex.IsMatch(text, "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$",
-            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+    /// <summary>Takes off the SQL LIKE escapes a contains / starts / ends value carries ("[%]" "[_]" "[[]"); the reverse of the escaping
+    /// in <see cref="CopyRecordsDefinition.ParseQuery"/> and of <see cref="EscapeLike"/>.</summary>
+    public static string UnescapeLike(string value) =>
+        value.Contains('[') ? value.Replace("[%]", "%").Replace("[_]", "_").Replace("[[]", "[") : value;
+
+    /// <summary>Escapes a plain-text value for SQL LIKE, so "%", "_" and "[" match themselves rather than acting as wildcards.</summary>
+    public static string EscapeLike(string value) =>
+        value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
+
+    /// <summary>Quickbase's WC/XWC wildcard: '*' any run of characters, '?' one character, '\*' / '\?' the character itself.</summary>
+    private static bool Wildcard(string text, string pattern)
+    {
+        var regex = new System.Text.StringBuilder("^");
+        for (var i = 0; i < pattern.Length; i++)
+        {
+            var c = pattern[i];
+            if (c == '\\' && i + 1 < pattern.Length && pattern[i + 1] is '*' or '?') { regex.Append(Regex.Escape(pattern[++i].ToString())); }
+            else if (c == '*') regex.Append(".*");
+            else if (c == '?') regex.Append('.');
+            else regex.Append(Regex.Escape(c.ToString()));
+        }
+        return Regex.IsMatch(text, regex.Append('$').ToString(), RegexOptions.IgnoreCase | RegexOptions.Singleline);
+    }
 
     private static IEnumerable<string> Members(object? v)
     {

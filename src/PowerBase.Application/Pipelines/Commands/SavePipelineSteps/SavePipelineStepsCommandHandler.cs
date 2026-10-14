@@ -123,6 +123,13 @@ public class SavePipelineStepsCommandHandler
         var rootOrder = 0;
         FlattenSteps(command.Steps, null, null, ref rootOrder, flatList);
 
+        // Parameter / response field names learned from real traffic (Incoming Request, Make Request) are written by the
+        // server while the editor is open; the editor's copy of the config can predate them, so keep them across the save.
+        var savedConfigs = dbSteps.Where(s => !s.IsDeleted).GroupBy(s => s.PublicId).ToDictionary(g => g.Key, g => g.First().ConfigJson);
+        foreach (var step in flatList)
+            if (savedConfigs.TryGetValue(step.PublicId, out var savedConfig))
+                step.ConfigJson = PipelineSampleKeys.PreserveOnSave(savedConfig, step.ConfigJson);
+
         bool stepsChanged = StepsConfigChanged(dbSteps.ToList(), flatList);
         bool shouldDeactivate = pipeline.IsActive && stepsChanged;
 
@@ -341,8 +348,9 @@ public class SavePipelineStepsCommandHandler
         if (string.IsNullOrEmpty(json1) || string.IsNullOrEmpty(json2)) return false;
         try
         {
-            var node1 = JsonNode.Parse(json1);
-            var node2 = JsonNode.Parse(json2);
+            // Learned field names and the output list derived from them are not an edit of the step.
+            var node1 = PipelineSampleKeys.WithoutDerived(JsonNode.Parse(json1));
+            var node2 = PipelineSampleKeys.WithoutDerived(JsonNode.Parse(json2));
             return JsonNode.DeepEquals(node1, node2);
         }
         catch
