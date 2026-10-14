@@ -1574,9 +1574,31 @@ public partial class PipelineEngine : IPipelineEngine
             response_headers = result.ResponseHeaders,
             request_url = result.RequestUrl,
             request_headers = result.RequestHeaders,
+            url_params = result.RequestUrlParams ?? new Dictionary<string, object?>(),
+            body_params = result.RequestBodyParams ?? new Dictionary<string, object?>(),
             body = new { text = result.OutputJson }
         };
+        await RecordResponseFieldNamesAsync(step, result.OutputJson, ct);
         return result.OutputJson;
+    }
+
+    /// <summary>Remembers the top-level field names of a JSON object response, so the pipeline builder offers them to later
+    /// steps after the request has run once — no schema sample needed. Best effort: never fails the step.</summary>
+    private async Task RecordResponseFieldNamesAsync(PipelineStep step, string outputJson, CancellationToken ct)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(outputJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return;
+            var names = document.RootElement.EnumerateObject().Select(p => p.Name).ToList();
+            var updated = PipelineSampleKeys.Merge(step.ConfigJson, new Dictionary<string, IEnumerable<string>> { [PipelineSampleKeys.ResponseFields] = names });
+            if (updated != null && await _pipelineRepo.UpdateStepConfigJsonAsync(step.Id, updated, step.RowVersion, ct))
+                step.ConfigJson = updated;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not record Make Request response field names for step {StepId}", step.Id);
+        }
     }
 
     private static byte[] ComputeSha256Hash(string rawData)
