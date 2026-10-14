@@ -188,6 +188,34 @@ POST /tables/{tableId}/import-files                -> multipart "file"; returns 
 
 Repeating a start with the same client token returns the first run (`200`, `replayed: true`) instead of starting another.
 
+### Listing imports for a PowerFlow
+
+`GET /apps/{appId}/powerflow/import-templates?tableId={guid}&templateId={guid}&sourceKind={file|table}` (`PowerFlowImportTemplatesController`, its own handler; read-only, nothing of the import screen or the run API is used or changed).
+For a step that picks an import: choose the app, then a table, and list the imports that fill it. All query parameters are optional and are combined with **AND**:
+
+| Parameter | Keeps |
+|---|---|
+| `tableId` | imports that fill that table, as their first table or any other (a table of another app is a **404**) |
+| `templateId` | that import (an id that is no import of the app is an empty list) |
+| `sourceKind` | imports that read a `file` or a `table` (any case, surrounding spaces ignored; blank = no filter; anything else is a **400**, `sourceKind` in the errors) |
+
+Responses: **200** `{ "data": [ { templateId, name, importType, sourceKind, tableId, tableName, tableIds[], needsAttention, attentionReason } ] }`; **400** a malformed or empty (all-zero) `appId` / `tableId` / `templateId`, or a bad `sourceKind`; **401** not signed in;
+**403** not a member of the app; **404** a `tableId` of another app. The order of checks is: who may ask, then what was asked, then the data, so a stranger learns nothing from a validation message. `templateId` is what `POST /apps/{appId}/imports/{templateId}/run` takes.
+It does not recheck imports (`needsAttention` is as last saved or checked), changes nothing, and sends `Cache-Control: no-store`. An import whose saved options are damaged is still listed, with its first table only. The list is not paged (an app has few imports).
+
+#### Starting and following an import from a PowerFlow
+
+All in `PowerFlowImportTemplatesController`, which calls none of the import screen's endpoints. The run is started by the same code as the import run API (`StartImportRunHandler`), so it is checked, queued and reported the same way; only the file upload is folded into the same call.
+
+* `POST /apps/{appId}/powerflow/import-templates/{templateId}/run` - **multipart/form-data** (shows a file picker in Swagger). Fields: `file` (a CSV or Excel .xlsx; **required for a file import, not allowed for a table import**) and `notifyEmails` (optional, addresses separated by commas or semicolons; replaces the people saved on the import for this run).
+  Optional header `X-PowerBase-Client-Token` (up to 200 characters) makes a retry safe: the same token returns the same run (**200**, `replayed: true`) and the file sent again is discarded. Otherwise **202** `{ "data": { "runId", "replayed" } }`.
+  A table import needs no body at all (an empty form). A file import uploads the file to the import's first table (needs the right to add records there, like the screen), runs it, and deletes it when the run ends; if the run is refused the upload is removed at once.
+* `GET /apps/{appId}/powerflow/import-runs/{runId}` - status (`status`, `progress`, `rowsRead`, `inserted`, `updated`, `skipped`, `errored`, `unchanged`, times, `errorDetail`, `hasFeedback`), poll until `success`, `partial`, `failed` or `cancelled`. Counts only.
+* `GET /apps/{appId}/powerflow/import-runs/{runId}/feedback` - CSV of the rows that were not imported (the person who started the run, or an admin).
+
+Errors: **400** no file for a file import, a file for a table import, a wrong / empty / too large file, a bad address list, an empty id, an overlong token or a failed pre-run check (e.g. a merge field with duplicates); **401** not signed in; **403** not a member of the app or no permission on the import's tables;
+**404** no such import in the app; **409** already running. Checks run in this order: who may ask, what was sent, then the data.
+
 ## Operations
 
 * `Imports:RetentionDays` (appsettings, optional, default 30) sets how long details files and uploaded source files are kept. Migration `071` adds the unchanged counters, the per-table details path, the files-expired marker and the indexes the history and clean-up read.
