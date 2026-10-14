@@ -147,7 +147,7 @@ public class TablesController : ControllerBase
         var result = await _updateHandler.HandleAsync(new UpdateTableCommand(
             publicId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon,
             request.DefaultRecordPickerField1Id, request.DefaultRecordPickerField2Id, request.DefaultRecordPickerField3Id,
-            request.IsShowInBar, request.CustomDataRule, request.CustomDataRuleEnabled), ct);
+            request.IsShowInBar, request.CustomDataRule, request.CustomDataRuleEnabled, request.AutoSaveOnLeave), ct);
         return Ok(new ApiResponse<TableSummaryResponse>(MapToSummaryResponse(result)));
     }
 
@@ -243,6 +243,7 @@ public class TablesController : ControllerBase
         KeyFieldFid = ResolveKeyFieldFid(r.Table.KeyFieldId, r.Fields),
         RecordCount = r.Table.RecordCount,
         IsShowInBar = r.Table.IsShowInBar,
+        IsAutoSaveOnLeave = r.Table.IsAutoSaveOnLeave,
         CreatedOn = r.Table.CreatedOn,
         Fields = r.Fields.Select(f => MapFieldToResponse(f, r.SummarySourceSettings.GetValueOrDefault(f.Id))).ToList(),
     };
@@ -302,6 +303,7 @@ public class TablesController : ControllerBase
         DefaultRecordPickerField3Id = r.Table.DefaultRecordPickerField3Id,
         CustomDataRule = r.Table.CustomDataRule,
         IsCustomDataRuleEnabled = r.Table.IsCustomDataRuleEnabled,
+        IsAutoSaveOnLeave = r.Table.IsAutoSaveOnLeave,
         Fields = r.Fields.Select(f => new TableAdvancedSettingsFieldResponse
         {
             Id = f.Id,

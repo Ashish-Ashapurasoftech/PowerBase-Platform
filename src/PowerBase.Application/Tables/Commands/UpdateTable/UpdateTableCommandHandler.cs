@@ -111,6 +111,12 @@ public class UpdateTableCommandHandler
         if (table.CustomDataRule != command.CustomDataRule || table.IsCustomDataRuleEnabled != command.CustomDataRuleEnabled)
             await _tableRepo.UpdateCustomDataRuleAsync(command.TablePublicId, command.CustomDataRule, command.CustomDataRuleEnabled, ct);
 
+        if (command.AutoSaveOnLeave is { } autoSave && table.IsAutoSaveOnLeave != autoSave)
+        {
+            await _tableRepo.SetAutoSaveOnLeaveAsync(command.TablePublicId, autoSave, ct);
+            changes.Add($"Auto save when redirected away turned {(autoSave ? "on" : "off")}");
+        }
+
         if (affected > 0 && changes.Count > 0)
         {
             var logMessage = $"Table updated: {string.Join(", ", changes)}";

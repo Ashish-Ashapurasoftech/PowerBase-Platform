@@ -342,11 +342,33 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                 WHERE FormSectionId = @lastSectionId
                   AND (FormSectionBlockId = @lastBlockId OR (@lastBlockId IS NULL AND FormSectionBlockId IS NULL))
             );
+            -- Grid-placed blocks (every element already has a row): put the new field on the first free row under
+            -- everything in the block, at the block's own columns. Left null for legacy/unplaced blocks - the form
+            -- designer derives their positions from the element order - and for an empty block.
+            DECLARE @blockColStart INT, @blockColSpan INT;
+            SELECT @blockColStart = ColStart, @blockColSpan = ColSpan FROM meta.FormSectionBlock WHERE Id = @lastBlockId;
+            DECLARE @unplaced INT = (
+                SELECT COUNT(*) FROM meta.FormElement
+                WHERE FormSectionId = @lastSectionId
+                  AND (FormSectionBlockId = @lastBlockId OR (@lastBlockId IS NULL AND FormSectionBlockId IS NULL))
+                  AND RowStart IS NULL
+            );
+            DECLARE @nextRow INT = (
+                SELECT MAX(RowStart + ISNULL(RowSpan, 1))
+                FROM meta.FormElement
+                WHERE FormSectionId = @lastSectionId
+                  AND (FormSectionBlockId = @lastBlockId OR (@lastBlockId IS NULL AND FormSectionBlockId IS NULL))
+            );
+            DECLARE @placed BIT = CASE WHEN @unplaced = 0 AND @nextRow IS NOT NULL
+                                        AND @blockColStart IS NOT NULL AND @blockColSpan IS NOT NULL THEN 1 ELSE 0 END;
             INSERT INTO meta.FormElement
                 (FormSectionId, FormSectionBlockId, AppFieldId, LabelMode,
-                 ShowOnAdd, ShowOnEdit, ShowOnView, WidthMode, IsReadOnly, IsRequired, DisplayOrder)
+                 ShowOnAdd, ShowOnEdit, ShowOnView, WidthMode, IsReadOnly, IsRequired, DisplayOrder,
+                 ColStart, RowStart, ColSpan, RowSpan)
             VALUES
-                (@lastSectionId, @lastBlockId, @fieldId, 'Default', 1, 1, 1, 'Auto', 0, 0, @nextOrder);
+                (@lastSectionId, @lastBlockId, @fieldId, 'Default', 1, 1, 1, 'Auto', 0, 0, @nextOrder,
+                 CASE WHEN @placed = 1 THEN @blockColStart END, CASE WHEN @placed = 1 THEN @nextRow END,
+                 CASE WHEN @placed = 1 THEN @blockColSpan END, CASE WHEN @placed = 1 THEN 1 END);
         END
         """;
 

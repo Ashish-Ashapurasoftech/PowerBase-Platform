@@ -617,6 +617,11 @@ public sealed class ImportPlanBuilder(
         foreach (var n in group.Nodes)
         {
             var condition = n.Condition;
+            if (condition is { Operator: "isNotCurrentUser" })
+            {
+                nodes.Add(new FilterNode { Group = RunReportQueryHandler.NotCurrentUserGroup(condition.FieldId, isUserList: false, user.UserId) });
+                continue;
+            }
             if (condition is { Operator: "isCurrentUser" })
                 condition = new FilterCondition { FieldId = condition.FieldId, Operator = "eq", Value = user.UserId.ToString() };
             else if (condition is { Value.Length: > 0 } && userFids.Contains(condition.FieldId)

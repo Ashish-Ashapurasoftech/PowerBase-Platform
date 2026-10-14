@@ -13,7 +13,7 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
     private const string SelectColumns = """
         Id, PublicId, AppId, Name, Alias, SingularLabel, PluralLabel, Description,
         PhysicalTableName, DefaultReportSettings, DisplayFieldId, KeyFieldId, DefaultRecordPickerField1Id, DefaultRecordPickerField2Id, DefaultRecordPickerField3Id, RecordCount, IsShowInBar, IsSystem, DisplayOrder,
-        IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion, Icon, CustomDataRule, IsCustomDataRuleEnabled
+        IsDeleted, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy, DeletedOn, DeletedBy, RowVersion, Icon, CustomDataRule, IsCustomDataRuleEnabled, IsAutoSaveOnLeave
         """;
 
     private const string GetByIdSql = $"""
@@ -181,6 +181,14 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
+    private const string SetAutoSaveOnLeaveSql = """
+        UPDATE meta.AppTable
+        SET IsAutoSaveOnLeave = @isEnabled,
+            ModifiedOn        = SYSUTCDATETIME(),
+            ModifiedBy        = @modifiedBy
+        WHERE PublicId = @publicId AND IsDeleted = 0
+        """;
+
     private const string SoftDeleteSql = """
         UPDATE meta.AppTable
         SET IsDeleted = 1,
@@ -280,7 +288,8 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
                 appId,
                 search = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim()}%",
                 isShowInBar,
-                offset = (page - 1) * pageSize,
+                // long math: an unbounded pageSize on a high page must not overflow the int offset.
+                offset = (int)Math.Min((long)(page - 1) * pageSize, int.MaxValue),
                 pageSize
             }, cancellationToken: ct));
         return rows.ToList();
@@ -411,6 +420,19 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
             new CommandDefinition(UpdateCustomDataRuleSql, new
             {
                 publicId, customDataRule, isEnabled,
+                modifiedBy = QueryContext.UserId,
+            }, cancellationToken: ct));
+        if (affected == 0)
+            throw new NotFoundException("Table", publicId);
+    }
+
+    public async Task SetAutoSaveOnLeaveAsync(Guid publicId, bool isEnabled, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var affected = await connection.ExecuteAsync(
+            new CommandDefinition(SetAutoSaveOnLeaveSql, new
+            {
+                publicId, isEnabled,
                 modifiedBy = QueryContext.UserId,
             }, cancellationToken: ct));
         if (affected == 0)

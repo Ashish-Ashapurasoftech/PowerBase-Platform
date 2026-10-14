@@ -21,5 +21,7 @@ public record UpdateTableCommand(
     /// <summary>The "Turn custom data rules on?" toggle. While false, CustomDataRule is stored
     /// as-is — not even syntax-validated — and never evaluated on record writes (see
     /// <c>PowerBase.Application.Records.CustomDataRuleValidator</c>).</summary>
-    bool CustomDataRuleEnabled = false
+    bool CustomDataRuleEnabled = false,
+    /// <summary>Null = leave unchanged; otherwise sets the "Auto save when redirected away from the page" flag.</summary>
+    bool? AutoSaveOnLeave = null
 );

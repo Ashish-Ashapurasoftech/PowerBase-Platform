@@ -17,7 +17,7 @@ public static class CommonReportValidationHelpers
     {
         "eq", "ne", "contains", "notContains", "startsWith", "notStartsWith", "endsWith", "notEndsWith",
         "gt", "gte", "lt", "lte", "in", "notIn", "isEmpty", "isNotEmpty", "date_eq",
-        "wildcard", "notWildcard", "isCurrentUser", "includes", "notIncludes",
+        "wildcard", "notWildcard", "isCurrentUser", "isNotCurrentUser", "includes", "notIncludes",
         // Date-only range-containment operators ("is during" / "is not during") — resolved
         // server-side into a literal {gte,lte}/{lt,gt} pair, same as pastDays/futureDays are
         // resolved into a literal date; see RunReportQueryHandler.ResolveDateCondition.
@@ -31,6 +31,8 @@ public static class CommonReportValidationHelpers
     public static readonly HashSet<string> FieldComparableOperators = new(StringComparer.OrdinalIgnoreCase)
     {
         "eq", "ne", "gt", "gte", "lt", "lte", "date_eq",
+        // "contains the user in the field" — only offered on user fields (the UI gates it by type).
+        "contains", "notContains", "wildcard", "notWildcard",
     };
 
     /// <summary>Base aggregate functions valid everywhere; Summary/Chart validators layer the
