@@ -59,9 +59,16 @@ public class DeleteFieldCommandHandler
         // Dependency Check: Pipeline Field Lock
         if (field.Fid.HasValue)
         {
+            // Another account's PowerFlow can't be deactivated from here, so this blocks even a forced delete.
+            if (await _pipelineRepo.GetCrossAccountTriggerCountAsync(table.PublicId, new[] { field.Fid.Value }, ct) > 0)
+                throw new ValidationException(new Dictionary<string, string[]>
+                {
+                    { "Field", new[] { $"Cannot delete field '{(string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label)}' because a PowerFlow in another account is triggered through it." } }
+                });
+
             if (command.Force)
             {
-                var pipelinesToDeactivate = await _pipelineRepo.GetActivePipelinesReferencingFieldAsync(field.Fid.Value, ct);
+                var pipelinesToDeactivate = await _pipelineRepo.GetActivePipelinesReferencingFieldAsync(field, table.PublicId, ct);
                 
                 await _uow.BeginAsync(ct);
                 try
@@ -100,13 +107,13 @@ public class DeleteFieldCommandHandler
             }
             else
             {
-                var activeReferences = await _pipelineRepo.GetActivePipelineReferencesForFieldAsync(field.Fid.Value, ct);
+                var activeReferences = await _pipelineRepo.GetActivePipelineReferencesForFieldAsync(field, table.PublicId, ct);
                 if (activeReferences.Any())
                 {
                     var refDetails = string.Join("; ", activeReferences.Select(r => $"PowerFlow '{r.PipelineName}' (Step: '{r.StepLabel}')"));
                     throw new ValidationException(new Dictionary<string, string[]>
                     {
-                        { "Field", new[] { $"Cannot delete field '{field.Name}' because it is referenced in the following active PowerFlows: {refDetails}" } }
+                        { "Field", new[] { $"Cannot delete field '{(string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label)}' because it is referenced in the following PowerFlows: {refDetails}" } }
                     });
                 }
             }

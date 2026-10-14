@@ -1,6 +1,7 @@
 using Dapper;
 using System.Data;
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Pipelines;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Infrastructure.Persistence;
@@ -282,24 +283,6 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
           AND (@pipelineId IS NULL OR r.PipelineId = @pipelineId)
           AND (@fromDate IS NULL OR r.StartedOn >= @fromDate)
           AND (@toDate IS NULL OR r.StartedOn <= @toDate)
-        """;
-
-    private const string GetActivePipelineReferencesForFieldSql = """
-        SELECT p.Name AS PipelineName, s.Label AS StepLabel
-        FROM meta.PipelineStep s
-        JOIN meta.Pipeline p ON s.PipelineId = p.Id
-        WHERE p.IsActive = 1 AND p.IsDeleted = 0 AND s.IsDeleted = 0
-          AND s.ConfigJson LIKE '%fid[_]' + CAST(@fid AS VARCHAR(10)) + '%'
-          AND s.ConfigJson NOT LIKE '%fid[_]' + CAST(@fid AS VARCHAR(10)) + '[0-9]%'
-        """;
-
-    private const string GetActivePipelinesReferencingFieldSql = $"""
-        SELECT {PipelineColumns}
-        FROM meta.PipelineStep s
-        JOIN meta.Pipeline p ON s.PipelineId = p.Id
-        WHERE p.IsActive = 1 AND p.IsDeleted = 0 AND s.IsDeleted = 0
-          AND s.ConfigJson LIKE '%fid[_]' + CAST(@fid AS VARCHAR(10)) + '%'
-          AND s.ConfigJson NOT LIKE '%fid[_]' + CAST(@fid AS VARCHAR(10)) + '[0-9]%'
         """;
 
     private const string NameExistsSql = """
@@ -1326,19 +1309,144 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         return result;
     }
 
-    public async Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineReferencesForFieldAsync(int fid, CancellationToken ct = default)
+    private sealed class FieldReferenceStepRow
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var results = await connection.QueryAsync<(string PipelineName, string StepLabel)>(
-            new CommandDefinition(GetActivePipelineReferencesForFieldSql, new { fid }, cancellationToken: ct));
-        return results.AsList();
+        public Guid PipelinePublicId { get; set; }
+        public string PipelineName { get; set; } = string.Empty;
+        public string RefId { get; set; } = string.Empty;
+        public string Label { get; set; } = string.Empty;
+        public string Type { get; set; } = string.Empty;
+        public string Subtype { get; set; } = string.Empty;
+        public string? ConfigJson { get; set; }
+        public bool IsMatch { get; set; }
     }
 
-    public async Task<IReadOnlyList<Pipeline>> GetActivePipelinesReferencingFieldAsync(int fid, CancellationToken ct = default)
+    /// <summary>The steps (label, pipeline) that really use field <paramref name="fid"/> of the given table. The SQL only narrows
+    /// to pipelines whose text mentions fid_N; which table each mention belongs to is decided by <see cref="PipelineFieldReferenceMatcher"/>.</summary>
+    private async Task<List<(Guid PipelinePublicId, string PipelineName, string StepLabel)>> FindFieldReferencesAsync(AppField field, Guid tablePublicId, CancellationToken ct)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = (await connection.QueryAsync<FieldReferenceStepRow>(
+            new CommandDefinition(GetStepsOfPipelinesUsingTableSql, new { tableText = tablePublicId.ToString() }, cancellationToken: ct))).AsList();
+
+        var references = new List<(Guid, string, string)>();
+        foreach (var byPipeline in rows.GroupBy(r => r.PipelinePublicId))
+        {
+            var pipelineRows = byPipeline.ToList();
+            var steps = pipelineRows.Select(r => new PipelineStepSnapshot(r.RefId, r.Label, r.Type, r.Subtype, r.ConfigJson)).ToList();
+            for (var i = 0; i < pipelineRows.Count; i++)
+            {
+                if (pipelineRows[i].IsMatch && PipelineFieldReferenceMatcher.ReferencesField(steps[i], steps, field, tablePublicId))
+                    references.Add((pipelineRows[i].PipelinePublicId, pipelineRows[i].PipelineName, pipelineRows[i].Label));
+            }
+        }
+        return references;
+    }
+
+    private const string GetActivePipelinesByPublicIdsSql = $"""
+        SELECT {PipelineColumns}
+        FROM meta.Pipeline
+        WHERE PublicId IN @ids AND IsActive = 1 AND IsDeleted = 0
+        """;
+
+    // Steps of every active pipeline that has at least one step mentioning the table's id. A field of the table can only be
+    // used by a pipeline that names the table somewhere (directly, or via a step/trigger the {{...}} token reads from).
+    private const string GetStepsOfPipelinesUsingTableSql = """
+        SELECT p.PublicId AS PipelinePublicId, p.Name AS PipelineName, s.RefId, s.Label, s.Type, s.Subtype, s.ConfigJson,
+               CAST(1 AS BIT) AS IsMatch
+        FROM meta.PipelineStep s
+        JOIN meta.Pipeline p ON s.PipelineId = p.Id
+        WHERE p.IsDeleted = 0 AND s.IsDeleted = 0
+          AND p.Id IN (
+              SELECT m.PipelineId FROM meta.PipelineStep m
+              WHERE m.IsDeleted = 0 AND m.ConfigJson LIKE '%' + @tableText + '%')
+        """;
+
+    public async Task<int> GetCrossAccountTriggerCountAsync(Guid tablePublicId, IReadOnlyCollection<int>? fids = null, CancellationToken ct = default)
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("tableId", tablePublicId);
+        parameters.Add("tenantId", QueryContext.TenantId);
+        var fidFilter = string.Empty;
+        if (fids is { Count: > 0 })
+        {
+            var parts = new List<string>();
+            var index = 0;
+            foreach (var fid in fids)
+            {
+                parameters.Add($"f{index}", $"%fid[_]{fid}%");
+                parameters.Add($"q{index}", $"%{{{fid}.%");
+                parts.Add($"CONCAT(TriggerFieldsJson, FiltersJson, FilterGroupsJson, AdvancedQuery) LIKE @f{index} OR AdvancedQuery LIKE @q{index}");
+                index++;
+            }
+            fidFilter = $" AND ({string.Join(" OR ", parts)})";
+        }
+        var sql = $"""
+            SELECT COUNT(*) FROM meta.PipelineTriggerSubscription
+            WHERE TargetTablePublicId = @tableId AND OwnerTenantId <> @tenantId{fidFilter}
+            """;
+        await using var controlConn = _controlConnectionFactory.Create();
+        await controlConn.OpenAsync(ct);
+        return await controlConn.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+    }
+
+    /// <summary>PowerFlow steps (any kind: trigger, search, create/update, copy records…) whose configuration names the table at all.</summary>
+    public async Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineStepsUsingTableAsync(Guid tablePublicId, CancellationToken ct = default)
+    {
+        const string sql = """
+            SELECT p.Name AS PipelineName, s.Label AS StepLabel
+            FROM meta.PipelineStep s
+            JOIN meta.Pipeline p ON s.PipelineId = p.Id
+            WHERE p.IsDeleted = 0 AND s.IsDeleted = 0
+              AND s.ConfigJson LIKE '%' + @tableText + '%'
+            ORDER BY p.Name, s.DisplayOrder
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<(string PipelineName, string StepLabel)>(
+            new CommandDefinition(sql, new { tableText = tablePublicId.ToString() }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    /// <summary>One query for all of a table's fields (used by table delete): which of <paramref name="fids"/> each PowerFlow step uses.</summary>
+    public async Task<IReadOnlyList<(int Fid, string PipelineName, string StepLabel)>> GetActivePipelineReferencesForTableFieldsAsync(
+        IReadOnlyCollection<AppField> fields, Guid tablePublicId, CancellationToken ct = default)
+    {
+        if (fields.Count == 0) return Array.Empty<(int, string, string)>();
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = (await connection.QueryAsync<FieldReferenceStepRow>(
+            new CommandDefinition(GetStepsOfPipelinesUsingTableSql, new { tableText = tablePublicId.ToString() }, cancellationToken: ct))).AsList();
+
+        var references = new List<(int, string, string)>();
+        foreach (var byPipeline in rows.GroupBy(r => r.PipelinePublicId))
+        {
+            var pipelineRows = byPipeline.ToList();
+            var steps = pipelineRows.Select(r => new PipelineStepSnapshot(r.RefId, r.Label, r.Type, r.Subtype, r.ConfigJson)).ToList();
+            for (var i = 0; i < steps.Count; i++)
+            {
+                if (string.IsNullOrWhiteSpace(steps[i].ConfigJson)) continue;
+                foreach (var field in fields.Where(f => f.Fid.HasValue))
+                    if (PipelineFieldReferenceMatcher.ReferencesField(steps[i], steps, field, tablePublicId))
+                        references.Add((field.Fid!.Value, pipelineRows[i].PipelineName, pipelineRows[i].Label));
+            }
+        }
+        return references;
+    }
+
+    public async Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineReferencesForFieldAsync(AppField field, Guid tablePublicId, CancellationToken ct = default)
+    {
+        var references = await FindFieldReferencesAsync(field, tablePublicId, ct);
+        return references.Select(r => (r.PipelineName, r.StepLabel)).ToList();
+    }
+
+    public async Task<IReadOnlyList<Pipeline>> GetActivePipelinesReferencingFieldAsync(AppField field, Guid tablePublicId, CancellationToken ct = default)
+    {
+        var referencedIds = (await FindFieldReferencesAsync(field, tablePublicId, ct)).Select(r => r.PipelinePublicId).ToHashSet();
+        if (referencedIds.Count == 0) return Array.Empty<Pipeline>();
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
         var results = await connection.QueryAsync<Pipeline>(
-            new CommandDefinition(GetActivePipelinesReferencingFieldSql, new { fid }, cancellationToken: ct));
+            new CommandDefinition(GetActivePipelinesByPublicIdsSql, new { ids = referencedIds.ToList() }, cancellationToken: ct));
         return results.AsList();
     }
 

@@ -101,8 +101,17 @@ public interface IPipelineRepository
     Task CompleteSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineBulkEventRecord>> GetPendingSearchWorksetPageAsync(Guid worksetId, int pageSize, CancellationToken ct = default);
     Task MarkSearchWorksetRecordsProcessedAsync(Guid worksetId, List<long> ids, byte processedStatus, CancellationToken ct = default);
-    Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineReferencesForFieldAsync(int fid, CancellationToken ct = default);
-    Task<IReadOnlyList<Pipeline>> GetActivePipelinesReferencingFieldAsync(int fid, CancellationToken ct = default);
+    /// <summary>PowerFlow steps (active or inactive) that use field <paramref name="fid"/> of the table <paramref name="tablePublicId"/>
+    /// (field IDs repeat across tables, so the table is needed to tell its field 10 from another table's).</summary>
+    Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineReferencesForFieldAsync(AppField field, Guid tablePublicId, CancellationToken ct = default);
+    /// <summary>PowerFlow steps (active or inactive) of any kind whose configuration names the table (trigger, search, create/update, copy records…).</summary>
+    Task<IReadOnlyList<(string PipelineName, string StepLabel)>> GetActivePipelineStepsUsingTableAsync(Guid tablePublicId, CancellationToken ct = default);
+    /// <summary>Same check for many fields of one table in a single pass (active or inactive PowerFlows): which of <paramref name="fids"/> each PowerFlow step uses.</summary>
+    Task<IReadOnlyList<(int Fid, string PipelineName, string StepLabel)>> GetActivePipelineReferencesForTableFieldsAsync(IReadOnlyCollection<AppField> fields, Guid tablePublicId, CancellationToken ct = default);
+    /// <summary>Triggers of PowerFlows in OTHER accounts that listen to this table (via a connection). With <paramref name="fids"/>, only
+    /// those whose filters / trigger fields mention one of those fields.</summary>
+    Task<int> GetCrossAccountTriggerCountAsync(Guid tablePublicId, IReadOnlyCollection<int>? fids = null, CancellationToken ct = default);
+    Task<IReadOnlyList<Pipeline>> GetActivePipelinesReferencingFieldAsync(AppField field, Guid tablePublicId, CancellationToken ct = default);
     Task<IReadOnlyList<string>> GetPipelineNamesForUserAsync(long userId, CancellationToken ct = default);
     Task<bool> NameExistsForUserAsync(long userId, string name, CancellationToken ct = default);
     Task<byte[]> GetRowVersionAsync(long pipelineId, IDbTransaction? transaction = null, CancellationToken ct = default);

@@ -54,13 +54,20 @@ public class BulkDeleteFieldsCommandHandler
         var blockedFieldsErrors = new Dictionary<string, string[]>();
         var pipelinesToDeactivate = new Dictionary<Guid, Pipeline>();
 
+        var fidsToDelete = fieldsToDelete.Where(f => f.Fid.HasValue).Select(f => f.Fid!.Value).ToList();
+        if (fidsToDelete.Count > 0 && await _pipelineRepo.GetCrossAccountTriggerCountAsync(table.PublicId, fidsToDelete, ct) > 0)
+            throw new ValidationException(new Dictionary<string, string[]>
+            {
+                { "Fields", new[] { "Cannot delete these fields because a PowerFlow in another account is triggered through one of them." } }
+            });
+
         foreach (var field in fieldsToDelete)
         {
             if (field.Fid.HasValue)
             {
                 if (command.Force)
                 {
-                    var refs = await _pipelineRepo.GetActivePipelinesReferencingFieldAsync(field.Fid.Value, ct);
+                    var refs = await _pipelineRepo.GetActivePipelinesReferencingFieldAsync(field, table.PublicId, ct);
                     foreach (var p in refs)
                     {
                         pipelinesToDeactivate[p.PublicId] = p;
@@ -68,11 +75,11 @@ public class BulkDeleteFieldsCommandHandler
                 }
                 else
                 {
-                    var activeReferences = await _pipelineRepo.GetActivePipelineReferencesForFieldAsync(field.Fid.Value, ct);
+                    var activeReferences = await _pipelineRepo.GetActivePipelineReferencesForFieldAsync(field, table.PublicId, ct);
                     if (activeReferences.Any())
                     {
                         var refDetails = string.Join("; ", activeReferences.Select(r => $"PowerFlow '{r.PipelineName}' (Step: '{r.StepLabel}')"));
-                        blockedFieldsErrors[field.Name] = new[] { $"Cannot delete field '{field.Name}' because it is referenced in the following active PowerFlows: {refDetails}" };
+                        blockedFieldsErrors[field.Name] = new[] { $"Cannot delete field '{(string.IsNullOrWhiteSpace(field.Label) ? field.Name : field.Label)}' because it is referenced in the following PowerFlows: {refDetails}" };
                     }
                 }
             }

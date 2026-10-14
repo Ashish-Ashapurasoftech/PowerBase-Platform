@@ -44,7 +44,7 @@ public class DeleteFieldDependencyTests
         _fieldRepo.GetByPublicIdAsync(fieldId, Arg.Any<CancellationToken>()).Returns(field);
         
         // Mock active pipeline reference
-        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(fid, Arg.Any<CancellationToken>())
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Is<PowerBase.Domain.Entities.AppField>(f => f.Fid == fid), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(new List<(string PipelineName, string StepLabel)> { ("Pipeline A", "Step 1") });
 
         var sut = CreateDeleteFieldSut();
@@ -54,7 +54,7 @@ public class DeleteFieldDependencyTests
             .Should().ThrowAsync<ValidationException>();
 
         exception.Which.Errors.Should().ContainKey("Field");
-        exception.Which.Errors["Field"][0].Should().Contain("referenced in the following active PowerFlows");
+        exception.Which.Errors["Field"][0].Should().Contain("referenced in the following PowerFlows");
 
         await _fieldRepo.DidNotReceive().DeleteAsync(Arg.Any<Guid>(), Arg.Any<long>(), Arg.Any<CancellationToken>());
     }
@@ -72,7 +72,7 @@ public class DeleteFieldDependencyTests
         _fieldRepo.GetByPublicIdAsync(fieldId, Arg.Any<CancellationToken>()).Returns(field);
         
         // Mock no active references
-        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(fid, Arg.Any<CancellationToken>())
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Is<PowerBase.Domain.Entities.AppField>(f => f.Fid == fid), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(new List<(string PipelineName, string StepLabel)>());
         _fieldRepo.DeleteAsync(fieldId, table.Id, Arg.Any<CancellationToken>()).Returns(1);
 
@@ -101,9 +101,9 @@ public class DeleteFieldDependencyTests
         _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new List<AppField> { field1, field2 });
 
         // Mock fid1 as referenced, fid2 as not referenced
-        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(fid1, Arg.Any<CancellationToken>())
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Is<PowerBase.Domain.Entities.AppField>(f => f.Fid == fid1), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(new List<(string PipelineName, string StepLabel)> { ("Pipeline A", "Step 1") });
-        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(fid2, Arg.Any<CancellationToken>())
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Is<PowerBase.Domain.Entities.AppField>(f => f.Fid == fid2), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(new List<(string PipelineName, string StepLabel)>());
 
         var sut = CreateBulkDeleteFieldSut();
@@ -131,9 +131,9 @@ public class DeleteFieldDependencyTests
         _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(new List<AppField> { field1, field2 });
 
         // Mock no active references
-        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(fid1, Arg.Any<CancellationToken>())
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Is<PowerBase.Domain.Entities.AppField>(f => f.Fid == fid1), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(new List<(string PipelineName, string StepLabel)>());
-        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(fid2, Arg.Any<CancellationToken>())
+        _pipelineRepo.GetActivePipelineReferencesForFieldAsync(Arg.Is<PowerBase.Domain.Entities.AppField>(f => f.Fid == fid2), Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(new List<(string PipelineName, string StepLabel)>());
         _fieldRepo.BulkDeleteAsync(Arg.Any<IEnumerable<Guid>>(), table.Id, Arg.Any<CancellationToken>()).Returns(2);
 
