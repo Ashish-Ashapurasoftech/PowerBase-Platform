@@ -1741,6 +1741,46 @@ public class PipelineEngineTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_MakeRequest_ExposesSentParametersAndLearnsResponseFieldNames()
+    {
+        var connectionPublicId = Guid.NewGuid();
+        var task = new PipelineExecutionTask { PipelineId = 1, TenantId = 1, TriggerEvent = "manual", TriggerPayloadJson = "{}" };
+        _pipelineRepo.CreateRunAsync(Arg.Any<PipelineRun>(), Arg.Any<CancellationToken>()).Returns((Guid.NewGuid(), 1L));
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true, IsDeleted = false, CreatedBy = 42 });
+        _tenantRepository.GetTenantForUserAsync(connectionPublicId, 42, Arg.Any<CancellationToken>()).Returns(new Tenant());
+        _pipelineRepo.UpdateStepConfigJsonAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>()).Returns(true);
+        _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(new List<PipelineStep>
+        {
+            new() { Id = 10, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "ref_request", Type = "action", Subtype = "make-request",
+                IsValidated = true, DisplayOrder = 0, RowVersion = new byte[] { 1 },
+                ConfigJson = JsonSerializer.Serialize(new { requestMode = "quickbase", connectionPublicId, url = "/api/records?page=2", method = "POST", body = "{\"name\":\"Ann\"}" }) },
+            new() { Id = 11, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "ref_echo", Type = "action", Subtype = "make-request",
+                IsValidated = true, DisplayOrder = 1, RowVersion = new byte[] { 2 },
+                ConfigJson = JsonSerializer.Serialize(new { requestMode = "quickbase", connectionPublicId, url = "/api/echo", method = "POST",
+                    body = "{{steps.ref_request._metadata.body_params.name}}|{{steps.ref_request._metadata.url_params.page}}|{{steps.ref_request.total}}" }) }
+        });
+        var sentBodies = new List<string>();
+        _apiRequestDispatcher.SendAsync(Arg.Any<HttpRequestMessage>(), Arg.Any<IServiceProvider>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                var request = call.Arg<HttpRequestMessage>();
+                sentBodies.Add(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"total\":7,\"items\":[]}", System.Text.Encoding.UTF8, "application/json")
+                };
+            });
+
+        await _engine.ExecuteAsync(task, CancellationToken.None);
+
+        sentBodies.Should().HaveCount(2);
+        sentBodies[1].Should().Be("Ann|2|7");
+        await _pipelineRepo.Received().UpdateStepConfigJsonAsync(10,
+            Arg.Is<string>(json => json.Contains("sampleResponseKeys") && json.Contains("\"total\"") && json.Contains("\"items\"")),
+            Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task PipelineCreateRecord_UsesActiveRecordLookup()
     {
         // Arrange

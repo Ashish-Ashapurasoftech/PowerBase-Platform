@@ -129,12 +129,16 @@ public sealed class MakeRequestExecutor
         var query = ParseQuery(request.RequestUri!.Query);
         if (config.AuthType == "API Key" && !string.IsNullOrEmpty(config.ApiKeyName) && query.ContainsKey(config.ApiKeyName))
             query[config.ApiKeyName] = new() { "[REDACTED]" };
+        var requestBody = request.Content == null ? null : await request.Content.ReadAsStringAsync(ct);
+        // What the step sent, for later steps' URL Parameters / Body Parameters (the API key stays redacted).
+        var urlParams = RequestParameters.Collapse(query);
+        var bodyParams = RequestParameters.FromBody(request.Content?.Headers.ContentType?.MediaType, requestBody);
         var auditData = new Dictionary<string, object?>
         {
             ["RequestMode"] = config.RequestMode ?? "http", ["Method"] = method,
             ["Url"] = request.RequestUri.GetLeftPart(UriPartial.Path), ["QueryParameters"] = query,
             ["Headers"] = AuditHeaders(request.Headers.Concat(request.Content?.Headers.AsEnumerable() ?? Enumerable.Empty<KeyValuePair<string, IEnumerable<string>>>())),
-            ["Body"] = request.Content == null ? null : BodyValue(await request.Content.ReadAsStringAsync(ct))
+            ["Body"] = requestBody == null ? null : BodyValue(requestBody)
         };
         audit?.Invoke(auditData);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -188,7 +192,7 @@ public sealed class MakeRequestExecutor
         if (string.IsNullOrEmpty(result)) result = "null";
         var reqHeaders = auditData != null && auditData.TryGetValue("Headers", out var hObj) && hObj is Dictionary<string, string> h ? h : new Dictionary<string, string>();
         return new(result, status, response.ReasonPhrase ?? "", response.Headers.Concat(response.Content.Headers).Where(x => !x.Key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase) && !x.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase)).ToDictionary(x => x.Key, x => string.Join(", ", x.Value), StringComparer.OrdinalIgnoreCase),
-            request.RequestUri?.ToString() ?? "", reqHeaders);
+            request.RequestUri?.ToString() ?? "", reqHeaders, urlParams, bodyParams);
     }
     private async Task AuthenticateAsync(MakeRequestDefinition config, HttpRequestMessage request, Func<string?, string> resolve, CancellationToken ct)
     {
@@ -262,4 +266,5 @@ public sealed class MakeRequestExecutor
         return data + "." + Base64(signature);
     }
 }
-public sealed record MakeRequestResult(string OutputJson, int StatusCode, string StatusMessage, Dictionary<string, string> ResponseHeaders, string RequestUrl, Dictionary<string, string> RequestHeaders);
+public sealed record MakeRequestResult(string OutputJson, int StatusCode, string StatusMessage, Dictionary<string, string> ResponseHeaders, string RequestUrl, Dictionary<string, string> RequestHeaders,
+    Dictionary<string, object?>? RequestUrlParams = null, Dictionary<string, object?>? RequestBodyParams = null);

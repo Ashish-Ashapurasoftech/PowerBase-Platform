@@ -69,6 +69,71 @@ public class IncomingWebhookTests
         await repo.DidNotReceive().UpdateStepConfigJsonAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
     }
     [Fact]
+    public async Task JsonObjectBodyBecomesBodyParametersAndItsNamesAreRecorded()
+    {
+        http.Request.ContentType = "application/json";
+        Assert.IsType<OkObjectResult>(await Send("{\"file_name\":\"a.csv\",\"csv_url\":\"https://x/a.csv\",\"rows\":{\"n\":1}}"));
+        using var payload = JsonDocument.Parse(Queued().TriggerPayloadJson);
+        var bodyParams = payload.RootElement.GetProperty("body_params");
+        Assert.Equal("a.csv", bodyParams.GetProperty("file_name").GetString());
+        Assert.Equal("https://x/a.csv", bodyParams.GetProperty("csv_url").GetString());
+        Assert.Equal(1, bodyParams.GetProperty("rows").GetProperty("n").GetInt32());
+        await repo.Received(1).UpdateStepConfigJsonAsync(42,
+            Arg.Is<string>(json => json.Contains("sampleBodyParamKeys") && json.Contains("\"file_name\"") && json.Contains("\"csv_url\"") && json.Contains("\"rows\"")),
+            Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+    }
+    [Fact]
+    public async Task FormBodyBecomesBodyParameters()
+    {
+        http.Request.ContentType = "application/x-www-form-urlencoded";
+        Assert.IsType<OkObjectResult>(await Send("first_name=Ann&tag=a&tag=b&note=hello+world"));
+        using var payload = JsonDocument.Parse(Queued().TriggerPayloadJson);
+        var bodyParams = payload.RootElement.GetProperty("body_params");
+        Assert.Equal("Ann", bodyParams.GetProperty("first_name").GetString());
+        Assert.Equal("hello world", bodyParams.GetProperty("note").GetString());
+        Assert.Equal(2, bodyParams.GetProperty("tag").GetArrayLength());
+    }
+    [Fact]
+    public async Task MultipartFormFieldsBecomeBodyParametersAndFilesGiveTheirName()
+    {
+        http.Request.ContentType = "multipart/form-data; boundary=XyZ";
+        var body = "--XyZ\r\nContent-Disposition: form-data; name=\"city\"\r\n\r\nPune\r\n" +
+                   "--XyZ\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"data.csv\"\r\nContent-Type: text/csv\r\n\r\na,b\r\n--XyZ--\r\n";
+        Assert.IsType<OkObjectResult>(await Send(body));
+        using var payload = JsonDocument.Parse(Queued().TriggerPayloadJson);
+        var bodyParams = payload.RootElement.GetProperty("body_params");
+        Assert.Equal("Pune", bodyParams.GetProperty("city").GetString());
+        Assert.Equal("data.csv", bodyParams.GetProperty("upload").GetString());
+    }
+    [Theory]
+    [InlineData("hello")][InlineData("[1,2]")][InlineData("")]
+    public async Task BodiesWithoutNamedParametersGiveEmptyBodyParameters(string body)
+    {
+        Assert.IsType<OkObjectResult>(await Send(body));
+        using var payload = JsonDocument.Parse(Queued().TriggerPayloadJson);
+        Assert.Empty(payload.RootElement.GetProperty("body_params").EnumerateObject());
+    }
+    [Fact]
+    public async Task RecordsParameterNamesWhileThePowerFlowIsStillOff()
+    {
+        pipeline.IsActive = false;
+        http.Request.QueryString = new QueryString("?id=5");
+        http.Request.ContentType = "application/json";
+        Assert.IsType<NoContentResult>(await Send("{\"email\":\"a@b.c\"}"));
+        await repo.Received(1).UpdateStepConfigJsonAsync(42,
+            Arg.Is<string>(json => json.Contains("sampleUrlParamKeys") && json.Contains("\"id\"") && json.Contains("sampleBodyParamKeys") && json.Contains("\"email\"")),
+            Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+        queue.DidNotReceive().QueueTask(Arg.Any<PipelineExecutionTask>());
+    }
+    [Fact]
+    public async Task UnauthenticatedRequestsNeverTeachParameterNames()
+    {
+        step.ConfigJson = JsonSerializer.Serialize(new { authType = "bearer", authSecret = "secret" });
+        http.Request.QueryString = new QueryString("?id=5");
+        Assert.IsType<UnauthorizedObjectResult>(await Send("{\"email\":\"a@b.c\"}"));
+        await repo.DidNotReceive().UpdateStepConfigJsonAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+    }
+    [Fact]
     public async Task RejectsPatchOutsideQuickbaseMethodList()
     {
         http.Request.Method = "PATCH";
