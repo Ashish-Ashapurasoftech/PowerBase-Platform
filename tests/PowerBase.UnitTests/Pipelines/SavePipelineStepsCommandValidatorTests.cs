@@ -198,6 +198,25 @@ public class SavePipelineStepsCommandValidatorTests
     }
 
     [Fact]
+    public async Task Validate_ImportWithCsvAtStart_IsValid()
+    {
+        var import = new SavePipelineStepDto
+        {
+            PublicId = Guid.NewGuid(),
+            RefId = "ref_import",
+            Type = "action",
+            Subtype = "import-with-csv",
+            ConfigJson = "{\"connection\":\"c\",\"app\":\"a\",\"tableLabel\":\"t\",\"importTemplateId\":\"x\",\"csvFile\":\"https://example.com/a.csv\"}",
+            IsValidated = true
+        };
+        var command = new SavePipelineStepsCommand(Guid.NewGuid(), new List<SavePipelineStepDto> { import }, Array.Empty<byte>());
+
+        var result = await _validator.ValidateAsync(command);
+
+        result.Errors.Should().NotContain(e => e.ErrorMessage.Contains("A PowerFlow must begin with"));
+    }
+
+    [Fact]
     public async Task Validate_InvalidFirstStepType_ReturnsError()
     {
         // Arrange

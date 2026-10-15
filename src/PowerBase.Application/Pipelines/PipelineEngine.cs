@@ -514,9 +514,10 @@ public partial class PipelineEngine : IPipelineEngine
                     var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
                     var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
                     var isPauseRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "pause";
-                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot && !isPauseRoot)
+                    var isImportWithCsvRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "import-with-csv";
+                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot && !isPauseRoot && !isImportWithCsvRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query, Make Request, Copy Records, Prepare Bulk Record Upsert, or Pause first step.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("Activation trigger event requires a Search/Query, Make Request, Copy Records, Import with CSV, Prepare Bulk Record Upsert, or Pause first step.");
                     }
                 }
                 else if (normalizedEventName == "pipeline_schedule")
@@ -526,9 +527,10 @@ public partial class PipelineEngine : IPipelineEngine
                     var isCopyRecordsRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "copy-records";
                     var isMakeRequestRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "make-request";
                     var isPauseRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "pause";
-                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot && !isPauseRoot)
+                    var isImportWithCsvRoot = firstQueryStep?.Type == "action" && firstQueryStep.Subtype == "import-with-csv";
+                    if (!isQueryRoot && !isPrepareBulkRoot && !isCopyRecordsRoot && !isMakeRequestRoot && !isPauseRoot && !isImportWithCsvRoot)
                     {
-                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("PowerFlow schedule trigger event requires a Search/Query, Make Request, Copy Records, Prepare Bulk Record Upsert, or Pause first step.");
+                        throw new PowerBase.Domain.Exceptions.PipelineNonRetryableException("PowerFlow schedule trigger event requires a Search/Query, Make Request, Copy Records, Import with CSV, Prepare Bulk Record Upsert, or Pause first step.");
                     }
                     if (activeSteps.Any(s => s.Type == "trigger"))
                     {
@@ -1435,6 +1437,8 @@ public partial class PipelineEngine : IPipelineEngine
 
             if (step.Subtype == "copy-records")
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
+            if (step.Subtype == "import-with-csv")
+                return await ExecuteImportWithCsvAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
 
             if (step.Subtype == "make-request")
                 return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, accountScopeHandle.Services, ct);
@@ -1481,6 +1485,8 @@ public partial class PipelineEngine : IPipelineEngine
 
             if (step.Subtype == "copy-records")
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
+                if (step.Subtype == "import-with-csv")
+                    return await ExecuteImportWithCsvAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
 
                 if (step.Subtype == "make-request")
                     return await ExecuteMakeRequestAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, scope.ServiceProvider, ct);
@@ -1504,6 +1510,8 @@ public partial class PipelineEngine : IPipelineEngine
         {
             if (step.Subtype == "copy-records")
                 return await ExecuteCopyRecordsAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
+            if (step.Subtype == "import-with-csv")
+                return await ExecuteImportWithCsvAsync(step, payloadJson, allSteps, contextDict, executionPath, stepRun, _serviceProvider, ct);
             await EnforceStepAccessAsync(step, _serviceProvider, ct);
             return await RunInStepScopeAsync(_serviceProvider, null, () =>
                 ExecuteStepWithServicesAsync(step, payloadJson, contextDict, allSteps, stepsDict, runId, stepRun, snapshots, executionPath,
