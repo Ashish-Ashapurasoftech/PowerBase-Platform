@@ -86,6 +86,16 @@ public static class ReferenceFilterResolver
                         nodes.Add(new FilterNode { Condition = new FilterCondition { FieldId = c.FieldId, Operator = "eq", Value = currentUserId.ToString() } });
                     continue;
                 }
+                if (string.Equals(c.Operator, "isNotCurrentUser", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (currentUserId > 0)
+                    {
+                        var isList = (parentFields.FirstOrDefault(f => f.Fid == (int)c.FieldId) ?? childFields.FirstOrDefault(f => f.Fid == (int)c.FieldId))
+                            ?.TypeCode is "MultiUser" or "Formula_ListUser";
+                        nodes.Add(new FilterNode { Group = Reports.Queries.RunReport.RunReportQueryHandler.NotCurrentUserGroup(c.FieldId, isList, currentUserId) });
+                    }
+                    continue;
+                }
                 if (!ParentFieldScope.IsParentFieldMode(c.ValueMode)) { nodes.Add(node); continue; }
                 if (c.ValueFieldId is not long formFid || !childFields.Any(f => f.Fid == (int)formFid)) continue;
                 if (!formValues.TryGetValue((int)formFid, out var raw)) continue;

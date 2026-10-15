@@ -23,7 +23,7 @@ public static class SummaryEncryptionGuard
         "eq", "ne", "contains", "notContains", "startsWith", "notStartsWith",
         "gt", "gte", "lt", "lte", "in", "notIn", "isEmpty", "isNotEmpty",
         "wildcard", "notWildcard", "includes", "notIncludes",
-        "isCurrentUser", "during", "notDuring", "date_eq",
+        "isCurrentUser", "isNotCurrentUser", "during", "notDuring", "date_eq",
     };
 
     public static bool IsEncrypted(App app, AppField? field) =>

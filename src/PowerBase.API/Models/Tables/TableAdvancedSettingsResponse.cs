@@ -23,6 +23,8 @@ public class TableAdvancedSettingsResponse
     public string? CustomDataRule { get; init; }
     /// <summary>The "Turn custom data rules on?" toggle.</summary>
     public bool IsCustomDataRuleEnabled { get; init; }
+    /// <summary>"Auto save when redirected away from the page".</summary>
+    public bool IsAutoSaveOnLeave { get; init; }
     public IReadOnlyList<TableAdvancedSettingsFieldResponse> Fields { get; init; } = [];
 }
 

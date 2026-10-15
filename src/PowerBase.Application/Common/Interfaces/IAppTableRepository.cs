@@ -42,6 +42,8 @@ public interface IAppTableRepository
     /// unchanged" ambiguity to preserve here, and the Alias this rule can reference is intentionally
     /// not settable through any update path.</summary>
     Task UpdateCustomDataRuleAsync(Guid publicId, string? customDataRule, bool isEnabled, CancellationToken ct = default);
+    /// <summary>Sets the "Auto save when redirected away from the page" flag.</summary>
+    Task SetAutoSaveOnLeaveAsync(Guid publicId, bool isEnabled, CancellationToken ct = default);
     /// <summary>Sets the table's key field (null = reset to Record ID#, the default).</summary>
     Task SetKeyFieldAsync(long tableId, long? keyFieldId, CancellationToken ct = default);
     /// <summary>Targeted update of just the three Identifying Records fields — used by table/field

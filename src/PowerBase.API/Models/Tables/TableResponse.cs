@@ -17,6 +17,8 @@ public class TableResponse
     public int RecordCount { get; set; }
     public int? FieldCount { get; set; }
     public bool IsShowInBar { get; set; }
+    /// <summary>"Auto save when redirected away from the page" — see the table's Advanced Settings.</summary>
+    public bool IsAutoSaveOnLeave { get; set; }
     public long? DefaultRecordPickerField1Id { get; set; }
     public long? DefaultRecordPickerField2Id { get; set; }
     public long? DefaultRecordPickerField3Id { get; set; }
