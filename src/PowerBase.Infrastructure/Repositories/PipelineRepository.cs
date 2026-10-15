@@ -1095,6 +1095,47 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             }, cancellationToken: ct));
     }
 
+    public async Task CreateCompletedStepRunsAsync(IReadOnlyList<PipelineStepRun> stepRuns, CancellationToken ct = default)
+    {
+        if (stepRuns.Count == 0) return;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await DetectStepHistorySchemaAsync(connection, ct);
+        var snapshots = _hasStepSnapshotColumns == true;
+        var enhanced = snapshots || _hasEnhancedStepHistoryColumns == true;
+        var columns = "PipelineRunId, StepId, Status, StartedOn, CompletedOn, InputContext, OutputContext, LogMessage"
+            + (enhanced ? ", PipelineRunAttemptId, ExecutionPath, SequenceNumber, TransactionOutcome, ErrorType" : "")
+            + (snapshots ? ", StepPublicIdSnapshot, StepRefIdSnapshot, StepLabelSnapshot, StepTypeSnapshot, StepSubtypeSnapshot" : "");
+        var perRow = 8 + (enhanced ? 5 : 0) + (snapshots ? 5 : 0);
+        foreach (var chunk in stepRuns.Chunk(Math.Max(1, 2000 / perRow)))
+        {
+            var parameters = new DynamicParameters();
+            var tuples = new List<string>(chunk.Length);
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                var run = chunk[i];
+                var names = new List<string>(perRow);
+                void Add(string name, object? value) { parameters.Add($"{name}{i}", value); names.Add($"@{name}{i}"); }
+                Add("pipelineRunId", run.PipelineRunId); Add("stepId", run.StepId); Add("status", run.Status);
+                Add("startedOn", run.StartedOn); Add("completedOn", run.CompletedOn ?? DateTime.UtcNow);
+                Add("inputContext", run.InputContext); Add("outputContext", run.OutputContext); Add("logMessage", run.LogMessage);
+                if (enhanced)
+                {
+                    Add("pipelineRunAttemptId", run.PipelineRunAttemptId); Add("executionPath", run.ExecutionPath);
+                    Add("sequenceNumber", run.SequenceNumber); Add("transactionOutcome", run.TransactionOutcome); Add("errorType", run.ErrorType);
+                }
+                if (snapshots)
+                {
+                    Add("stepPublicIdSnapshot", run.StepPublicIdSnapshot); Add("stepRefIdSnapshot", run.StepRefIdSnapshot);
+                    Add("stepLabelSnapshot", run.StepLabelSnapshot); Add("stepTypeSnapshot", run.StepTypeSnapshot);
+                    Add("stepSubtypeSnapshot", run.StepSubtypeSnapshot);
+                }
+                tuples.Add("(" + string.Join(", ", names) + ")");
+            }
+            await connection.ExecuteAsync(new CommandDefinition(
+                $"INSERT INTO audit.PipelineStepRun ({columns}) VALUES {string.Join(", ", tuples)}", parameters, cancellationToken: ct));
+        }
+    }
+
     public Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, CancellationToken ct = default)
     {
         return GetStepRunsByRunIdAsync(runId, 1, 2000, ct);

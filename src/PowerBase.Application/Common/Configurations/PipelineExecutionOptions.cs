@@ -34,6 +34,11 @@ public class PipelineExecutionOptions
     public int MaxStepOutputBytes { get; set; }
     public bool EnableLoopBatches { get; set; }
     public int LoopBatchSize { get; set; } = 100;
+    /// <summary>A loop whose only step is Create Record writes each batch in one transaction — one multi-row INSERT, one
+    /// receipt write, one trigger write and one history write for the whole batch — instead of a transaction and some twenty
+    /// round trips per record. Same rules, same records, same history; a batch it cannot write that way (a record a rule
+    /// rejects, a duplicate within the batch, any write error) is written record by record exactly as before.</summary>
+    public bool BulkCreateRecordsInLoops { get; set; }
     // In automatic mode the two concurrency values below are ceilings, not fixed counts.
     public bool AutoScaleLoopWorkers { get; set; }
     public int LoopConcurrency { get; set; } = 4;
