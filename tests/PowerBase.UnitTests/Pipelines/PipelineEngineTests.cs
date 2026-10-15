@@ -237,7 +237,8 @@ public class PipelineEngineTests
         InvokeParseValueType("true", "checkbox").Should().Be(true);
         InvokeParseValueType("1", "boolean").Should().Be(true);
         InvokeParseValueType("123.45", "numeric").Should().Be(123.45m);
-        InvokeParseValueType("2026-08-06T18:00:00Z", "date_time").Should().Be(DateTime.Parse("2026-08-06T18:00:00Z"));
+        // A UTC timestamp is written as its UTC wall-clock time on every server (it used to move by the server's own offset).
+        InvokeParseValueType("2026-08-06T18:00:00Z", "date_time").Should().Be(new DateTime(2026, 8, 6, 18, 0, 0));
         InvokeParseValueType("plain text", "text").Should().Be("plain text");
         InvokeParseValueType("123", "text").Should().Be("123");
         InvokeParseValueType("123", "Integer").Should().Be(123m);

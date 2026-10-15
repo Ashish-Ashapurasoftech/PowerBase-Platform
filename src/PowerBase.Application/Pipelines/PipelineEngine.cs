@@ -1841,7 +1841,7 @@ public partial class PipelineEngine : IPipelineEngine
                     var colName = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                     if (record.TryGetValue(colName, out var val))
                     {
-                        norm[$"fid_{f.Fid.Value}"] = val;
+                        norm[$"fid_{f.Fid.Value}"] = StoredFieldValue(record, f, val);
                     }
                     else if (record.TryGetValue(f.Name, out var valByName))
                     {
@@ -2266,7 +2266,7 @@ public partial class PipelineEngine : IPipelineEngine
                         var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                         if (record.TryGetValue(colKey, out var val))
                         {
-                            norm[$"fid_{f.Fid.Value}"] = val;
+                            norm[$"fid_{f.Fid.Value}"] = StoredFieldValue(record, f, val);
                         }
                         else if (record.TryGetValue(f.Name, out var valByName))
                         {
@@ -4139,6 +4139,19 @@ public partial class PipelineEngine : IPipelineEngine
         }
     }
 
+    /// <summary>A stored field's value as a step hands it on. A Date / Numeric Range lives in two columns (f_N and f_N_e) and goes on
+    /// as one { start, end } value, as the Records API returns it: read from its start column alone, the end was lost on the way to the
+    /// next step (a range copied by Search Records + Create Record kept only its start). An encrypted app stores the whole range as
+    /// JSON text in the start column; that, and any other field, is passed on as it is.</summary>
+    internal static object? StoredFieldValue(IReadOnlyDictionary<string, object?> record, AppField field, object? value)
+    {
+        if (!field.Fid.HasValue || !PhysicalNaming.IsRangeTypeCode(field.TypeCode)) return value;
+        if (value is string text && text.TrimStart().StartsWith('{')) return value;
+        if (!record.TryGetValue(PhysicalNaming.EndColumnName(field.Fid.Value), out var end)) return value;
+        if (value is null && end is null) return null;
+        return new Dictionary<string, object?> { ["start"] = value, ["end"] = end };
+    }
+
     public static Dictionary<string, object?> BuildCreatedRecordOutput(
         Guid recordPublicId,
         long recordId,
@@ -4167,7 +4180,7 @@ public partial class PipelineEngine : IPipelineEngine
             var key = $"fid_{fid}";
             var column = PhysicalNaming.GetPhysicalColumnName(field);
             if (persistedRecord is not null && persistedRecord.TryGetValue(column, out var persistedValue))
-                output[key] = persistedValue;
+                output[key] = StoredFieldValue(persistedRecord, field, persistedValue);
             else if (persistedRecord is not null && persistedRecord.TryGetValue(field.Name, out var namedValue))
                 output[key] = namedValue;
             else if (submittedValues.TryGetValue(fid, out var submittedValue))
@@ -4211,7 +4224,7 @@ public partial class PipelineEngine : IPipelineEngine
         {
             var key = $"fid_{field.Fid!.Value}";
             var column = PhysicalNaming.GetPhysicalColumnName(field);
-            if (record.TryGetValue(column, out var value)) normalized[key] = value;
+            if (record.TryGetValue(column, out var value)) normalized[key] = StoredFieldValue(record, field, value);
             else if (record.TryGetValue(field.Name, out var namedValue)) normalized[key] = namedValue;
         }
         return normalized;
@@ -5263,6 +5276,9 @@ public partial class PipelineEngine : IPipelineEngine
         {
             _stepsAccessor = new StepsDictionaryAccessor(rootContext);
             _proxyAccessor = new FallbackRootProxy(rootContext);
+            // Scriban cuts every value it renders at 1,048,576 characters by default (and appends "..."). A token carries a
+            // record's value as it is — a Rich Text with an embedded image is several MB — so a mapped value is never cut.
+            LimitToString = 0;
         }
 
         protected override Scriban.Runtime.IObjectAccessor GetMemberAccessorImpl(object target)
@@ -5628,6 +5644,14 @@ public partial class PipelineEngine : IPipelineEngine
         }
     }
 
+    /// <summary>How a mapped date / time text is read: a value with an offset ("…Z" — a record's Date Created — or "+05:30") is
+    /// converted to UTC, one without is taken as written. Read as local time, a UTC Date Created mapped into a Date &amp; Time
+    /// field moved by the server's own offset (07:13 written as 12:43 on a server in India); a server running on UTC never saw it.</summary>
+    private const DateTimeStyles WallClockStyles = DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal;
+
+    /// <summary>The parsed value as the wall-clock time a Date / Date &amp; Time / Time column stores (no time-zone kind).</summary>
+    private static DateTime WallClock(DateTime parsed) => DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
+
     private object? ParseValueType(string valueStr, string typeCode, string fieldName)
         => ParseValueTypeWithFormat(valueStr, typeCode, fieldName, null);
 
@@ -5667,10 +5691,10 @@ public partial class PipelineEngine : IPipelineEngine
             };
             var canonicalFormats = normalizedCode == "DATE" ? new[] { "yyyy-MM-dd" } : isoFormats;
             if (DateTime.TryParseExact(valueStr.Trim(), canonicalFormats, CultureInfo.InvariantCulture,
-                DateTimeStyles.AllowWhiteSpaces, out var dtVal)) return dtVal;
+                WallClockStyles, out var dtVal)) return WallClock(dtVal);
             // A Date field fed a full timestamp keeps its calendar day.
             if (normalizedCode == "DATE" && DateTime.TryParseExact(valueStr.Trim(), isoFormats, CultureInfo.InvariantCulture,
-                DateTimeStyles.AllowWhiteSpaces, out var dateFromTimestamp)) return dateFromTimestamp.Date;
+                WallClockStyles, out var dateFromTimestamp)) return WallClock(dateFromTimestamp).Date;
 
             var dotNetDateFormat = dateFormat?.ToUpperInvariant() switch
             {
@@ -5690,23 +5714,23 @@ public partial class PipelineEngine : IPipelineEngine
                     dotNetDateFormat, dotNetDateFormat.Replace('-', '/')
                 };
             if (DateTime.TryParseExact(valueStr.Trim(), localizedFormats, CultureInfo.InvariantCulture,
-                DateTimeStyles.AllowWhiteSpaces, out dtVal)) return dtVal;
+                WallClockStyles, out dtVal)) return WallClock(dtVal);
             // The text of a DateTime formatted by the host ("10/8/2026 5:57:12 AM" — single-digit month/day,
             // which the fixed MM/dd patterns above reject). Tried last so the configured format always wins.
-            if (DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out dtVal))
-                return normalizedCode == "DATE" ? dtVal.Date : dtVal;
+            if (DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, WallClockStyles, out dtVal))
+                return normalizedCode == "DATE" ? WallClock(dtVal).Date : WallClock(dtVal);
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
         if (normalizedCode is "TIME" or "TIME_OF_DAY")
         {
             if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm", "HH:mm:ss", "h:mm tt", "h:mm:ss tt" },
-                CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeVal)) return timeVal;
+                CultureInfo.InvariantCulture, WallClockStyles, out var timeVal)) return WallClock(timeVal);
             // A time with fractional seconds, or a full timestamp (a record's Date Created mapped into a Time
             // field): keep the time of day.
             if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm:ss.FFFFFFF", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss" },
-                CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeFromStamp) ||
-                DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out timeFromStamp))
-                return DateTime.Today.Add(timeFromStamp.TimeOfDay);
+                CultureInfo.InvariantCulture, WallClockStyles, out var timeFromStamp) ||
+                DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, WallClockStyles, out timeFromStamp))
+                return DateTime.Today.Add(WallClock(timeFromStamp).TimeOfDay);
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
 
