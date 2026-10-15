@@ -69,6 +69,9 @@ public interface IPipelineRepository
     Task<bool> ExtendRunLeaseAsync(Guid messageId, string workerId, CancellationToken ct = default);
     Task<long> CreateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default);
     Task UpdateStepRunAsync(PipelineStepRun stepRun, CancellationToken ct = default);
+    /// <summary>Writes many already finished step runs (status, start / end times and final audit set) with multi-row INSERTs —
+    /// the history of a loop batch written in one go instead of an insert and an update per record.</summary>
+    Task CreateCompletedStepRunsAsync(IReadOnlyList<PipelineStepRun> stepRuns, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, CancellationToken ct = default);
     Task<IReadOnlyList<PipelineStepRun>> GetStepRunsByRunIdAsync(long runId, int page, int pageSize, CancellationToken ct = default);
     Task<int> CountStepRunsByRunIdAsync(long runId, CancellationToken ct = default);

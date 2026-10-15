@@ -111,6 +111,8 @@ public partial class PipelineEngine
             BatchSize = _options.LoopBatchSize, IsBulkEvent = bulk, ChunkedSearch = workset
         });
         var hadPrevious = steps.TryGetValue(step.RefId, out var previous);
+        var bulkCreate = GetLoopBulkCreateStep(step, config, allSteps);
+        var bulkState = bulkCreate != null ? new LoopBulkCreateState() : null;
         var offset = 0;
         var batchNumber = 0;
         var processed = 0;
@@ -155,12 +157,17 @@ public partial class PipelineEngine
                 var timer = Stopwatch.StartNew();
                 var errors = new Exception?[items.Count];
                 var completed = new bool[items.Count];
+                var snapshotMark = snapshots.Count;
+                var bulkWritten = false;
                 LoopBatchProfile.Reset();
                 AppDomain.CurrentDomain.FirstChanceException += LoopBatchProfile.OnFirstChance;
                 try
                 {
-                    await ExecuteLoopBatchItemsAsync(step, allSteps, items, total, runId, context, steps,
-                        snapshots, concurrency, false, completed, errors, ct);
+                    bulkWritten = bulkCreate != null && await TryWriteLoopBatchInBulkAsync(step, bulkCreate, bulkState!, allSteps,
+                        items, total, runId, context, steps, completed, ct);
+                    if (!bulkWritten)
+                        await ExecuteLoopBatchItemsAsync(step, allSteps, items, total, runId, context, steps,
+                            snapshots, concurrency, false, completed, errors, ct);
                 }
                 finally
                 {
@@ -199,7 +206,9 @@ public partial class PipelineEngine
                         Failed = errors.Count(error => error != null), ProcessedThisAttempt = processed,
                         TotalCount = total, Workers = concurrency, DurationMs = timer.ElapsedMilliseconds
                     });
-                    batchRun.LogMessage = $"Batch {batchNumber}: {completed.Count(done => done)}/{items.Count} records succeeded in {timer.ElapsedMilliseconds} ms using {concurrency} worker(s).";
+                    batchRun.LogMessage = bulkWritten
+                        ? $"Batch {batchNumber}: {completed.Count(done => done)}/{items.Count} records succeeded in {timer.ElapsedMilliseconds} ms in one bulk write."
+                        : $"Batch {batchNumber}: {completed.Count(done => done)}/{items.Count} records succeeded in {timer.ElapsedMilliseconds} ms using {concurrency} worker(s).";
                     await _pipelineRepo.UpdateStepRunAsync(batchRun, ct);
                     _logger.LogInformation("Pipeline run {RunId}: {BatchSummary}", runId, batchRun.LogMessage);
                 }
@@ -209,6 +218,7 @@ public partial class PipelineEngine
                 // infrastructure errors (always preferred as `firstError`) end the attempt.
                 if (firstError != null && IsControlFlowOrInfrastructureException(firstError))
                     ExceptionDispatchInfo.Capture(firstError).Throw();
+                await FlushAuditSnapshotsAsync(snapshots, snapshotMark, context, runId, ct);
             }
         }
         finally

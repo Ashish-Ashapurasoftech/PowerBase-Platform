@@ -9,6 +9,7 @@ using PowerBase.Application.Connections.Queries.GetConnectionApps;
 using PowerBase.Application.Connections.Queries.GetConnectionFields;
 using PowerBase.Application.Connections.Queries.GetConnections;
 using PowerBase.Application.Connections.Queries.GetConnectionTables;
+using PowerBase.Application.Pipelines;
 using System;
 
 namespace PowerBase.API.Controllers;
@@ -144,6 +145,38 @@ public class PipelineConnectionsController : ControllerBase
     {
         var tables = await _tablesHandler.HandleAsync(new GetConnectionTablesQuery(connectionId, appId), ct);
         return Ok(new ApiListResponse<ConnectionTableDto>(tables, tables.Count, 1, tables.Count));
+    }
+
+    /// <summary>Import templates (imports that read a file) of an app in the caller's account, for the Import with CSV step;
+    /// optionally only those that fill <paramref name="tableId"/>. Each has the merge field it matches records on.</summary>
+    [HttpGet("pipelines/metadata/apps/{appId:guid}/import-templates")]
+    [ProducesResponseType(typeof(ApiListResponse<PipelineImportTemplateDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetCurrentTenantImportTemplates(Guid appId, [FromQuery] Guid? tableId,
+        [FromServices] PowerBase.Application.Common.Interfaces.IAppAccessService access,
+        [FromServices] IServiceProvider services,
+        CancellationToken ct)
+    {
+        await access.RequirePermissionByAppPublicIdAsync(appId, PowerBase.Domain.Constants.PermissionCodes.PowerFlowsRead, ct);
+        var items = await PipelineImportTemplates.ListAsync(services, appId, tableId, ct);
+        return Ok(new ApiListResponse<PipelineImportTemplateDto>(items, items.Count, 1, items.Count));
+    }
+
+    /// <summary>Import templates of an app visible through a saved account (Connect new account), for the Import with CSV step.</summary>
+    [HttpGet("pipelines/connections/{connectionId:guid}/apps/{appId:guid}/import-templates")]
+    [ProducesResponseType(typeof(ApiListResponse<PipelineImportTemplateDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetConnectionImportTemplates(Guid connectionId, Guid appId, [FromQuery] Guid? tableId,
+        [FromServices] ConnectionScopeResolver scopeResolver,
+        [FromServices] Microsoft.Extensions.DependencyInjection.IServiceScopeFactory scopeFactory,
+        CancellationToken ct)
+    {
+        var connection = await scopeResolver.TryResolveAsync(connectionId, ct)
+            ?? throw new PowerBase.Domain.Exceptions.NotFoundException("Connection", connectionId);
+        await using var target = await TargetTenantScopeHelper.OpenAsync(scopeFactory, connection, ct);
+        await target.GetRequiredService<PowerBase.Application.Common.Interfaces.IAppAccessService>()
+            .RequirePermissionByAppPublicIdAsync(appId, PowerBase.Domain.Constants.PermissionCodes.PowerFlowsRead, ct);
+        var items = await PipelineImportTemplates.ListAsync(target.Services, appId, tableId, ct);
+        return Ok(new ApiListResponse<PipelineImportTemplateDto>(items, items.Count, 1, items.Count));
     }
 
     /// <summary>List fields of a table visible through a saved account.</summary>
