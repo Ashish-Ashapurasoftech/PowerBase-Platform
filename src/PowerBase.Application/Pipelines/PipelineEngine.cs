@@ -3202,7 +3202,7 @@ public partial class PipelineEngine : IPipelineEngine
             if (root.SelectedFieldFids != null)
             {
                 foreach (var field in fields.Where(f => f.Fid.HasValue && root.SelectedFieldFids.Contains(f.Fid.Value) && !f.IsSystem))
-                    rowValues[field.Fid!.Value] = ParseBulkUpsertValueType("", field.TypeCode);
+                    rowValues[field.Fid!.Value] = ParseBulkUpsertValueType("", field.TypeCode, field.Settings);
             }
 
             var resolvedMappings = new Dictionary<string, object?>();
@@ -3217,7 +3217,7 @@ public partial class PipelineEngine : IPipelineEngine
                     if (field != null && field.Fid.HasValue)
                     {
                         var resolvedValStr = mapping.Value != null ? EvaluateTokens(await RenderUserTokensForTextAsync(mapping.Value, field, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct), payloadJson, executionPath, allSteps) : null;
-                        var parsedVal = mapping.Value != null ? ParseBulkUpsertValueType(resolvedValStr, field.TypeCode) : null;
+                        var parsedVal = mapping.Value != null ? ParseBulkUpsertValueType(resolvedValStr, field.TypeCode, field.Settings) : null;
                         rowValues[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -3248,18 +3248,18 @@ public partial class PipelineEngine : IPipelineEngine
                             else if (el.ValueKind == JsonValueKind.String)
                             {
                                 var resolvedValStr = EvaluateTokens(el.GetString(), payloadJson, executionPath, allSteps);
-                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode, field.Settings);
                             }
                             else
                             {
                                 var resolvedValStr = EvaluateTokens(el.GetRawText(), payloadJson, executionPath, allSteps);
-                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode, field.Settings);
                             }
                         }
                         else if (rawVal is string s)
                         {
                             var resolvedValStr = EvaluateTokens(s, payloadJson, executionPath, allSteps);
-                            parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                            parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode, field.Settings);
                         }
                         else
                         {
@@ -5628,6 +5628,9 @@ public partial class PipelineEngine : IPipelineEngine
     private object? ParseRecordMappingValueWithFormat(string value, AppField field, string? expression, string? dateFormat)
     {
         var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
+        // A Multi-select Text field stores a JSON array of its choices, as the record form saves it.
+        if (string.Equals(field.TypeCode, "MultiSelect", StringComparison.OrdinalIgnoreCase))
+            return PipelineChoiceValues.ToStoredMultiSelect(value, field.Settings);
         try { return ParseValueTypeWithFormat(value, field.TypeCode, label, dateFormat); }
         catch (FormatException ex)
         {
@@ -5667,9 +5670,8 @@ public partial class PipelineEngine : IPipelineEngine
 
         if (normalizedCode == "CHECKBOX" || normalizedCode == "BOOLEAN")
         {
-            if (bool.TryParse(valueStr, out var bVal)) return bVal;
-            if (valueStr == "1") return true;
-            if (valueStr == "0") return false;
+            // true / false, 1 / 0, and the Yes / No a step's Select tab writes.
+            if (PipelineChoiceValues.TryParseCheckbox(valueStr, out var bVal)) return bVal;
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
         if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER", "RATING", "DURATION" }.Contains(normalizedCode))
@@ -5737,9 +5739,13 @@ public partial class PipelineEngine : IPipelineEngine
         return valueStr; // Default to string
     }
 
-    private object? ParseBulkUpsertValueType(string? valueStr, string? typeCode)
+    private object? ParseBulkUpsertValueType(string? valueStr, string? typeCode, string? settings = null)
     {
         if (valueStr == null) return null;
+
+        // A Multi-select Text field stores a JSON array of its choices, as the record form saves it.
+        if (string.Equals(typeCode, "MultiSelect", StringComparison.OrdinalIgnoreCase))
+            return PipelineChoiceValues.ToStoredMultiSelect(valueStr, settings);
 
         // Normalize resolved row values before merge-key lookup and persistence.
         // Trim only the edges; spaces within a value are meaningful.
@@ -5770,9 +5776,8 @@ public partial class PipelineEngine : IPipelineEngine
 
         if (normalizedCode == "CHECKBOX" || normalizedCode == "BOOLEAN" || normalizedCode == "BOOL")
         {
-            if (bool.TryParse(valueStr, out var bVal)) return bVal;
-            if (valueStr == "1") return true;
-            if (valueStr == "0") return false;
+            // true / false, 1 / 0, and the Yes / No a step's Select tab writes.
+            if (PipelineChoiceValues.TryParseCheckbox(valueStr, out var bVal)) return bVal;
             return null;
         }
 
