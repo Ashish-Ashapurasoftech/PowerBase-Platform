@@ -4506,12 +4506,14 @@ public partial class PipelineEngine : IPipelineEngine
     /// <summary>A User / MultiUser field offers its person's details as sub-fields in the field picker (Id, Name, First name, Last name, Email),
     /// the way Quickbase does: <c>{{trigger.fid_4.email}}</c>. The field itself carries only the user id, so these are looked up.</summary>
     private static readonly Regex UserSubTokenRegex = new(
-        @"\{\{\s*([^{}]*?\.fid_\d+)\.(id|name|first_name|last_name|email)\s*\}\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"\{\{\s*([^{}]*?\.fid_\d+)\.(id|name|first_name|last_name|email|screen_name)\s*\}\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, UserTokenInfo> _userTokenInfo = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, AppField?> _tokenSourceFieldCache = new();
 
-    private sealed record UserTokenInfo(string Name, string FirstName, string LastName, string Email);
+    /// <summary>A person a <c>{{…fid_N.detail}}</c> token reads. ScreenName is the name the app shows for them (core.[User].Name, as
+    /// the record table and the audit's screenName); Name is the older "Name" detail — first + last name, else the email.</summary>
+    private sealed record UserTokenInfo(string Name, string FirstName, string LastName, string Email, string ScreenName);
 
     private static List<long> ParseUserIds(string? raw)
     {
@@ -4545,7 +4547,9 @@ public partial class PipelineEngine : IPipelineEngine
                 var first = user.FirstName?.Trim() ?? string.Empty;
                 var last = user.LastName?.Trim() ?? string.Empty;
                 var name = $"{first} {last}".Trim();
-                _userTokenInfo[id] = new UserTokenInfo(name.Length > 0 ? name : user.Email, first, last, user.Email);
+                var displayName = name.Length > 0 ? name : user.Email;
+                var screenName = string.IsNullOrWhiteSpace(user.Name) ? displayName : user.Name.Trim();
+                _userTokenInfo[id] = new UserTokenInfo(displayName, first, last, user.Email, screenName);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -4567,7 +4571,14 @@ public partial class PipelineEngine : IPipelineEngine
             {
                 if (property == "id") return id.ToString(CultureInfo.InvariantCulture);
                 if (!_userTokenInfo.TryGetValue(id, out var info)) return string.Empty;
-                return property switch { "email" => info.Email, "first_name" => info.FirstName, "last_name" => info.LastName, _ => info.Name };
+                return property switch
+                {
+                    "email" => info.Email,
+                    "first_name" => info.FirstName,
+                    "last_name" => info.LastName,
+                    "screen_name" => info.ScreenName,
+                    _ => info.Name
+                };
             }));
         });
 
