@@ -1251,7 +1251,7 @@ public class PipelineEngineTests
         _pipelineRepo.When(repo => repo.AppendSearchWorksetPageAsync(Arg.Any<PipelineSearchWorkset>(),
                 Arg.Any<List<PipelineBulkEventRecord>>(), Arg.Any<long>(), Arg.Any<CancellationToken>()))
             .Do(call => staged.AddRange(call.ArgAt<List<PipelineBulkEventRecord>>(1)));
-        _pipelineRepo.GetPendingSearchWorksetPageAsync(Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _pipelineRepo.GetPendingSearchWorksetPageAsync(Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<CancellationToken>(), Arg.Any<long>())
             .Returns(_ => staged.Where(row => row.Processed == 0).Take(500).ToList());
         _pipelineRepo.When(repo => repo.MarkSearchWorksetRecordsProcessedAsync(Arg.Any<Guid>(),
                 Arg.Any<List<long>>(), 1, Arg.Any<CancellationToken>()))

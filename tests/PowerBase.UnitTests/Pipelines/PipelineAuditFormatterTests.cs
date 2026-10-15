@@ -275,6 +275,28 @@ public class PipelineAuditFormatterTests
     }
 
     [Fact]
+    public async Task CreateRecord_IsNamedFromItsOutput_WithoutReadingTheRecordAgain()
+    {
+        // The step's output carries the created record's stored values; a loop creating a million records used to read every
+        // one of them back just to name it in the history.
+        var tableGuid = Guid.NewGuid();
+        var fields = new List<AppField> { new() { Id = 2, Fid = 6, Name = "Name", TypeCode = "Text" } };
+        var table = new AppTable { Id = 20, Name = "Order", PublicId = tableGuid };
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+        await _formatter.InitializeAsync(1, 0, CancellationToken.None);
+        var created = Guid.NewGuid();
+
+        var result = _formatter.FormatStepRun(new PipelineStep { Id = 100, Type = "action", Subtype = "create-record", RefId = "s" },
+            JsonSerializer.Serialize(new { TableId = tableGuid.ToString(), FieldMappings = new Dictionary<string, object> { ["fid_6"] = "Kuldeep Thakkar" } }),
+            JsonSerializer.Serialize(new { CreatedRecordPublicId = created.ToString(), Id = 476891, fid_3 = 476891, fid_6 = "Kuldeep Thakkar" }),
+            "Success", "c", DateTime.UtcNow, DateTime.UtcNow);
+
+        result.LogMessage.Should().Be(@"Created record ""Kuldeep Thakkar"" in Order.");
+        await _recordRepo.DidNotReceiveWithAnyArgs().GetByPublicIdAsync(default!, default!, default, default, default);
+    }
+
+    [Fact]
     public void CopyRecordsAcrossTenants_UsesStoredMetadataForBothTables()
     {
         var source = Guid.NewGuid();

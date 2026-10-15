@@ -208,7 +208,7 @@ public class PipelineStreamedAiSearchTests
             });
         pipelineRepo.CompleteSearchWorksetDiscoveryAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(_ => { outcome.CompleteCalls++; return Task.CompletedTask; });
-        pipelineRepo.GetPendingSearchWorksetPageAsync(Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        pipelineRepo.GetPendingSearchWorksetPageAsync(Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<CancellationToken>(), Arg.Any<long>())
             .Returns(_ => outcome.Staged.Where(row => row.Processed == 0).Take(500).ToList());
         pipelineRepo.When(repo => repo.MarkSearchWorksetRecordsProcessedAsync(Arg.Any<Guid>(), Arg.Any<List<long>>(), 1, Arg.Any<CancellationToken>()))
             .Do(call => { foreach (var id in call.ArgAt<List<long>>(1)) outcome.Staged.Single(row => row.Id == id).Processed = 1; });

@@ -37,35 +37,58 @@ public partial class PipelineEngine
     /// are not tried in bulk again for the rest of the loop: each try is wasted work before the record-by-record write.</summary>
     private const int BulkCreateMaxConsecutiveFallbacks = 3;
 
-    /// <summary>The loop's Create Record step when its batches can be written in bulk, otherwise null.</summary>
-    private PipelineStep? GetLoopBulkCreateStep(PipelineStep loop, LoopStepConfig config, List<PipelineStep> allSteps)
+    /// <summary>The loop's Create Record step when its batches can be written in bulk, otherwise null (and the reason is logged once).</summary>
+    private async Task<PipelineStep?> GetLoopBulkCreateStepAsync(PipelineStep loop, LoopStepConfig config, List<PipelineStep> allSteps, CancellationToken ct)
+    {
+        if (!_options.BulkCreateRecordsInLoops) return null;
+        var (create, reason) = await FindLoopBulkCreateStepAsync(loop, config, allSteps, ct);
+        if (create == null && reason != null)
+            _logger.LogInformation("Loop {LoopRefId} is written record by record, not in bulk: {Reason}.", loop.RefId, reason);
+        return create;
+    }
+
+    private async Task<(PipelineStep? Create, string? Reason)> FindLoopBulkCreateStepAsync(
+        PipelineStep loop, LoopStepConfig config, List<PipelineStep> allSteps, CancellationToken ct)
     {
         // An explicitly sequential loop asked for its records in order, one after another.
-        if (!_options.BulkCreateRecordsInLoops || config.MaxConcurrency == 1) return null;
+        if (config.MaxConcurrency == 1) return (null, "the loop is set to run one record at a time");
         var children = allSteps.Where(s => s.ParentStepId == loop.Id).ToList();
-        if (children.Count != 1) return null;
+        if (children.Count != 1) return (null, "it has more than one step inside it");
         var create = children[0];
-        if (create.Type != "action" || create.Subtype != "create-record" || string.IsNullOrWhiteSpace(create.RefId) ||
+        if (create.Type != "action" || create.Subtype != "create-record") return (null, null);
+        if (string.IsNullOrWhiteSpace(create.RefId) ||
             !string.Equals(create.ParentBranch, "children", StringComparison.OrdinalIgnoreCase) ||
-            allSteps.Any(s => s.ParentStepId == create.Id)) return null;
+            allSteps.Any(s => s.ParentStepId == create.Id)) return (null, "its Create Record step is not a plain step of the loop");
 
         // A mapping that reads the previous record's result, or indexes the steps dynamically, depends on the order of the records.
         var json = create.ConfigJson ?? "{}";
         if (Regex.IsMatch(json, @"\bsteps\s*\[", RegexOptions.IgnoreCase) ||
-            Regex.IsMatch(json, $@"\b{Regex.Escape(create.RefId)}\s*[.\[]", RegexOptions.IgnoreCase)) return null;
+            Regex.IsMatch(json, $@"\b{Regex.Escape(create.RefId)}\s*[.\[]", RegexOptions.IgnoreCase))
+            return (null, "a mapping reads the previous record's result");
 
-        // A step that writes through a saved account or into another tenant runs in that account's scope: record by record.
+        // The step's account decides where it writes, exactly as when it runs on its own (ExecuteStepAsync): the flow's own
+        // account (the builder saves it on every step) writes here; another tenant, or a saved account, runs in that account's
+        // scope — record by record.
+        Guid? connectionId = null;
         try
         {
             using var document = JsonDocument.Parse(json);
-            if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return (null, "its configuration is not an object");
             foreach (var name in new[] { "connectionPublicId", "ConnectionPublicId" })
-                if (document.RootElement.TryGetProperty(name, out var connection) && connection.ValueKind == JsonValueKind.String &&
-                    Guid.TryParse(connection.GetString(), out var connectionId) && !PipelineStepValidator.SystemConnectionIds.Contains(connectionId))
-                    return null;
+                if (document.RootElement.TryGetProperty(name, out var connection) && connection.ValueKind == JsonValueKind.String)
+                {
+                    if (Guid.TryParse(connection.GetString(), out var id)) connectionId = id;
+                    break;
+                }
         }
-        catch (JsonException) { return null; }
-        return create;
+        catch (JsonException) { return (null, "its configuration cannot be read"); }
+        if (connectionId is { } account && !PipelineStepValidator.SystemConnectionIds.Contains(account))
+        {
+            var tenantId = await _adminRepo.GetTenantIdByPublicIdAsync(account, ct);
+            if (tenantId != _queryContext.TenantId)
+                return (null, tenantId.HasValue ? "it writes into another account's tenant" : "it writes through a saved account");
+        }
+        return (create, null);
     }
 
     /// <summary>
@@ -102,6 +125,8 @@ public partial class PipelineEngine
         var hashes = paths.Select(ComputeSha256Hash).ToArray();
         var sequenceBase = context.TryGetValue("_StepSequence", out var sequenceObj) && sequenceObj is int sequence ? sequence : 0;
         var outputs = new string?[items.Count];
+        var batchStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        var phase = batchStart;
 
         CreateRecordStepConfig config;
         AppTable table;
@@ -173,6 +198,7 @@ public partial class PipelineEngine
         {
             if (records.Count > 0)
             {
+                LoopBatchProfile.Phase("bulk-prepare", ref phase);
                 await _uow.BeginAsync(ct);
                 // Unique fields: which of the batch's values the table already holds, asked once per field for the whole batch.
                 var asked = new Dictionary<long, HashSet<string>>();
@@ -213,6 +239,7 @@ public partial class PipelineEngine
                     // A value nobody asked the database about: let the database answer, as the single-record check does.
                     return asked.TryGetValue(fid, out var keys) && keys.Contains(key) ? taken[fid].Contains(key) : null;
                 }
+                LoopBatchProfile.Phase("bulk-unique-lookup", ref phase);
                 foreach (var record in records)
                 {
                     // A rejected record throws here: the batch is rolled back and written record by record, where it fails on its own.
@@ -223,15 +250,18 @@ public partial class PipelineEngine
                             inBatch[field.Fid.Value].Add(UniqueValueKey(field, value, state.MemoryUnique.ContainsKey(field.Fid.Value)));
                 }
 
+                LoopBatchProfile.Phase("bulk-validate", ref phase);
                 created = await _recordRepo.CreateManyAsync(table, fields,
                     records.Select(r => (IReadOnlyDictionary<long, object?>)r.Values).ToList(), _uow.Transaction!, ct, indexMessages.Add);
                 if (created.Count != records.Count)
                     throw new InvalidOperationException("The batch insert returned an unexpected number of records.");
 
+                LoopBatchProfile.Phase("bulk-insert", ref phase);
                 var recordIds = new Dictionary<Guid, long>(created.Count);
                 foreach (var chunk in created.Chunk(1000))
                     foreach (var (publicId, id) in await _recordRepo.GetActiveRecordIdsByPublicIdsAsync(table, chunk, _uow.Transaction, ct))
                         recordIds[publicId] = id;
+                LoopBatchProfile.Phase("bulk-record-ids", ref phase);
                 // Date Created / Record Owner are system-managed, so nothing submits them; filled in like the single-record step does.
                 var createdOnField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
                 var createdByField = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
@@ -244,6 +274,7 @@ public partial class PipelineEngine
                     if (createdByField != null) records[n].Values[createdByField.Fid!.Value] = StepActingUserId;
                 }
 
+                LoopBatchProfile.Phase("bulk-ids-backfill", ref phase);
                 // The persisted rows (defaults, explicit nulls) and their Formula values, as the single-record step returns them.
                 var persisted = new Dictionary<long, IReadOnlyDictionary<string, object?>>();
                 foreach (var chunk in recordIds.Values.Chunk(1000))
@@ -255,6 +286,7 @@ public partial class PipelineEngine
                 for (int n = 0, p = 0; n < rows.Count; n++)
                     if (rows[n] != null && computed != null) rows[n] = MergeComputed(rows[n]!, computed[p++]);
 
+                LoopBatchProfile.Phase("bulk-read-back", ref phase);
                 var added = new List<(Guid RecordPublicId, IReadOnlyDictionary<long, object?> Values)>(records.Count);
                 var receiptLogs = new List<PipelineStepIdempotencyLog>(records.Count);
                 for (var n = 0; n < records.Count; n++)
@@ -270,10 +302,14 @@ public partial class PipelineEngine
                         ExecutionPath = paths[position], OutputJson = outputs[position]!
                     });
                 }
+                LoopBatchProfile.Phase("bulk-build-output", ref phase);
                 if (await _triggerInterceptor.HasActiveSubscriptionsAsync(table, ct))
                     await _triggerInterceptor.InterceptAddedManyAsync(table, fields, added, ct);
+                LoopBatchProfile.Phase("bulk-triggers", ref phase);
                 await _idempotencyRepo.InsertManyAsync(receiptLogs, _uow.Transaction, ct);
+                LoopBatchProfile.Phase("bulk-receipts", ref phase);
                 await _uow.CommitAsync(ct);
+                LoopBatchProfile.Phase("bulk-commit", ref phase);
             }
         }
         catch (Exception ex)
@@ -298,6 +334,10 @@ public partial class PipelineEngine
             if (inBatch.TryGetValue(fid, out var batchValues)) held.UnionWith(batchValues);
 
         await WriteBulkCreateHistoryAsync(create, config, table, fields, records, outputs, paths, sequenceBase, runId, context, ct);
+        phase = System.Diagnostics.Stopwatch.GetTimestamp();   // its two phases are counted inside
+        Interlocked.Add(ref LoopBatchProfile.Items, records.Count);
+        Interlocked.Add(ref LoopBatchProfile.ItemTicks, phase - batchStart);
+        Interlocked.Add(ref LoopBatchProfile.StepTicks, phase - batchStart);
         context["_StepSequence"] = sequenceBase + items.Count;
         for (var i = 0; i < items.Count; i++) completed[i] = outputs[i] != null;
         var last = outputs.LastOrDefault(output => output != null);
@@ -316,6 +356,7 @@ public partial class PipelineEngine
         CancellationToken ct)
     {
         if (records.Count == 0) return;
+        var phase = System.Diagnostics.Stopwatch.GetTimestamp();
         var attemptId = context.TryGetValue("_RunAttemptId", out var attemptObj) && attemptObj is long attempt ? attempt : (long?)null;
         var correlationId = context.TryGetValue("_CorrelationId", out var correlationObj) ? correlationObj?.ToString() ?? string.Empty : string.Empty;
         var metadata = BuildAuditFieldMetadata(table, fields);
@@ -348,6 +389,7 @@ public partial class PipelineEngine
             }
             history.Add(run);
         }
+        LoopBatchProfile.Phase("bulk-history-format", ref phase);
         try
         {
             using var suppress = new TransactionScope(TransactionScopeOption.Suppress, TransactionScopeAsyncFlowOption.Enabled);
@@ -358,6 +400,7 @@ public partial class PipelineEngine
         {
             _logger.LogWarning(ex, "Pipeline run {RunId}: {Count} records were created but their step history could not be written.", runId, history.Count);
         }
+        LoopBatchProfile.Phase("bulk-history-write", ref phase);
     }
 
     /// <summary>How two Unique values compare: the stored text for an encrypted field (as its decrypted index holds it), otherwise the
