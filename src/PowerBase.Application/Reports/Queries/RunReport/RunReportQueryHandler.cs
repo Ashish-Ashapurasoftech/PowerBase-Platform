@@ -1486,7 +1486,15 @@ public class RunReportQueryHandler
         CancellationToken ct,
         IEnumerable<IReadOnlyDictionary<long, object?>>? computed = null)
     {
-        var hasUserFields = fields.Any(f =>
+        // A Lookup of a parent User-typed field carries the parent's raw user id(s) as its
+        // projected value — resolve it like the source field it pulls down.
+        var userLookupTypes = fields
+            .Where(f => f.Fid.HasValue && f.TypeCode == "Lookup")
+            .Select(f => (Fid: (long)f.Fid!.Value, Type: RecordResult.UserLookupSourceType(f)))
+            .Where(x => x.Type is not null)
+            .ToList();
+
+        var hasUserFields = userLookupTypes.Count > 0 || fields.Any(f =>
             f.TypeCode is "User" or "MultiUser" or "File" or "Formula_User" or "Formula_ListUser" ||
             (f.IsSystem && f.PhysicalColumnName is "CreatedBy" or "ModifiedBy"));
 
@@ -1496,9 +1504,15 @@ public class RunReportQueryHandler
         if (computed is not null)
         {
             var formulaUserFids = fields.Where(f => f.TypeCode == "Formula_User" && f.Fid.HasValue)
-                .Select(f => (long)f.Fid!.Value).ToList();
+                .Select(f => (long)f.Fid!.Value)
+                .Concat(userLookupTypes.Where(x => x.Type is "User" or "Formula_User").Select(x => x.Fid))
+                .ToList();
             var formulaUserListFids = fields.Where(f => f.TypeCode == "Formula_ListUser" && f.Fid.HasValue)
-                .Select(f => (long)f.Fid!.Value).ToList();
+                .Select(f => (long)f.Fid!.Value)
+                .Concat(userLookupTypes.Where(x => x.Type == "Formula_ListUser").Select(x => x.Fid))
+                .ToList();
+            // A looked-up MultiUser is the parent's stored JSON array of ids ("[12,15]").
+            var multiUserLookupFids = userLookupTypes.Where(x => x.Type == "MultiUser").Select(x => x.Fid).ToList();
             foreach (var values in computed)
             {
                 foreach (var fid in formulaUserFids)
@@ -1509,6 +1523,21 @@ public class RunReportQueryHandler
                     if (values.TryGetValue(fid, out var lv) && lv is IEnumerable<string> listIds)
                         foreach (var raw in listIds)
                             if (long.TryParse(raw, out var luid)) ids.Add(luid);
+                foreach (var fid in multiUserLookupFids)
+                {
+                    if (!values.TryGetValue(fid, out var mv) || mv is null) continue;
+                    var str = mv.ToString()!;
+                    if (str.TrimStart().StartsWith('['))
+                    {
+                        try
+                        {
+                            var parsed = System.Text.Json.JsonSerializer.Deserialize<List<long>>(str);
+                            if (parsed != null) foreach (var pid in parsed) ids.Add(pid);
+                        }
+                        catch { }
+                    }
+                    else if (long.TryParse(str, out var muid)) ids.Add(muid);
+                }
             }
         }
         foreach (var row in rows)
