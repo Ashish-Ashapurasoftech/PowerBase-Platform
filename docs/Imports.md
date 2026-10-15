@@ -115,6 +115,8 @@ cell takes the field out, blank cells are ignored, and a column with no filled c
 A saved mapping is never dropped by this. Formulas and virtual columns can use every column. If the check cannot be made, every column and every field is offered, and the run reports rows that do not convert.
 When a workbook is mapped **sheet by sheet** (below), a table is built from the columns whose heading matches one of its fields, so only those are used there.
 
+**Opening a new template (feedback, 2026-10-15):** a workbook is first read as one sheet, like a CSV, so **every column of the file is listed** (before, a workbook with several sheets opened straight into "The sheets I pick", which lists only matched columns, while an edited template listed them all). Only the columns whose heading names a field and whose values fit it are auto-mapped; by hand, a column can go only to a field its values fit. "The sheets I pick" is a choice the user makes, and a template saved that way opens that way.
+
 **Find each column by.** *Its heading*: a column is found again by its heading in each new file, so it can move, and it is mapped by name. *Its position*: a column is the one in the same place in every file, whatever its heading says (it can change).
 The columns are then named **Column 1, Column 2...** in the mapping, in formulas and in messages (`ImportFileColumns.NamedBy`), nothing is mapped by name, and the user maps each column to a field by hand. Sheets cannot be picked by field in this mode.
 
@@ -135,6 +137,8 @@ with different mappings, and one table can use sheet mode while another reads th
 * A table in sheet mode ignores the import-wide filter and the table filter; each sheet has its own filter. Merge needs the key mapped in every sheet of the table.
 * A missing sheet, or a sheet without its row of column names, stops the run before anything is written, naming the sheet. The sheet layouts are checked by *needs attention* like the rest.
 * `POST import-files/{fileId}/sheets` reads several sheets (each with its own layout) in one call. Limits: 50 sheets per table, 100 sheets in a workbook mapping.
+
+**The filter of the whole import opens with its first condition ready** (feedback, 2026-10-15): the first field of the source, its first operator, and no value yet. A condition nothing has been typed in is left out when the import is saved (`pruneEmptyFilterNodes`), so it filters nothing until it is filled in; the person can remove the row. It is the same for a table and a file source.
 
 ### Only records changed since the last run
 
