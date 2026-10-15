@@ -102,7 +102,9 @@ public interface IPipelineRepository
     /// <see cref="PipelineSearchWorkset.LastSearchCursor"/>). An empty page still advances the cursor.</summary>
     Task AppendSearchWorksetAiPageAsync(PipelineSearchWorkset workset, List<PipelineBulkEventRecord> records, string nextCursor, CancellationToken ct = default);
     Task CompleteSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default);
-    Task<IReadOnlyList<PipelineBulkEventRecord>> GetPendingSearchWorksetPageAsync(Guid worksetId, int pageSize, CancellationToken ct = default);
+    /// <summary>The first pending rows of a search workset with an ordinal above <paramref name="afterOrdinal"/>. A loop passes the last
+    /// ordinal it finished, so each page is found right where the previous one ended instead of from the start of the workset.</summary>
+    Task<IReadOnlyList<PipelineBulkEventRecord>> GetPendingSearchWorksetPageAsync(Guid worksetId, int pageSize, CancellationToken ct = default, long afterOrdinal = 0);
     Task MarkSearchWorksetRecordsProcessedAsync(Guid worksetId, List<long> ids, byte processedStatus, CancellationToken ct = default);
     /// <summary>PowerFlow steps (active or inactive) that use field <paramref name="fid"/> of the table <paramref name="tablePublicId"/>
     /// (field IDs repeat across tables, so the table is needed to tell its field 10 from another table's).</summary>

@@ -1306,7 +1306,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             var rowsPerStatement = Math.Max(1, Math.Min(1000, (maxParameters - 1) / perRow));
             foreach (var chunk in rowIndexes.Chunk(rowsPerStatement))
             {
-                var parameters = new DynamicParameters();
+                var parameters = new BulkParameters();
                 parameters.Add("createdBy", QueryContext.UserId);
                 var tuples = new List<string>(chunk.Length);
                 for (var n = 0; n < chunk.Length; n++)
@@ -2954,7 +2954,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // Same equality as HasValueDuplicateAsync ("col = value"), asked for a whole chunk of values at once.
         foreach (var chunk in Enumerable.Range(0, values.Count).Chunk(1000))
         {
-            var parameters = new DynamicParameters();
+            var parameters = new BulkParameters();
             var rowsSql = new string[chunk.Length];
             for (var i = 0; i < chunk.Length; i++)
             {

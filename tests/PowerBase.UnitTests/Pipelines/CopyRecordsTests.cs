@@ -805,6 +805,118 @@ public class CopyRecordsTests
     // A destination with nothing that makes one row depend on another (no unique / reference field, no data rule) is written a
     // page at a time: one insert for the page, one lookup of the merge values, one receipt write, one audit write, one count update.
 
+    [Fact]
+    public async Task Copy_ExportingAFormulaOverStoredFields_ProjectsOnlyThatFormula_NeverTheSourcesSummaries()
+    {
+        // Order → Order Detail: the copy exports "ORD000" & ToText([Record ID#]); Order also has a Summary over Order Detail.
+        // That Summary is computed in memory over every Order Detail row (encrypted app), page after page — it must not run.
+        using var harness = BatchHarness(300);
+        harness.SourceFields[0].TypeCode = "Formula_Text";
+        harness.SourceFields[0].Settings = "{\"expression\":\"\\\"ORD000\\\" & ToText([Record ID#])\"}";
+        harness.SourceFields.Add(new AppField { Id = 103, Fid = 3, Name = "Record ID#", TypeCode = "RecordId", IsSystem = true, PhysicalColumnName = "Id" });
+        harness.SourceFields.Add(new AppField { Id = 110, Fid = 10, Name = "Sum of amount", TypeCode = "Summary", Settings = "{\"childTableId\":6,\"function\":\"Sum\"}" });
+        harness.FormulaProjector.GetFormulaDependencies(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IEnumerable<long>>())
+            .Returns(new HashSet<long> { 6, 3 });
+        var number = 0;
+        harness.FormulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable>())
+            .Returns(c => c.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
+                .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?> { [6] = $"ORD000{++number}" }).ToList());
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(300, result.GetProperty("InsertedCount").GetInt32());
+        Assert.Empty(harness.RelationalProjector.ReceivedCalls());
+        var projected = harness.FormulaProjector.ReceivedCalls().Where(c => c.GetMethodInfo().Name == "Project")
+            .Select(c => (IReadOnlyList<AppField>)c.GetArguments()[0]!).ToList();
+        Assert.NotEmpty(projected);
+        Assert.All(projected, fields => { Assert.Contains(fields, f => f.Fid == 6); Assert.DoesNotContain(fields, f => f.Fid == 10); });
+    }
+
+    /// <summary>The field lists the relationship projector was asked to project.</summary>
+    private static List<IReadOnlyList<AppField>> RelationalCalls(Harness harness) => harness.RelationalProjector.ReceivedCalls()
+        .Where(c => c.GetMethodInfo().Name == "ProjectAsync").Select(c => (IReadOnlyList<AppField>)c.GetArguments()[1]!).ToList();
+
+    private static List<IReadOnlyList<AppField>> FormulaCalls(Harness harness) => harness.FormulaProjector.ReceivedCalls()
+        .Where(c => c.GetMethodInfo().Name == "Project").Select(c => (IReadOnlyList<AppField>)c.GetArguments()[0]!).ToList();
+
+    [Fact]
+    public async Task Copy_ExportingAFormulaThatReadsAnotherFormula_ProjectsBothFormulas_AndNoSummary()
+    {
+        // A = B & "-x", B = "ORD000" & ToText([Record ID#]): both formulas, still nothing relational.
+        using var harness = BatchHarness(20);
+        harness.SourceFields[0].TypeCode = "Formula_Text";
+        harness.SourceFields[0].Settings = "{\"expression\":\"[Order no] & \\\"-x\\\"\"}";
+        harness.SourceFields.Add(new AppField { Id = 107, Fid = 7, Name = "Order no", TypeCode = "Formula_Text", Settings = "{\"expression\":\"\\\"ORD000\\\" & ToText([Record ID#])\"}" });
+        harness.SourceFields.Add(new AppField { Id = 103, Fid = 3, Name = "Record ID#", TypeCode = "RecordId", IsSystem = true, PhysicalColumnName = "Id" });
+        harness.SourceFields.Add(new AppField { Id = 110, Fid = 10, Name = "Sum of amount", TypeCode = "Summary", Settings = "{\"childTableId\":6,\"function\":\"Sum\"}" });
+        harness.FormulaProjector.GetFormulaDependencies(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IEnumerable<long>>()).Returns(new HashSet<long> { 6, 7, 3 });
+
+        await harness.Run();
+
+        Assert.Empty(RelationalCalls(harness));
+        Assert.All(FormulaCalls(harness), fields =>
+        {
+            Assert.Contains(fields, f => f.Fid == 6);
+            Assert.Contains(fields, f => f.Fid == 7);
+            Assert.DoesNotContain(fields, f => f.Fid == 10);
+        });
+    }
+
+    [Fact]
+    public async Task Copy_ExportingASummary_ProjectsThatSummaryOnly_NotTheSourcesOtherSummaries()
+    {
+        using var harness = BatchHarness(10);
+        harness.SourceFields[0].TypeCode = "Summary";
+        harness.SourceFields[0].Settings = "{\"childTableId\":6,\"function\":\"Sum\"}";
+        harness.SourceFields.Add(new AppField { Id = 111, Fid = 11, Name = "Line count", TypeCode = "Summary", Settings = "{\"childTableId\":7,\"function\":\"Count\"}" });
+        harness.SourceFields.Add(new AppField { Id = 112, Fid = 12, Name = "Customer", TypeCode = "Reference", Settings = "{\"parentTableId\":8}" });
+
+        await harness.Run();
+
+        var calls = RelationalCalls(harness);
+        Assert.NotEmpty(calls);
+        Assert.All(calls, fields =>
+        {
+            Assert.Contains(fields, f => f.Fid == 6);
+            Assert.DoesNotContain(fields, f => f.Fid == 11);
+            Assert.DoesNotContain(fields, f => f.Fid == 12);   // a Reference nobody exports or reads is not labelled either
+        });
+    }
+
+    [Fact]
+    public async Task Copy_ExportingALookup_ProjectsThatLookupOnly()
+    {
+        using var harness = BatchHarness(10);
+        harness.SourceFields[0].TypeCode = "Lookup";
+        harness.SourceFields[0].Settings = "{\"sourceTableId\":8,\"referenceFid\":12,\"sourceFid\":6}";
+        harness.SourceFields.Add(new AppField { Id = 112, Fid = 12, Name = "Customer", TypeCode = "Reference", Settings = "{\"parentTableId\":8}" });
+        harness.SourceFields.Add(new AppField { Id = 110, Fid = 10, Name = "Sum of amount", TypeCode = "Summary", Settings = "{\"childTableId\":6,\"function\":\"Sum\"}" });
+
+        await harness.Run();
+
+        var calls = RelationalCalls(harness);
+        Assert.NotEmpty(calls);
+        Assert.All(calls, fields => { Assert.Contains(fields, f => f.Fid == 6); Assert.DoesNotContain(fields, f => f.Fid == 10); });
+    }
+
+    [Fact]
+    public async Task Copy_FormulaWhoseInputsCannotBeListed_StillGetsTheFullProjection()
+    {
+        // GetFormulaDependencies answers null (e.g. a field chosen per record): project everything, as before.
+        using var harness = BatchHarness(10);
+        harness.SourceFields[0].TypeCode = "Formula_Text";
+        harness.SourceFields[0].Settings = "{\"expression\":\"ToText([Record ID#])\"}";
+        harness.SourceFields.Add(new AppField { Id = 110, Fid = 10, Name = "Sum of amount", TypeCode = "Summary", Settings = "{\"childTableId\":6,\"function\":\"Sum\"}" });
+        harness.FormulaProjector.GetFormulaDependencies(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IEnumerable<long>>()).Returns((IReadOnlySet<long>?)null);
+
+        await harness.Run();
+
+        var calls = RelationalCalls(harness);
+        Assert.NotEmpty(calls);
+        Assert.All(calls, fields => Assert.Contains(fields, f => f.Fid == 10));
+    }
+
     private const int RowByRowGuardFid = 99;
 
     private static Harness BatchHarness(int rows)
@@ -1474,6 +1586,8 @@ public class CopyRecordsTests
         /// <summary>Every receipt written so far, by the hex of its execution-path hash.</summary>
         public Dictionary<string, string> Logs { get; } = new();
         public IPipelineStepIdempotencyRepository Idempotency { get; } = Substitute.For<IPipelineStepIdempotencyRepository>();
+        public PowerBase.Application.Relationships.IRelationalProjector RelationalProjector { get; } = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
+        public PowerBase.Application.Formulas.IFormulaProjector FormulaProjector { get; } = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
         private readonly ServiceProvider provider;
         private readonly Guid step = Guid.NewGuid(), message = Guid.NewGuid();
         public Harness()
@@ -1523,12 +1637,12 @@ public class CopyRecordsTests
             encryption.DecryptDataAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<long>(), Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(c => c.ArgAt<string>(0));
             Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>()).Returns(_ => Page());
             Records.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<FilterGroup>(), null, null, Arg.Any<CancellationToken>()).Returns(Array.Empty<IReadOnlyDictionary<string, object?>>());
-            var relationalProjector = Substitute.For<PowerBase.Application.Relationships.IRelationalProjector>();
+            var relationalProjector = RelationalProjector;
             relationalProjector.ProjectAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
                 Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
                 .Returns(c => c.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
                     .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
-            var formulaProjector = Substitute.For<PowerBase.Application.Formulas.IFormulaProjector>();
+            var formulaProjector = FormulaProjector;
             formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
                 Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable>())
                 .Returns(c => c.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
