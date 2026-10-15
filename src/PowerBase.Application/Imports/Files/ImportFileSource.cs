@@ -116,12 +116,28 @@ public static class ImportFileRemap
     private static ValidationException Invalid(string message) =>
         new(new Dictionary<string, string[]> { ["Import"] = [message] });
 
-    /// <summary>A copy of the configuration whose column references are valid for <paramref name="file"/>. Fails with every column
-    /// the import needs that the file does not have.</summary>
+    /// <summary>A copy of the configuration whose column references are valid for <paramref name="file"/>. Columns are found by their heading when the
+    /// import was set up that way; when the file's headings differ (a renamed or reworded heading), the columns are taken by their place instead, as long as
+    /// the file has that many columns. Fails, naming every column missing, only when the file has fewer columns than the import uses.</summary>
     public static ImportDefinitionConfig Apply(ImportDefinitionConfig cfg, ImportFileSource file)
     {
-        var saved = file.Options.Columns;
         var byName = file.Options.ColumnBy != ImportSourceKinds.ColumnByPosition;
+        var (clone, missing) = Remap(cfg, file, byName);
+        if (missing.Count > 0 && byName)
+        {
+            var (byPlace, stillMissing) = Remap(cfg, file, false);
+            if (stillMissing.Count == 0) return byPlace;
+        }
+        if (missing.Count > 0)
+            throw Invalid(byName
+                ? $"The file has no column named {string.Join(", ", missing)}, and it does not have as many columns as the import expects, so the columns cannot be matched by position either. Check the file, or edit the import."
+                : $"The file has fewer columns than the import expects ({string.Join(", ", missing)} missing).");
+        return clone;
+    }
+
+    private static (ImportDefinitionConfig Config, List<string> Missing) Remap(ImportDefinitionConfig cfg, ImportFileSource file, bool byName)
+    {
+        var saved = file.Options.Columns;
         var missing = new List<string>();
 
         int? Translate(long fid)
@@ -153,17 +169,12 @@ public static class ImportFileRemap
         var tableConditions = Remap(cfg.TableConditions, Translate);
         var targetConditions = cfg.AdditionalTargets.Select(t => Remap(t.Conditions, Translate)).ToList();
 
-        if (missing.Count > 0)
-            throw Invalid(byName
-                ? $"The file has no column named {string.Join(", ", missing)}. Rename the heading in the file, or edit the import."
-                : $"The file has fewer columns than the import expects ({string.Join(", ", missing)} missing).");
-
         var clone = ImportJson.Deserialize<ImportDefinitionConfig>(ImportJson.Serialize(cfg))!;
         clone.Mappings = mappings;
         clone.Conditions = conditions;
         clone.TableConditions = tableConditions;
         for (var i = 0; i < clone.AdditionalTargets.Count; i++) clone.AdditionalTargets[i].Conditions = targetConditions[i];
-        return clone;
+        return (clone, missing);
     }
 
     private static FilterGroup? Remap(FilterGroup? group, Func<long, int?> translate)

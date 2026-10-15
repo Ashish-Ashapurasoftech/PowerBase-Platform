@@ -42,6 +42,9 @@ public sealed class StartImportRunHandler(
         var source = isFile ? null : await tables.GetByIdAsync(def.SourceTableId ?? 0, ct);
         var config = ImportConfigMapper.ToConfig(def, source?.PublicId ?? Guid.Empty);
         if (notifyOverride is not null) config.NotifyEmails = ImportNotify.Normalize(notifyOverride);
+        // A scheduled run of an import that only reads what changed since its last finished run says from when (nothing, and so everything, for the first run or
+        // after an edit). A run somebody starts by hand always reads every record: they asked for it now.
+        if (config.OnlyChangedSinceLastRun && !isFile && triggeredBy == ImportTrigger.Schedule) config.ChangedSinceUtc = ImportRunSince.Since(config, await runs.GetLastFinishedRunAsync(def.Id, ct));
 
         // A file import reads the file the person uploaded for this run: theirs, of the type the import expects, readable as set up.
         ImportRunFile? runFile = null;
@@ -51,8 +54,16 @@ public sealed class StartImportRunHandler(
             if (fileId is null) throw new ValidationException(new Dictionary<string, string[]> { ["File"] = ["Choose the file to import."] });
             var upload = await files.GetByPublicIdAsync(fileId.Value, ct);
             if (upload is null || upload.UploadedByUserId != user.UserId) throw new NotFoundException("ImportFile", fileId.Value);
+            // The file may be Excel or CSV whichever the import was set up with: it is read as what it is, with the same columns.
             if (upload.Format != config.File!.Format)
-                throw new ValidationException(new Dictionary<string, string[]> { ["File"] = [$"This import reads {(config.File.Format == ImportFileFormats.Xlsx ? "Excel (.xlsx)" : "CSV")} files, but the file you chose is {(upload.Format == ImportFileFormats.Xlsx ? "Excel" : "CSV")}."] });
+            {
+                if (ImportSheetModes.SheetsUsed(config).Count > 0 && upload.Format != ImportFileFormats.Xlsx)
+                    throw new ValidationException(new Dictionary<string, string[]> { ["File"] = ["This import maps each sheet of a workbook separately, so it needs an Excel (.xlsx) file."] });
+                config.File.Format = upload.Format;
+                config.File.Sheet = null;      // a CSV has no sheets, and a workbook is read from its first sheet
+                config.File.AllSheets = false;
+                config.File.Delimiter = null;  // detected from the file
+            }
             runFile = new ImportRunFile(upload.PublicId, upload.StoragePath, upload.FileName);
             try { fileSource = await fileAccess.OpenSourceAsync(new ImportRunSnapshot(destination.PublicId, config, null, runFile), countRows: false, ct); }
             catch (ImportFileFormatException ex) { throw new ValidationException(new Dictionary<string, string[]> { ["File"] = [ex.Message] }); }
@@ -64,7 +75,8 @@ public sealed class StartImportRunHandler(
         foreach (var plan in await planBuilder.BuildAllAsync(config, destination.PublicId, ct, fileSource))
             await planBuilder.EnsureMergeKeyIsUniqueAsync(plan, ct);
 
-        if (await runs.HasActiveRunAsync(def.Id, ct)) throw new ConflictException("This import is already running.");
+        // A file import is started with a file of its own each time, so several runs of it may go together; a table import reads the same records every time.
+        if (!isFile && await runs.HasActiveRunAsync(def.Id, ct)) throw new ConflictException("This import is already running.");
 
         var run = new ImportRun
         {

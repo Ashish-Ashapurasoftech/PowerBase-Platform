@@ -68,6 +68,16 @@ public sealed class ImportRunRepository(ITenantConnectionFactory connections, IQ
             new { definitionId }, cancellationToken: ct));
     }
 
+    public async Task<(DateTime StartedOn, string SnapshotJson)?> GetLastFinishedRunAsync(long definitionId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        var row = await conn.QuerySingleOrDefaultAsync<(DateTime StartedOn, string SnapshotJson)?>(new CommandDefinition(
+            "SELECT TOP 1 StartedOn, DefinitionSnapshotJson AS SnapshotJson FROM meta.ImportRun " +
+            "WHERE ImportDefinitionId = @definitionId AND Status IN ('success', 'partial') AND StartedOn IS NOT NULL ORDER BY Id DESC",
+            new { definitionId }, cancellationToken: ct));
+        return row;
+    }
+
     public async Task<bool> MarkRunningAsync(long runId, long sourceMaxId, CancellationToken ct = default)
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);

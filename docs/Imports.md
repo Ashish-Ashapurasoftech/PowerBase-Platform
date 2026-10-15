@@ -68,11 +68,15 @@ A **Reference** field (the child side of a table relationship, e.g. Student → 
 
 * **What is shown:** the Reference field itself, under its own name (e.g. "Department Name"), is the destination. Its display lookup (computed) and the hidden "(original)" copy are never destinations.
 * A value from the file or source table is the parent's **key** (the relationship's display key, else the parent table's key field, else - when no key was ever set - the field its reference picker labels records with: the table's first picker field, its display field, or its first ordinary stored field; e.g. a course's name) or its **Record ID#**, as every Reference write accepts.
-  A value that is a live Record ID# is taken as that record (as the form and API do); otherwise it is compared with the key (case and surrounding spaces do not matter). Whatever is looked up is asked once per chunk.
+  **When the relationship (or the parent table) has a key field, a value is looked up by that key only** (case and surrounding spaces do not matter) and is never taken for a Record ID#: a file that says `1` means the record whose key is `1`, not the record whose Record ID# is 1 (feedback, 2026-10-15). Only a parent that has **no key field** accepts a live Record ID# (as the form and API do) before the picker-label fallback. Whatever is looked up is asked once per chunk.
   A parent with no field to look a value up in is matched on the Record ID# only. A key field that is **encrypted** (every field is, in an app with app-level encryption) cannot be searched in the database, so the parent's records are read decrypted once per run and searched in memory (up to 500,000 records; beyond that the run says to import Record ID#s instead). Two parent records with the same value: the first one.
 * A value that finds **no parent record does not reject the row**: the reference is left blank and the text is kept in the field's hidden "(original)" copy, which the grid and reports show in its place (the same as when a field was converted into a reference). A Reference created straight into a relationship has no such copy yet: the first import run that meets a value with no parent record **creates it** (the same hidden Text field a conversion makes, named "<label> (original)", encrypted when the app is, recorded in the Reference's settings), once, in the real run and never in the check before it, and only for a person who may create fields in the table; if it cannot be made, the row is still imported blank and the details file says the text was not kept. A required Reference that stays blank is rejected like any missing required value.
   A value that matches is stored as the Record ID#, and any stale text in the "(original)" copy is cleared.
 * The person must be able to read the parent table. A Reference that only accepts some parent records (a dependent-dropdown rule) cannot be imported yet, and the import is refused with that message. A Reference is never what records are matched on. A fixed value can name the parent every row gets.
+
+### User fields
+
+A **User** field can be a destination, with a **fixed value** only: the mapping screen shows the app's users as a dropdown, and every record gets the chosen user (the same for every row; a source column or a formula cannot name a user). The fixed value is saved as the user's public id; when the import is planned (`ImportPlanBuilder.ResolveFixedUserAsync`) it is looked up once and each record gets the plain user id the column stores, as every record write does. A user that no longer exists, a value that is not a user, or a unique User field is refused when the import is saved or run. Multi-user fields are not supported yet.
 
 ### The Record ID#
 
@@ -87,6 +91,10 @@ constraint problem). `read = inserted + updated + skipped + errored`. A bad row 
 > value in a unique field is an error row, and with the "import nothing if any row has a problem" policy one such row stops the run.
 
 ### File imports
+
+**At run time** (feedback, 2026-10-14): the file picked for a run may be **Excel or CSV whichever the import was set up with**; it is read as what it is (first sheet of a workbook, separator detected for a CSV). An import that maps sheets separately still needs a workbook. When the file's **headings differ** from the template's, the columns are taken **by their place** (the same order as the template) as long as the file has at least as many columns; the run fails, naming the missing columns, only when it has fewer. Several runs of a **file import** may go together (each has its own file); a **table import** still runs one at a time, and so does a scheduled run. An import reading a table is not started twice at once: "This import is already running".
+
+**Dates in a file** (feedback, 2026-10-14): a Date or Date & Time field reads whatever way the file writes the date (`2026-04-05`, `05/04/2026`, `5-Apr-2026`, `April 5, 2026`, `05-04-26`, with an optional time such as `14:30` or `2:30 PM`; `ImportDateParser`). The value is stored as a real date and shown in the app's date format. Where day and month could swap (`05-04-2026`) the **app's date format** (App settings > Formatting) decides which comes first; a date that cannot be that order (`25-04-2026` under month-first) is read the other way round. Text that is not a date, or an impossible one (`31-02-2026`), is reported on its row. A bare number such as `45000` is not read as an Excel serial date.
 
 * A sample file is uploaded while setting up the import so the columns can be seen and mapped; the real file is uploaded **each time the import is run**.
 * Settings: sheet, row holding the column names (0 = none), first data row, separator, and whether a column is found by its **heading** (it may move) or its **position**.
@@ -127,6 +135,17 @@ with different mappings, and one table can use sheet mode while another reads th
 * A table in sheet mode ignores the import-wide filter and the table filter; each sheet has its own filter. Merge needs the key mapped in every sheet of the table.
 * A missing sheet, or a sheet without its row of column names, stops the run before anything is written, naming the sheet. The sheet layouts are checked by *needs attention* like the rest.
 * `POST import-files/{fileId}/sheets` reads several sheets (each with its own layout) in one call. Limits: 50 sheets per table, 100 sheets in a workbook mapping.
+
+### Only records changed since the last run
+
+A merge **from a table** can be set to **only read records changed since the last run** (`OnlyChangedSinceLastRun`, off by default). A scheduled import then does not read, compare and rewrite records nothing has touched (a nightly merge of 70,000 records that changes 40 reads and updates 40).
+
+* It applies to **scheduled runs only**: a run started by a person or through the API always reads every record. The last finished run counts whichever way it was started.
+* When a run is queued, `StartImportRunHandler` asks the run repository for the import's last run that **finished** (success or partial; failed and cancelled runs did not read everything) and puts its **start** time, minus a one-minute margin, in the run's own copy of the definition (`ChangedSinceUtc`). The plan builder then adds `Date Created > since OR Date Modified > since` (system fields 1 and 2, exact UTC times) to the source filter, next to the import's own conditions and the person's role filter. A record that was never changed has no change time, so its creation counts.
+* The **first run**, and the **first run after the import is edited** (its mapping, key, rules, filters, type or tables - compared with the last run's own copy by `ImportRunSince.Fingerprint`; who is told, the schedule and the name do not count), read every record, because records nothing touched have never been through the new mapping.
+* Only a merge from a table can use it, and every table the import fills must merge: a copy would add the changed records again. It is refused otherwise.
+* The source must not be the table being filled: each run would change its own source records (Date Modified), so every record would be read and rewritten every time. The plan builder refuses it, and the import screen hides the option in that case.
+* Limits: a record is read when it, not something it points to, changed (a change in a parent record that only shows through a Lookup is not seen); a record that failed in a partial run is tried again only when its source record changes; a change made only in a destination table is not put back until its source record changes. To read everything again, switch the option off for a run.
 
 ### Several destination tables in one run
 
