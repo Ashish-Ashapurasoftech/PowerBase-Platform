@@ -24,6 +24,9 @@ public class AppTable
     /// is stored as-is (not even syntax-validated) but never evaluated on record writes — lets an
     /// admin draft/save an incomplete formula before switching enforcement on.</summary>
     public bool IsCustomDataRuleEnabled { get; set; }
+    /// <summary>"Auto save when redirected away from the page": while true, clicking a Url / Formula URL link in an
+    /// Add / Edit Record form saves the record (through the normal Save path) before the link opens.</summary>
+    public bool IsAutoSaveOnLeave { get; set; }
     public string? PhysicalTableName { get; set; }
     public string DefaultReportSettings { get; set; } = "{}";
     public long? DisplayFieldId { get; set; }

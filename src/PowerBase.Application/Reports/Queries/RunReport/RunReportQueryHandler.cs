@@ -935,6 +935,12 @@ public class RunReportQueryHandler
                     var isUserList = fieldLookup.TryGetValue(cond.FieldId, out var userField) && userField.TypeCode is "MultiUser" or "Formula_ListUser";
                     newCondition = new FilterCondition { FieldId = cond.FieldId, Operator = isUserList ? "includes" : "eq", Value = currentUserId.ToString() };
                 }
+                else if (string.Equals(cond.Operator, "isNotCurrentUser", StringComparison.OrdinalIgnoreCase))
+                {
+                    var isUserList = fieldLookup.TryGetValue(cond.FieldId, out var userField) && userField.TypeCode is "MultiUser" or "Formula_ListUser";
+                    nodes.Add(new FilterNode { Group = NotCurrentUserGroup(cond.FieldId, isUserList, currentUserId) });
+                    continue;
+                }
                 else if (appUserRepo is not null
                     && UserTextOperators.Contains(cond.Operator)
                     && !string.IsNullOrWhiteSpace(cond.Value)
@@ -980,6 +986,19 @@ public class RunReportQueryHandler
         }
         return new FilterGroup { Logic = group.Logic, Nodes = nodes };
     }
+
+    /// <summary>"is not the current user": the field is blank, or (for a list of users) holds nobody but others /
+    /// (for a single user) is someone else. A blank user counts as "not the current user", so the records nobody
+    /// is assigned to stay visible — a plain "ne" would drop them (NULL never compares as different).</summary>
+    public static FilterGroup NotCurrentUserGroup(long fieldId, bool isUserList, long currentUserId) => new()
+    {
+        Logic = "or",
+        Nodes =
+        [
+            new FilterNode { Condition = new FilterCondition { FieldId = fieldId, Operator = "isEmpty" } },
+            new FilterNode { Condition = new FilterCondition { FieldId = fieldId, Operator = isUserList ? "notIncludes" : "ne", Value = currentUserId.ToString() } },
+        ],
+    };
 
     /// <summary>A user's public id → the numeric id a user column stores; -1 when the user can't be found
     /// (deleted/unknown) — callers then leave the value as-is, which simply matches nothing.</summary>

@@ -16,5 +16,7 @@ public record UpdateTableRequest(
     /// server-side if it fails to compile, but only when enabled — while off, it's stored as-is.</summary>
     string? CustomDataRule = null,
     /// <summary>The "Turn custom data rules on?" toggle.</summary>
-    bool CustomDataRuleEnabled = false
+    bool CustomDataRuleEnabled = false,
+    /// <summary>Null = leave unchanged; otherwise sets "Auto save when redirected away from the page".</summary>
+    bool? AutoSaveOnLeave = null
 );

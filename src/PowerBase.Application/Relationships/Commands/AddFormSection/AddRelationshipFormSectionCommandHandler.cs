@@ -90,9 +90,9 @@ public class AddRelationshipFormSectionCommandHandler
             {
                 NewElement("Report", appFieldId: null, reportContent, rowStart: 1, rowSpan: ReportRowSpan, order: 1, showOnAdd: true),
             };
-            // "Add {Child}" sits right under the report; it needs a saved parent record, so it isn't shown on Add.
+            // "Add {Child}" sits right under the report, shown in every mode like any other field.
             if (addRecord?.Fid is { } addFid)
-                elements.Add(NewElement("Field", addFid, null, rowStart: 1 + ReportRowSpan, rowSpan: 1, order: 2, showOnAdd: false));
+                elements.Add(NewElement("Field", addFid, null, rowStart: 1 + ReportRowSpan, rowSpan: 1, order: 2, showOnAdd: true));
 
             await _formRepo.AppendSectionAsync(form.Id, new FormSection
             {

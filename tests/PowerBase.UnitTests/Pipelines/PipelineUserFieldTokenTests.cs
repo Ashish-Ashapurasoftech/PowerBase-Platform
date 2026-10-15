@@ -42,6 +42,8 @@ public class PipelineUserFieldTokenTests
         var users = Substitute.For<IUserRepository>();
         users.GetNamesByIdsAsync(Arg.Any<IEnumerable<long>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<long, string> { [40021] = "Dipak Patel", [40022] = "Ronak Dhamsaniya" });
+        users.GetByIdAsync(40021, Arg.Any<CancellationToken>()).Returns(new User { Id = 40021, FirstName = "Dipak", LastName = "Patel", Email = "dipak@example.com" });
+        users.GetByIdAsync(40022, Arg.Any<CancellationToken>()).Returns(new User { Id = 40022, FirstName = "Ronak", LastName = "Dhamsaniya", Email = "ronak@example.com" });
         tableRepo.GetByPublicIdAsync(Table.PublicId, Arg.Any<CancellationToken>()).Returns(Table);
         fieldRepo.ListByTableAsync(Table.Id, Arg.Any<CancellationToken>()).Returns(Fields());
         uow.Transaction.Returns(Substitute.For<IDbTransaction>());
@@ -113,5 +115,71 @@ public class PipelineUserFieldTokenTests
         var (_, written) = await RunAsync("{{trigger.fid_6}} / {{trigger.fid_7}}", "", "{\"trigger\":{\"fid_6\":\"Ronak\",\"fid_7\":\"Rajkot\"}}");
 
         Assert.Equal("Ronak / Rajkot", written[7]);
+    }
+
+    // ───────────────────────── sub-fields: Id / Name / First name / Last name / Email ─────────────────────────
+
+    [Theory]
+    [InlineData("id", "40021")]
+    [InlineData("name", "Dipak Patel")]
+    [InlineData("first_name", "Dipak")]
+    [InlineData("last_name", "Patel")]
+    [InlineData("email", "dipak@example.com")]
+    public async Task UserSubField_ResolvesEachDetailOfThePerson(string detail, string expected)
+    {
+        var (_, written) = await RunAsync($"{{{{trigger.fid_4.{detail}}}}}", "", "{\"trigger\":{\"fid_4\":40021}}");
+
+        Assert.Equal(expected, written[7]);
+    }
+
+    [Fact]
+    public async Task UserSubFields_CanBeCombinedWithTextAndOtherFields()
+    {
+        var (_, written) = await RunAsync(
+            "{{trigger.fid_6}} - {{trigger.fid_4.id}} - {{trigger.fid_4.first_name}} {{trigger.fid_4.last_name}} - {{trigger.fid_4.email}}", "",
+            "{\"trigger\":{\"fid_6\":\"Ronak\",\"fid_4\":40021}}");
+
+        Assert.Equal("Ronak - 40021 - Dipak Patel - dipak@example.com", written[7]);
+    }
+
+    [Fact]
+    public async Task UserSubField_IntoAUserField_StillWritesTheId()
+    {
+        var (_, written) = await RunAsync("x", "{{trigger.fid_4.id}}", "{\"trigger\":{\"fid_4\":40021}}");
+
+        Assert.Equal("40021", written[9]?.ToString());
+    }
+
+    [Fact]
+    public async Task MultiUserSubField_JoinsEveryPerson()
+    {
+        var (_, written) = await RunAsync("{{trigger.fid_10.email}}", "", "{\"trigger\":{\"fid_10\":\"[40021,40022]\"}}");
+
+        Assert.Equal("dipak@example.com, ronak@example.com", written[7]);
+    }
+
+    [Fact]
+    public async Task UserSubField_WithNoUser_WritesNothing()
+    {
+        var (_, written) = await RunAsync("{{trigger.fid_4.email}}", "", "{\"trigger\":{\"fid_4\":null}}");
+
+        Assert.False(written.ContainsKey(7));
+    }
+
+    [Fact]
+    public async Task UserSubField_ForAnUnknownUser_DoesNotFailTheStep()
+    {
+        var (_, written) = await RunAsync("{{trigger.fid_4.id}}/{{trigger.fid_4.email}}", "", "{\"trigger\":{\"fid_4\":999}}");
+
+        Assert.Equal("999/", written[7]);
+    }
+
+    [Fact]
+    public async Task OrdinaryObjectProperties_NamedLikeUserDetails_AreNotTouched()
+    {
+        // fid_6 holds plain text, not a user id: the token is left for normal path resolution.
+        var (_, written) = await RunAsync("{{trigger.fid_6}}", "", "{\"trigger\":{\"fid_6\":\"Ronak\"}}");
+
+        Assert.Equal("Ronak", written[7]);
     }
 }

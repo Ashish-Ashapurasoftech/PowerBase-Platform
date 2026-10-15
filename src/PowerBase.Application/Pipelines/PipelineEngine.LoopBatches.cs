@@ -9,6 +9,64 @@ using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Pipelines;
 
+/// <summary>Where the time of a record loop goes, per batch: counters filled by the loop workers and read when the batch ends.
+/// Diagnostic only (one line in the log per batch).</summary>
+internal static class LoopBatchProfile
+{
+    internal static long Items, ItemTicks, PreStepTicks, StepTicks, FirstChanceExceptions;
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> ExceptionTypes = new();
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> PhaseTicks = new();
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> ExceptionStacks = new();
+
+    /// <summary>Adds the time since <paramref name="last"/> to the named phase and moves the mark.</summary>
+    internal static void Phase(string name, ref long last)
+    {
+        var now = Stopwatch.GetTimestamp();
+        var elapsed = now - last;
+        PhaseTicks.AddOrUpdate(name, elapsed, (_, total) => total + elapsed);
+        last = now;
+    }
+
+    internal static void Reset()
+    {
+        Interlocked.Exchange(ref Items, 0); Interlocked.Exchange(ref ItemTicks, 0);
+        Interlocked.Exchange(ref PreStepTicks, 0); Interlocked.Exchange(ref StepTicks, 0);
+        Interlocked.Exchange(ref FirstChanceExceptions, 0); ExceptionTypes.Clear(); PhaseTicks.Clear(); ExceptionStacks.Clear();
+    }
+
+    internal static void OnFirstChance(object? sender, System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs e)
+    {
+        Interlocked.Increment(ref FirstChanceExceptions);
+        var type = e.Exception.GetType().Name;
+        ExceptionTypes.AddOrUpdate(type, 1, (_, count) => count + 1);
+        if (!ExceptionStacks.ContainsKey(type))
+        {
+            var frames = new StackTrace(1, false).GetFrames()
+                .Select(f => f.GetMethod()).Where(m => m?.DeclaringType != null)
+                .Select(m => $"{m!.DeclaringType!.Name}.{m.Name}")
+                .Where(n => !n.StartsWith("AsyncMethodBuilder") && !n.Contains("MoveNext") || n.Contains("PowerBase"))
+                .Take(14);
+            ExceptionStacks.TryAdd(type, e.Exception.Message.ReplaceLineEndings(" ") + " @ " + string.Join(" <- ", frames));
+        }
+    }
+
+    internal static double Ms(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
+
+    internal static string Summary()
+    {
+        var items = Math.Max(1, Interlocked.Read(ref Items));
+        var item = Ms(Interlocked.Read(ref ItemTicks)) / items;
+        var pre = Ms(Interlocked.Read(ref PreStepTicks)) / items;
+        var step = Ms(Interlocked.Read(ref StepTicks)) / items;
+        var types = string.Join(", ", ExceptionTypes.OrderByDescending(kv => kv.Value).Take(4).Select(kv => $"{kv.Key} x{kv.Value}"));
+        var phases = string.Join(", ", PhaseTicks.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {Ms(kv.Value) / items:F1}"));
+        var stacks = string.Join(" || ", ExceptionStacks.Select(kv => $"{kv.Key}: {kv.Value}"));
+        return $"per record: {item:F1} ms in total = {pre:F1} before the step + {step:F1} in the step + {item - pre - step:F1} after; " +
+               $"first-chance exceptions: {Interlocked.Read(ref FirstChanceExceptions)}{(types.Length > 0 ? " (" + types + ")" : "")}; " +
+               $"create-record phases (ms/record): {phases}; exception origin: {stacks}";
+    }
+}
+
 public partial class PipelineEngine
 {
     private Dictionary<(IAppTableRepository, IAppFieldRepository, Guid), (AppTable, IReadOnlyList<AppField>)>? _loopMetadata;
@@ -53,6 +111,8 @@ public partial class PipelineEngine
             BatchSize = _options.LoopBatchSize, IsBulkEvent = bulk, ChunkedSearch = workset
         });
         var hadPrevious = steps.TryGetValue(step.RefId, out var previous);
+        var bulkCreate = GetLoopBulkCreateStep(step, config, allSteps);
+        var bulkState = bulkCreate != null ? new LoopBulkCreateState() : null;
         var offset = 0;
         var batchNumber = 0;
         var processed = 0;
@@ -97,13 +157,22 @@ public partial class PipelineEngine
                 var timer = Stopwatch.StartNew();
                 var errors = new Exception?[items.Count];
                 var completed = new bool[items.Count];
+                var snapshotMark = snapshots.Count;
+                var bulkWritten = false;
+                LoopBatchProfile.Reset();
+                AppDomain.CurrentDomain.FirstChanceException += LoopBatchProfile.OnFirstChance;
                 try
                 {
-                    await ExecuteLoopBatchItemsAsync(step, allSteps, items, total, runId, context, steps,
-                        snapshots, concurrency, false, completed, errors, ct);
+                    bulkWritten = bulkCreate != null && await TryWriteLoopBatchInBulkAsync(step, bulkCreate, bulkState!, allSteps,
+                        items, total, runId, context, steps, completed, ct);
+                    if (!bulkWritten)
+                        await ExecuteLoopBatchItemsAsync(step, allSteps, items, total, runId, context, steps,
+                            snapshots, concurrency, false, completed, errors, ct);
                 }
                 finally
                 {
+                    AppDomain.CurrentDomain.FirstChanceException -= LoopBatchProfile.OnFirstChance;
+                    _logger.LogInformation("Pipeline run {RunId}: Batch {Batch} profile — {Profile}", runId, batchNumber, LoopBatchProfile.Summary());
                     // The record action's receipt commits with its write. If a worker stops before
                     // this page checkpoint, replay skips its committed actions on the next attempt.
                     var successfulIds = items.Where((_, i) => completed[i]).Select(i => i.StagingId)
@@ -137,7 +206,9 @@ public partial class PipelineEngine
                         Failed = errors.Count(error => error != null), ProcessedThisAttempt = processed,
                         TotalCount = total, Workers = concurrency, DurationMs = timer.ElapsedMilliseconds
                     });
-                    batchRun.LogMessage = $"Batch {batchNumber}: {completed.Count(done => done)}/{items.Count} records succeeded in {timer.ElapsedMilliseconds} ms using {concurrency} worker(s).";
+                    batchRun.LogMessage = bulkWritten
+                        ? $"Batch {batchNumber}: {completed.Count(done => done)}/{items.Count} records succeeded in {timer.ElapsedMilliseconds} ms in one bulk write."
+                        : $"Batch {batchNumber}: {completed.Count(done => done)}/{items.Count} records succeeded in {timer.ElapsedMilliseconds} ms using {concurrency} worker(s).";
                     await _pipelineRepo.UpdateStepRunAsync(batchRun, ct);
                     _logger.LogInformation("Pipeline run {RunId}: {BatchSummary}", runId, batchRun.LogMessage);
                 }
@@ -147,6 +218,7 @@ public partial class PipelineEngine
                 // infrastructure errors (always preferred as `firstError`) end the attempt.
                 if (firstError != null && IsControlFlowOrInfrastructureException(firstError))
                     ExceptionDispatchInfo.Capture(firstError).Throw();
+                await FlushAuditSnapshotsAsync(snapshots, snapshotMark, context, runId, ct);
             }
         }
         finally
@@ -279,12 +351,15 @@ public partial class PipelineEngine
                         ["steps"] = localSteps, ["_StepSequence"] = sequenceBase + i * childCount
                     };
                     var audit = localSnapshots[i] = new List<RawStepAuditSnapshot>();
+                    var itemStart = Stopwatch.GetTimestamp();
                     try
                     {
                         await engine.ExecuteSiblingStepsAsync(runId, allSteps, loop.Id, "children", localContext,
                             localSteps, audit, items[i].Path, ct);
                         completed[i] = true;
                         outputs[i] = localSteps;
+                        Interlocked.Increment(ref LoopBatchProfile.Items);
+                        Interlocked.Add(ref LoopBatchProfile.ItemTicks, Stopwatch.GetTimestamp() - itemStart);
                     }
                     catch (Exception ex)
                     {

@@ -35,13 +35,25 @@ internal static class PipelineCreateRecordRules
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values,
         IRecordRepository records, IAppTableRepository tables, IAppFieldRepository fieldRepo,
         IServiceProvider services, System.Data.IDbTransaction? transaction, CancellationToken ct)
-    {
-        string? dateFormat = null;
-        if (services.GetService<IAppRepository>() is { } apps)
-            dateFormat = AppFormattingSettings.GetDateFormatString((await apps.GetByIdAsync(table.AppId, ct)).Formatting);
+        => await ValidateAsync(table, fields, values, records, tables, fieldRepo, services, transaction,
+            await GetDateFormatAsync(table, services, ct), isDuplicate: null, ct);
 
+    /// <summary>The app's Date Formatting, which the format check reads. A caller validating many records of one table looks it up once.</summary>
+    public static async Task<string?> GetDateFormatAsync(AppTable table, IServiceProvider services, CancellationToken ct)
+        => services.GetService<IAppRepository>() is { } apps
+            ? AppFormattingSettings.GetDateFormatString((await apps.GetByIdAsync(table.AppId, ct)).Formatting)
+            : null;
+
+    /// <summary>Same rules, with the date format already known and, for a caller that checked a whole batch's Unique values at once,
+    /// its answer to "is this value in use?" (null = ask the database, as the single-record check does).</summary>
+    public static async Task ValidateAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values,
+        IRecordRepository records, IAppTableRepository tables, IAppFieldRepository fieldRepo,
+        IServiceProvider services, System.Data.IDbTransaction? transaction, string? dateFormat,
+        Func<AppField, object, bool?>? isDuplicate, CancellationToken ct)
+    {
         await RecordConstraintValidator.ValidateAsync(table, fields, values, records, isCreate: true, excludeRecordId: null, ct,
-            appDateFormat: dateFormat, transaction: transaction);
+            appDateFormat: dateFormat, transaction: transaction, isDuplicate: isDuplicate);
 
         if (services.GetService<FormulaEngine>() is { } engine)
             await CustomDataRuleValidator.ValidateAsync(table, fields, values, tables, fieldRepo, records, engine, ct);

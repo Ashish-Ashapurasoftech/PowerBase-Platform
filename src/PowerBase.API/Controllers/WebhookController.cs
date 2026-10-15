@@ -84,30 +84,6 @@ public class WebhookController : ControllerBase
             return BadRequest(new { error = new { code = "INVALID_CONFIG", message = "The Incoming Request configuration is invalid." } });
         }
 
-        // 5b. Remember any new query-string parameter names so the pipeline builder can list
-        // them under URL Parameters once a real request has revealed the webhook's actual shape.
-        // Edits the raw ConfigJson node directly (never round-trips it through IncomingWebhookConfig)
-        // so every other saved property keeps the exact casing the Angular editor wrote it with.
-        if (Request.Query.Count > 0)
-        {
-            try
-            {
-                var observedKeys = Request.Query.Keys.Where(k => !string.IsNullOrEmpty(k)).ToList();
-                var node = System.Text.Json.Nodes.JsonNode.Parse(
-                    string.IsNullOrWhiteSpace(step.ConfigJson) ? "{}" : step.ConfigJson)!.AsObject();
-                var knownKeys = node["sampleUrlParamKeys"] is System.Text.Json.Nodes.JsonArray existing
-                    ? existing.Select(n => n?.GetValue<string>()).Where(k => !string.IsNullOrEmpty(k)).ToList()!
-                    : new List<string>();
-                var mergedKeys = knownKeys.Concat(observedKeys).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-                if (mergedKeys.Count != knownKeys.Count)
-                {
-                    node["sampleUrlParamKeys"] = new System.Text.Json.Nodes.JsonArray(mergedKeys.Select(k => (System.Text.Json.Nodes.JsonNode)System.Text.Json.Nodes.JsonValue.Create(k)).ToArray());
-                    await _pipelineRepo.UpdateStepConfigJsonAsync(step.Id, node.ToJsonString(), step.RowVersion, ct);
-                }
-            }
-            catch { /* best-effort sample capture; must never block webhook execution */ }
-        }
-
         // 6. Match the six methods displayed by Incoming Request. ANY BELOW accepts all six.
         if (!IncomingWebhookConfig.Methods.Contains(Request.Method, StringComparer.OrdinalIgnoreCase))
             return StatusCode(StatusCodes.Status405MethodNotAllowed);
@@ -174,9 +150,8 @@ public class WebhookController : ControllerBase
 
         var pipeline = await _pipelineRepo.GetByIdAsync(step.PipelineId, ct);
         if (pipeline == null || pipeline.IsDeleted) return NotFound();
-        if (!pipeline.IsActive) return NoContent();
 
-        // 9. Validate request body against JSON Schema
+        // 9. Read the request body (bounded)
         if (Request.ContentLength > 1048576) return StatusCode(StatusCodes.Status413PayloadTooLarge);
         // Bound streamed/chunked requests too, instead of allocating an unbounded string.
         using var buffer = new MemoryStream();
@@ -188,9 +163,36 @@ public class WebhookController : ControllerBase
             await buffer.WriteAsync(chunk.AsMemory(0, read), ct);
         }
         buffer.Position = 0;
+        var bodyBytes = buffer.ToArray();
         using var reader = new StreamReader(buffer);
         var bodyStr = await reader.ReadToEndAsync(ct);
+        var urlParams = RequestParameters.FromQuery(Request.QueryString.Value);
+        var bodyParams = await ReadBodyParamsAsync(Request.ContentType, bodyStr, bodyBytes, ct);
 
+        // 9b. Remember new URL / body parameter names so the pipeline builder can list them under URL Parameters and
+        // Body Parameters once a real request has revealed the webhook's shape (Quickbase shows url_params / body_params
+        // after a request is consumed). Recorded for an authenticated request even while the PowerFlow is still off, so
+        // the flow can be built from a test call. Edits the raw ConfigJson (never round-trips it through
+        // IncomingWebhookConfig) so every other property keeps the casing the editor wrote it with.
+        try
+        {
+            var updatedConfig = PipelineSampleKeys.Merge(step.ConfigJson, new Dictionary<string, IEnumerable<string>>
+            {
+                [PipelineSampleKeys.UrlParams] = urlParams.Keys,
+                [PipelineSampleKeys.BodyParams] = bodyParams.Keys
+            });
+            if (updatedConfig != null)
+                await _pipelineRepo.UpdateStepConfigJsonAsync(step.Id, updatedConfig, step.RowVersion, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best-effort sample capture; it must never block the webhook.
+            _logger.LogWarning(ex, "Could not record Incoming Request parameter names for step {StepId}", step.Id);
+        }
+
+        if (!pipeline.IsActive) return NoContent();
+
+        // 10. Validate request body against JSON Schema
         if (!string.IsNullOrEmpty(config.JsonSchema))
         {
             try
@@ -251,7 +253,8 @@ public class WebhookController : ControllerBase
             body = bodyStr, json, method = Request.Method,
             content_type = Request.ContentType ?? "",
             headers = Request.Headers.SelectMany(h => h.Value.Select(v => new { name = h.Key, value = v ?? "" })).ToArray(),
-            url_params = Request.Query.ToDictionary(q => q.Key, q => q.Value.Count == 1 ? (object?)q.Value[0] : q.Value.ToArray()),
+            url_params = urlParams,
+            body_params = bodyParams,
             origin_ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "",
             jwt_payload = jwtPayload
         });
@@ -296,6 +299,47 @@ public class WebhookController : ControllerBase
 
         // 17. Return accepted response
         return Ok(new { message = "Pipeline execution enqueued successfully.", correlationId, messageId = messageId.ToString() });
+    }
+
+    /// <summary>Body Parameters: a submitted form's fields (url-encoded or multipart — a file part gives its file name),
+    /// or the top-level properties of a JSON object body.</summary>
+    private static async Task<Dictionary<string, object?>> ReadBodyParamsAsync(string? contentType, string body, byte[] raw, CancellationToken ct)
+    {
+        if (!Microsoft.Net.Http.Headers.MediaTypeHeaderValue.TryParse(contentType, out var mediaType)
+            || !mediaType.MediaType.Equals("multipart/form-data", StringComparison.OrdinalIgnoreCase))
+            return RequestParameters.FromBody(contentType, body);
+
+        var boundary = Microsoft.Net.Http.Headers.HeaderUtilities.RemoveQuotes(mediaType.Boundary).Value;
+        if (string.IsNullOrWhiteSpace(boundary)) return new();
+        var values = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        try
+        {
+            var multipart = new Microsoft.AspNetCore.WebUtilities.MultipartReader(boundary, new MemoryStream(raw));
+            while (await multipart.ReadNextSectionAsync(ct) is { } section)
+            {
+                if (!Microsoft.Net.Http.Headers.ContentDispositionHeaderValue.TryParse(section.ContentDisposition, out var disposition)
+                    || !Microsoft.Extensions.Primitives.StringSegment.Equals(disposition.DispositionType, "form-data", StringComparison.OrdinalIgnoreCase)) continue;
+                var name = Microsoft.Net.Http.Headers.HeaderUtilities.RemoveQuotes(disposition.Name).Value;
+                if (string.IsNullOrEmpty(name)) continue;
+                var fileName = Microsoft.Net.Http.Headers.HeaderUtilities.RemoveQuotes(
+                    disposition.FileNameStar.HasValue ? disposition.FileNameStar : disposition.FileName).Value;
+                string value;
+                if (fileName != null) value = fileName;
+                else
+                {
+                    using var sectionReader = new StreamReader(section.Body);
+                    value = await sectionReader.ReadToEndAsync(ct);
+                }
+                if (!values.TryGetValue(name, out var list)) values[name] = list = new();
+                list.Add(value);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException)
+        {
+            // A malformed multipart body simply has no parameters; the raw body is still in Body.
+            return new();
+        }
+        return RequestParameters.Collapse(values);
     }
 
 }

@@ -2398,6 +2398,18 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
             if (cond.Operator == "date_eq")
                 return $"CAST({colExpr} AS DATE) = CAST({colExpr2} AS DATE)";
+            // contains / does not contain on a user field: the stored ids (a single id or a JSON/comma list) of this
+            // field hold any id of the other field. Comma-wrapped so id 1 never matches inside 12.
+            // wildcard match against another user field has no pattern to expand — a user is its stored id — so it
+            // means the same as contains: the two fields hold a user in common.
+            if (cond.Operator is "contains" or "notContains" or "wildcard" or "notWildcard")
+            {
+                static string Normalized(string expr) =>
+                    $"(',' + REPLACE(REPLACE(REPLACE(CAST({expr} AS NVARCHAR(MAX)), '[', ','), ']', ','), '\"', ',') + ',')";
+                var holds = $"EXISTS (SELECT 1 FROM STRING_SPLIT({Normalized(colExpr2)}, ',') s "
+                          + $"WHERE LTRIM(RTRIM(s.value)) <> '' AND {Normalized(colExpr)} LIKE '%,' + LTRIM(RTRIM(s.value)) + ',%')";
+                return cond.Operator is "contains" or "wildcard" ? holds : $"NOT {holds}";
+            }
             var sqlOp = cond.Operator switch
             {
                 "eq" => "=", "ne" => "<>", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=",

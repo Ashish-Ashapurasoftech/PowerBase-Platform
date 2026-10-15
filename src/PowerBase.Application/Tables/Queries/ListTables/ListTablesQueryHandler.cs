@@ -30,7 +30,8 @@ public class ListTablesQueryHandler
         var app = await _appRepo.GetByPublicIdAsync(query.AppPublicId, ct);
 
         var page = query.Page < 1 ? 1 : query.Page;
-        var pageSize = query.PageSize is < 1 or > 100 ? 20 : query.PageSize;
+        // No upper bound: a caller that needs every table in one request (a picker, a settings page) can ask for it.
+        var pageSize = query.PageSize < 1 ? 20 : query.PageSize;
         var sortBy = AllowedSortFields.Contains(query.SortBy) ? query.SortBy : "name";
 
         var items = await _tableRepo.ListByAppPagedAsync(app.Id, page, pageSize, query.Search, sortBy, query.SortDesc, query.IsShowInBar, ct);

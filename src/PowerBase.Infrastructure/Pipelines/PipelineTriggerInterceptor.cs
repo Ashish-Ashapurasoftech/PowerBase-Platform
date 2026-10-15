@@ -416,11 +416,13 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         {
             currentDepth = _queryContext.PipelineDepth + 1;
 
-            if (!string.IsNullOrEmpty(_queryContext.PipelineChainJson))
+            // A manually started run carries its correlation id here, not a JSON list: only a real list is parsed, so the
+            // common case does not throw (and swallow) an exception for every record a loop writes.
+            if (_queryContext.PipelineChainJson is { } chainJson && chainJson.AsSpan().TrimStart().StartsWith("["))
             {
                 try
                 {
-                    currentChain = JsonSerializer.Deserialize<List<long>>(_queryContext.PipelineChainJson) ?? new List<long>();
+                    currentChain = JsonSerializer.Deserialize<List<long>>(chainJson) ?? new List<long>();
                 }
                 catch
                 {

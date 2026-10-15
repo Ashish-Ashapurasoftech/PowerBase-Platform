@@ -32,9 +32,21 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
         public int Active, Peak, DelayMs = 5, FailAt = -1;
         private long _stepId;
 
-        public Harness(int concurrency = 4, int hostConcurrency = 16, bool automatic = false)
+        // Bulk-written batches (BulkCreateRecordsInLoops): multi-row inserts, the receipts and "record added" events they wrote.
+        public int BulkInserts, Singles;
+        public readonly ConcurrentDictionary<Guid, long> RecordIds = new();
+        public readonly ConcurrentDictionary<string, string> Receipts = new();
+        public int TriggeredRecords;
+        public List<PipelineEngine.RawStepAuditSnapshot> LastSnapshots = new();
+        private long _recordId;
+
+        public Harness(int concurrency = 4, int hostConcurrency = 16, bool automatic = false, bool bulk = false)
         {
-            Options = new() { EnableLoopBatches = true, AutoScaleLoopWorkers = automatic, LoopConcurrency = concurrency, PerInstanceLoopConcurrency = hostConcurrency };
+            Options = new() { EnableLoopBatches = true, AutoScaleLoopWorkers = automatic, LoopConcurrency = concurrency, PerInstanceLoopConcurrency = hostConcurrency, BulkCreateRecordsInLoops = bulk };
+            Repository.CreateCompletedStepRunsAsync(Arg.Any<IReadOnlyList<PipelineStepRun>>(), Arg.Any<CancellationToken>()).Returns(call => {
+                foreach (var row in call.Arg<IReadOnlyList<PipelineStepRun>>()) { row.Id = Interlocked.Increment(ref _stepId); History.Add(row); }
+                return Task.CompletedTask;
+            });
             Repository.GetByIdAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(new Pipeline { Id = 1, IsActive = true });
             Repository.UpdateStepRunAsync(Arg.Any<PipelineStepRun>(), Arg.Any<CancellationToken>()).Returns(call => {
                 var row = call.Arg<PipelineStepRun>();
@@ -67,6 +79,7 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
                 records.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
                     Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>(), null)
                     .Returns(async call => {
+                        Interlocked.Increment(ref Singles);
                         var active = Interlocked.Increment(ref Active);
                         int seen;
                         do { seen = Peak; } while (active > seen && Interlocked.CompareExchange(ref Peak, active, seen) != seen);
@@ -82,6 +95,27 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
                     });
                 records.HasValueDuplicateAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<object>(), Arg.Any<long?>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>())
                     .Returns(call => Task.FromResult(ExistingValues.Contains(call.ArgAt<object>(2).ToString()!)));
+                records.CreateManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(),
+                    Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
+                    .Returns(call => {
+                        Interlocked.Increment(ref BulkInserts);
+                        var rows = call.ArgAt<IReadOnlyList<IReadOnlyDictionary<long, object?>>>(2);
+                        var mapped = rows.Select(row => row.TryGetValue(6, out var value) ? value?.ToString() ?? "" : "").ToList();
+                        // A write error the rules did not foresee fails the whole multi-row insert, as SQL Server does.
+                        if (mapped.Contains(FailAt.ToString())) throw FailWith ?? new InvalidOperationException("Injected record failure");
+                        foreach (var value in mapped) Written.Add(value);
+                        var ids = rows.Select(_ => Guid.NewGuid()).ToList();
+                        foreach (var id in ids) RecordIds[id] = Interlocked.Increment(ref _recordId);
+                        return Task.FromResult<IReadOnlyList<Guid>>(ids);
+                    });
+                records.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>())
+                    .Returns(call => Task.FromResult<IReadOnlyDictionary<Guid, long>>(
+                        call.ArgAt<IReadOnlyCollection<Guid>>(1).ToDictionary(id => id, id => RecordIds[id])));
+                records.GetBulkUpsertRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+                    .Returns(Task.FromResult<IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>>>(new Dictionary<long, IReadOnlyDictionary<string, object?>>()));
+                records.GetExistingValueIndexesAsync(Arg.Any<AppTable>(), Arg.Any<AppField>(), Arg.Any<IReadOnlyList<object>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>())
+                    .Returns(call => Task.FromResult<IReadOnlySet<int>>(call.ArgAt<IReadOnlyList<object>>(2)
+                        .Select((value, index) => (value, index)).Where(p => ExistingValues.Contains(p.value.ToString()!)).Select(p => p.index).ToHashSet()));
                 return records;
             });
             var tables = Substitute.For<IAppTableRepository>();
@@ -98,11 +132,30 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
             services.AddSingleton(Substitute.For<IHttpClientFactory>());
             services.AddSingleton(Substitute.For<IFileStorageService>());
             services.AddSingleton(Substitute.For<ILogger<PipelineEngine>>());
-            services.AddSingleton(Substitute.For<IPipelineTriggerInterceptor>());
+            var triggers = Substitute.For<IPipelineTriggerInterceptor>();
+            triggers.HasActiveSubscriptionsAsync(Arg.Any<AppTable>(), Arg.Any<CancellationToken>()).Returns(true);
+            triggers.InterceptAddedManyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+                Arg.Any<IReadOnlyList<(Guid RecordPublicId, IReadOnlyDictionary<long, object?> Values)>>(), Arg.Any<CancellationToken>())
+                .Returns(call => {
+                    Interlocked.Add(ref TriggeredRecords, call.ArgAt<IReadOnlyList<(Guid, IReadOnlyDictionary<long, object?>)>>(2).Count);
+                    return Task.CompletedTask;
+                });
+            services.AddSingleton(triggers);
             services.AddSingleton(Substitute.For<IPipelineAuditFormatter>());
             services.AddSingleton(Substitute.For<IAdminRepository>());
             services.AddSingleton(Substitute.For<ITenantRepository>());
-            services.AddSingleton(Substitute.For<IPipelineStepIdempotencyRepository>());
+            var receipts = Substitute.For<IPipelineStepIdempotencyRepository>();
+            receipts.GetManyByExecutionKeysAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyCollection<byte[]>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>())
+                .Returns(call => Task.FromResult<IReadOnlyDictionary<string, string>>(call.ArgAt<IReadOnlyCollection<byte[]>>(2)
+                    .Select(hash => $"{call.ArgAt<Guid>(0)}:{Convert.ToHexString(hash)}")
+                    .Where(Receipts.ContainsKey).ToDictionary(key => key.Split(':')[1], key => Receipts[key])));
+            receipts.InsertManyAsync(Arg.Any<IReadOnlyCollection<PipelineStepIdempotencyLog>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>())
+                .Returns(call => {
+                    foreach (var log in call.ArgAt<IReadOnlyCollection<PipelineStepIdempotencyLog>>(0))
+                        Receipts[$"{log.MessageId}:{Convert.ToHexString(log.ExecutionPathHash)}"] = log.OutputJson;
+                    return Task.CompletedTask;
+                });
+            services.AddSingleton(receipts);
             services.AddSingleton(Substitute.For<IPipelineRecordSearchService>());
             Services = services.BuildServiceProvider();
         }
@@ -130,7 +183,8 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
                 .Returns(call => { foreach (var id in call.ArgAt<List<long>>(1)) Status[id] = call.ArgAt<byte>(2); return Task.CompletedTask; });
         }
 
-        public async Task RunAsync(int count, string? mapping = null, CancellationToken ct = default, int? maxConcurrency = null, bool staged = false)
+        public async Task RunAsync(int count, string? mapping = null, CancellationToken ct = default, int? maxConcurrency = null, bool staged = false,
+            Guid? messageId = null)
         {
             using var scope = Services.CreateScope();
             var engine = scope.ServiceProvider.GetRequiredService<IPipelineEngine>();
@@ -148,10 +202,11 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
                 StageWorkset(worksetId, count);
                 steps["a"] = JsonSerializer.Serialize(new { mode = "chunked-search", worksetId, count });
             }
-            var context = new Dictionary<string, object> { ["steps"] = steps, ["_MessageId"] = Guid.NewGuid(), ["_CreatedBy"] = 7L };
+            var context = new Dictionary<string, object> { ["steps"] = steps, ["_MessageId"] = messageId ?? Guid.NewGuid(), ["_CreatedBy"] = 7L };
+            LastSnapshots = new List<PipelineEngine.RawStepAuditSnapshot>();
             await (Task)typeof(PipelineEngine).GetMethod("ExecuteSiblingStepsAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .Invoke(engine, new object?[] { 1L, new List<PipelineStep> { loop, child }, null, null, context, steps,
-                    new List<PipelineEngine.RawStepAuditSnapshot>(), "root", ct })!;
+                    LastSnapshots, "root", ct })!;
         }
         public void Dispose() => Services.Dispose();
     }
@@ -382,6 +437,140 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => h.RunAsync(1000, ct: cancel.Token));
         Assert.Equal(0, h.Active);
         Assert.True(h.Written.Count < 1000);
+    }
+
+    // ── Bulk-written batches (BulkCreateRecordsInLoops) ────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Bulk_ThousandRecords_AreWrittenInTenInserts_WithTheirHistoryReceiptsAndTriggers()
+    {
+        using var h = new Harness(bulk: true);
+        var timer = Stopwatch.StartNew();
+        await h.RunAsync(1000);
+        output.WriteLine($"1000 records in bulk batches: {timer.ElapsedMilliseconds}ms");
+
+        Assert.Equal(1000, h.Written.Count);
+        Assert.Equal(1000, h.Written.Distinct().Count());
+        Assert.Equal(10, h.BulkInserts);
+        Assert.Equal(0, h.Singles);
+        var batches = h.History.Where(row => row.StepSubtypeSnapshot == "loop-batch").ToList();
+        Assert.Equal(10, batches.Count);
+        Assert.All(batches, batch => { Assert.Equal("Success", batch.Status); Assert.Contains("bulk write", batch.LogMessage); });
+        var created = h.History.Where(row => row.StepSubtypeSnapshot == "create-record").ToList();
+        Assert.Equal(1000, created.Count);
+        Assert.All(created, row => { Assert.Equal("Success", row.Status); Assert.Equal("Committed", row.TransactionOutcome); Assert.NotNull(row.CompletedOn); });
+        Assert.Equal(h.History.Count, h.History.Select(row => row.SequenceNumber).Distinct().Count());
+        Assert.Equal(1000, created.Select(row => row.ExecutionPath).Distinct().Count());
+        Assert.Equal(1000, h.Receipts.Count);
+        Assert.Equal(1000, h.TriggeredRecords);
+        // The loop's table and fields are read once per batch, not once per record.
+        Assert.InRange(h.Services.GetRequiredService<IAppTableRepository>().ReceivedCalls()
+            .Count(call => call.GetMethodInfo().Name == "GetByPublicIdAsync"), 1, 20);
+    }
+
+    [Fact]
+    public async Task Bulk_StagedWriteError_RedoesOnlyThatBatchRecordByRecord_AndSkipsTheBadRecord()
+    {
+        using var h = new Harness(bulk: true) { FailAt = 204 };
+        await h.RunAsync(1000, staged: true);
+
+        Assert.Equal(999, h.Written.Count);
+        Assert.DoesNotContain("204", h.Written);
+        Assert.Equal((byte)3, h.Status[205]);
+        Assert.Equal(999, h.Status.Count(kv => kv.Value == 1));
+        Assert.Equal(10, h.BulkInserts);    // nine written in bulk, one that failed and was redone record by record
+        Assert.Equal(100, h.Singles);
+        Assert.Single(h.History, row => row.StepSubtypeSnapshot == "loop-batch" && row.Status == "Failed");
+    }
+
+    [Fact]
+    public async Task Bulk_UniqueValueAlreadyInTheTable_RejectsThatRecord_AndWritesTheOthers()
+    {
+        using var h = new Harness(concurrency: 1, bulk: true) { FieldUnique = true };
+        h.ExistingValues.Add("204");
+
+        await h.RunAsync(1000, staged: true);
+
+        Assert.DoesNotContain("204", h.Written);
+        Assert.Equal(999, h.Written.Count);
+        Assert.Equal((byte)3, h.Status[205]);
+        Assert.Equal(9, h.BulkInserts);     // the batch holding 204 is rejected before its insert and redone record by record
+        Assert.Contains(h.Errors, error => error.Contains("must be unique"));
+    }
+
+    [Fact]
+    public async Task Bulk_RequiredFieldLeftBlank_IsRejected_AndNothingIsWritten()
+    {
+        using var h = new Harness(concurrency: 1, bulk: true) { FieldRequired = true };
+
+        await h.RunAsync(500, mapping: "", staged: true);
+
+        Assert.Empty(h.Written);
+        Assert.Equal(0, h.BulkInserts);
+        Assert.All(h.Status.Values, status => Assert.Equal((byte)3, status));
+        Assert.Contains(h.Errors, error => error.Contains("is required"));
+    }
+
+    [Fact]
+    public async Task Bulk_ReplayOfTheSameRun_WritesNoRecordTwice()
+    {
+        using var h = new Harness(bulk: true);
+        var messageId = Guid.NewGuid();
+
+        await h.RunAsync(250, messageId: messageId);
+        await h.RunAsync(250, messageId: messageId);
+
+        Assert.Equal(250, h.Written.Count);
+        Assert.Equal(3, h.BulkInserts);
+        Assert.Equal(0, h.Singles);
+    }
+
+    [Fact]
+    public async Task Bulk_ExplicitSequentialLoop_StaysRecordByRecord()
+    {
+        using var h = new Harness(bulk: true);
+        await h.RunAsync(25, maxConcurrency: 1);
+
+        Assert.Equal(0, h.BulkInserts);
+        Assert.Equal(25, h.Singles);
+        Assert.Equal(25, h.Written.Count);
+    }
+
+    [Fact]
+    public async Task Bulk_PreviousIterationReference_StaysRecordByRecord()
+    {
+        using var h = new Harness(bulk: true);
+        await h.RunAsync(5, "{{c.fid_6}}");
+
+        Assert.Equal(0, h.BulkInserts);
+    }
+
+    [Fact]
+    public async Task RecordByRecordHistory_IsSavedAfterEachBatch_NotHeldUntilTheEndOfTheRun()
+    {
+        using var h = new Harness();
+        await h.RunAsync(300);
+
+        Assert.Equal(300, h.Written.Count);
+        // Only the loop's own step is left for the end of the run; its 300 records' history was saved batch by batch.
+        Assert.Equal("loop", Assert.Single(h.LastSnapshots).Step.Subtype);
+        Assert.Equal(300, h.Repository.ReceivedCalls().Count(call => call.GetMethodInfo().Name == "UpdateStepRunAsync" &&
+            call.GetArguments()[0] is PipelineStepRun { StepSubtypeSnapshot: "create-record", LogMessage: "Step execution finished with status Success." }));
+    }
+
+    [Fact]
+    public async Task Benchmark_RecordByRecordVersusBulk_SameThousandRecords()
+    {
+        using var single = new Harness(4);
+        using var bulk = new Harness(4, bulk: true);
+        var timer = Stopwatch.StartNew();
+        await single.RunAsync(1000);
+        var singleMs = timer.ElapsedMilliseconds;
+        timer.Restart();
+        await bulk.RunAsync(1000);
+        var bulkMs = timer.ElapsedMilliseconds;
+        output.WriteLine($"Controlled 1000-record benchmark (mock DB, {single.DelayMs}ms per single write): record by record={singleMs}ms; bulk={bulkMs}ms; speedup={(double)singleMs / Math.Max(1, bulkMs):F2}x.");
+        Assert.Equal(single.Written.OrderBy(v => v), bulk.Written.OrderBy(v => v));
     }
 
     [Fact]
