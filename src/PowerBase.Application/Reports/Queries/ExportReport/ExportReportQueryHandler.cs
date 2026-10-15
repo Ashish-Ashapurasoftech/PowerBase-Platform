@@ -72,6 +72,10 @@ public class ExportReportQueryHandler
             };
         }
 
+        // Caller's extra "fieldId:value" filters (e.g. an embedded child grid's parent scope),
+        // ANDed on with the same merge the run endpoint uses for its dynamicFilters.
+        filterTree = RunReport.RunReportQueryHandler.MergeRuntimeFilters(filterTree, allFields, query.RuntimeFilters);
+
         IReadOnlyList<SortSpec> sortFields = definition.SortFields.Count > 0
             ? definition.SortFields
             : (definition.SortFieldId.HasValue
