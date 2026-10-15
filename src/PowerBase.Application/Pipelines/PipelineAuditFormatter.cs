@@ -279,6 +279,24 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
         return recordPublicId.ToString();
     }
 
+    /// <summary>A record's stored field values (keyed <c>fid_N</c>) as they appear in a step's output, shaped like a read of the record:
+    /// no computed fields (a read has no column for them), and dates as <see cref="DateTime"/> (the output carries them as text).</summary>
+    private static Dictionary<string, object?> StoredFieldValues(List<AppField> fields, Dictionary<string, object?> output)
+    {
+        var values = new Dictionary<string, object?>();
+        foreach (var field in fields)
+        {
+            if (!field.Fid.HasValue || PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
+            var key = $"fid_{field.Fid.Value}";
+            if (!output.TryGetValue(key, out var value)) continue;
+            if (value is string text && (field.TypeCode is "Date" or "DateTime" || field.PhysicalColumnName is "CreatedOn" or "ModifiedOn") &&
+                DateTime.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var date))
+                value = date;
+            values[key] = value;
+        }
+        return values;
+    }
+
     /// <summary>Numeric Record ID (RID) for a record's public id, or null if it can't be resolved
     /// (e.g. the record was deleted). Mirrors what Quickbase shows as "Record ID" on record steps.</summary>
     private async Task<long?> GetOrFetchRecordNumericIdAsync(AppTable table, Guid recordPublicId, CancellationToken ct)
@@ -851,7 +869,13 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                     var meta = GetOrFetchTableMetadataAsync(tGuid, ct).GetAwaiter().GetResult();
                     if (meta != null)
                     {
-                        recordDisplayName = GetOrFetchRecordDisplayAsync(meta.Value.Table, fields, crGuid, ct).GetAwaiter().GetResult();
+                        // The step's output already holds the created record's stored values (read back after the insert, decrypted):
+                        // the record is named from them instead of being read again — a loop creating a million records read every
+                        // one of them back here. Output written before it carried the values still reads the record.
+                        var storedValues = StoredFieldValues(fields, outputDict);
+                        recordDisplayName = storedValues.Count > 0
+                            ? GetRecordDisplayValue(meta.Value.Table, fields, storedValues, crGuid.ToString())
+                            : GetOrFetchRecordDisplayAsync(meta.Value.Table, fields, crGuid, ct).GetAwaiter().GetResult();
                     }
                 }
 
