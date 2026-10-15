@@ -96,10 +96,27 @@ public class DeleteRelationshipCommandHandler
                 if (outcome != RestoreOutcome.Restored)
                     await _fieldRepo.RevertToNumberFieldAsync(refField.Id, ct);
             }
+            else if (command.Restore != OriginalFieldRestore.None && await HoldsDataAsync(child, childFields, refField, ct))
+            {
+                // The reference field was auto-created for this relationship but holds data. Like a converted field, it's
+                // kept as a real field holding what the user sees now (the parent's key text) on every row, so deleting the
+                // relationship loses nothing. Only when that can't be done is it deleted, as before.
+                var (outcome, why) = await TryRestoreOriginalFieldAsync(rel, child, parent, childFields, parentFields, refField, ct);
+                if (outcome == RestoreOutcome.RevertToNumber)
+                    await _fieldRepo.RevertToNumberFieldAsync(refField.Id, ct);
+                else if (outcome == RestoreOutcome.Failed)
+                {
+                    Console.WriteLine($"[DeleteRelationship] '{refField.Name}' (fid {refField.Fid}) deleted, not restored: {why}");
+                    await _fieldRepo.DeleteAsync(refField.PublicId, child.Id, ct);
+                }
+            }
             else
             {
-                // The reference field was auto-created for this relationship — delete it.
+                // The reference field was auto-created for this relationship and holds nothing — delete it, with the
+                // hidden "(original)" field an import may have added beside it.
                 await _fieldRepo.DeleteAsync(refField.PublicId, child.Id, ct);
+                if (OriginalFieldOf(refField, childFields) is { } originalField)
+                    await _fieldRepo.DeleteAsync(originalField.PublicId, child.Id, ct);
             }
         }
 
@@ -170,12 +187,14 @@ public class DeleteRelationshipCommandHandler
     }
 
     /// <summary>
-    /// Turns a Reference that was converted from an existing field back into a real field, so deleting the relationship
-    /// loses nothing:
+    /// Turns a Reference that was converted from an existing field (or created with the relationship and holding data) back
+    /// into a real field, so deleting the relationship loses nothing:
     ///   • it was a stored type we can rebuild (Text, Number, Date…) → that type again, each row holding the parent's key
     ///     text (a row whose reference was NULL gets the value kept in the hidden "(original)" field);
     ///   • it was a Formula → the formula again (it recomputes; its physical column is dropped);
     ///   • any other type, or one recorded before this was tracked with a non-numeric key → a Text field with that text;
+    ///   • created with the relationship → Text with that text, or RevertToNumber when the key is Record ID# and no
+    ///     "(original)" text was kept;
     ///   • it was an already-numeric field holding Record IDs (metadata-only conversion) → RevertToNumber, which is exact.
     /// Failed (with the reason) means the schema engine couldn't do it (e.g. SQL-enclave encryption, a blocking index);
     /// nothing has been changed in that case.
@@ -188,8 +207,17 @@ public class DeleteRelationshipCommandHandler
 
         var settings = FormulaTypeMap.ParseReferenceSettings(refField.Settings);
         var displayKey = KeyFieldResolver.ResolveDisplayKey(rel, parent, parentFields);
+        var originalField = OriginalFieldOf(refField, childFields);
         var originalTypeCode = settings?.OriginalTypeCode;
-        if (originalTypeCode is null)
+        if (originalTypeCode is null && !rel.ReferenceFieldIsExisting)
+        {
+            // Created with the relationship, so there's no earlier type: Record ID# keys are already the stored values
+            // (Number is exact); any other key comes back as Text, which also takes the text an import kept in the
+            // "(original)" field for rows that matched no parent.
+            if (displayKey is null && originalField is null) return (RestoreOutcome.RevertToNumber, null);
+            originalTypeCode = nameof(Domain.Enums.FieldTypeCode.Text);
+        }
+        else if (originalTypeCode is null)
         {
             // Not recorded: a numeric key means the field was already numeric (Record IDs) — Number is exactly right.
             // Otherwise it held the parent's key text (an older relationship), so give that back as Text.
@@ -197,8 +225,6 @@ public class DeleteRelationshipCommandHandler
                 return (RestoreOutcome.RevertToNumber, null);
             originalTypeCode = nameof(Domain.Enums.FieldTypeCode.Text);
         }
-
-        var originalField = settings?.OriginalFid is int ofid ? childFields.FirstOrDefault(f => f.Fid == ofid) : null;
 
         if (originalTypeCode.StartsWith("Formula", StringComparison.OrdinalIgnoreCase))
         {
@@ -274,4 +300,15 @@ public class DeleteRelationshipCommandHandler
         if (originalField is not null) await _fieldRepo.DeleteAsync(originalField.PublicId, child.Id, ct);
         return (RestoreOutcome.Restored, null);
     }
+
+    /// <summary>The hidden "(original)" text field a reference keeps unmatched values in, if it has one.</summary>
+    private static AppField? OriginalFieldOf(AppField refField, IReadOnlyList<AppField> childFields) =>
+        FormulaTypeMap.ParseReferenceSettings(refField.Settings)?.OriginalFid is int ofid
+            ? childFields.FirstOrDefault(f => f.Fid == ofid)
+            : null;
+
+    /// <summary>Whether any row has a reference, or text kept in the reference's "(original)" field.</summary>
+    private async Task<bool> HoldsDataAsync(AppTable child, IReadOnlyList<AppField> childFields, AppField refField, CancellationToken ct) =>
+        await _recordRepo.HasAnyDataAsync(child, refField, ct)
+        || (OriginalFieldOf(refField, childFields) is { } originalField && await _recordRepo.HasAnyDataAsync(child, originalField, ct));
 }
