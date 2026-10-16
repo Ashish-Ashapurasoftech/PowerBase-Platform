@@ -1,3 +1,4 @@
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
@@ -36,10 +37,12 @@ public class RecordResult
                 var computed = computedValues != null && field.Fid.HasValue
                     && computedValues.TryGetValue(field.Fid.Value, out var cv) ? cv : null;
                 // A Formula_User evaluates to a bare user id and a Formula_ListUser to a list of
-                // them — show the name(s), like a stored User/MultiUser field.
-                fieldData[cfid] = userNames == null ? computed : field.TypeCode switch
+                // them — show the name(s), like a stored User/MultiUser field. A Lookup of a parent
+                // User-typed field pulls down that same raw id (or list), so it resolves the same way.
+                var userTypeCode = field.TypeCode == "Lookup" ? UserLookupSourceType(field) : field.TypeCode;
+                fieldData[cfid] = userNames == null ? computed : userTypeCode switch
                 {
-                    "Formula_User" => ResolveUserValue(computed, userNames),
+                    "User" or "MultiUser" or "Formula_User" => ResolveUserValue(computed, userNames),
                     "Formula_ListUser" => ResolveUserIdList(computed, userNames),
                     _ => computed,
                 };
@@ -129,6 +132,16 @@ public class RecordResult
             CreatedByName = userNames != null && userNames.TryGetValue(createdBy, out var creatorName) ? creatorName : null,
             Fields = fieldData,
         };
+    }
+
+    /// <summary>For a Lookup field whose parent source is User-typed, that source type ("User",
+    /// "MultiUser", "Formula_User" or "Formula_ListUser" — captured in LookupSettings.SourceTypeCode,
+    /// already resolved through any lookup chain); null for every other field. The looked-up value
+    /// is the parent's raw user id(s), so it needs the same id → name resolution.</summary>
+    internal static string? UserLookupSourceType(AppField field)
+    {
+        var sourceType = SummaryLookupSources.Settings(field)?.SourceTypeCode;
+        return sourceType is "User" or "MultiUser" or "Formula_User" or "Formula_ListUser" ? sourceType : null;
     }
 
     private static object? ResolveUserValue(object? val, IReadOnlyDictionary<long, string> userNames)

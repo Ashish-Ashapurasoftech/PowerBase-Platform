@@ -21,6 +21,7 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
     private sealed class Harness : IDisposable
     {
         public readonly IPipelineRepository Repository = Substitute.For<IPipelineRepository>();
+        public readonly IAdminRepository Admin = Substitute.For<IAdminRepository>();
         public readonly ConcurrentBag<PipelineStepRun> History = new();
         public readonly ConcurrentBag<string> Written = new();
         public readonly ConcurrentBag<string> Errors = new();
@@ -142,7 +143,7 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
                 });
             services.AddSingleton(triggers);
             services.AddSingleton(Substitute.For<IPipelineAuditFormatter>());
-            services.AddSingleton(Substitute.For<IAdminRepository>());
+            services.AddSingleton(Admin);
             services.AddSingleton(Substitute.For<ITenantRepository>());
             var receipts = Substitute.For<IPipelineStepIdempotencyRepository>();
             receipts.GetManyByExecutionKeysAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyCollection<byte[]>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>())
@@ -176,15 +177,15 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
                 EventType = "Added", AfterValuesJson = JsonSerializer.Serialize(new Dictionary<string, object> { ["value"] = (i - 1).ToString() })
             }).ToList();
             foreach (var r in rows) Status[r.Id] = 0;
-            Repository.GetPendingSearchWorksetPageAsync(worksetId, Arg.Any<int>(), Arg.Any<CancellationToken>())
+            Repository.GetPendingSearchWorksetPageAsync(worksetId, Arg.Any<int>(), Arg.Any<CancellationToken>(), Arg.Any<long>())
                 .Returns(call => Task.FromResult<IReadOnlyList<PipelineBulkEventRecord>>(
-                    rows.Where(r => Status[r.Id] is 0 or 2).Take(call.ArgAt<int>(1)).ToList()));
+                    rows.Where(r => Status[r.Id] is 0 or 2 && r.Ordinal > call.ArgAt<long>(3)).Take(call.ArgAt<int>(1)).ToList()));
             Repository.MarkSearchWorksetRecordsProcessedAsync(worksetId, Arg.Any<List<long>>(), Arg.Any<byte>(), Arg.Any<CancellationToken>())
                 .Returns(call => { foreach (var id in call.ArgAt<List<long>>(1)) Status[id] = call.ArgAt<byte>(2); return Task.CompletedTask; });
         }
 
         public async Task RunAsync(int count, string? mapping = null, CancellationToken ct = default, int? maxConcurrency = null, bool staged = false,
-            Guid? messageId = null)
+            Guid? messageId = null, Guid? account = null)
         {
             using var scope = Services.CreateScope();
             var engine = scope.ServiceProvider.GetRequiredService<IPipelineEngine>();
@@ -192,7 +193,8 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
                 ConfigJson = JsonSerializer.Serialize(new { LoopOverStepId = "a", MaxConcurrency = maxConcurrency }) };
             var child = new PipelineStep { Id = 3, PipelineId = 1, PublicId = Guid.NewGuid(), RefId = "c", Type = "action", Subtype = "create-record",
                 ParentStepId = 2, ParentBranch = "children", ConfigJson = JsonSerializer.Serialize(new {
-                    TableId, FieldMappings = new[] { new { Field = "fid_6", Value = mapping ?? "{{b.item.value}}" } }
+                    TableId, FieldMappings = new[] { new { Field = "fid_6", Value = mapping ?? "{{b.item.value}}" } },
+                    ConnectionPublicId = account
                 }) };
             var steps = new Dictionary<string, object> { ["a"] = Enumerable.Range(0, count)
                 .Select(i => new Dictionary<string, object> { ["value"] = i.ToString() }).ToList() };
@@ -523,6 +525,56 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
         Assert.Equal(250, h.Written.Count);
         Assert.Equal(3, h.BulkInserts);
         Assert.Equal(0, h.Singles);
+    }
+
+    [Fact]
+    public async Task StagedLoop_ReadsEachPageRightAfterThePreviousOne_InsteadOfFromTheStartOfTheWorkset()
+    {
+        using var h = new Harness(bulk: true);
+        await h.RunAsync(1000, staged: true);
+
+        Assert.Equal(1000, h.Written.Count);
+        var cursors = h.Repository.ReceivedCalls().Where(call => call.GetMethodInfo().Name == "GetPendingSearchWorksetPageAsync")
+            .Select(call => (long)call.GetArguments()[3]!).ToList();
+        Assert.Equal(Enumerable.Range(0, 11).Select(page => page * 100L), cursors);   // ten pages, then the empty read that ends the loop
+    }
+
+    [Fact]
+    public async Task StagedLoop_ARecordLeftPendingByAWriteError_IsNotSkippedByTheCursor()
+    {
+        // A lost connection leaves the record pending and ends the attempt; the cursor never moves past it.
+        using var h = new Harness(concurrency: 1, bulk: true) { FailAt = 204, FailWith = new FakeSqlError(233) };
+        await Assert.ThrowsAnyAsync<Exception>(() => h.RunAsync(1000, staged: true));
+
+        Assert.Equal((byte)0, h.Status[205]);
+        Assert.DoesNotContain(h.Status.Values, v => v == 3);
+    }
+
+    [Fact]
+    public async Task Bulk_StepSavedWithTheFlowsOwnAccount_IsStillWrittenInBulk()
+    {
+        // The builder saves the flow's own account on every step; that account writes into this tenant, so nothing changes.
+        using var h = new Harness(bulk: true);
+        var own = Guid.NewGuid();
+        h.Admin.GetTenantIdByPublicIdAsync(own, Arg.Any<CancellationToken>()).Returns(42L);
+
+        await h.RunAsync(1000, account: own);
+
+        Assert.Equal(10, h.BulkInserts);
+        Assert.Equal(0, h.Singles);
+        Assert.Equal(1000, h.Written.Count);
+    }
+
+    [Fact]
+    public async Task Bulk_StepWritingIntoAnotherTenant_StaysRecordByRecord()
+    {
+        using var h = new Harness(bulk: true);
+        var other = Guid.NewGuid();
+        h.Admin.GetTenantIdByPublicIdAsync(other, Arg.Any<CancellationToken>()).Returns(43L);
+
+        await h.RunAsync(20, account: other);
+
+        Assert.Equal(0, h.BulkInserts);
     }
 
     [Fact]

@@ -1108,7 +1108,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         var perRow = 8 + (enhanced ? 5 : 0) + (snapshots ? 5 : 0);
         foreach (var chunk in stepRuns.Chunk(Math.Max(1, 2000 / perRow)))
         {
-            var parameters = new DynamicParameters();
+            var parameters = new BulkParameters();
             var tuples = new List<string>(chunk.Length);
             for (var i = 0; i < chunk.Length; i++)
             {
@@ -2207,7 +2207,7 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         const int rowsPerStatement = 300;
         foreach (var chunk in records.Chunk(rowsPerStatement))
         {
-            var parameters = new DynamicParameters();
+            var parameters = new BulkParameters();
             var tuples = new string[chunk.Length];
             for (var i = 0; i < chunk.Length; i++)
             {
@@ -2322,19 +2322,36 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
     }
 
     public async Task<IReadOnlyList<PipelineBulkEventRecord>> GetPendingSearchWorksetPageAsync(
-        Guid worksetId, int pageSize, CancellationToken ct = default)
+        Guid worksetId, int pageSize, CancellationToken ct = default, long afterOrdinal = 0)
     {
+        // The pending rows are looked for in a bounded range of ordinals after the caller's cursor, never in the whole workset:
+        // asked for "the first pending rows" of a 110,000-row workset, SQL Server read every pending (or every processed) row
+        // before taking the first page — 3 ms for the first page and 140 ms by the 900th, so a long loop slowed down as it went.
+        // A range with nothing pending (rows processed by an earlier attempt) doubles the next one, so a resume skips them quickly.
         const string sql = """
             SELECT TOP (@pageSize) Id, BulkEventId, SearchWorksetId, Ordinal, RecordPublicId,
                 EventType, BeforeValuesJson, AfterValuesJson, ChangedFieldsJson, Processed, CreatedOn
             FROM meta.PipelineBulkEventRecord
             WHERE SearchWorksetId=@worksetId AND Processed IN (0,2)
+              AND Ordinal > @afterOrdinal AND Ordinal <= @upToOrdinal
             ORDER BY Ordinal;
             """;
+        const string lastOrdinalSql = "SELECT ISNULL(MAX(Ordinal), 0) FROM meta.PipelineBulkEventRecord WHERE SearchWorksetId=@worksetId;";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync<PipelineBulkEventRecord>(
-            new CommandDefinition(sql, new { worksetId, pageSize }, cancellationToken: ct));
-        return rows.AsList();
+        var lastOrdinal = await connection.ExecuteScalarAsync<long>(
+            new CommandDefinition(lastOrdinalSql, new { worksetId }, cancellationToken: ct));
+        var rows = new List<PipelineBulkEventRecord>();
+        var range = Math.Max(1L, pageSize) * 4;
+        while (rows.Count < pageSize && afterOrdinal < lastOrdinal)
+        {
+            var upToOrdinal = afterOrdinal + range;
+            var found = (await connection.QueryAsync<PipelineBulkEventRecord>(new CommandDefinition(sql,
+                new { worksetId, pageSize = pageSize - rows.Count, afterOrdinal, upToOrdinal }, cancellationToken: ct))).AsList();
+            rows.AddRange(found);
+            afterOrdinal = upToOrdinal;
+            if (found.Count == 0) range *= 2;
+        }
+        return rows;
     }
 
     public async Task MarkSearchWorksetRecordsProcessedAsync(

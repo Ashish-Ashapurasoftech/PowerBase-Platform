@@ -111,9 +111,10 @@ public partial class PipelineEngine
             BatchSize = _options.LoopBatchSize, IsBulkEvent = bulk, ChunkedSearch = workset
         });
         var hadPrevious = steps.TryGetValue(step.RefId, out var previous);
-        var bulkCreate = GetLoopBulkCreateStep(step, config, allSteps);
+        var bulkCreate = await GetLoopBulkCreateStepAsync(step, config, allSteps, ct);
         var bulkState = bulkCreate != null ? new LoopBulkCreateState() : null;
         var offset = 0;
+        long worksetCursor = 0;
         var batchNumber = 0;
         var processed = 0;
         var failed = 0;
@@ -123,11 +124,12 @@ public partial class PipelineEngine
             {
                 ct.ThrowIfCancellationRequested();
                 List<LoopItem> items;
+                var pageStarted = Stopwatch.GetTimestamp();
                 if (bulk || workset)
                 {
                     var rows = bulk
                         ? await _pipelineRepo.GetPendingBulkEventRecordsPageAsync(messageId, 1, _options.LoopBatchSize, ct)
-                        : await _pipelineRepo.GetPendingSearchWorksetPageAsync(worksetId, _options.LoopBatchSize, ct);
+                        : await _pipelineRepo.GetPendingSearchWorksetPageAsync(worksetId, _options.LoopBatchSize, ct, worksetCursor);
                     items = rows.Select(r => new LoopItem(
                         bulk ? BuildBulkEventRecord(r) :
                             JsonSerializer.Deserialize<Dictionary<string, object?>>(r.AfterValuesJson ?? "{}") ?? new(),
@@ -141,6 +143,7 @@ public partial class PipelineEngine
                     offset += items.Count;
                 }
                 if (items.Count == 0) break;
+                var pageMs = Stopwatch.GetElapsedTime(pageStarted).TotalMilliseconds;
                 batchNumber++;
                 var concurrency = GetLoopBatchConcurrency(step, config, allSteps, items, total, context, steps);
                 var batchRun = new PipelineStepRun {
@@ -153,7 +156,9 @@ public partial class PipelineEngine
                     InputContext = JsonSerializer.Serialize(new { Batch = batchNumber, RecordCount = items.Count,
                         FirstRecord = items[0].Index + 1, LastRecord = items[^1].Index + 1, Workers = concurrency })
                 };
+                var historyStarted = Stopwatch.GetTimestamp();
                 batchRun.Id = await _pipelineRepo.CreateStepRunAsync(batchRun, ct);
+                var historyMs = Stopwatch.GetElapsedTime(historyStarted).TotalMilliseconds;
                 var timer = Stopwatch.StartNew();
                 var errors = new Exception?[items.Count];
                 var completed = new bool[items.Count];
@@ -175,6 +180,7 @@ public partial class PipelineEngine
                     _logger.LogInformation("Pipeline run {RunId}: Batch {Batch} profile — {Profile}", runId, batchNumber, LoopBatchProfile.Summary());
                     // The record action's receipt commits with its write. If a worker stops before
                     // this page checkpoint, replay skips its committed actions on the next attempt.
+                    var checkpointStarted = Stopwatch.GetTimestamp();
                     var successfulIds = items.Where((_, i) => completed[i]).Select(i => i.StagingId)
                         .Where(id => id.HasValue).Select(id => id!.Value).ToList();
                     if (successfulIds.Count > 0)
@@ -193,6 +199,15 @@ public partial class PipelineEngine
                         if (bulk) await _pipelineRepo.MarkBulkEventRecordsProcessedAsync(failedIds, LoopItemFailedAndSkipped, null, ct);
                         else if (workset) await _pipelineRepo.MarkSearchWorksetRecordsProcessedAsync(worksetId, failedIds, LoopItemFailedAndSkipped, ct);
                     }
+                    var checkpointMs = Stopwatch.GetElapsedTime(checkpointStarted).TotalMilliseconds;
+                    // The next page starts after the rows this one finished (written, or failed and skipped). A row left pending
+                    // keeps the cursor before it, so it is read again exactly as it was when every page started from the beginning.
+                    if (workset)
+                    {
+                        var unfinished = items.Select((item, i) => (item, i))
+                            .FirstOrDefault(p => !completed[p.i] && (errors[p.i] == null || IsControlFlowOrInfrastructureException(errors[p.i]!)));
+                        worksetCursor = unfinished.item != null ? unfinished.item.Index : items[^1].Index + 1;
+                    }
                     processed += completed.Count(done => done);
                     failed += errors.Count(error => error != null);
                     // A Pause that releases the job is not a failure: the batch is simply waiting to continue.
@@ -209,8 +224,12 @@ public partial class PipelineEngine
                     batchRun.LogMessage = bulkWritten
                         ? $"Batch {batchNumber}: {completed.Count(done => done)}/{items.Count} records succeeded in {timer.ElapsedMilliseconds} ms in one bulk write."
                         : $"Batch {batchNumber}: {completed.Count(done => done)}/{items.Count} records succeeded in {timer.ElapsedMilliseconds} ms using {concurrency} worker(s).";
+                    historyStarted = Stopwatch.GetTimestamp();
                     await _pipelineRepo.UpdateStepRunAsync(batchRun, ct);
+                    historyMs += Stopwatch.GetElapsedTime(historyStarted).TotalMilliseconds;
                     _logger.LogInformation("Pipeline run {RunId}: {BatchSummary}", runId, batchRun.LogMessage);
+                    _logger.LogInformation("Pipeline run {RunId}: Batch {Batch} around the records — page read {PageMs:F0} ms, processed checkpoint {CheckpointMs:F0} ms, batch history {HistoryMs:F0} ms.",
+                        runId, batchNumber, pageMs, checkpointMs, historyMs);
                 }
                 var firstError = errors.FirstOrDefault(error => error != null && IsControlFlowOrInfrastructureException(error))
                     ?? errors.FirstOrDefault(error => error != null);

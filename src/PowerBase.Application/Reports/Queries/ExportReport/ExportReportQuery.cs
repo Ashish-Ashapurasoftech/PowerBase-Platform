@@ -1,6 +1,12 @@
 namespace PowerBase.Application.Reports.Queries.ExportReport;
 
-public record ExportReportQuery(Guid ReportPublicId, string Format); // Format: "csv" | "xlsx"
+/// <param name="RuntimeFilters">Optional extra "fieldId:value" filters ANDed onto the report's own
+/// filter — same shape and merge as RunReportQuery's (e.g. an embedded child grid scoping the export
+/// to its parent's children).</param>
+public record ExportReportQuery(
+    Guid ReportPublicId,
+    string Format, // Format: "csv" | "xlsx"
+    IReadOnlyList<(long FieldId, string Value, string? SubField)>? RuntimeFilters = null);
 
 public class ExportResult
 {

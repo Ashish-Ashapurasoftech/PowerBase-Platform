@@ -236,6 +236,37 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                 IncludeFilter(effectiveFilter);
                 var needsComputed = exported.Any(f => computedFids.Contains(f.Fid!.Value)) || computedFilter != null;
                 var snapshotFields = sourceFields.Where(f => f.Fid.HasValue && !computedFids.Contains(f.Fid.Value) && (needsComputed || needed.Contains(f.Fid.Value))).ToList();
+                // Only the computed values the copy uses are projected: the exported ones, the ones its filter reads, and what those
+                // read in turn — never every Formula / Lookup / Summary / Reference label of the source. A Summary over an encrypted
+                // child table is computed in memory over every child row, for every page: copying Order (6 million rows) while its
+                // Order Detail summaries were projected scanned all of Order Detail 24,000 times, though the copy exported only
+                // "ORD000" & [Record ID#]. The relationship projection runs only when one of those fields is a Lookup / Summary /
+                // Reference, and then for those fields alone. A formula whose inputs cannot be listed up front (a field chosen per
+                // record) still gets the full projection, as before.
+                var neededComputedFids = exported
+                    // An exported Reference is copied as its display text whenever the source has computed fields (see below).
+                    .Where(f => computedFids.Contains(f.Fid!.Value) || (computedFids.Count > 0 && referenceFids.Contains(f.Fid!.Value)))
+                    .Select(f => (long)f.Fid!.Value)
+                    .Concat(PipelineComputedProjection.ReferencedFids(computedFilter).Where(fid => computedFids.Contains(fid) || referenceFids.Contains(fid)))
+                    .ToHashSet();
+                var formulaProjector = services.GetRequiredService<IFormulaProjector>();
+                IReadOnlyList<AppField> projectedFields = sourceFields;
+                var projectsRelationships = true;
+                var neededFormulaFids = sourceFields
+                    .Where(f => f.Fid.HasValue && neededComputedFids.Contains(f.Fid.Value) && FormulaTypeMap.IsFormulaComputed(f.TypeCode, f.Settings))
+                    .Select(f => (long)f.Fid!.Value).ToList();
+                var closure = neededFormulaFids.Count == 0
+                    ? new HashSet<long>()
+                    : formulaProjector.GetFormulaDependencies(sourceFields, neededFormulaFids)?.ToHashSet();
+                // The dependency set always holds the formulas it started from; one that does not is not trusted.
+                if (closure != null && neededFormulaFids.All(closure.Contains))
+                {
+                    closure.UnionWith(neededComputedFids);
+                    // Stored fields (the formulas' inputs) plus the computed / Reference fields in the closure, nothing else.
+                    projectedFields = sourceFields.Where(f => f.Fid.HasValue &&
+                        (!(PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.TypeCode == "Reference") || closure.Contains(f.Fid.Value))).ToList();
+                    projectsRelationships = projectedFields.Any(f => f.TypeCode is "Lookup" or "Summary" or "Reference");
+                }
                 // Normally one chunk (one query); multiple only when AI Search matched more rows
                 // than a single SQL "IN" clause can parameterize — every chunk still feeds the
                 // same page/receipt sequence below, so no row is dropped and none copied twice.
@@ -246,9 +277,10 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                     IReadOnlyList<IReadOnlyDictionary<string, object?>> projected = page;
                     if (needsComputed)
                     {
-                        var projection = await PipelineComputedProjection.ProjectAsync(
-                            services.GetRequiredService<IRelationalProjector>(), services.GetRequiredService<IFormulaProjector>(),
-                            source, sourceFields, page, services.GetService<ILogger<CopyRecordsExecutor>>(), ct);
+                        // Nothing computed is needed (a filter on encrypted stored fields only): the decrypted rows are filtered as they are.
+                        var projection = neededComputedFids.Count == 0 ? null : await PipelineComputedProjection.ProjectAsync(
+                            projectsRelationships ? services.GetRequiredService<IRelationalProjector>() : null, formulaProjector,
+                            source, projectedFields, page, services.GetService<ILogger<CopyRecordsExecutor>>(), ct);
                         // A field the copy exports or filters on that cannot be computed fails the copy with its name;
                         // any other broken field is simply not needed.
                         PipelineComputedProjection.ThrowIfNeeded(projection, sourceFields,
