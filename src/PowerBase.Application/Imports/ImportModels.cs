@@ -214,7 +214,7 @@ public sealed record ImportDefinitionListItem(
     Guid PublicId, string Name, string ImportType, Guid SourceTableId, string SourceTableName,
     int MappingCount, bool NeedsAttention, string? AttentionReason, string? LastRunStatus, DateTime? LastRunOn,
     IReadOnlyList<string> NotifyEmails, string? ScheduleSummary, DateTime? NextRunOn, string SourceKind = ImportSourceKinds.Table,
-    int TableCount = 1, Guid DestinationTableId = default, string DestinationTableName = "");
+    int TableCount = 1, Guid DestinationTableId = default, string DestinationTableName = "", bool? ScheduleEnabled = null);
 
 public sealed record ImportDefinitionDetail(
     Guid PublicId, string Name, Guid DestinationTableId, Guid SourceTableId, string ImportType, int? MergeKeyFid,

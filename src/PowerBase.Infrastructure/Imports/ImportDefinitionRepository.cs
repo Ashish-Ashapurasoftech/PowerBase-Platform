@@ -54,7 +54,8 @@ public sealed class ImportDefinitionRepository(ITenantConnectionFactory connecti
         return rows.Select(r => new ImportDefinitionListItem(r.PublicId, r.Name, r.ImportType, r.SourceTableId ?? Guid.Empty, r.SourceTableName ?? "An uploaded file", r.MappingCount,
             r.NeedsAttention, r.AttentionReason, r.LastRunStatus, r.LastRunOn, ImportJson.Deserialize<List<string>>(r.NotifyEmailsJson) ?? [],
             ImportJson.Deserialize<ImportSchedule>(r.ScheduleJson) is { } s ? ImportScheduling.Describe(s) + (s.Enabled ? "" : " (paused)") : null,
-            r.NextRunOn, r.SourceKind, r.TableCount, r.DestinationTableId, r.DestinationTableName)).ToList();
+            r.NextRunOn, r.SourceKind, r.TableCount, r.DestinationTableId, r.DestinationTableName,
+            ImportJson.Deserialize<ImportSchedule>(r.ScheduleJson)?.Enabled)).ToList();
     }
 
     public async Task<IReadOnlyList<ImportDefinition>> ListEntitiesByAppAsync(long appId, CancellationToken ct = default)
