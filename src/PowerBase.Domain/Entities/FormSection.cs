@@ -8,6 +8,8 @@ public class FormSection
     public string Name { get; set; } = "Section heading";
     public int ColumnCount { get; set; } = 2;
     public bool IsCollapsed { get; set; }
+    /// <summary>Whether the section heading (<see cref="Name"/>) is displayed. Hiding it keeps the name.</summary>
+    public bool ShowHeading { get; set; } = true;
     public int DisplayOrder { get; set; }
     public string? ColumnWidths { get; set; }
     public List<FormElement> Elements { get; set; } = new();   // kept for backward-compat; populated from Blocks by the repo

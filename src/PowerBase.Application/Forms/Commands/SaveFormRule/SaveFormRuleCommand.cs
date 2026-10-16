@@ -29,4 +29,12 @@ public record FormRuleActionSpec(
     string? ActionValue,
     int DisplayOrder,
     bool RunOnceOnActivation = false,
-    bool IsExpressionValue = false);
+    bool IsExpressionValue = false,
+    Guid? TargetElementPublicId = null,
+    Guid? TargetSectionPublicId = null,
+    Guid? TargetBlockPublicId = null,
+    Guid? TargetPagePublicId = null,
+    string? ValueSource = null,
+    long? SourceFieldId = null,
+    string? MessageType = null,
+    string? MessageSeverity = null);

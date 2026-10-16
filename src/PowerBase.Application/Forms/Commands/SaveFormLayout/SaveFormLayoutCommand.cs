@@ -30,7 +30,8 @@ public record FormSectionLayout(
     int? BorderWidth = null,
     bool? ShowDividers = null,
     string? DividerColor = null,
-    int? DividerWidthPx = null);
+    int? DividerWidthPx = null,
+    bool? ShowHeading = null);
 
 public record FormBlockLayout(
     Guid? PublicId,
@@ -44,7 +45,9 @@ public record FormBlockLayout(
     string? BackgroundImage = null,
     string? DividerMode = null,
     string? DividerColor = null,
-    int? DividerWidthPx = null);
+    int? DividerWidthPx = null,
+    string? Name = null,
+    bool? ShowHeading = null);
 
 public record FormElementLayout(
     Guid? PublicId,
@@ -75,4 +78,5 @@ public record FormElementLayout(
     int? BorderWidth = null,
     string? ContentWidthMode = null,
     int? ContentWidthValue = null,
-    string? ContentWidthUnit = null);
+    string? ContentWidthUnit = null,
+    string? Name = null);

@@ -80,10 +80,13 @@ public class SaveFormLayoutCommandHandler
             DividerColor    = s.DividerColor,
             DividerWidthPx  = s.DividerWidthPx,
             IsPinned        = s.IsPinned ?? false,
+            ShowHeading     = s.ShowHeading ?? true,
             Blocks      = s.Blocks.Select(b => new FormSectionBlock
             {
                 PublicId        = b.PublicId ?? Guid.Empty,
                 Heading         = b.Heading,
+                Name            = b.Name,
+                ShowHeading     = b.ShowHeading ?? true,
                 BackgroundColor = b.BackgroundColor,
                 Width           = b.Width,
                 ColStart        = b.ColStart,
@@ -123,6 +126,7 @@ public class SaveFormLayoutCommandHandler
                     ContentWidthMode  = e.ContentWidthMode,
                     ContentWidthValue = e.ContentWidthValue,
                     ContentWidthUnit  = e.ContentWidthUnit,
+                    Name              = e.Name,
                 }).ToList(),
             }).ToList(),
         }).ToList();

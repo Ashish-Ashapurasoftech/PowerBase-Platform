@@ -29,7 +29,7 @@ public class SaveFormRuleCommandValidator : AbstractValidator<SaveFormRuleComman
 
     private static readonly HashSet<string> ValidConditionLogic = new() { "all", "any" };
 
-    private static readonly HashSet<string> ValidTargetTypes = new() { "Field", "Section", "Block" };
+    private static readonly HashSet<string> ValidTargetTypes = new() { "Field", "Section", "Block", "Page" };
 
     private static readonly HashSet<string> ValidConditionKinds = new() { "field", "role" };
 
@@ -87,7 +87,23 @@ public class SaveFormRuleCommandValidator : AbstractValidator<SaveFormRuleComman
                 .WithMessage($"ActionType must be one of: {string.Join(", ", ValidActionTypes)}");
             a.RuleFor(x => x.TargetType)
                 .Must(t => ValidTargetTypes.Contains(t))
-                .WithMessage("TargetType must be 'Field' or 'Section'.");
+                .WithMessage("TargetType must be 'Field', 'Section', 'Block' or 'Page'.");
+            a.RuleFor(x => x.ValueSource)
+                .Must(v => v is null or "literal" or "field" or "clear" or "formula")
+                .WithMessage("ValueSource must be 'literal', 'field', 'clear' or 'formula'.");
+            a.RuleFor(x => x.MessageType)
+                .Must(v => v is null or "notification" or "modal" or "field")
+                .WithMessage("MessageType must be 'notification', 'modal' or 'field'.");
+            a.RuleFor(x => x)
+                .Must(x => x.TargetElementPublicId != null || x.TargetElementId != null)
+                .When(x => x.ActionType == "DisplayMessage" && x.MessageType == "field")
+                .WithMessage("Pick the field the message is shown with.");
+            a.RuleFor(x => x.MessageSeverity)
+                .Must(v => v is null or "success" or "info" or "warning" or "error")
+                .WithMessage("MessageSeverity must be 'success', 'info', 'warning' or 'error'.");
+            a.RuleFor(x => x.SourceFieldId)
+                .NotNull().When(x => x.ValueSource == "field")
+                .WithMessage("Pick the field to copy the value from.");
         });
     }
 }

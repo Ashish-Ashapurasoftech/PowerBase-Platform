@@ -34,12 +34,15 @@ public class FormSectionLayoutRequest
     public bool? ShowDividers { get; init; }
     public string? DividerColor { get; init; }
     public int? DividerWidthPx { get; init; }
+    public bool? ShowHeading { get; init; }
 }
 
 public class FormBlockLayoutRequest
 {
     public Guid? PublicId { get; init; }
     public string? Heading { get; init; }
+    public string? Name { get; init; }
+    public bool? ShowHeading { get; init; }
     public string? BackgroundColor { get; init; }
     public int? Width { get; init; }
     public List<FormElementLayoutRequest> Elements { get; init; } = [];
@@ -83,4 +86,5 @@ public class FormElementLayoutRequest
     public string? ContentWidthMode { get; init; }
     public int? ContentWidthValue { get; init; }
     public string? ContentWidthUnit { get; init; }
+    public string? Name { get; init; }
 }
