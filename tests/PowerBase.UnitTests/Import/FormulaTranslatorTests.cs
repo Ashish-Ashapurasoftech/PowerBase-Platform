@@ -67,7 +67,8 @@ public class FormulaTranslatorTests
 
         result.Status.Should().Be(FormulaTranslationStatus.Clean);
         result.SettingsJson.Should().NotBeNullOrEmpty();
-        result.SettingsJson.Should().Contain("Number");
+        // Tenant databases only carry Formula_{X} variants, so the result type picks the field type.
+        result.TypeCode.Should().Be("Formula_Number");
         result.SettingsJson.Should().Contain("[Qty] * [Price]");
         result.Diagnostics.Should().BeEmpty();
     }

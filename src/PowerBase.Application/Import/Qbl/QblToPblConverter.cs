@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using PowerBase.Application.Apps.Commands;
 using PowerBase.Application.Import.Pbl;
 
 namespace PowerBase.Application.Import.Qbl;
@@ -81,6 +82,7 @@ public static class QblToPblConverter
             var fieldNameByRef = new Dictionary<string, string>(StringComparer.Ordinal);
             var relFields = new RelationshipFieldCollector();
             var seenFieldNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var seenFieldLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             // Address composite fields explicitly link to their own sub-component shadow fields
             // via Street1/Street2/City/State/PostalCode/Country !Ref properties (confirmed real
@@ -141,6 +143,18 @@ public static class QblToPblConverter
                 {
                     issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Field '{field.Name}' is already used on table '{table.Name}'; only the first is imported.", fieldRef));
                     continue;
+                }
+
+                // PowerBase also needs labels unique per table. Two fields can share a label in a
+                // real export; keep both, numbering the later one, and say so.
+                var wantedLabel = (field.Label ?? field.Name).Trim();
+                var uniqueLabel = wantedLabel;
+                for (var n = 2; !seenFieldLabels.Add(uniqueLabel); n++)
+                    uniqueLabel = $"{wantedLabel} ({n})";
+                if (!string.Equals(uniqueLabel, wantedLabel, StringComparison.Ordinal))
+                {
+                    field.Label = uniqueLabel;
+                    issues.Add(Warning("QBL_DUPLICATE_FIELD_LABEL", $"Field label '{wantedLabel}' is already used on table '{table.Name}'; imported as '{uniqueLabel}'.", fieldRef));
                 }
 
                 table.Fields.Add(field);
@@ -277,9 +291,98 @@ public static class QblToPblConverter
                 role.TablePermissions = perms;
         }
 
-        var document = new PblDocument { App = pblApp, Tables = tables, Relationships = relationships, Forms = forms, Roles = roles };
+        var variables = ConvertVariables(appNode, issues);
+        var pages = ConvertCodePages(appNode, issues);
+
+        var document = new PblDocument { App = pblApp, Tables = tables, Relationships = relationships, Forms = forms, Roles = roles, Variables = variables, Pages = pages };
         return new QblConversionResult { Document = document, Issues = issues };
     }
+
+    /// <summary>QBL <c>QB::Application::Variable</c> nodes (under the app's <c>Variables</c> map)
+    /// map 1:1 to PowerBase app variables. A name PowerBase can't accept (bracket characters, or an
+    /// id-looking name like <c>var_5</c>) or a value over the column limit is flagged, not altered.</summary>
+    private static List<PblVariable> ConvertVariables(QblResourceNode appNode, List<PblIssue> issues)
+    {
+        var result = new List<PblVariable>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (varRef, varNode) in appNode.ChildMap("Variables"))
+        {
+            if (varNode.Type != "QB::Application::Variable")
+                continue;
+
+            var name = ResolveScalar(varNode, "Name")?.Trim();
+            var value = ResolveScalar(varNode, "Value") ?? "";
+
+            if (string.IsNullOrEmpty(name))
+            {
+                issues.Add(Warning("QBL_VARIABLE_NO_NAME", $"Variable '{varRef}' has no name; skipped.", varRef));
+                continue;
+            }
+            if (name.Length > MAX_VARIABLE_NAME_LENGTH)
+            {
+                issues.Add(Warning("QBL_VARIABLE_NAME_TOO_LONG", $"Variable '{name}' name exceeds {MAX_VARIABLE_NAME_LENGTH} characters; skipped.", varRef));
+                continue;
+            }
+            if (!AppVariableNameRules.HasNoBracketCharacters(name) || AppVariableNameRules.IsReserved(name))
+            {
+                issues.Add(Warning("QBL_VARIABLE_INVALID_NAME", $"Variable '{name}' has a name PowerBase cannot accept (brackets or a reserved id-style name); skipped.", varRef));
+                continue;
+            }
+            if (value.Length > MAX_VARIABLE_VALUE_LENGTH)
+            {
+                issues.Add(Warning("QBL_VARIABLE_VALUE_TOO_LONG", $"Variable '{name}' value exceeds {MAX_VARIABLE_VALUE_LENGTH} characters; skipped.", varRef));
+                continue;
+            }
+            if (!seen.Add(name))
+            {
+                issues.Add(Warning("QBL_DUPLICATE_VARIABLE_NAME", $"Variable '{name}' is already defined; only the first is imported.", varRef));
+                continue;
+            }
+
+            result.Add(new PblVariable { LogicalRef = varRef, Name = name, Value = value, Description = NullIfBlank(ResolveScalar(varNode, "Description")) });
+        }
+
+        return result;
+    }
+
+    /// <summary>QBL <c>QB::CodePage</c> nodes (under the app's <c>Pages</c> map) carry one
+    /// <c>RawCode</c> blob. Any other page type (homepages, rich-text pages) has no PowerBase
+    /// equivalent and is flagged.</summary>
+    private static List<PblPage> ConvertCodePages(QblResourceNode appNode, List<PblIssue> issues)
+    {
+        var result = new List<PblPage>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (pageRef, pageNode) in appNode.ChildMap("Pages"))
+        {
+            if (pageNode.Type != "QB::CodePage")
+            {
+                issues.Add(Warning("QBL_UNSUPPORTED_PAGE_TYPE", $"Page '{pageRef}' of type '{pageNode.Type}' has no PowerBase equivalent; skipped.", pageRef));
+                continue;
+            }
+
+            var name = ResolveScalar(pageNode, "Name")?.Trim();
+            if (string.IsNullOrEmpty(name))
+                name = pageRef;
+            if (name.Length > MAX_PAGE_NAME_LENGTH)
+                name = name[..MAX_PAGE_NAME_LENGTH];
+
+            if (!seen.Add(name))
+            {
+                issues.Add(Warning("QBL_DUPLICATE_PAGE_NAME", $"Code page '{name}' is already defined; only the first is imported.", pageRef));
+                continue;
+            }
+
+            result.Add(new PblPage { LogicalRef = pageRef, Name = name, Code = ResolveScalar(pageNode, "RawCode") ?? "" });
+        }
+
+        return result;
+    }
+
+    private const int MAX_VARIABLE_NAME_LENGTH = 100;
+    private const int MAX_VARIABLE_VALUE_LENGTH = 500;
+    private const int MAX_PAGE_NAME_LENGTH = 200;
 
     /// <summary>Quickbase writes another table's id as the pseudo-field <c>[_DBID_TABLE_NAME]</c>
     /// (the table's name upper-cased, non-alphanumerics collapsed to underscores). PowerBase

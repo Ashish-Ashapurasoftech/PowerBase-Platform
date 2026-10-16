@@ -61,6 +61,10 @@ public static class QblFieldTypeMap
         ["QB::Field::DateTime::Formula"] = "DateTime",
         ["QB::Field::Duration::Formula"] = "Duration",
         ["QB::Field::User::Formula"] = "User",
+        // Tenant databases carry Formula_MultiSelect / Formula_Time variants, so these two are no longer
+        // lossy. The importer picks the final variant from what the expression actually evaluates to.
+        ["QB::Field::MultiselectText::Formula"] = "TextList",
+        ["QB::Field::TimeOfDay::Formula"] = "Time",
     };
 
     /// <summary>Formula field types with no PowerBase <c>FormulaResultTypes</c> equivalent —
@@ -70,9 +74,7 @@ public static class QblFieldTypeMap
     /// unsupported rather than silently approximated.</summary>
     public static readonly IReadOnlyCollection<string> UnsupportedFormulaTypes = new[]
     {
-        "QB::Field::MultiselectText::Formula",
         "QB::Field::TextMultipleChoice::Formula",
-        "QB::Field::TimeOfDay::Formula",
     };
 
     /// <summary>Relationship-family field types — never created as a standalone <c>PblField</c>;

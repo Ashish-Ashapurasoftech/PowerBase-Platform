@@ -346,6 +346,7 @@ builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListNavPages.List
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
 builder.Services.AddScoped<IAppVariableRepository, AppVariableRepository>();
+builder.Services.AddScoped<IImportSourceRefRepository, ImportSourceRefRepository>();
 builder.Services.AddScoped<IAppRoleRepository, AppRoleRepository>();
 builder.Services.AddScoped<IAppRolePermissionRepository, AppRolePermissionRepository>();
 builder.Services.AddScoped<IAppUserRepository, AppUserRepository>();
@@ -486,6 +487,12 @@ builder.Services.AddScoped<CreateAppCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Pbl.PblValidator>();
 builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.FormulaTranslator>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblExtrasImporter>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblDeferredResolver>();
+builder.Services.AddScoped<PowerBase.Application.Import.Diff.ImportDiffBuilder>();
+builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportDiff.ImportDiffQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Commands.UpdateAppFromPbl.UpdateAppFromPblCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportSourceRefRecorder>();
 builder.Services.AddScoped<PowerBase.Application.Import.Commands.ImportAppFromPbl.ImportAppFromPblCommandHandler>();
 builder.Services.AddScoped<UpdateAppCommandHandler>();
 builder.Services.AddScoped<ListAppUsersQueryHandler>();

@@ -338,15 +338,18 @@ public class PblValidator
 
     /// <summary>Structural-only check: a full compile against the table's schema happens at
     /// import time (Fids don't exist yet during validation).</summary>
+    /// <summary>The generic result types plus the list/time variants tenant databases carry (Formula_ListUser, Formula_MultiSelect, Formula_Time).</summary>
+    private static readonly string[] AllowedFormulaResultTypes = [.. FormulaResultTypes.All, "Time", "TextList", "UserList"];
+
     private static void ValidateFormulaField(PblField field, List<PblIssue> issues)
     {
         if (string.IsNullOrWhiteSpace(field.FormulaExpression))
             issues.Add(Error("MISSING_FORMULA_EXPRESSION", "Formula field is missing an expression.", field.LogicalRef));
 
-        if (string.IsNullOrWhiteSpace(field.ResultType) || !FormulaResultTypes.All.Contains(field.ResultType, StringComparer.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(field.ResultType) || !AllowedFormulaResultTypes.Contains(field.ResultType, StringComparer.OrdinalIgnoreCase))
             issues.Add(Error(
                 "INVALID_FORMULA_RESULT_TYPE",
-                $"Formula result type must be one of: {string.Join(", ", FormulaResultTypes.All)}.",
+                $"Formula result type must be one of: {string.Join(", ", AllowedFormulaResultTypes)}.",
                 field.LogicalRef));
     }
 

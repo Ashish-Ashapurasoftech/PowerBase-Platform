@@ -17,6 +17,7 @@ using PowerBase.Application.Forms.Queries.GetFormLayout;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.FormulaTranslation;
 using PowerBase.Application.Import.Pbl;
+using PowerBase.Application.Import.Services;
 using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Commands.CreateReport;
@@ -109,12 +110,25 @@ public class ImportAppFromPblCommandHandlerTests
 
         var deleteAppHandler = new DeleteAppCommandHandler(_appRepo, _auditRepo);
 
+        var variableRepo = Substitute.For<IAppVariableRepository>();
+        var accessService = Substitute.For<IAppAccessService>();
+        var extrasImporter = new PblExtrasImporter(
+            new PowerBase.Application.Apps.Commands.CreateAppVariable.CreateAppVariableCommandHandler(_appRepo, variableRepo, accessService),
+            new PowerBase.Application.Apps.Commands.UpdateAppVariable.UpdateAppVariableCommandHandler(_appRepo, variableRepo, accessService),
+            new PowerBase.Application.Pages.Commands.CreatePage.CreatePageCommandHandler(
+                _appRepo, _appRoleRepo, _appUserRepo, Substitute.For<IPageRepository>(), _queryContext, _auditRepo, Substitute.For<ITenantRepository>()),
+            _appRepo, variableRepo);
+        var sourceRefRecorder = new ImportSourceRefRecorder(
+            _appRepo, _tableRepo, _fieldRepo, _reportRepo, _formRepo, _appRoleRepo, variableRepo,
+            Substitute.For<IPageRepository>(), Substitute.For<IImportSourceRefRepository>());
+
         return new ImportAppFromPblCommandHandler(
             _validator, createAppHandler, deleteAppHandler, _appRepo, _tableRepo, _fieldRepo,
             _formRepo, _reportRepo, _appRoleRepo, bulkCreateHandler,
             formulaTranslator, createReportHandler, createRelationshipHandler, createFormHandler, saveFormLayoutHandler,
             getFormLayoutHandler, createFormRuleHandler, saveFormRuleHandler,
-            createAppRoleHandler, updateTablePermissionsHandler);
+            createAppRoleHandler, updateTablePermissionsHandler, extrasImporter, sourceRefRecorder,
+            new PblDeferredResolver(null!, null!, _fieldRepo));
     }
 
     public ImportAppFromPblCommandHandlerTests()
@@ -283,7 +297,7 @@ public class ImportAppFromPblCommandHandlerTests
         report.FormulaTranslations.Should().ContainSingle(f => f.Name == "Total" && f.Status == "Clean");
 
         await _fieldRepo.Received(1).CreateAsync(
-            Arg.Is<AppField>(f => f.Name == "Total" && f.TypeCode == "Formula"),
+            Arg.Is<AppField>(f => f.Name == "Total" && f.TypeCode == "Formula_Number"),
             Arg.Any<CancellationToken>());
     }
 

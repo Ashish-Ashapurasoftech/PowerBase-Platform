@@ -17,6 +17,32 @@ public sealed class PblDocument
     public List<PblRelationship> Relationships { get; set; } = [];
     public List<PblForm> Forms { get; set; } = [];
     public List<PblRole> Roles { get; set; } = [];
+
+    /// <summary>App-level variables (readable from formulas as <c>[Name]</c>).</summary>
+    public List<PblVariable> Variables { get; set; } = [];
+
+    /// <summary>Code pages (custom HTML). Created only when the tenant has Code Pages enabled and
+    /// the importing user holds the Code Page capability; otherwise reported as skipped.</summary>
+    public List<PblPage> Pages { get; set; } = [];
+}
+
+public sealed class PblVariable
+{
+    /// <summary>Logical ref, e.g. "$Variable_Tax_Rate".</summary>
+    public string LogicalRef { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Value { get; set; } = string.Empty;
+    public string? Description { get; set; }
+}
+
+public sealed class PblPage
+{
+    /// <summary>Logical ref, e.g. "$Page_Dashboard".</summary>
+    public string LogicalRef { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Raw page code. Stored as a single "html" Code page (PowerBase's one-page-one-file model).</summary>
+    public string Code { get; set; } = string.Empty;
 }
 
 public sealed class PblApp

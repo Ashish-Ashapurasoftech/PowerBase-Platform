@@ -278,10 +278,10 @@ public class QblToPblConverterTests
     }
 
     [Fact]
-    public void Convert_MultiselectFormula_FlaggedUnsupportedNotApproximated()
+    public void Convert_MultiselectFormula_ImportsAsTextListFormula()
     {
-        // Confirmed real occurrence: no PowerBase FormulaResultTypes equivalent for a
-        // multi-select formula - must be flagged, not coerced into Text.
+        // Confirmed real occurrence. Tenant databases have a Formula_MultiSelect variant, so a
+        // multi-select formula keeps its list result type instead of being flagged or flattened to Text.
         var result = Convert(TableWithFields("""
               $Field_NamesBeforeMe:
                 Type: QB::Field::MultiselectText::Formula
@@ -290,8 +290,8 @@ public class QblToPblConverterTests
                   Formula: 'List(...)'
             """));
 
-        result.Document.Tables[0].Fields.Should().BeEmpty();
-        result.Issues.Should().ContainSingle(i => i.Code == "QBL_UNSUPPORTED_FORMULA_RESULT_TYPE");
+        result.Document.Tables[0].Fields.Should().ContainSingle().Which.ResultType.Should().Be("TextList");
+        result.Issues.Should().NotContain(i => i.Code == "QBL_UNSUPPORTED_FORMULA_RESULT_TYPE");
     }
 
     [Fact]

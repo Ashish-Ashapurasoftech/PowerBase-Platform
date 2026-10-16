@@ -3,6 +3,7 @@ using PowerBase.Application.Formulas;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.FieldSettings;
 using PowerBase.Formula;
+using PowerBase.Formula.Types;
 
 namespace PowerBase.Application.Import.FormulaTranslation;
 
@@ -21,8 +22,13 @@ public enum FormulaTranslationStatus
 public sealed class FormulaTranslationResult
 {
     public FormulaTranslationStatus Status { get; init; }
-    /// <summary>JSON-serialized <see cref="FormulaSettings"/>, ready for <c>AppField.Settings</c>. Null unless Status is Clean.</summary>
+    /// <summary>JSON settings (<c>{ "expression": ... }</c>) for the <see cref="TypeCode"/> variant, ready for
+    /// <c>AppField.Settings</c>. Null unless Status is Clean/Adjusted.</summary>
     public string? SettingsJson { get; init; }
+
+    /// <summary>The <c>Formula_{X}</c> field type to create. Tenant databases only carry the per-result-type
+    /// variants (Formula_Text, Formula_Number, …) — the bare "Formula" type does not exist there.</summary>
+    public string? TypeCode { get; init; }
     public IReadOnlyList<string> Diagnostics { get; init; } = [];
 }
 
@@ -88,7 +94,22 @@ public class FormulaTranslator
         new()
         {
             Status = status,
-            SettingsJson = JsonSerializer.Serialize(
-                new FormulaSettings { ResultType = resultType, Expression = expression }, JsonOptions),
+            TypeCode = VariantTypeCode(resultType),
+            SettingsJson = JsonSerializer.Serialize(new Dictionary<string, string> { ["expression"] = expression }, JsonOptions),
         };
+
+    /// <summary>Maps the compiled result type to its <c>Formula_{X}</c> field type code.</summary>
+    public static string VariantTypeCode(string resultType) => resultType switch
+    {
+        nameof(FormulaType.Number) => "Formula_Number",
+        nameof(FormulaType.Date) => "Formula_Date",
+        nameof(FormulaType.DateTime) => "Formula_DateTime",
+        nameof(FormulaType.Time) => "Formula_Time",
+        nameof(FormulaType.Duration) => "Formula_Duration",
+        nameof(FormulaType.Bool) => "Formula_Bool",
+        nameof(FormulaType.User) => "Formula_User",
+        nameof(FormulaType.UserList) => "Formula_ListUser",
+        nameof(FormulaType.TextList) => "Formula_MultiSelect",
+        _ => "Formula_Text",
+    };
 }

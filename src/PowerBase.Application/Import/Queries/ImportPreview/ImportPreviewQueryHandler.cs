@@ -93,6 +93,8 @@ public class ImportPreviewQueryHandler
             Relationships = relationships,
             Forms = forms,
             Roles = roles,
+            Variables = (document.Variables ?? []).Select(v => v.Name).ToList(),
+            Pages = (document.Pages ?? []).Select(p => p.Name).ToList(),
             Errors = validation.Errors.Concat(conversionIssues.Where(i => i.Severity == PblIssueSeverity.Error)).Select(ToDto).ToList(),
             Warnings = validation.Warnings.Concat(conversionIssues.Where(i => i.Severity == PblIssueSeverity.Warning)).Select(ToDto).ToList(),
         });

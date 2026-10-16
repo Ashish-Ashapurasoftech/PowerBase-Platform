@@ -75,6 +75,8 @@ public sealed class ImportPreviewResult
     public List<ImportPreviewRelationshipItem> Relationships { get; init; } = [];
     public List<ImportPreviewFormItem> Forms { get; init; } = [];
     public List<ImportPreviewRoleItem> Roles { get; init; } = [];
+    public List<string> Variables { get; init; } = [];
+    public List<string> Pages { get; init; } = [];
     public List<PblIssueDto> Errors { get; init; } = [];
     public List<PblIssueDto> Warnings { get; init; } = [];
 }
