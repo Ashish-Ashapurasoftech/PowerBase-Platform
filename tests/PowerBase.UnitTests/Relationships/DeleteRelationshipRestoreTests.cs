@@ -6,8 +6,9 @@ using PowerBase.Domain.Entities;
 
 namespace PowerBase.UnitTests.Relationships;
 
-/// <summary>Deleting a relationship whose reference field was created with it: a reference holding data is kept as a real
-/// field with the parent's key text on every row (as a converted field is), not deleted; an empty one is deleted.</summary>
+/// <summary>Deleting a relationship whose reference field was created with it: the reference is kept as a real field of the
+/// parent key's type (a Date key gives a Date field) with the key value on every row, not deleted — whether or not it
+/// holds data.</summary>
 public class DeleteRelationshipRestoreTests
 {
     private readonly IAppTableRepository _tableRepo = Substitute.For<IAppTableRepository>();
@@ -18,11 +19,16 @@ public class DeleteRelationshipRestoreTests
     private readonly ISchemaEngineService _schemaEngine = Substitute.For<ISchemaEngineService>();
 
     private const long AppId = 10, ClientTableId = 170, SessionTableId = 171, RelId = 159;
-    private const int TextTypeId = 1;
+    private const int TextTypeId = 1, DateTypeId = 10;
 
     private readonly AppTable _clients = new() { Id = ClientTableId, PublicId = Guid.NewGuid(), AppId = AppId, Name = "Clients", KeyFieldId = 2476 };
     private readonly AppTable _sessions = new() { Id = SessionTableId, PublicId = Guid.NewGuid(), AppId = AppId, Name = "Sessions" };
     private readonly AppField _clientName = new() { Id = 2476, Fid = 6, AppTableId = ClientTableId, Name = "Client Name", TypeCode = "Text", IsUnique = true };
+    private readonly AppField _startDate = new()
+    {
+        Id = 2477, Fid = 8, AppTableId = ClientTableId, Name = "Start Date", TypeCode = "Date", IsUnique = true,
+        Settings = """{"showMonthName":true}""",
+    };
     private readonly AppField _reference = new()
     {
         Id = 2484, PublicId = Guid.NewGuid(), Fid = 7, AppTableId = SessionTableId, Name = "Related Client", TypeCode = "Reference",
@@ -44,6 +50,7 @@ public class DeleteRelationshipRestoreTests
         _fieldRepo.ListByTableAsync(ClientTableId, Arg.Any<CancellationToken>()).Returns(new List<AppField> { _clientName });
         _fieldRepo.ListByTableAsync(SessionTableId, Arg.Any<CancellationToken>()).Returns(new List<AppField> { _reference, _original });
         _fieldTypeRepo.GetByCodeAsync("Text", Arg.Any<CancellationToken>()).Returns(new FieldType { Id = TextTypeId, Code = "Text" });
+        _fieldTypeRepo.GetByCodeAsync("Date", Arg.Any<CancellationToken>()).Returns(new FieldType { Id = DateTypeId, Code = "Date" });
         _recordRepo.EncryptColumnTextsAsync(default!, default!, default!, default)
             .ReturnsForAnyArgs(ci => ci.ArgAt<IReadOnlyDictionary<long, string>>(2));
         _schemaEngine.RestoreColumnFromReferenceAsync(default!, default!, default!, default).ReturnsForAnyArgs(true);
@@ -55,6 +62,12 @@ public class DeleteRelationshipRestoreTests
 
     private void GivenReferenceHoldsData() =>
         _recordRepo.HasAnyDataAsync(_sessions, _reference, Arg.Any<CancellationToken>()).Returns(true);
+
+    private void GivenDateKey()
+    {
+        _clients.KeyFieldId = _startDate.Id;
+        _fieldRepo.ListByTableAsync(ClientTableId, Arg.Any<CancellationToken>()).Returns(new List<AppField> { _clientName, _startDate });
+    }
 
     [Fact]
     public async Task Delete_NewReferenceWithData_RewritesEveryRowAsKeyText_AndKeepsTheField()
@@ -102,13 +115,76 @@ public class DeleteRelationshipRestoreTests
     }
 
     [Fact]
-    public async Task Delete_NewReferenceWithoutData_DeletesItAndItsOriginalField()
+    public async Task Delete_NewReferenceWithoutData_KeepsItAsTheKeyType()
     {
+        GivenDateKey();
+        _recordRepo.ListAllRowsDecryptedAsync(_sessions, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>>());
+
         await Handler().HandleAsync(new DeleteRelationshipCommand(_rel.PublicId, Force: false));
 
-        await _fieldRepo.Received(1).DeleteAsync(_reference.PublicId, SessionTableId, Arg.Any<CancellationToken>());
+        await _schemaEngine.Received(1).RestoreColumnFromReferenceAsync(
+            _sessions, Arg.Is<AppField>(f => f.Id == _reference.Id && f.TypeCode == "Date"),
+            Arg.Is<IReadOnlyDictionary<long, string>>(d => d.Count == 0), Arg.Any<CancellationToken>());
+        await _fieldRepo.Received(1).UpdateFieldTypeAsync(_reference.Id, DateTypeId, _startDate.Settings, Arg.Any<bool>(), Arg.Any<CancellationToken>());
+        await _fieldRepo.DidNotReceive().DeleteAsync(_reference.PublicId, Arg.Any<long>(), Arg.Any<CancellationToken>());
         await _fieldRepo.Received(1).DeleteAsync(_original.PublicId, SessionTableId, Arg.Any<CancellationToken>());
-        await _schemaEngine.DidNotReceiveWithAnyArgs().RestoreColumnFromReferenceAsync(default!, default!, default!, default);
+    }
+
+    [Fact]
+    public async Task Delete_NewReferenceWithDateKey_RebuildsItAsDateWithTheKeyDates()
+    {
+        GivenDateKey();
+        GivenReferenceHoldsData();
+        _recordRepo.ListAllRowsDecryptedAsync(_sessions, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>>
+            {
+                new Dictionary<string, object?> { ["Id"] = 1L, ["f_7"] = 1L, ["f_9"] = null },
+                new Dictionary<string, object?> { ["Id"] = 2L, ["f_7"] = null, ["f_9"] = "2026-10-01" },   // matched no client on import
+                new Dictionary<string, object?> { ["Id"] = 3L, ["f_7"] = null, ["f_9"] = null },
+            });
+        _recordRepo.GetRowsByIdsAsync(_clients, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>
+            {
+                [1] = new Dictionary<string, object?> { ["f_8"] = new DateTime(2026, 9, 16) },
+            });
+
+        await Handler().HandleAsync(new DeleteRelationshipCommand(_rel.PublicId, Force: true));
+
+        await _schemaEngine.Received(1).RestoreColumnFromReferenceAsync(
+            _sessions,
+            Arg.Is<AppField>(f => f.Id == _reference.Id && f.TypeCode == "Date" && f.FieldTypeId == DateTypeId),
+            Arg.Is<IReadOnlyDictionary<long, string>>(d => d.Count == 2 && d[1] == "2026-09-16" && d[2] == "2026-10-01"),
+            Arg.Any<CancellationToken>());
+        await _fieldRepo.Received(1).UpdateFieldTypeAsync(_reference.Id, DateTypeId, _startDate.Settings, Arg.Any<bool>(), Arg.Any<CancellationToken>());
+        await _fieldRepo.DidNotReceive().DeleteAsync(_reference.PublicId, Arg.Any<long>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Delete_NewReferenceWithDateKeyAndNonDateOriginalText_RebuildsItAsText()
+    {
+        GivenDateKey();
+        GivenReferenceHoldsData();
+        _recordRepo.ListAllRowsDecryptedAsync(_sessions, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>>
+            {
+                new Dictionary<string, object?> { ["Id"] = 1L, ["f_7"] = 1L, ["f_9"] = null },
+                new Dictionary<string, object?> { ["Id"] = 2L, ["f_7"] = null, ["f_9"] = "next week" },
+            });
+        _recordRepo.GetRowsByIdsAsync(_clients, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>
+            {
+                [1] = new Dictionary<string, object?> { ["f_8"] = new DateTime(2026, 9, 16) },
+            });
+
+        await Handler().HandleAsync(new DeleteRelationshipCommand(_rel.PublicId, Force: true));
+
+        await _schemaEngine.Received(1).RestoreColumnFromReferenceAsync(
+            _sessions,
+            Arg.Is<AppField>(f => f.Id == _reference.Id && f.TypeCode == "Text"),
+            Arg.Is<IReadOnlyDictionary<long, string>>(d => d.Count == 2 && d[1] == "2026-09-16" && d[2] == "next week"),
+            Arg.Any<CancellationToken>());
+        await _fieldRepo.Received(1).UpdateFieldTypeAsync(_reference.Id, TextTypeId, null, Arg.Any<bool>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
