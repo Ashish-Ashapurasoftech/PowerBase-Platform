@@ -572,6 +572,9 @@ builder.Services.AddScoped<PowerBase.Application.Fields.Commands.SetKey.SetKeyCo
 builder.Services.AddScoped<CreateReportCommandHandler>();
 builder.Services.AddScoped<UpdateReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.DeleteReportRecords.DeleteReportRecordsCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Reports.DeleteJobs.IRecordDeleteJobRepository, PowerBase.Infrastructure.Repositories.RecordDeleteJobRepository>();
+builder.Services.AddScoped<PowerBase.Application.Reports.DeleteJobs.RecordDeleteJobProcessor>();
+builder.Services.AddHostedService<PowerBase.API.Workers.RecordDeleteJobWorker>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();
 builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();

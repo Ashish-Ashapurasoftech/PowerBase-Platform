@@ -130,13 +130,16 @@ public class BulkDeleteRecordsCommandHandler
 
 
 
-            await _auditRepo.LogActivityAsync(
-                AuditActions.Deleted,
-                AuditEntityTypes.Record,
-                command.TablePublicId.ToString(),
-                $"{uniqueRecordPublicIds.Count} record(s) bulk-deleted from {table.Name}",
-                appId: table.AppId,
-                ct: ct);
+            if (!command.SkipAudit)
+            {
+                await _auditRepo.LogActivityAsync(
+                    AuditActions.Deleted,
+                    AuditEntityTypes.Record,
+                    command.TablePublicId.ToString(),
+                    $"{uniqueRecordPublicIds.Count} record(s) bulk-deleted from {table.Name}",
+                    appId: table.AppId,
+                    ct: ct);
+            }
 
             await _uow.CommitAsync(ct);
 
