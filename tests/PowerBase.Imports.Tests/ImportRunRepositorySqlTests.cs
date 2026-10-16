@@ -59,6 +59,7 @@ public sealed class RunSqlFixture : IAsyncLifetime
             IF COL_LENGTH('meta.ImportRun', 'FilesExpiredOn') IS NULL ALTER TABLE meta.ImportRun ADD FilesExpiredOn DATETIME2(3) NULL;
             IF COL_LENGTH('meta.ImportRunTarget', 'Unchanged') IS NULL ALTER TABLE meta.ImportRunTarget ADD Unchanged BIGINT NOT NULL DEFAULT 0;
             IF COL_LENGTH('meta.ImportRunTarget', 'DetailsFilePath') IS NULL ALTER TABLE meta.ImportRunTarget ADD DetailsFilePath NVARCHAR(500) NULL;
+            IF COL_LENGTH('meta.ImportDefinition', 'IsDeleted') IS NULL ALTER TABLE meta.ImportDefinition ADD IsDeleted BIT NOT NULL DEFAULT 0;
             """);
         // Explicit ids from a range no real tenant uses: the tables may already exist from the data store tests without identity columns.
         _appId = 800_000_000L + Random.Shared.Next(99_000_000);
@@ -123,6 +124,15 @@ public sealed class RunSqlFixture : IAsyncLifetime
         await c.ExecuteAsync("INSERT INTO meta.ImportRun (ImportDefinitionId, TriggeredByUserId, Status) VALUES (@d, 5, 'success')", new { d = definition });
     }
     private readonly List<long> _otherDefinitions = new();
+
+    /// <summary>A run of an import that was removed afterwards, as a quick import's is: its definition is soft-deleted the moment the run is queued.</summary>
+    public async Task<long> AddRunOfRemovedDefinitionAsync(string name, long userId, string status)
+    {
+        await using var c = new SqlConnection(SqlFixture.ConnectionString);
+        var definition = await c.ExecuteScalarAsync<long>("INSERT INTO meta.ImportDefinition (Name, DestinationTableId, AppId, IsDeleted) OUTPUT INSERTED.Id VALUES (@n, @t, @a, 1)", new { n = name, t = _tableId, a = _appId });
+        _otherDefinitions.Add(definition);
+        return await c.ExecuteScalarAsync<long>("INSERT INTO meta.ImportRun (ImportDefinitionId, TriggeredByUserId, Status) OUTPUT INSERTED.Id VALUES (@d, @u, @s)", new { d = definition, u = userId, s = status });
+    }
 
     /// <summary>A run of this fixture's import, with the details the history shows.</summary>
     public async Task<(long Id, Guid PublicId)> AddHistoryRunAsync(string status, DateTime createdOn, string trigger = "manual", string? snapshot = null, string? feedback = null,
@@ -405,6 +415,21 @@ public class ImportRunRepositorySqlTests : IClassFixture<RunSqlFixture>
         var running = await _db.AddRunAsync("running");
 
         (await _db.Runs.ListWithExpiredFilesAsync(DateTime.UtcNow.AddDays(1), 50)).Should().NotContain(r => r.RunId == running);
+    }
+
+    // ---- a quick import's run: its definition is removed as soon as the run is queued ----
+
+    [SqlFact]
+    public async Task A_run_whose_definition_was_removed_still_shows_in_the_history_and_in_the_users_notices()
+    {
+        var user = 7500 + Random.Shared.Next(400);
+        await _db.AddRunOfRemovedDefinitionAsync("Quick import - students.csv", user, "running");
+
+        var history = await _db.Runs.ListHistoryAsync(new ImportHistoryQuery(_db.AppDbId, DateTime.UtcNow.AddDays(-1), null, null, null, null, null, 0, 50));
+        var (_, notices) = await _db.Runs.ListForUserAsync(user, null, 20);
+
+        history.Should().Contain(r => r.ImportName == "Quick import - students.csv");
+        notices.Should().ContainSingle().Which.DefinitionName.Should().Be("Quick import - students.csv");
     }
 
     // ---- the history query ----
