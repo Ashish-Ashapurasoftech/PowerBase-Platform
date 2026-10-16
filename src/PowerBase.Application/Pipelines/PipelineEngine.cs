@@ -1876,6 +1876,14 @@ public partial class PipelineEngine : IPipelineEngine
             FilterGroup? filterTree = null;
             string? evaluatedFilterVal = null;
 
+            // A rule on a person's detail ("Record Owner → Email is x") becomes a condition on the user ids the column holds.
+            var userDetailFilters = config.IsSimpleFilter || string.IsNullOrWhiteSpace(config.AdvancedQuery)
+                ? await ResolveUserDetailFilterRulesAsync(
+                    PipelineUserFieldFilter.DetailRules(config.FilterGroups, fields).Concat(PipelineUserFieldFilter.DetailRules(config.Filters, fields)).ToList(),
+                    table, fields, payloadJson, executionPath, allSteps, recordRepo, ct)
+                : null;
+            _userDetailFilterRules.Value = userDetailFilters?.Conditions;
+
             if (!config.IsSimpleFilter && !string.IsNullOrWhiteSpace(config.AdvancedQuery))
             {
                 try
@@ -1932,6 +1940,8 @@ public partial class PipelineEngine : IPipelineEngine
                 }
             }
 
+            _userDetailFilterRules.Value = null;
+
             // The flow reads as its owner: only the records and fields that identity may see.
             var searchAccess = await GetRestrictedAccessAsync(table, ct);
             filterTree = ApplyRoleRowRestrictions(filterTree, searchAccess, fields);
@@ -1963,6 +1973,8 @@ public partial class PipelineEngine : IPipelineEngine
             // column holds the parent's Record ID#. Id-style conditions on a Reference stay in SQL.
             var labelReferenceFids = PipelineComputedFilter.LabelStyleReferenceFids(fields, filterTree);
             inMemoryFilterFids.UnionWith(labelReferenceFids);
+            // A user-detail rule naming more users than one SQL query can carry.
+            if (userDetailFilters != null) inMemoryFilterFids.UnionWith(userDetailFilters.InMemoryFids);
             var canStreamFilter = inMemoryFilterFids.Count == 0 ||
                 !FormulaFilterSorter.TreeContainsFormulaField(filterTree, inMemoryFilterFids);
 
@@ -4508,12 +4520,8 @@ public partial class PipelineEngine : IPipelineEngine
     private static readonly Regex UserSubTokenRegex = new(
         @"\{\{\s*([^{}]*?\.fid_\d+)\.(id|name|first_name|last_name|email|screen_name)\s*\}\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, UserTokenInfo> _userTokenInfo = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, PipelineUserDetails> _userTokenInfo = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, AppField?> _tokenSourceFieldCache = new();
-
-    /// <summary>A person a <c>{{…fid_N.detail}}</c> token reads. ScreenName is the name the app shows for them (core.[User].Name, as
-    /// the record table and the audit's screenName); Name is the older "Name" detail — first + last name, else the email.</summary>
-    private sealed record UserTokenInfo(string Name, string FirstName, string LastName, string Email, string ScreenName);
 
     private static List<long> ParseUserIds(string? raw)
     {
@@ -4539,23 +4547,7 @@ public partial class PipelineEngine : IPipelineEngine
             try { foreach (var id in ParseUserIds(EvaluateTokens("{{" + match.Groups[1].Value + "}}", payloadJson, executionPath, allSteps))) wanted.Add(id); }
             catch (Exception) { /* the token's own evaluation reports an unresolvable reference */ }
         }
-        foreach (var id in wanted)
-        {
-            try
-            {
-                var user = await userRepo.GetByIdAsync(id, ct);
-                var first = user.FirstName?.Trim() ?? string.Empty;
-                var last = user.LastName?.Trim() ?? string.Empty;
-                var name = $"{first} {last}".Trim();
-                var displayName = name.Length > 0 ? name : user.Email;
-                var screenName = string.IsNullOrWhiteSpace(user.Name) ? displayName : user.Name.Trim();
-                _userTokenInfo[id] = new UserTokenInfo(displayName, first, last, user.Email, screenName);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning("User {UserId} referenced by a token could not be loaded: {Message}", id, ex.Message);
-            }
-        }
+        await PipelineUserFieldFilter.LoadAsync(userRepo, wanted, _userTokenInfo, _logger, ct);
     }
 
     private string ExpandUserSubTokens(string input, string payloadJson, string? executionPath, List<PipelineStep>? allSteps)
@@ -4570,15 +4562,7 @@ public partial class PipelineEngine : IPipelineEngine
             return string.Join(", ", ids.Select(id =>
             {
                 if (property == "id") return id.ToString(CultureInfo.InvariantCulture);
-                if (!_userTokenInfo.TryGetValue(id, out var info)) return string.Empty;
-                return property switch
-                {
-                    "email" => info.Email,
-                    "first_name" => info.FirstName,
-                    "last_name" => info.LastName,
-                    "screen_name" => info.ScreenName,
-                    _ => info.Name
-                };
+                return _userTokenInfo.TryGetValue(id, out var info) ? PipelineUserFieldFilter.DetailOf(id, info, property) : string.Empty;
             }));
         });
 
@@ -6183,6 +6167,56 @@ public partial class PipelineEngine : IPipelineEngine
         };
     }
 
+    /// <summary>
+    /// Search Records rules on a person's detail ("Record Owner → Email is x", "List Of Users → Screen name contains y"). The table
+    /// stores user ids, so each rule is worked out over the people its column holds — read once per field — and becomes a condition
+    /// on their ids (see <see cref="PipelineUserFieldFilter.BuildDbNode"/>). Null when there are none.
+    /// </summary>
+    private sealed record UserDetailFilters(IReadOnlyDictionary<TriggerFilterRule, FilterNode?> Conditions, IReadOnlyCollection<long> InMemoryFids);
+
+    private async Task<UserDetailFilters?> ResolveUserDetailFilterRulesAsync(
+        IReadOnlyList<TriggerFilterRule> rules, AppTable table, IReadOnlyList<AppField> fields, string payloadJson, string? executionPath,
+        List<PipelineStep>? allSteps, IRecordRepository recordRepo, CancellationToken ct)
+    {
+        if (rules.Count == 0) return null;
+        var resolved = new Dictionary<TriggerFilterRule, FilterNode?>(ReferenceEqualityComparer.Instance);
+        var inMemoryFids = new HashSet<long>();
+        var sqlIds = 0;
+        var idsByField = new Dictionary<long, List<long>>();
+        var userRepo = CurrentStepServices.GetService<IUserRepository>();
+        foreach (var rule in rules)
+        {
+            if (!PipelineUserFieldFilter.TryResolve(rule.Field, fields, out var field, out var detail) || !field.Fid.HasValue) continue;
+            if (!idsByField.TryGetValue(field.Id, out var ids))
+            {
+                // Every person the column holds — no limit, so "none of these people" is exact.
+                var (values, _) = await recordRepo.GetDistinctFieldValuesAsync(table, field, int.MaxValue, null, ct);
+                ids = values.SelectMany(PipelineUserFieldFilter.ParseUserIds).Distinct().ToList();
+                idsByField[field.Id] = ids;
+            }
+            if (detail != "id") await PipelineUserFieldFilter.LoadAsync(userRepo, ids, _userTokenInfo, _logger, ct);
+            var value = EvaluateTokens(rule.Value, payloadJson, executionPath, allSteps);
+            var filter = PipelineUserFieldFilter.BuildDbFilter(field, detail, rule.Operator, value, ids, _userTokenInfo);
+            resolved[rule] = filter.Node;
+            // Too many ids for one SQL query (each is a parameter): the field is checked on each page of the search in memory
+            // instead — the same streamed path as an encrypted field, so nothing is left out however many users or records.
+            if (inMemoryFids.Contains(field.Fid.Value)) continue;
+            if (sqlIds + filter.IdCount > PipelineUserFieldFilter.SqlIdBudget)
+            {
+                inMemoryFids.Add(field.Fid.Value);
+                _logger.LogInformation("Search Records: the filter on {Detail} of field {FieldId} names {Count} users; it is checked in memory.",
+                    detail, field.Fid, filter.IdCount);
+            }
+            else sqlIds += filter.IdCount;
+        }
+        return new UserDetailFilters(resolved, inMemoryFids);
+    }
+
+    /// <summary>Conditions for the running Search Records step's rules on a person's detail, worked out by
+    /// <see cref="ResolveUserDetailFilterRulesAsync"/> before it maps its filter (a null condition: every record passes the rule).
+    /// Per async flow, so steps running side by side in a loop never see each other's.</summary>
+    private readonly AsyncLocal<IReadOnlyDictionary<TriggerFilterRule, FilterNode?>?> _userDetailFilterRules = new();
+
     private FilterGroup? MapTriggerFilterGroupToDbFilterGroup(
         TriggerFilterGroup group,
         IReadOnlyList<AppField> fields,
@@ -6236,6 +6270,12 @@ public partial class PipelineEngine : IPipelineEngine
             else
             {
                 if (string.IsNullOrWhiteSpace(rule.Field)) continue;
+
+                if (_userDetailFilterRules.Value is { } userDetailRules && userDetailRules.TryGetValue(rule, out var userDetailNode))
+                {
+                    if (userDetailNode != null) dbGroup.Nodes.Add(userDetailNode);
+                    continue;
+                }
 
                 var field = ResolvePipelineField(rule.Field, fields);
 
