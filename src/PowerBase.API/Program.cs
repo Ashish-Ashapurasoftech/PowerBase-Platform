@@ -566,6 +566,9 @@ builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.UpdateRe
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.AddFormSection.AddRelationshipFormSectionCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipFieldFactory>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.RelationshipKeyCarryOverService>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.IReferenceRelinkService, PowerBase.Application.Relationships.ReferenceRelinkService>();
+builder.Services.AddScoped<PowerBase.Application.Relationships.IReferenceRelinkQueue, PowerBase.Infrastructure.Repositories.ReferenceRelinkQueue>();
+builder.Services.AddHostedService<PowerBase.API.Workers.ReferenceRelinkWorker>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.RelationshipQueriesHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.GetParentOptionsQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Queries.IsParentAllowedQueryHandler>();

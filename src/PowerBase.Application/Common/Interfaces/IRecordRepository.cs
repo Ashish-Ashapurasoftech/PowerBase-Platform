@@ -125,6 +125,20 @@ public interface IRecordRepository
     Task<IReadOnlyDictionary<long, string>> EncryptColumnTextsAsync(
         AppTable table, AppField field, IReadOnlyDictionary<long, string> plainByRowId, CancellationToken ct = default);
 
+    /// <summary>The live rows of <paramref name="child"/> whose <paramref name="reference"/> is blank and whose hidden
+    /// <paramref name="original"/> field kept the text that matched no parent record (see <c>ReferenceSettings.OriginalFid</c>),
+    /// with that text decrypted. The blank references are found through the reference column's index, so the cost follows the
+    /// number of such rows, not the size of the table.</summary>
+    Task<IReadOnlyList<(long Id, string Text)>> ListUnlinkedOriginalsAsync(
+        AppTable child, AppField reference, AppField original, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+
+    /// <summary>Points each row of <paramref name="parentIdByRowId"/> (row Id → parent Record ID) at its parent and clears its
+    /// <paramref name="original"/> text — only while its reference is still blank, so a link made in the meantime is never
+    /// overwritten. Returns the rows changed (PublicId and the parent Record ID they now hold).</summary>
+    Task<IReadOnlyList<(Guid PublicId, long ParentId)>> LinkUnlinkedReferencesAsync(
+        AppTable child, AppField reference, AppField original, IReadOnlyDictionary<long, long> parentIdByRowId,
+        System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
         FilterGroup? filterTree = null,
