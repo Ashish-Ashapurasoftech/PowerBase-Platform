@@ -140,6 +140,14 @@ with different mappings, and one table can use sheet mode while another reads th
 
 **The filter of the whole import opens with its first condition ready** (feedback, 2026-10-15): the first field of the source, its first operator, and no value yet. A condition nothing has been typed in is left out when the import is saved (`pruneEmptyFilterNodes`), so it filters nothing until it is filled in; the person can remove the row. It is the same for a table and a file source.
 
+### Import from a table's own menu (Phase I, no template)
+
+A table's records view has **Import** in its top-right ⋮ menu (shown only to a person who can **add** records to that table; **Merge** is offered only if they can also **edit**). It opens a dialog: choose **a file** (CSV or Excel, one sheet) or **another table**, map what goes where with the template screens' own mapping (matching by heading, type check, fixed values, formulas, virtual columns), choose Copy or Merge, the duplicate policy and who else to email, and run. Nothing is kept as a template; to repeat or schedule an import, create a template in Imports. Not offered here: schedules, several tables in one run, sheets read separately, filters, reading only what changed.
+
+* **Backend:** `POST tables/{tableId}/quick-imports` (`QuickImportController`, `StartQuickImportHandler`). It is the template import under another door, not a second engine: the definition is saved through `SaveImportDefinitionHandler` (every check a saved import goes through, permissions included), the run is started through the unchanged `StartImportRunHandler`, and the definition is then **soft-deleted** (in a `finally`, so a failed start leaves nothing). A run needs a definition row (`ImportRun.ImportDefinitionId` is required), and runs of soft-deleted definitions are already first-class: every list of templates (Imports, PowerFlow, pipelines, the checker, the scheduler) filters `IsDeleted = 0`, while History, the run page, the "my imports" notices and the details files do not, so a quick import shows in History as "Quick import - <file name or source table>". No migration, and no existing handler or query changed.
+* **Cost:** one soft-deleted `ImportDefinition` row per quick import (a small JSON). For about one request the temporary definition exists and could appear in a list refreshed at that moment.
+* **Frontend:** `QuickImportDialogComponent` (`shared/components/quick-import-dialog`), the config is assembled by `core/utils/quick-import-config.ts` (with a spec); the template builder and its components are untouched.
+
 ### Only records changed since the last run
 
 A merge **from a table** can be set to **only read records changed since the last run** (`OnlyChangedSinceLastRun`, off by default). A scheduled import then does not read, compare and rewrite records nothing has touched (a nightly merge of 70,000 records that changes 40 reads and updates 40).
