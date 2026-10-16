@@ -612,27 +612,27 @@ public class ReportsController : ControllerBase
             kv => new ReportColumnTotalDto { Sum = kv.Value.Sum, NonBlankCount = kv.Value.NonBlankCount, RowCount = kv.Value.RowCount }),
     };
 
-    /// <summary>Export report results as CSV.</summary>
+    /// <summary>Export report results as CSV. Optional dynamicFilters=fieldId:value (repeatable), same as run.</summary>
     [HttpGet("reports/{publicId:guid}/export/csv")]
     [RequireAppMember(AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> ExportCsv(Guid publicId, CancellationToken ct)
+    public async Task<IActionResult> ExportCsv(Guid publicId, [FromQuery] List<string>? dynamicFilters = null, CancellationToken ct = default)
     {
-        var result = await _exportHandler.HandleAsync(new ExportReportQuery(publicId, "csv"), ct);
+        var result = await _exportHandler.HandleAsync(new ExportReportQuery(publicId, "csv", ParseDynamicFilters(dynamicFilters)), ct);
         return File(result.Content, result.ContentType, result.FileName);
     }
 
-    /// <summary>Export report results as Excel (.xlsx).</summary>
+    /// <summary>Export report results as Excel (.xlsx). Optional dynamicFilters=fieldId:value (repeatable), same as run.</summary>
     [HttpGet("reports/{publicId:guid}/export/xlsx")]
     [RequireAppMember(AppAccessResolver.ByReportPublicId)]
     [ProducesResponseType(typeof(FileResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> ExportXlsx(Guid publicId, CancellationToken ct)
+    public async Task<IActionResult> ExportXlsx(Guid publicId, [FromQuery] List<string>? dynamicFilters = null, CancellationToken ct = default)
     {
-        var result = await _exportHandler.HandleAsync(new ExportReportQuery(publicId, "xlsx"), ct);
+        var result = await _exportHandler.HandleAsync(new ExportReportQuery(publicId, "xlsx", ParseDynamicFilters(dynamicFilters)), ct);
         return File(result.Content, result.ContentType, result.FileName);
     }
 

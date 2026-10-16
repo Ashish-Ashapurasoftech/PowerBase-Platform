@@ -59,7 +59,7 @@ public class PipelineStepIdempotencyRepository : TenantRepositoryBase, IPipeline
         {
             foreach (var chunk in executionPathHashes.Chunk(ManyLookupChunk))
             {
-                var parameters = new DynamicParameters();
+                var parameters = new BulkParameters();
                 parameters.Add("messageId", messageId);
                 parameters.Add("stepPublicId", stepPublicId);
                 var names = new string[chunk.Length];
@@ -97,7 +97,7 @@ public class PipelineStepIdempotencyRepository : TenantRepositoryBase, IPipeline
         {
             foreach (var chunk in logs.Chunk(ManyInsertChunk))
             {
-                var parameters = new DynamicParameters();
+                var parameters = new BulkParameters();
                 var tuples = new string[chunk.Length];
                 for (var i = 0; i < chunk.Length; i++)
                 {

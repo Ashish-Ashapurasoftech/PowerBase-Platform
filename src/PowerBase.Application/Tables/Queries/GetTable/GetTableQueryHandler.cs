@@ -7,8 +7,9 @@ namespace PowerBase.Application.Tables.Queries.GetTable;
 
 /// <param name="SummarySourceSettings">Summary field Id → the current Settings JSON of the child
 /// field it summarizes, for Min/Max summaries only (the one kind whose value IS a value of that
-/// field, e.g. the latest Due Date). Lets the client render it in the source field's own display
-/// format (month name, show time, …) — the summary's own Settings carry no display settings.</param>
+/// field, e.g. the latest Due Date) — and, for a Date/DateTime Lookup, the parent field it shows.
+/// Lets the client render it in the source field's own display format (month name, show time, …) —
+/// the summary's / lookup's own Settings carry no display settings.</param>
 public record GetTableResult(
     AppTable Table,
     IReadOnlyList<AppField> Fields,
@@ -58,6 +59,25 @@ public class GetTableQueryHandler
                 childFieldsByTable[childId] = childFields;
             }
             if (childFields.FirstOrDefault(f => f.Fid == targetFid) is { } source)
+                result[field.Id] = source.Settings;
+        }
+
+        // A Date/DateTime Lookup shows the parent field's own value, so it gets that field's display
+        // settings the same way (the lookup's own Settings carry none).
+        foreach (var field in fields.Where(f => f.TypeCode == nameof(Domain.Enums.FieldTypeCode.Lookup)))
+        {
+            var s = FormulaTypeMap.ParseLookupSettings(field.Settings);
+            if (s is not { SourceTableId: long sourceTableId, SourceFid: int sourceFid }
+                || s.SourceTypeCode is not ("Date" or "DateTime")
+                || !string.IsNullOrWhiteSpace(s.SourceSubField))
+                continue;
+
+            if (!childFieldsByTable.TryGetValue(sourceTableId, out var sourceFields))
+            {
+                sourceFields = await _fieldRepo.ListByTableAsync(sourceTableId, ct);
+                childFieldsByTable[sourceTableId] = sourceFields;
+            }
+            if (sourceFields.FirstOrDefault(f => f.Fid == sourceFid) is { } source)
                 result[field.Id] = source.Settings;
         }
         return result;

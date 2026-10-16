@@ -234,7 +234,8 @@ public class RelationshipsController : ControllerBase
         return Ok(new ApiResponse<int>(added));
     }
 
-    /// <summary>Delete a relationship and its reference/lookup/summary fields.</summary>
+    /// <summary>Delete a relationship and its lookup/summary fields. The reference field is kept as a real field of the
+    /// parent key's type (or its original type, when it was converted from an existing field).</summary>
     [HttpDelete("apps/{appId:guid}/relationships/{id:guid}")]
     [RequireAppPermission(PermissionCodes.FieldsDelete, AppAccessResolver.ByAppId)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
