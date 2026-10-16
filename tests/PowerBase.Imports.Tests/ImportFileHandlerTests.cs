@@ -456,12 +456,17 @@ public class ImportFileDefinitionTests
     public async Task An_unknown_upload_is_not_found()
         => await ((Func<Task>)(() => new Start().Run(Guid.NewGuid()))).Should().ThrowAsync<NotFoundException>();
 
-    [Fact]
-    public async Task A_file_of_the_wrong_type_is_refused_with_both_types_named()
+    [Theory]
+    [InlineData("xlsx")]
+    [InlineData("csv")]
+    public async Task A_file_may_be_Excel_or_CSV_whichever_the_import_was_set_up_with_and_is_read_as_what_it_is(string uploaded)
     {
-        var s = new Start(uploadFormat: "xlsx");
+        var s = new Start(uploadFormat: uploaded);
 
-        await ((Func<Task>)(() => s.Run(s.Upload.PublicId))).Should().ThrowAsync<ValidationException>().WithMessage("*CSV*Excel*");
+        await s.Run(s.Upload.PublicId);
+
+        await s.Runs.Received(1).CreateAsync(Arg.Is<ImportRun>(r =>
+            ImportJson.Deserialize<ImportRunSnapshot>(r.DefinitionSnapshotJson)!.Config.File!.Format == uploaded), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -475,7 +480,21 @@ public class ImportFileDefinitionTests
     }
 
     [Fact]
-    public async Task A_file_missing_a_column_the_import_needs_is_refused_before_anything_is_queued()
+    public async Task A_file_with_fewer_columns_than_the_import_uses_is_refused_before_anything_is_queued()
+    {
+        var s = new Start();
+        s.Access.OpenSourceAsync(Arg.Any<ImportRunSnapshot>(), false, Arg.Any<CancellationToken>()).Returns(ci =>
+        {
+            var options = ci.Arg<ImportRunSnapshot>().Config.File!;
+            return new ImportFileSource(ImportFileColumns.FromHeader(["Name"], 1), "x.csv", options.ToLayout(), "/files/x", 0, 0, options);
+        });
+
+        await ((Func<Task>)(() => s.Run(s.Upload.PublicId))).Should().ThrowAsync<ValidationException>().WithMessage("*'Qty'*");
+        await s.Runs.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
+    }
+
+    [Fact]
+    public async Task A_file_whose_headings_differ_is_read_by_the_columns_place_when_it_has_as_many_columns()
     {
         var s = new Start();
         s.Access.OpenSourceAsync(Arg.Any<ImportRunSnapshot>(), false, Arg.Any<CancellationToken>()).Returns(ci =>
@@ -484,8 +503,20 @@ public class ImportFileDefinitionTests
             return new ImportFileSource(ImportFileColumns.FromHeader(["Name", "Note"], 2), "x.csv", options.ToLayout(), "/files/x", 0, 0, options);
         });
 
-        await ((Func<Task>)(() => s.Run(s.Upload.PublicId))).Should().ThrowAsync<ValidationException>().WithMessage("*'Qty'*");
-        await s.Runs.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
+        await s.Run(s.Upload.PublicId);
+
+        await s.Runs.Received(1).CreateAsync(Arg.Any<ImportRun>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Several_runs_of_a_file_import_may_go_together_each_with_its_own_file()
+    {
+        var s = new Start();
+        s.Runs.HasActiveRunAsync(1, Arg.Any<CancellationToken>()).Returns(true);
+
+        await s.Run(s.Upload.PublicId);
+
+        await s.Runs.Received(1).CreateAsync(Arg.Any<ImportRun>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

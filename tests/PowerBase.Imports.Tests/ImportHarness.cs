@@ -140,6 +140,10 @@ public sealed class HarnessOptions
     public int? CancelAtAdvance { get; set; }
     /// <summary>Simulates a run cancelled while it waited in the queue: it cannot be marked running.</summary>
     public bool CancelledWhileQueued { get; set; }
+    /// <summary>The users a fixed User value is looked up in (null: a stand-in that knows none).</summary>
+    public PowerBase.Application.Common.Interfaces.IUserRepository? Users { get; set; }
+    /// <summary>The app the destination belongs to, for its date format (null: none is known).</summary>
+    public PowerBase.Application.Common.Interfaces.IAppRepository? Apps { get; set; }
 }
 
 /// <summary>Everything an import run needs, wired to fakes, so a test only describes the data and the definition.</summary>
@@ -315,7 +319,7 @@ public sealed class ImportHarness
         var engine = new FormulaEngine();
         var relationshipRepo = Substitute.For<IRelationshipRepository>();
         relationshipRepo.ListByChildTableAsync(Arg.Any<long>(), Arg.Any<CancellationToken>()).Returns(options.Relationships);
-        var planBuilder = new ImportPlanBuilder(tables, fields, Substitute.For<IAppAccessService>(), enforcer, Substitute.For<IUserRepository>(), Substitute.For<IQueryContext>(), records, engine, store, relationshipRepo);
+        var planBuilder = new ImportPlanBuilder(tables, fields, Substitute.For<IAppAccessService>(), enforcer, options.Users ?? Substitute.For<IUserRepository>(), Substitute.For<IQueryContext>(), records, engine, store, relationshipRepo, options.Apps);
         var processor = new ImportRunProcessor(
             runs,
             planBuilder,

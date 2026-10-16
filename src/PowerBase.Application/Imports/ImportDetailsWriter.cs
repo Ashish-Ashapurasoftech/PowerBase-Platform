@@ -18,6 +18,13 @@ public static class ImportValueEquality
         if (stored is bool a && incoming is bool b) return a == b;
         if (stored is DateTime d1 && incoming is DateTime d2) return d1 == d2;
         if (stored is string s1 && incoming is string s2) return string.Equals(s1, s2, StringComparison.Ordinal);
+        // An encrypted field is stored as text whatever its type (a number as "6.2", a date in ISO form, a checkbox as "True"): read it back as the incoming kind.
+        if (stored is string text)
+        {
+            if (IsNumber(incoming)) return decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var n) && n == ToDecimal(incoming!);
+            if (incoming is bool flag) return bool.TryParse(text, out var parsed) && parsed == flag;
+            if (incoming is DateTime when) return DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var d) && d == when;
+        }
         return false;
     }
 

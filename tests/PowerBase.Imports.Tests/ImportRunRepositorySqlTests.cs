@@ -82,6 +82,17 @@ public sealed class RunSqlFixture : IAsyncLifetime
         return id;
     }
 
+    /// <summary>A run with a start time and a copy of the definition, for the lookup of the last run that finished.</summary>
+    public async Task<long> AddStartedRunAsync(string status, DateTime? startedOn, string snapshot)
+    {
+        await using var c = new SqlConnection(SqlFixture.ConnectionString);
+        var id = await c.ExecuteScalarAsync<long>(
+            "INSERT INTO meta.ImportRun (ImportDefinitionId, TriggeredByUserId, Status, StartedOn, DefinitionSnapshotJson) OUTPUT INSERTED.Id VALUES (@d, 5, @s, @on, @j)",
+            new { d = DefinitionId, s = status, on = startedOn, j = snapshot });
+        _runIds.Add(id);
+        return id;
+    }
+
     public async Task<dynamic> RowAsync(long id)
     {
         await using var c = new SqlConnection(SqlFixture.ConnectionString);
@@ -148,6 +159,25 @@ public class ImportRunRepositorySqlTests : IClassFixture<RunSqlFixture>
 {
     private readonly RunSqlFixture _db;
     public ImportRunRepositorySqlTests(RunSqlFixture db) => _db = db;
+
+    [SqlFact]
+    public async Task The_last_run_that_finished_is_the_latest_success_or_partial_that_started_and_failed_or_unfinished_runs_do_not_count()
+    {
+        var first = new DateTime(2026, 10, 14, 1, 0, 0, DateTimeKind.Utc);
+        await _db.AddStartedRunAsync("success", first, "{\"which\":\"first\"}");
+        await _db.AddStartedRunAsync("partial", first.AddHours(1), "{\"which\":\"partial\"}");
+        await _db.AddStartedRunAsync("failed", first.AddHours(2), "{\"which\":\"failed\"}");
+        await _db.AddStartedRunAsync("cancelled", first.AddHours(3), "{\"which\":\"cancelled\"}");
+        await _db.AddStartedRunAsync("queued", null, "{\"which\":\"queued\"}");
+        await _db.AddStartedRunAsync("running", first.AddHours(4), "{\"which\":\"running\"}");
+
+        var last = await _db.Runs.GetLastFinishedRunAsync(_db.DefinitionId);
+
+        last.Should().NotBeNull();
+        last!.Value.StartedOn.Should().Be(first.AddHours(1));
+        last.Value.SnapshotJson.Should().Contain("partial");
+        (await _db.Runs.GetLastFinishedRunAsync(long.MaxValue)).Should().BeNull("an import that never ran");
+    }
 
     [SqlFact]
     public async Task Asking_a_running_run_to_stop_sets_a_flag_that_the_next_progress_update_reports()

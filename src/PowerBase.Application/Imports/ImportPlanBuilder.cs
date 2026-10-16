@@ -1,6 +1,7 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Imports.Files;
+using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Queries.RunReport;
 using PowerBase.Application.Relationships;
@@ -8,6 +9,7 @@ using PowerBase.Application.Reports.Validation;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
+using PowerBase.Domain.ValueObjects;
 using PowerBase.Formula;
 using PowerBase.Formula.Diagnostics;
 using PowerBase.Formula.Evaluation;
@@ -32,8 +34,9 @@ public sealed class ResolvedMapping
 }
 
 /// <summary>Where a Reference field's values point: the parent table, the field of it that people know a record by (null when that is the Record ID#,
-/// or it has none; an encrypted field is read decrypted and searched in memory), and the hidden "(original)" text field that keeps a value that found no parent record.</summary>
-public sealed record ImportReferenceTarget(AppTable Parent, AppField? DisplayKey, int? OriginalFid, IReadOnlyList<AppField> ParentFields);
+/// or it has none; an encrypted field is read decrypted and searched in memory), whether a value is looked up by that key only (<c>ByKey</c>: the relationship or the table has a key
+/// field, so a value is never taken for a Record ID#), and the hidden "(original)" text field that keeps a value that found no parent record.</summary>
+public sealed record ImportReferenceTarget(AppTable Parent, AppField? DisplayKey, int? OriginalFid, IReadOnlyList<AppField> ParentFields, bool ByKey = false);
 
 /// <summary>Everything the engine needs to run a definition, resolved and permission-checked once.</summary>
 public sealed class ImportPlan
@@ -68,6 +71,8 @@ public sealed class ImportPlan
     /// <summary>This table's own filter, for an import that fills several tables: checked on each row read, in memory, to decide whether this
     /// table gets it. Null when the table takes every row that was read.</summary>
     public ImportRowFilter? TableFilter { get; init; }
+    /// <summary>The app's date format ("DD-MM-YYYY"...): where a date in a file could be read two ways, it decides which of day and month comes first.</summary>
+    public string? DateFormat { get; init; }
     /// <summary>Which of the import's tables this plan fills: 0 is the import's own table. A table read sheet by sheet has a plan per sheet, all with
     /// the same index, and the run keeps one set of counts and one details file for the table.</summary>
     public int TableIndex { get; set; }
@@ -96,7 +101,8 @@ public sealed class ImportPlanBuilder(
     IRecordRepository records,
     FormulaEngine formulaEngine,
     IImportDataStore? store = null,
-    IRelationshipRepository? relationships = null)
+    IRelationshipRepository? relationships = null,
+    IAppRepository? apps = null)
 {
     public const int MaxMappings = 250;
     /// <summary>Tables an import may fill besides its own.</summary>
@@ -117,6 +123,9 @@ public sealed class ImportPlanBuilder(
         if (cfg.Name.Length > 200) throw Invalid("The import name is too long.");
         if (cfg.ImportType is not (ImportTypes.Copy or ImportTypes.Merge)) throw Invalid("The import type must be Copy or Merge.");
         var isMerge = cfg.ImportType == ImportTypes.Merge;
+        // Reading only what changed means the rest is left as it is: that is a merge's meaning; a copy would add the changed records again.
+        if (cfg.OnlyChangedSinceLastRun && (file is not null || cfg.SourceKind == ImportSourceKinds.File || !isMerge))
+            throw Invalid("Only records changed since the last run can only be used by a merge from a table.");
         if (isMerge && cfg.MergeKeyFid is null) throw Invalid("Choose the unique field to match existing records on.");
 
         var active = cfg.Mappings.Where(m => !m.DoNotImport).ToList();
@@ -148,6 +157,9 @@ public sealed class ImportPlanBuilder(
             && (destAccess.ViewFilter is not null || destAccess.RestrictToCreatedBy.HasValue || destAccess.ModifyScope != RecordScopes.AllRecords))
             throw Invalid("Merge is not available into a table where your role limits which records you can edit.");
 
+        // A table that is both the source and the destination changes its own records every run: they would all look changed next time, and nothing could be skipped.
+        if (cfg.OnlyChangedSinceLastRun && file is null && source.Id == destination.Id)
+            throw Invalid("Only records changed since the last run cannot be used when the source is the table being filled: every run changes its own records. Copy from another table, or switch it off.");
         var mergeKey = isMerge ? ResolveMergeKey(cfg.MergeKeyFid!.Value, destFields) : null;
         var visibleSource = sourceAccess is null || sourceAccess.Unrestricted ? sourceFields : sourceAccess.VisibleFields;
         var mappings = new List<ResolvedMapping>(active.Count);
@@ -161,12 +173,17 @@ public sealed class ImportPlanBuilder(
             var dest = destFields.FirstOrDefault(f => f.Fid == m.DestFid && !f.IsDeleted)
                 ?? throw Invalid($"Destination field {m.DestFid} no longer exists.");
             // The Record ID# is never written; it can only be mapped as the key an import matches existing records on.
-            if (!ImportTypeCompatibility.IsWritable(dest) || (ImportTypeCompatibility.IsRecordId(dest) && dest.Fid != mergeKey?.Fid))
+            if (!ImportTypeCompatibility.CanReceive(dest) || (ImportTypeCompatibility.IsRecordId(dest) && dest.Fid != mergeKey?.Fid))
                 throw Invalid($"'{ImportTypeCompatibility.DisplayName(dest)}' cannot be imported into.");
             // The Record ID# is only matched on, never written, so it needs no edit right.
             if (!destAccess.Unrestricted && !ImportTypeCompatibility.IsRecordId(dest) && !destAccess.EditableFieldIds.Contains(m.DestFid))
                 throw new UnauthorizedActionException($"write to '{ImportTypeCompatibility.DisplayName(dest)}'");
 
+            if (ImportTypeCompatibility.IsUserDestination(dest))
+            {
+                mappings.Add(await ResolveFixedUserAsync(m, dest, cfg.VirtualColumns, ct));
+                continue;
+            }
             mappings.Add(m.Source switch
             {
                 ImportMappingSource.Dynamic => ResolveDynamic(m, dest, sourceWithVirtuals, anySourceType: file is not null || (m.SourceFid is { } sf && ImportVirtual.IsVirtualFid(sf))),
@@ -188,6 +205,7 @@ public sealed class ImportPlanBuilder(
         var combined = new FilterGroup();
         if (cfg.Conditions is { Nodes.Count: > 0 }) combined.Nodes.Add(new() { Group = cfg.Conditions });
         if (sourceAccess?.ViewFilter is not null) combined.Nodes.Add(new() { Group = sourceAccess.ViewFilter });
+        if (cfg.ChangedSinceUtc is { } since && file is null) combined.Nodes.Add(new() { Group = CreatedOrChangedAfter(since) });
         var resolved = combined.Nodes.Count == 0 ? null : await ResolveAsync(combined, sourceFields, ct);
         // A file's rows are never filtered by SQL: every condition on a file's columns is checked on each row as it is read.
         var rowFids = sourceFields.Where(f => f.Fid.HasValue && (file is not null || PhysicalNaming.IsComputedTypeCode(f.TypeCode) || f.IsEncrypted))
@@ -232,7 +250,8 @@ public sealed class ImportPlanBuilder(
             Mappings = mappings, ReferenceTargets = referenceTargets, ImportType = cfg.ImportType, MergeKey = mergeKey, Rules = rules, ConstraintPolicy = cfg.ConstraintPolicy,
             SourceFilter = sqlFilter, RowFilter = rowFilterTree is null ? null : new ImportRowFilter(rowFilterTree, sourceFields),
             SourceOwnerRestriction = sourceAccess?.RestrictToCreatedBy, File = file, ReadFields = readFields, NeedsProjection = needsProjection,
-            FormulaOptions = FormulaOptionsForRun(source, runClock), Virtuals = virtuals, TableFilter = tableFilter
+            FormulaOptions = FormulaOptionsForRun(source, runClock), Virtuals = virtuals, TableFilter = tableFilter,
+            DateFormat = await DateFormatAsync(destination.AppId, ct)
         };
     }
 
@@ -429,7 +448,7 @@ public sealed class ImportPlanBuilder(
             SourceFilter = first.SourceFilter, RowFilter = first.RowFilter, MergeKey = first.MergeKey, Rules = first.Rules,
             ConstraintPolicy = first.ConstraintPolicy, SourceOwnerRestriction = first.SourceOwnerRestriction,
             ReadFields = plans.SelectMany(p => p.ReadFields).GroupBy(f => f.Id).Select(g => g.First()).ToList(),
-            NeedsProjection = plans.Any(p => p.NeedsProjection), FormulaOptions = first.FormulaOptions, Virtuals = virtualsPerPlan ? [] : first.Virtuals,
+            NeedsProjection = plans.Any(p => p.NeedsProjection), FormulaOptions = first.FormulaOptions, DateFormat = first.DateFormat, Virtuals = virtualsPerPlan ? [] : first.Virtuals,
             TableIndex = first.TableIndex, SheetName = first.SheetName
         };
     }
@@ -441,6 +460,31 @@ public sealed class ImportPlanBuilder(
         var problem = anySourceType ? null : ImportTypeCompatibility.CheckMapping(src, dest);
         if (problem is not null) throw Invalid(problem);
         return new ResolvedMapping { Destination = dest, Kind = ImportMappingSource.Dynamic, Source = src, SourceColumn = PhysicalNaming.GetPhysicalColumnName(src) };
+    }
+
+    /// <summary>The date format the destination's app is set to; null when it cannot be read (dates are then read month first).</summary>
+    private async Task<string?> DateFormatAsync(long appId, CancellationToken ct)
+    {
+        if (apps is null) return null;
+        try { return AppFormattingSettings.GetDateFormatString((await apps.GetByIdAsync(appId, ct)).Formatting); }
+        catch (NotFoundException) { return null; }
+    }
+
+    /// <summary>A User field is filled with one chosen user for every row: the fixed value of a virtual column (or a fixed mapping) holding the user's public id.
+    /// The user is looked up once here and the row gets the id the column stores, as every record write does.</summary>
+    private async Task<ResolvedMapping> ResolveFixedUserAsync(ImportFieldMapping m, AppField dest, IReadOnlyList<ImportVirtualColumn> virtuals, CancellationToken ct)
+    {
+        var name = ImportTypeCompatibility.DisplayName(dest);
+        string? text = null;
+        if (m.Source == ImportMappingSource.Static) text = m.StaticValue;
+        else if (m.Source == ImportMappingSource.Dynamic && m.SourceFid is { } sourceFid && ImportVirtual.IsVirtualFid(sourceFid))
+            text = virtuals.FirstOrDefault(v => v.Fid == sourceFid && v.Kind == ImportVirtual.Fixed)?.StaticValue;
+        if (text is null) throw Invalid($"'{name}' holds a user, so it can only be given a fixed value: choose the user.");
+        if (dest.IsUnique) throw Invalid($"'{name}' must be unique, so it cannot be given one fixed user: every row would get the same value.");
+        if (!Guid.TryParse(text.Trim(), out var publicId)) throw Invalid($"Choose the user for '{name}'.");
+        var id = await UserFieldValueResolver.TryResolveLongIdAsync(users, publicId, ct)
+            ?? throw Invalid($"The user chosen for '{name}' no longer exists.");
+        return new ResolvedMapping { Destination = dest, Kind = ImportMappingSource.Static, Constant = id, StaticText = text.Trim() };
     }
 
     /// <summary>A fixed value goes to every row, so it is parsed once here. It cannot be the match key (every row would
@@ -528,9 +572,10 @@ public sealed class ImportPlanBuilder(
             var relationship = settings.RelationshipId is long relId && relationships is not null ? await relationships.GetByIdAsync(relId, ct) : null;
             var parentFields = await fields.ListByTableAsync(parent.Id, ct);
             // A table with no key set is still shown by a field (the one its reference picker labels records with): that is what a person has in the file.
-            var displayKey = KeyFieldResolver.ResolveDisplayKey(relationship, parent, parentFields) ?? PickerLabelField(parent, parentFields);
+            var key = KeyFieldResolver.ResolveDisplayKey(relationship, parent, parentFields);
+            var displayKey = key ?? PickerLabelField(parent, parentFields);
             var original = settings.OriginalFid is int o && destFields.Any(f => f.Fid == o && !f.IsDeleted) ? o : (int?)null;
-            targets[m.Destination.Fid!.Value] = new ImportReferenceTarget(parent, displayKey, original, parentFields);
+            targets[m.Destination.Fid!.Value] = new ImportReferenceTarget(parent, displayKey, original, parentFields, ByKey: key is not null);
         }
         return targets;
     }
@@ -543,6 +588,22 @@ public sealed class ImportPlanBuilder(
             && !PhysicalNaming.IsRangeTypeCode(f.TypeCode) && f.TypeCode is "Text" or "Email" or "Phone" or "Url" or "Number" or "Currency" or "Percent" or "Rating" or "Date" or "DateTime";
         AppField? Pick(long? id) => id is long x ? parentFields.FirstOrDefault(f => f.Id == x && Storable(f)) : null;
         return Pick(parent.DefaultRecordPickerField1Id) ?? Pick(parent.DisplayFieldId) ?? parentFields.FirstOrDefault(Storable);
+    }
+
+    /// <summary>Records created or changed after the moment: a record that was never changed has no change time, so its creation counts. Both are system fields every
+    /// table has (Date Created 1, Date Modified 2), compared as exact times in UTC.</summary>
+    private static FilterGroup CreatedOrChangedAfter(DateTime since)
+    {
+        var value = since.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        return new FilterGroup
+        {
+            Logic = "or",
+            Nodes =
+            [
+                new() { Condition = new FilterCondition { FieldId = 2, Operator = "gt", Value = value } },
+                new() { Condition = new FilterCondition { FieldId = 1, Operator = "gt", Value = value } }
+            ]
+        };
     }
 
     /// <summary>The merge key must be a unique field (or the Record ID#) so a value identifies exactly one record.</summary>
