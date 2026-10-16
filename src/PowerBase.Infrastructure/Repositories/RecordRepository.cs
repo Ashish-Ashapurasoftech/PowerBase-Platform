@@ -871,6 +871,89 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
     }
 
+    /// <summary>Rows read or linked per statement when re-linking unmatched references: an UPDATE of more than 5,000 rows
+    /// would have SQL Server escalate its row locks to a lock on the whole child table.</summary>
+    private const int RelinkBatchSize = 2000;
+
+    /// <summary>Seconds a re-link statement may run. These run in a background job, where a large child table without its reference
+    /// index (a column converted before conversions got one) must not time out at the default 30 seconds.</summary>
+    private const int RelinkCommandTimeoutSeconds = 300;
+
+    public async Task<IReadOnlyList<(long Id, string Text)>> ListUnlinkedOriginalsAsync(
+        AppTable child, AppField reference, AppField original, IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(child.Id);
+        var referenceColumn = PhysicalNaming.GetPhysicalColumnName(reference);
+        var originalColumn = PhysicalNaming.GetPhysicalColumnName(original);
+
+        await using var ownedConnection = transaction == null ? await ConnectionFactory.CreateAsync(ct) : null;
+        var connection = transaction?.Connection ?? ownedConnection
+            ?? throw new InvalidOperationException("The transaction has no active connection.");
+
+        // Two steps on purpose. The Ids alone are covered by the reference column's filtered index (IX_t_X_f_N ... WHERE IsDeleted = 0),
+        // so finding them is a seek however large the table is; asked for together with the text, SQL Server may choose to scan the
+        // whole table instead. The text is then read by primary key, for those rows only.
+        var ids = (await connection.QueryAsync<long>(new CommandDefinition($"""
+            SELECT Id FROM {physicalTable}
+            WHERE {referenceColumn} IS NULL AND IsDeleted = 0
+            """, transaction: transaction, commandTimeout: RelinkCommandTimeoutSeconds, cancellationToken: ct))).ToList();
+        if (ids.Count == 0) return [];
+
+        var textSql = $"""
+            SELECT t.Id, t.{originalColumn} AS Text
+            FROM {physicalTable} t
+            JOIN OPENJSON(@ids) WITH (id BIGINT '$') m ON t.Id = m.id
+            WHERE t.{originalColumn} IS NOT NULL
+            """;
+        var stored = new List<(long Id, string Text)>();
+        foreach (var batch in ids.Chunk(RelinkBatchSize))
+            stored.AddRange(await connection.QueryAsync<(long, string)>(new CommandDefinition(
+                textSql, new { ids = JsonSerializer.Serialize(batch) }, transaction, RelinkCommandTimeoutSeconds, cancellationToken: ct)));
+        if (stored.Count == 0) return [];
+
+        var enc = await GetEncryptionContextAsync(connection, child.AppId, transaction, ct);
+        var encrypted = enc.IsActive && (enc.IsAppEncrypted || original.IsEncrypted);
+        var result = new List<(long Id, string Text)>(stored.Count);
+        foreach (var (id, text) in stored)
+        {
+            var plain = encrypted ? await enc.DecryptValueAsync(text, ct) : text;
+            if (!string.IsNullOrWhiteSpace(plain)) result.Add((id, plain));
+        }
+        return result;
+    }
+
+    public async Task<IReadOnlyList<(Guid PublicId, long ParentId)>> LinkUnlinkedReferencesAsync(
+        AppTable child, AppField reference, AppField original, IReadOnlyDictionary<long, long> parentIdByRowId,
+        IDbTransaction? transaction = null, CancellationToken ct = default)
+    {
+        if (parentIdByRowId.Count == 0) return [];
+        var physicalTable = PhysicalNaming.FullTableName(child.Id);
+        var referenceColumn = PhysicalNaming.GetPhysicalColumnName(reference);
+        var originalColumn = PhysicalNaming.GetPhysicalColumnName(original);
+
+        await using var ownedConnection = transaction == null ? await ConnectionFactory.CreateAsync(ct) : null;
+        var connection = transaction?.Connection ?? ownedConnection
+            ?? throw new InvalidOperationException("The transaction has no active connection.");
+
+        // "IS NULL" again here: a row linked (by hand, or by another write) since it was read keeps its link.
+        var sql = $"""
+            UPDATE t
+            SET {referenceColumn} = m.parentId, {originalColumn} = NULL, ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
+            OUTPUT inserted.PublicId, inserted.{referenceColumn}
+            FROM {physicalTable} t
+            JOIN OPENJSON(@links) WITH (id BIGINT '$.id', parentId BIGINT '$.parentId') m ON t.Id = m.id
+            WHERE t.{referenceColumn} IS NULL AND t.IsDeleted = 0
+            """;
+        var linked = new List<(Guid PublicId, long ParentId)>();
+        foreach (var batch in parentIdByRowId.Chunk(RelinkBatchSize))
+        {
+            var links = JsonSerializer.Serialize(batch.Select(p => new { id = p.Key, parentId = p.Value }));
+            linked.AddRange(await connection.QueryAsync<(Guid, long)>(new CommandDefinition(
+                sql, new { links, modifiedBy = QueryContext.UserId }, transaction, RelinkCommandTimeoutSeconds, cancellationToken: ct)));
+        }
+        return linked;
+    }
+
     /// <summary>The SQL expression for a summary's target (or Combined Text sort): its f_{fid}
     /// column, a system field's own column (Id, CreatedOn, …), a Lookup's parent column (see
     /// <see cref="LookupColumnExpr"/>), or — for a composite Address field's sub-key — the

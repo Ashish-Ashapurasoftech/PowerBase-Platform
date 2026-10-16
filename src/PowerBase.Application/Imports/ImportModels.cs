@@ -181,6 +181,12 @@ public sealed class ImportDefinitionConfig
     /// <summary>The same as <see cref="ImportTargetConfig.Conditions"/>, for the import's own table (the one the fields above belong to).
     /// Only for an import that fills several tables: with one table, <see cref="Conditions"/> already says which rows go in.</summary>
     public FilterGroup? TableConditions { get; set; }
+    /// <summary>A merge from a table that only reads the source records that were created or changed since the last run that finished, so a scheduled
+    /// import does not read, compare and rewrite records nothing has touched. Saved with the definition.</summary>
+    public bool OnlyChangedSinceLastRun { get; set; }
+    /// <summary>For one run: the moment the records must have been created or changed after (set when the run is queued, from the last run that finished; null reads
+    /// every record). Part of the run's own copy of the definition, never saved with the definition itself.</summary>
+    public DateTime? ChangedSinceUtc { get; set; }
     /// <summary>The same as <see cref="ImportTargetConfig.SheetMappings"/>, for the import's own table.</summary>
     public List<ImportSheetMapping> SheetMappings { get => _sheetMappings; set => _sheetMappings = value ?? new(); }
     private List<ImportSheetMapping> _sheetMappings = new();
@@ -208,7 +214,7 @@ public sealed record ImportDefinitionListItem(
     Guid PublicId, string Name, string ImportType, Guid SourceTableId, string SourceTableName,
     int MappingCount, bool NeedsAttention, string? AttentionReason, string? LastRunStatus, DateTime? LastRunOn,
     IReadOnlyList<string> NotifyEmails, string? ScheduleSummary, DateTime? NextRunOn, string SourceKind = ImportSourceKinds.Table,
-    int TableCount = 1, Guid DestinationTableId = default, string DestinationTableName = "");
+    int TableCount = 1, Guid DestinationTableId = default, string DestinationTableName = "", bool? ScheduleEnabled = null);
 
 public sealed record ImportDefinitionDetail(
     Guid PublicId, string Name, Guid DestinationTableId, Guid SourceTableId, string ImportType, int? MergeKeyFid,
@@ -216,7 +222,7 @@ public sealed record ImportDefinitionDetail(
     string ConstraintPolicy, IReadOnlyList<string> NotifyEmails, bool NeedsAttention, string? AttentionReason,
     ImportSchedule? Schedule, DateTime? NextRunOn, string SourceKind = ImportSourceKinds.Table, ImportFileOptions? File = null,
     IReadOnlyList<ImportTargetConfig>? AdditionalTargets = null, IReadOnlyList<ImportVirtualColumn>? VirtualColumns = null, FilterGroup? TableConditions = null,
-    IReadOnlyList<ImportSheetMapping>? SheetMappings = null);
+    IReadOnlyList<ImportSheetMapping>? SheetMappings = null, bool OnlyChangedSinceLastRun = false);
 
 public sealed record ImportRunListItem(
     Guid PublicId, string TriggeredBy, string Status, byte Progress, long RowsRead, long Inserted, long Updated,

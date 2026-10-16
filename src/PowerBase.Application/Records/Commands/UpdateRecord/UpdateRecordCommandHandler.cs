@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Exceptions;
 
@@ -12,6 +13,7 @@ public class UpdateRecordCommandHandler
     private readonly IRecordWriteService _writeService;
     private readonly ITenantUnitOfWork _uow;
     private readonly IMessagePublisher _messagePublisher;
+    private readonly IReferenceRelinkService? _relink;
 
     public UpdateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -19,7 +21,8 @@ public class UpdateRecordCommandHandler
         IRolePermissionEnforcer enforcer,
         IRecordWriteService writeService,
         ITenantUnitOfWork uow,
-        IMessagePublisher messagePublisher)
+        IMessagePublisher messagePublisher,
+        IReferenceRelinkService? relink = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -27,6 +30,7 @@ public class UpdateRecordCommandHandler
         _writeService = writeService;
         _uow = uow;
         _messagePublisher = messagePublisher;
+        _relink = relink;
     }
 
     public async Task HandleAsync(UpdateRecordCommand command, CancellationToken ct = default)
@@ -67,6 +71,12 @@ public class UpdateRecordCommandHandler
         await _uow.BeginAsync(ct);
         try
         {
+            // The record's key before this write (only read when the write sets a key some child keeps unmatched text for),
+            // so that a change of it can queue the background job that links children whose text is its NEW key.
+            var keyBefore = _relink is null ? null
+                : await _relink.SnapshotAsync(table, fields, command.RecordPublicId, command.FieldValues.Keys, _uow.Transaction, ct);
+
+            IReadOnlyDictionary<long, object?> written;
             var writesFileField = fields.Any(field => field.Fid.HasValue &&
                 command.FieldValues.ContainsKey(field.Fid.Value) &&
                 string.Equals(field.TypeCode, "File", StringComparison.OrdinalIgnoreCase));
@@ -74,7 +84,7 @@ public class UpdateRecordCommandHandler
             {
                 if (_writeService is IFileRecordWriteService fileWriteService)
                 {
-                    await fileWriteService.ApplyFileWriteAsync(
+                    written = await fileWriteService.ApplyFileWriteAsync(
                         table, fields, command.RecordPublicId, command.FieldValues,
                         AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false,
                         msg => indexMessage = msg, existingRecord: null, bypassFileReservation: false,
@@ -82,7 +92,7 @@ public class UpdateRecordCommandHandler
                 }
                 else
                 {
-                    await _writeService.ApplyAsync(
+                    written = await _writeService.ApplyAsync(
                         table, fields, command.RecordPublicId, command.FieldValues,
                         AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false,
                         msg => indexMessage = msg, existingRecord: null, reportId: command.ReportId,
@@ -91,12 +101,17 @@ public class UpdateRecordCommandHandler
             }
             else
             {
-                await _writeService.ApplyAsync(
+                written = await _writeService.ApplyAsync(
                     table, fields, command.RecordPublicId, command.FieldValues,
                     AuditActions.Updated, $"Record modified in {table.Name}", ct, _uow.Transaction, false,
                     msg => indexMessage = msg, existingRecord: null, reportId: command.ReportId,
                     isGridEditSave: command.IsGridEditSave);
             }
+
+            // Queued now, run once this save commits (nothing is queued if it rolls back).
+            if (keyBefore is not null)
+                await _relink!.QueueIfKeyChangedAsync(table, [keyBefore], written, ct);
+
             await _uow.CommitAsync(ct);
         }
         catch
