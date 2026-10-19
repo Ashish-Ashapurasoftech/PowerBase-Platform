@@ -28,4 +28,10 @@ public record RunReportQuery(
     /// persisted — keyed by tree-path (see RunReportRequest.AskAnswers), substituted directly
     /// into the saved FilterTree in place before it's resolved, preserving its exact AND/OR
     /// structure.</summary>
-    IReadOnlyDictionary<string, string>? AskAnswers = null);
+    IReadOnlyDictionary<string, string>? AskAnswers = null,
+    /// <summary>Set by bulk jobs ("Delete these records"): return only the ids of the next page-size matching records
+    /// with an internal Id greater than this value, in Id order — filters and permissions applied exactly as for the grid,
+    /// but without sorting, counting, projections or totals. Ignored (normal page-1 result) when the report filters or
+    /// sorts on a computed/encrypted field, which can only be evaluated in memory; see
+    /// <see cref="PagedReportRunResult.IdsOnlyHandled"/>.</summary>
+    long? IdsOnlyAfterId = null);

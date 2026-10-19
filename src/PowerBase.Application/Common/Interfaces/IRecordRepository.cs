@@ -166,6 +166,24 @@ public interface IRecordRepository
         long? restrictToCreatedBy = null,
         CancellationToken ct = default);
 
+    /// <summary>Only the (Id, PublicId) of the next <paramref name="batchSize"/> live rows matching the filter with Id greater
+    /// than <paramref name="afterId"/>, in Id order. No sort, count, projection or decryption: what a bulk job needs to walk
+    /// every matching record cheaply, one index seek per batch.</summary>
+    Task<IReadOnlyList<(long Id, Guid PublicId)>> ListIdsAfterIdAsync(
+        AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default);
+
+    /// <summary>Several live records (decrypted) by public id in one query — the batch form of GetByPublicIdAsync.
+    /// Ids that no longer exist are simply absent from the result.</summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> GetManyByPublicIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default);
+
+    /// <summary>Which of these live records were created by <paramref name="ownerUserId"/> — one query for the whole batch.</summary>
+    Task<IReadOnlySet<Guid>> ListOwnedPublicIdsAsync(
+        AppTable table, IReadOnlyCollection<Guid> publicIds, long ownerUserId, CancellationToken ct = default);
+
     Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 
     /// <summary>

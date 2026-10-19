@@ -44,7 +44,8 @@ public class BulkDeleteRecordsCommandHandler
         _messagePublisher = messagePublisher;
     }
 
-    public async Task HandleAsync(BulkDeleteRecordsCommand command, CancellationToken ct = default)
+    /// <returns>How many records were deleted.</returns>
+    public async Task<int> HandleAsync(BulkDeleteRecordsCommand command, CancellationToken ct = default)
     {
         if (command.RecordPublicIds.Count == 0)
             throw new ValidationException(new Dictionary<string, string[]> { ["ids"] = ["At least one record ID is required."] });
@@ -63,8 +64,15 @@ public class BulkDeleteRecordsCommandHandler
                 throw new UnauthorizedActionException("You do not have permission to delete records from this table.");
             if (access.ViewScope == RecordScopes.OwnRecords || access.ModifyScope == RecordScopes.OwnRecords)
             {
-                foreach (var id in uniqueRecordPublicIds)
-                    await _enforcer.EnsureRecordOwnedAsync(table, id, ct);
+                // One query for the whole batch instead of one per record.
+                var owned = await _recordRepo.ListOwnedPublicIdsAsync(table, uniqueRecordPublicIds, _queryContext.UserId, ct);
+                if (owned.Count != uniqueRecordPublicIds.Count)
+                {
+                    if (!command.SkipRecordsNotOwned)
+                        throw new UnauthorizedActionException("You can only modify records you created.");
+                    uniqueRecordPublicIds = uniqueRecordPublicIds.Where(owned.Contains).ToList();
+                    if (uniqueRecordPublicIds.Count == 0) return 0;
+                }
             }
         }
 
@@ -79,13 +87,17 @@ public class BulkDeleteRecordsCommandHandler
         await _uow.BeginAsync(ct);
         try
         {
-            // Load record values for interceptor before they are deleted from DB
-            var oldRecordsValues = new List<PipelineRecordChange>();
-            foreach (var id in uniqueRecordPublicIds)
+            // Pipelines get the deleted records' values (the rows are gone by the time a flow runs), but loading
+            // them costs a read per record — so only do it when some pipeline actually listens to this table,
+            // and then read the whole batch in one query.
+            if (await _triggerInterceptor.HasActiveSubscriptionsAsync(table, ct))
             {
-                try
+                var oldRecordsValues = new List<PipelineRecordChange>();
+                var rows = await _recordRepo.GetManyByPublicIdsAsync(table, fields, uniqueRecordPublicIds, ct);
+                foreach (var valuesDict in rows)
                 {
-                    var valuesDict = await _recordRepo.GetByPublicIdAsync(table, fields, id, ct: ct);
+                    if (!valuesDict.TryGetValue("PublicId", out var rawId) || rawId is not Guid id) continue;
+
                     // Convert string keys to long field IDs
                     var beforeValues = new Dictionary<long, object?>();
                     foreach (var f in fields)
@@ -107,22 +119,18 @@ public class BulkDeleteRecordsCommandHandler
                         PipelineRecordEventType.Deleted
                     ));
                 }
-                catch (NotFoundException)
-                {
-                    // Skip if not found
-                }
-            }
 
-            // Intercept triggers
-            await _triggerInterceptor.InterceptBulkAsync(
-                table,
-                fields,
-                oldRecordsValues,
-                Guid.NewGuid(),
-                Guid.NewGuid(),
-                _queryContext.UserId,
-                ct
-            );
+                // Intercept triggers
+                await _triggerInterceptor.InterceptBulkAsync(
+                    table,
+                    fields,
+                    oldRecordsValues,
+                    Guid.NewGuid(),
+                    Guid.NewGuid(),
+                    _queryContext.UserId,
+                    ct
+                );
+            }
 
             var indexMessages = new List<PowerBase.Application.Common.Models.SearchIndexMessage>();
             await _recordRepo.BulkDeleteAsync(table, uniqueRecordPublicIds, _uow.Transaction, ct, msg => indexMessages.Add(msg));
@@ -147,6 +155,8 @@ public class BulkDeleteRecordsCommandHandler
             {
                 _ = _messagePublisher.PublishBatchAsync(indexMessages, default);
             }
+
+            return uniqueRecordPublicIds.Count;
         }
         catch
         {

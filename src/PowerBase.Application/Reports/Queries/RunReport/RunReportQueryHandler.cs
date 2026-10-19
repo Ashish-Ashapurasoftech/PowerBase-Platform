@@ -39,6 +39,10 @@ public class PagedReportRunResult
     /// record matching the report's filters, not just this page. Only columns that opted into a
     /// total/average row appear here; empty when the report hides totals.</summary>
     public IReadOnlyDictionary<string, ColumnTotal> Totals { get; init; } = new Dictionary<string, ColumnTotal>();
+    /// <summary>True when <see cref="RunReportQuery.IdsOnlyAfterId"/> was honoured: Items carry only record ids and
+    /// <see cref="LastRecordId"/> is the cursor for the next call. False means a normal page was returned.</summary>
+    public bool IdsOnlyHandled { get; init; }
+    public long LastRecordId { get; init; }
 }
 
 public class RunReportQueryHandler
@@ -92,7 +96,8 @@ public class RunReportQueryHandler
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
     {
         var page = Math.Max(1, query.Page);
-        var pageSize = Math.Clamp(query.PageSize, 1, 200);
+        // An ids-only run reads two columns, so it can take bigger batches than a grid page.
+        var pageSize = Math.Clamp(query.PageSize, 1, query.IdsOnlyAfterId.HasValue ? 1000 : 200);
 
         var report = await _reportRepo.GetVisibleReportAsync(query.ReportPublicId, ct)
             ?? throw new NotFoundException("Report", query.ReportPublicId);
@@ -241,7 +246,8 @@ public class RunReportQueryHandler
             return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
-            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, ct);
+            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, ct,
+            query.IdsOnlyAfterId);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -257,7 +263,8 @@ public class RunReportQueryHandler
         IReadOnlyList<long>? quickSearchFieldIds,
         bool quickSearchExact,
         bool isMaskedPreview,
-        CancellationToken ct)
+        CancellationToken ct,
+        long? idsOnlyAfterId = null)
     {
         // Intersect report columns with fields the role can see (drop None-access fields)
         var visibleFieldIds = access.VisibleFields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value).ToHashSet();
@@ -479,6 +486,25 @@ public class RunReportQueryHandler
 
         var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(filterTree, formulaFids);
         var hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
+
+        // Bulk jobs only need to know WHICH records match (same filters, role view filter and own-records scope as
+        // above). Skip the report's sort, the count, relational/formula projection, user-name lookups and totals,
+        // and walk the table by Id so each batch is one index seek. A report that filters on a computed/encrypted
+        // field can't be evaluated in SQL, so it falls through to the normal path below (IdsOnlyHandled = false).
+        if (idsOnlyAfterId.HasValue && !isMaskedPreview && !hasFormulaFilters)
+        {
+            var idRows = await _recordRepo.ListIdsAfterIdAsync(table, allFields, idsOnlyAfterId.Value, pageSize, filterTree,
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            return new PagedReportRunResult
+            {
+                Page = 1,
+                PageSize = pageSize,
+                Columns = columns,
+                Items = idRows.Select(r => new RecordResult { Id = r.PublicId }).ToList(),
+                IdsOnlyHandled = true,
+                LastRecordId = idRows.Count > 0 ? idRows[^1].Id : idsOnlyAfterId.Value,
+            };
+        }
 
         IReadOnlyList<RecordResult> items;
         int total;

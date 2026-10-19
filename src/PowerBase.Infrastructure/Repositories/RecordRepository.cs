@@ -219,6 +219,77 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
     }
 
+    private sealed class IdPair
+    {
+        public long Id { get; set; }
+        public Guid PublicId { get; set; }
+    }
+
+    public async Task<IReadOnlyList<(long Id, Guid PublicId)>> ListIdsAfterIdAsync(
+        AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default)
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("afterId", afterId);
+        parameters.Add("batchSize", batchSize);
+        var fieldLookup = BuildFieldLookup(fields);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+
+        // Only the two id columns, in primary-key order, continuing after the last id seen: an index seek that
+        // never re-reads (or re-sorts) rows earlier batches already handled, however many are soft-deleted by now.
+        var sql = $"""
+            SELECT TOP (@batchSize) Id, PublicId
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND Id > @afterId{filterWhere}
+            ORDER BY Id
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<IdPair>(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
+        return rows.Select(r => (r.Id, r.PublicId)).ToList();
+    }
+
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> GetManyByPublicIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default)
+    {
+        if (publicIds.Count == 0) return [];
+
+        var sql = $"""
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE PublicId IN @publicIds AND IsDeleted = 0
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var all = new List<IDictionary<string, object?>>();
+        // Under SQL Server's 2,100-parameter limit: each id becomes one parameter.
+        foreach (var part in publicIds.Chunk(1000))
+        {
+            var rows = await connection.QueryAsync(new CommandDefinition(sql, new { publicIds = part }, cancellationToken: ct));
+            all.AddRange(rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)));
+        }
+
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        await enc.DecryptRowsAsync(all, fields, ct);
+        return all.Cast<IReadOnlyDictionary<string, object?>>().ToList();
+    }
+
+    public async Task<IReadOnlySet<Guid>> ListOwnedPublicIdsAsync(
+        AppTable table, IReadOnlyCollection<Guid> publicIds, long ownerUserId, CancellationToken ct = default)
+    {
+        var owned = new HashSet<Guid>();
+        if (publicIds.Count == 0) return owned;
+
+        var sql = $"SELECT PublicId FROM {PhysicalNaming.FullTableName(table.Id)} WHERE PublicId IN @publicIds AND IsDeleted = 0 AND CreatedBy = @ownerUserId";
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        foreach (var part in publicIds.Chunk(1000))
+            foreach (var id in await connection.QueryAsync<Guid>(new CommandDefinition(sql, new { publicIds = part, ownerUserId }, cancellationToken: ct)))
+                owned.Add(id);
+        return owned;
+    }
+
     public async Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
     {
         var parameters = new DynamicParameters();

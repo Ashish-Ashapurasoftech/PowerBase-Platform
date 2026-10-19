@@ -62,12 +62,13 @@ public class RecordDeleteJobFilter
     public static RecordDeleteJobFilter FromJson(string json) =>
         JsonSerializer.Deserialize<RecordDeleteJobFilter>(json) ?? new RecordDeleteJobFilter();
 
-    /// <summary>The report run for one chunk. Deleted records leave the result set, so page 1 is always the next chunk.</summary>
-    public RunReportQuery ToQuery(Guid reportPublicId, int pageSize) => new(
+    /// <summary>The report run for one chunk. With <paramref name="idsOnlyAfterId"/> it returns just the next ids after that
+    /// internal Id; without it, page 1 (deleted records leave the result set, so page 1 is always the next chunk).</summary>
+    public RunReportQuery ToQuery(Guid reportPublicId, int pageSize, long? idsOnlyAfterId) => new(
         reportPublicId, 1, pageSize,
         DynamicFilters?.Select(f => (f.FieldId, f.Value, f.SubField)).ToList(),
         QuickSearch, SearchFieldIds, ExactMatch, FilterTree,
-        null, false, null, false, true, AskAnswers);
+        null, false, null, false, true, AskAnswers, idsOnlyAfterId);
 }
 
 public class RecordDeleteJobDynamicFilter

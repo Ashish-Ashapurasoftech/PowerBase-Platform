@@ -57,7 +57,10 @@ public sealed class RecordDeleteJobWorker(IServiceProvider services, ILogger<Rec
         var leaseLost = false;
         try
         {
-            Guid? previousFirstId = null;
+            // Keyset cursor: each chunk continues after the last internal Id the previous one saw. If the lease is lost
+            // and the job is re-claimed it starts again from 0 — records already deleted no longer match, so it's safe.
+            long afterRecordId = 0;
+            var slowPath = false;
             var cancelRequested = job.CancelRequested;
             while (!stopping.IsCancellationRequested)
             {
@@ -75,12 +78,14 @@ public sealed class RecordDeleteJobWorker(IServiceProvider services, ILogger<Rec
                 }
 
                 var chunk = await sp.GetRequiredService<RecordDeleteJobProcessor>()
-                    .DeleteNextChunkAsync(job, job.ExpectedCount - deleted, stopping);
-                if (chunk.Deleted == 0) break; // nothing matches any more → completed
+                    .DeleteNextChunkAsync(job, job.ExpectedCount - deleted, afterRecordId, slowPath, stopping);
+                if (chunk.Examined == 0) break; // nothing matches any more → completed
 
-                if (chunk.FirstId is not null && chunk.FirstId == previousFirstId)
-                    throw new InvalidOperationException("Deleting made no progress (the same records matched again). Stopped to avoid looping.");
-                previousFirstId = chunk.FirstId;
+                slowPath = !chunk.IdsOnly;
+                afterRecordId = chunk.LastRecordId;
+                // Slow path re-reads page 1 each time: if nothing in it could be deleted (e.g. records the user did not
+                // create), the same records would come back forever — what is left is not theirs to delete, so finish.
+                if (slowPath && chunk.Deleted == 0) break;
                 deleted += chunk.Deleted;
 
                 var progress = await sp.GetRequiredService<IRecordDeleteJobRepository>()
