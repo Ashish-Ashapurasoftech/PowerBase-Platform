@@ -546,7 +546,8 @@ public class ReportsController : ControllerBase
     /// "Delete these records": deletes every record the report matches for the given runtime filters
     /// (not just one page). Two-step — call with Confirm=false to get the live matching count (nothing
     /// is deleted), then with Confirm=true and ExpectedCount=that count. If the count changed in
-    /// between, nothing is deleted (409). Capped per call (see MaxRecords in the response).
+    /// between, no job is created (409). There is no record limit: Confirm=true only queues a background job
+    /// (JobId in the response); the worker deletes in chunks and the client polls delete-jobs/{jobId}.
     /// </summary>
     [HttpPost("reports/{publicId:guid}/records/delete-matching")]
     [RequireAppMember(AppAccessResolver.ByReportPublicId)]
@@ -577,12 +578,38 @@ public class ReportsController : ControllerBase
         return Ok(new ApiResponse<DeleteReportRecordsResponse>(new DeleteReportRecordsResponse
         {
             MatchingCount = result.MatchingCount,
-            MaxRecords = result.MaxRecords,
-            ExceedsLimit = result.ExceedsLimit,
-            Deleted = result.Deleted,
-            DeletedCount = result.DeletedCount,
+            JobId = result.JobId,
         }));
     }
+
+    /// <summary>Progress of a "Delete these records" background job.</summary>
+    [HttpGet("reports/{publicId:guid}/records/delete-jobs/{jobId:guid}")]
+    [RequireAppMember(AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(typeof(ApiResponse<DeleteReportJobResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetDeleteJob(Guid publicId, Guid jobId, CancellationToken ct = default)
+        => Ok(new ApiResponse<DeleteReportJobResponse>(ToJobResponse(await _deleteReportRecordsHandler.GetJobAsync(publicId, jobId, ct))));
+
+    /// <summary>Stops a delete job after its current chunk. Records already deleted stay deleted.</summary>
+    [HttpPost("reports/{publicId:guid}/records/delete-jobs/{jobId:guid}/cancel")]
+    [RequireAppMember(AppAccessResolver.ByReportPublicId)]
+    [ProducesResponseType(typeof(ApiResponse<DeleteReportJobResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> CancelDeleteJob(Guid publicId, Guid jobId, CancellationToken ct = default)
+        => Ok(new ApiResponse<DeleteReportJobResponse>(ToJobResponse(await _deleteReportRecordsHandler.CancelJobAsync(publicId, jobId, ct))));
+
+    private static DeleteReportJobResponse ToJobResponse(DeleteJobStatusResult r) => new()
+    {
+        JobId = r.JobId,
+        Status = r.Status,
+        Total = r.Total,
+        Deleted = r.Deleted,
+        Error = r.Error,
+        CreatedOn = r.CreatedOn,
+        StartedOn = r.StartedOn,
+        CompletedOn = r.CompletedOn,
+    };
 
     private static ReportRunResponse ToRunResponse(PagedReportRunResult result) => new()
     {

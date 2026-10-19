@@ -27,6 +27,7 @@ public class MassUpdateRecordsCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly IUserRepository _userRepo;
     private readonly IAppUserRepository _appUserRepo;
+    private readonly IReferenceRelinkService? _relink;
 
     public MassUpdateRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -44,7 +45,8 @@ public class MassUpdateRecordsCommandHandler
         IFormRuleRepository formRuleRepo,
         IFormRepository formRepo,
         IUserRepository userRepo,
-        IAppUserRepository appUserRepo)
+        IAppUserRepository appUserRepo,
+        IReferenceRelinkService? relink = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -62,6 +64,7 @@ public class MassUpdateRecordsCommandHandler
         _formRepo = formRepo;
         _userRepo = userRepo;
         _appUserRepo = appUserRepo;
+        _relink = relink;
     }
 
     public async Task<int> HandleAsync(MassUpdateRecordsCommand command, CancellationToken ct = default)
@@ -256,6 +259,14 @@ public class MassUpdateRecordsCommandHandler
         try
         {
             affected = await _recordRepo.MassUpdateAsync(table, fields, idMap.Values.ToList(), effectiveValues, ct, indexMessages.Add, _uow.Transaction);
+
+            // Children whose kept "(original)" text is the key one of these records was just given are linked to it by a background
+            // job, queued here to run once this save commits. The same key set on several records at once is ambiguous, so a job is
+            // queued only when a single record's key changed.
+            if (_relink is not null)
+                await _relink.QueueIfKeyChangedAsync(
+                    table, recordChanges.Select(c => new RelinkSnapshot(idMap[c.RecordPublicId], c.BeforeValues)).ToList(),
+                    effectiveValues, ct);
 
             // After the write (inside the same transaction, like a single-record update does): the events re-read each record to compute its
             // Formula / Lookup / Summary values, and those have to be computed from the UPDATED record, not the one before the change.

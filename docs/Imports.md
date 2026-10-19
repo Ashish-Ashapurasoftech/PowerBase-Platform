@@ -140,6 +140,10 @@ with different mappings, and one table can use sheet mode while another reads th
 
 **The filter of the whole import opens with its first condition ready** (feedback, 2026-10-15): the first field of the source, its first operator, and no value yet. A condition nothing has been typed in is left out when the import is saved (`pruneEmptyFilterNodes`), so it filters nothing until it is filled in; the person can remove the row. It is the same for a table and a file source.
 
+### The list of imports: source filter and schedule switch
+
+The Templates list has a **source filter** beside the search box (All sources / File / Table; it combines with the search), and a table import that has a schedule has an **on/off switch** next to Run, so a schedule can be paused or resumed without opening the import. The switch calls `PUT import-definitions/{id}/schedule/enabled` (`ImportScheduleController`, `SetImportScheduleEnabledHandler`), which flips only `ImportSchedule.Enabled` (the settings, anchor and mapping stay as saved) and works out the next run when switched on; switching on also re-binds the run identity to the person who did it (as saving does) and is refused for an import that needs attention. The list item carries `ScheduleEnabled` (null when there is no schedule). The import's own screen is unchanged and still edits the whole schedule.
+
 ### Import from a table's own menu (Phase I, no template)
 
 A table's records view has **Import** in its top-right ⋮ menu (shown only to a person who can **add** records to that table; **Merge** is offered only if they can also **edit**). It opens a dialog: choose **a file** (CSV or Excel, one sheet) or **another table**, map what goes where with the template screens' own mapping (matching by heading, type check, fixed values, formulas, virtual columns), choose Copy or Merge, the duplicate policy and who else to email, and run. Nothing is kept as a template; to repeat or schedule an import, create a template in Imports. Not offered here: schedules, several tables in one run, sheets read separately, filters, reading only what changed.
