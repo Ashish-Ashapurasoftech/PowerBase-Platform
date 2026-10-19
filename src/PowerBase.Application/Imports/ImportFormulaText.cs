@@ -14,7 +14,27 @@ public static class ImportFormulaText
     private static readonly Regex TimeOnly = new(@"^\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*([AaPp][Mm])?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private const string TimeFormat = "h:mm:ss tt";
 
-    /// <summary>The text for the formula: the date/time normalised, or <paramref name="value"/> unchanged when it is not wholly a date or time.</summary>
+    /// <summary>The text for a column the person said how its dates and times are written (the formats chosen on the mapping row that column goes to): read exactly in
+    /// those formats and shown the one way the formula always sees them. A cell that does not fit its own format is left as it is (its row is reported by the
+    /// mapping).</summary>
+    public static string Normalize(string value, string? appFormat, ImportColumnFormat chosen)
+    {
+        var text = value.Trim();
+        if (text.Length == 0) return value;
+        if (chosen.DestTypeCode == "Time")
+        {
+            if (chosen.TimeFormat is null || !ImportDateFormats.TryParseTime(text, chosen.TimeFormat, out var stored, out _)) return value;
+            return (DateTime.Today + TimeSpan.Parse(stored, CultureInfo.InvariantCulture)).ToString(TimeFormat, CultureInfo.InvariantCulture);
+        }
+        if (chosen.DateFormat is null) return value;
+        var withTime = chosen.DestTypeCode == "DateTime";
+        if (!ImportDateFormats.TryParseDate(text, chosen.DateFormat, chosen.TimeFormat, withTime, out var parsed, out _)) return value;
+        var date = parsed.ToString(DotNetFormat(appFormat), CultureInfo.InvariantCulture);
+        return !withTime || parsed.TimeOfDay == TimeSpan.Zero ? date : date + " " + parsed.ToString(TimeFormat, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>The text for the formula: the date/time normalised, or <paramref name="value"/> unchanged when it is not wholly a date or time.
+    /// For a column nothing said the format of: unambiguous forms are normalised, an ambiguous order follows the app's date format.</summary>
     public static string Normalize(string value, string? appFormat)
     {
         var text = value.Trim();
@@ -41,10 +61,22 @@ public static class ImportFormulaText
     }
 }
 
-/// <summary>The row a formula reads in an import of a file: the cells as <see cref="ImportFormulaText"/> shows them.</summary>
-public sealed class ImportFileFormulaContext(IReadOnlyDictionary<string, object?> row, IReadOnlyDictionary<long, string> fidToColumn, string? appFormat) : IRecordContext
+/// <summary>How the dates and times of a source column are written, as chosen on the mapping row it goes to, and the kind of field it goes to.</summary>
+public sealed record ImportColumnFormat(string DestTypeCode, string? DateFormat, string? TimeFormat);
+
+/// <summary>The row a formula reads in an import of a file: the cells as <see cref="ImportFormulaText"/> shows them. A column a mapping reads as a date or a time is
+/// read in the format chosen for it, so the formula sees exactly what the field gets; any other cell is normalised by its own form.</summary>
+public sealed class ImportFileFormulaContext(
+    IReadOnlyDictionary<string, object?> row, IReadOnlyDictionary<long, string> fidToColumn, string? appFormat,
+    IReadOnlyDictionary<int, ImportColumnFormat>? columnFormats = null) : IRecordContext
 {
     private readonly RowRecordContext _inner = new(row, fidToColumn);
 
-    public object? GetValue(long fid) => _inner.GetValue(fid) is string text ? ImportFormulaText.Normalize(text, appFormat) : _inner.GetValue(fid);
+    public object? GetValue(long fid)
+    {
+        if (_inner.GetValue(fid) is not string text) return _inner.GetValue(fid);
+        return columnFormats is not null && columnFormats.TryGetValue((int)fid, out var chosen)
+            ? ImportFormulaText.Normalize(text, appFormat, chosen)
+            : ImportFormulaText.Normalize(text, appFormat);
+    }
 }

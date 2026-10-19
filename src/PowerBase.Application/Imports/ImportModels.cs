@@ -92,6 +92,12 @@ public sealed class ImportFieldMapping
     public string? StaticValue { get; set; }
     public string? Formula { get; set; }
     public bool DoNotImport { get; set; }
+    /// <summary>For a column of text that goes to a Date or Date and Time field: how its dates are written (one of <see cref="ImportDateFormats.Date"/>), chosen by the person who set the import up.</summary>
+    public string? DateFormat { get; set; }
+    /// <summary>The same for a time (one of <see cref="ImportDateFormats.Time"/>), for a Time or Date and Time field.</summary>
+    public string? TimeFormat { get; set; }
+    /// <summary>For a Date and Time field: the time zone (an IANA id such as Asia/Calcutta) the times in the file are in. The value is stored in UTC, as a record saved from the screen is, so it shows as written when read in this zone; none means UTC.</summary>
+    public string? TimeZone { get; set; }
 }
 
 /// <summary>Data-quality rules for one mapped column, evaluated independently of every other column.</summary>
