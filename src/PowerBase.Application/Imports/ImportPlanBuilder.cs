@@ -31,6 +31,11 @@ public sealed class ResolvedMapping
     public string? StaticText { get; init; }
     /// <summary>Formula: compiled once for the run, evaluated against each row.</summary>
     public CompiledFormula? Formula { get; init; }
+    /// <summary>Dynamic, into a Date, Date and Time or Time field from text: the formats the dates and times of the column are written in.</summary>
+    public string? DateFormat { get; init; }
+    public string? TimeFormat { get; init; }
+    /// <summary>Into a Date and Time field from text: the time zone the times in the file are in (null: UTC).</summary>
+    public TimeZoneInfo? Zone { get; init; }
 }
 
 /// <summary>Where a Reference field's values point: the parent table, the field of it that people know a record by (null when that is the Record ID#,
@@ -73,6 +78,8 @@ public sealed class ImportPlan
     public ImportRowFilter? TableFilter { get; init; }
     /// <summary>The app's date format ("DD-MM-YYYY"...): where a date in a file could be read two ways, it decides which of day and month comes first.</summary>
     public string? DateFormat { get; init; }
+    /// <summary>For each source column a mapping reads as a date or a time: how it is written, so a formula that reads the column sees what the field gets.</summary>
+    public IReadOnlyDictionary<int, ImportColumnFormat> ColumnFormats { get; init; } = new Dictionary<int, ImportColumnFormat>();
     /// <summary>Which of the import's tables this plan fills: 0 is the import's own table. A table read sheet by sheet has a plan per sheet, all with
     /// the same index, and the run keeps one set of counts and one details file for the table.</summary>
     public int TableIndex { get; set; }
@@ -251,7 +258,7 @@ public sealed class ImportPlanBuilder(
             SourceFilter = sqlFilter, RowFilter = rowFilterTree is null ? null : new ImportRowFilter(rowFilterTree, sourceFields),
             SourceOwnerRestriction = sourceAccess?.RestrictToCreatedBy, File = file, ReadFields = readFields, NeedsProjection = needsProjection,
             FormulaOptions = FormulaOptionsForRun(source, runClock), Virtuals = virtuals, TableFilter = tableFilter,
-            DateFormat = await DateFormatAsync(destination.AppId, ct)
+            DateFormat = await DateFormatAsync(destination.AppId, ct), ColumnFormats = ColumnFormatsOf(mappings)
         };
     }
 
@@ -448,7 +455,7 @@ public sealed class ImportPlanBuilder(
             SourceFilter = first.SourceFilter, RowFilter = first.RowFilter, MergeKey = first.MergeKey, Rules = first.Rules,
             ConstraintPolicy = first.ConstraintPolicy, SourceOwnerRestriction = first.SourceOwnerRestriction,
             ReadFields = plans.SelectMany(p => p.ReadFields).GroupBy(f => f.Id).Select(g => g.First()).ToList(),
-            NeedsProjection = plans.Any(p => p.NeedsProjection), FormulaOptions = first.FormulaOptions, DateFormat = first.DateFormat, Virtuals = virtualsPerPlan ? [] : first.Virtuals,
+            NeedsProjection = plans.Any(p => p.NeedsProjection), FormulaOptions = first.FormulaOptions, DateFormat = first.DateFormat, ColumnFormats = plans.SelectMany(p => p.ColumnFormats).GroupBy(kv => kv.Key).ToDictionary(g => g.Key, g => g.First().Value), Virtuals = virtualsPerPlan ? [] : first.Virtuals,
             TableIndex = first.TableIndex, SheetName = first.SheetName
         };
     }
@@ -459,8 +466,23 @@ public sealed class ImportPlanBuilder(
         if (src is null) throw Invalid($"The source field for '{ImportTypeCompatibility.DisplayName(dest)}' is missing or not visible to you.");
         var problem = anySourceType ? null : ImportTypeCompatibility.CheckMapping(src, dest);
         if (problem is not null) throw Invalid(problem);
-        return new ResolvedMapping { Destination = dest, Kind = ImportMappingSource.Dynamic, Source = src, SourceColumn = PhysicalNaming.GetPhysicalColumnName(src) };
+        // A column of text that goes to a date or a time says how its dates and times are written: they are read that way, never guessed.
+        var formatProblem = ImportDateFormats.Problem(ImportTypeCompatibility.DisplayName(dest), dest, src, m.DateFormat, m.TimeFormat, m.TimeZone);
+        if (formatProblem is not null) throw Invalid(formatProblem);
+        var (needsDate, needsTime) = ImportDateFormats.Needs(dest);
+        return new ResolvedMapping
+        {
+            Destination = dest, Kind = ImportMappingSource.Dynamic, Source = src, SourceColumn = PhysicalNaming.GetPhysicalColumnName(src),
+            DateFormat = needsDate ? m.DateFormat : null, TimeFormat = needsTime ? m.TimeFormat : null,
+            Zone = dest.TypeCode == "DateTime" ? ImportDateFormats.ZoneOf(m.TimeZone) : null
+        };
     }
+
+    /// <summary>The columns the mappings read as dates or times, with the formats chosen for them (the first mapping of a column wins).</summary>
+    private static Dictionary<int, ImportColumnFormat> ColumnFormatsOf(IEnumerable<ResolvedMapping> mappings) =>
+        mappings.Where(m => m.Kind == ImportMappingSource.Dynamic && m.Source?.Fid is not null && (m.DateFormat is not null || m.TimeFormat is not null))
+            .GroupBy(m => m.Source!.Fid!.Value)
+            .ToDictionary(g => g.Key, g => new ImportColumnFormat(g.First().Destination.TypeCode, g.First().DateFormat, g.First().TimeFormat));
 
     /// <summary>The date format the destination's app is set to; null when it cannot be read (dates are then read month first).</summary>
     private async Task<string?> DateFormatAsync(long appId, CancellationToken ct)
