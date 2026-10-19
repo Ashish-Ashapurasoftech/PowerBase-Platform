@@ -21,6 +21,7 @@ public static class ImportRunSince
         same.Schedule = null;
         same.OnlyChangedSinceLastRun = false;
         same.ChangedSinceUtc = null;
+        same.RunTimeZone = null;
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ImportJson.Serialize(same))));
     }
 

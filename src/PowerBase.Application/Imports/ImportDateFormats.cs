@@ -54,12 +54,10 @@ public static class ImportDateFormats
         if (!needsDate && !needsTime) return null;
         if (dateFormat is not null && !IsDate(dateFormat)) return $"'{dateFormat}' is not a date format. Choose the date format for '{destinationName}'.";
         if (timeFormat is not null && !IsTime(timeFormat)) return $"'{timeFormat}' is not a time format. Choose the time format for '{destinationName}'.";
-        if (timeZone is not null && destination.TypeCode == "DateTime" && ZoneOf(timeZone) is null) return $"'{timeZone}' is not a time zone. Choose the time zone of the times going to '{destinationName}'.";
+        if (timeZone is not null && destination.TypeCode == "DateTime" && ZoneOf(timeZone) is null) return $"'{timeZone}' is not a time zone.";
         if (source is not null && !IsTextual(source)) return null;
         if (needsDate && dateFormat is null) return $"Choose the date format of the column that goes to '{destinationName}'.";
         if (needsTime && timeFormat is null) return $"Choose the time format of the column that goes to '{destinationName}'.";
-        // A time is stored in UTC and shown in the viewer's zone: without the zone the times in the file are, the stored moment is wrong by the zone's offset (and a late evening lands on the next day).
-        if (destination.TypeCode == "DateTime" && timeZone is null) return $"Choose the time zone of the times that go to '{destinationName}'.";
         return null;
     }
 
@@ -71,6 +69,8 @@ public static class ImportDateFormats
         catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException) { return null; }
     }
 
+    /// <summary>A date and time is stored in UTC, as one saved from the screen is, and shown in the viewer's zone. The clock reading in the file is in the zone of the
+    /// person who set the import up, so converting it from that zone makes it show as written; with no zone it is stored as written, as UTC.</summary>
     private static DateTime ToUtc(DateTime wall, TimeZoneInfo? zone)
     {
         wall = DateTime.SpecifyKind(wall, DateTimeKind.Unspecified);
@@ -88,7 +88,7 @@ public static class ImportDateFormats
 
         if (DateTime.TryParseExact(text, MachineDateTime, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var machine))
         {
-            // A machine form with no zone on it is the clock of the sheet: it is in the chosen zone. One with a Z or an offset is an exact moment.
+            // A machine form with no zone on it is the clock of the sheet; one with a Z or an offset is an exact moment.
             result = withTime ? (HasZone(text) ? DateTime.SpecifyKind(machine, DateTimeKind.Utc) : ToUtc(machine, zone)) : machine.Date;
             return true;
         }
@@ -96,7 +96,6 @@ public static class ImportDateFormats
         // A month written as a word cannot be mistaken for another order of day and month.
         if (MonthWord.IsMatch(text) && ImportDateParser.TryParse(text, dateFormat, withTime, out var named))
         {
-            // The clock of the sheet, like any other: in the chosen zone.
             result = withTime ? ToUtc(named, zone) : named;
             return true;
         }
@@ -196,8 +195,9 @@ public static class ImportDateFormats
         return true;
     }
 
-    private static readonly Regex Zone = new(@"([Zz]|[+-]\d{2}:?\d{2})$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
-    private static bool HasZone(string text) => Zone.IsMatch(text);
+
+    private static readonly Regex ZoneSuffix = new(@"([Zz]|[+-]\d{2}:?\d{2})$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static bool HasZone(string text) => ZoneSuffix.IsMatch(text);
 
     private static bool Reject(string text, string format, out string error)
     {
