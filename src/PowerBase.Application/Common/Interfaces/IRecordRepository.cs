@@ -73,9 +73,9 @@ public interface IRecordRepository
         AppTable table, string columnName, IReadOnlyCollection<object> values, CancellationToken ct = default);
 
     /// <summary>Aggregate a child field grouped by the reference column, restricted to the given parent key
-    /// values (row Ids for the default Record ID# key, or the parent's key-field raw values for a Set-Key
-    /// table — drives Summary projection and the parent-delete restrict check). Returns parentKeyValue →
-    /// aggregate value.</summary>
+    /// values — always the parent row Ids, which is what a reference column stores even when the parent
+    /// table has a Set Key (drives Summary projection and the parent-delete restrict check). Returns
+    /// parentKeyValue → aggregate value.</summary>
     /// <param name="targetSubField">When the target field is a composite Address field, the JSON
     /// sub-key (see <see cref="PowerBase.Domain.FieldSettings.AddressSubFields"/>) to aggregate
     /// instead of the whole value. Only meaningful with Count/Exists/DistinctCount.</param>
