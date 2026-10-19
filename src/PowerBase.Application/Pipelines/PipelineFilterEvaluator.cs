@@ -701,17 +701,26 @@ public static class PipelineFilterEvaluator
         return group.Rules.All(r => IsRuleCompletelyBlank(r));
     }
 
-    public static bool EvaluateRule(TriggerFilterRule rule, IReadOnlyDictionary<long, object?> valuesSource, IReadOnlyList<AppField> fields, ILogger? logger = null)
+    /// <param name="users">The people the record's User / User List fields hold, for rules on a person's detail
+    /// ("Record Owner → Email"); see <see cref="PipelineUserFieldFilter"/>. Without it only the Id detail is known.</param>
+    public static bool EvaluateRule(TriggerFilterRule rule, IReadOnlyDictionary<long, object?> valuesSource, IReadOnlyList<AppField> fields, ILogger? logger = null,
+        IReadOnlyDictionary<long, PipelineUserDetails>? users = null)
     {
         if (IsRuleCompletelyBlank(rule)) return true;
 
         if (rule.Type == "nested")
         {
             if (rule.Groups == null || !rule.Groups.Any()) return true;
-            return rule.Groups.Any(g => EvaluateGroup(g, valuesSource, fields, logger));
+            return rule.Groups.Any(g => EvaluateGroup(g, valuesSource, fields, logger, users));
         }
 
         if (string.IsNullOrEmpty(rule.Field)) return true;
+
+        if (PipelineUserFieldFilter.TryResolve(rule.Field, fields, out var userField, out var detail))
+        {
+            var ids = PipelineUserFieldFilter.ParseUserIds(ReadFieldValue(userField, valuesSource));
+            return PipelineUserFieldFilter.Matches(ids, users, detail, rule.Operator, rule.Value);
+        }
 
         var field = ResolveRuleField(fields, rule.Field);
 
@@ -752,7 +761,8 @@ public static class PipelineFilterEvaluator
         return matched;
     }
 
-    public static bool EvaluateGroup(TriggerFilterGroup group, IReadOnlyDictionary<long, object?> valuesSource, IReadOnlyList<AppField> fields, ILogger? logger = null)
+    public static bool EvaluateGroup(TriggerFilterGroup group, IReadOnlyDictionary<long, object?> valuesSource, IReadOnlyList<AppField> fields, ILogger? logger = null,
+        IReadOnlyDictionary<long, PipelineUserDetails>? users = null)
     {
         if (group.Rules == null || !group.Rules.Any()) return true;
 
@@ -761,7 +771,7 @@ public static class PipelineFilterEvaluator
 
         foreach (var rule in activeRules)
         {
-            bool ruleResult = EvaluateRule(rule, valuesSource, fields, logger);
+            bool ruleResult = EvaluateRule(rule, valuesSource, fields, logger, users);
 
             if (!ruleResult) return false;
         }
@@ -788,6 +798,17 @@ public static class PipelineFilterEvaluator
         if (string.IsNullOrEmpty(rule.Field))
         {
             AddValidatorError(errors, path, "On New Event filter requires a field selection.");
+            return;
+        }
+
+        // A person's detail of a User / User List field ("Record Owner → Email") compares as text.
+        if (PipelineUserFieldFilter.TryResolve(rule.Field, fields, out var userField, out _))
+        {
+            var userFieldLabel = !string.IsNullOrWhiteSpace(userField.Label) ? userField.Label : userField.Name;
+            if (string.IsNullOrEmpty(rule.Operator))
+                AddValidatorError(errors, path, $"On New Event filter field '{userFieldLabel}' requires an operator.");
+            else if (!AllowedOperatorsByTypeCategory["TEXT"].Contains(rule.Operator.ToLowerInvariant().Trim()))
+                AddValidatorError(errors, path, $"On New Event filter field '{userFieldLabel}' does not support operator '{rule.Operator}'. Allowed operators for TEXT type are: [{string.Join(", ", AllowedOperatorsByTypeCategory["TEXT"])}].");
             return;
         }
 
