@@ -1,3 +1,4 @@
+using System.Globalization;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Formulas;
@@ -26,6 +27,13 @@ public class DeleteRelationshipCommandHandler
     // as the formula (it recomputes). Any other original type comes back as a Text field holding that text.
     private static readonly HashSet<string> RestorableTypeCodes = new(StringComparer.OrdinalIgnoreCase)
         { "Text", "MultiSelect", "Number", "Currency", "Date", "DateTime" };
+
+    // Parent key types a reference created with the relationship is rebuilt as, filled with the key's values. Any other
+    // key comes back as a Text field holding the key text.
+    private static readonly HashSet<string> KeyRestorableTypeCodes = new(StringComparer.OrdinalIgnoreCase)
+        { "Text", "TextMultiLine", "SingleSelect", "Email", "Phone", "Url", "Number", "Currency", "Percent", "Rating", "Date", "DateTime" };
+
+    private const int RecordIdFid = 3;
 
     private enum RestoreOutcome { Restored, RevertToNumber, Failed }
 
@@ -96,10 +104,27 @@ public class DeleteRelationshipCommandHandler
                 if (outcome != RestoreOutcome.Restored)
                     await _fieldRepo.RevertToNumberFieldAsync(refField.Id, ct);
             }
+            else if (command.Restore != OriginalFieldRestore.None)
+            {
+                // The reference field was auto-created for this relationship. It's kept as a real field of the parent key's
+                // type (a Date key gives a Date field), each row holding the key value it showed, so deleting the
+                // relationship loses nothing. Only when that can't be done is it deleted, as before.
+                var (outcome, why) = await TryRestoreOriginalFieldAsync(rel, child, parent, childFields, parentFields, refField, ct);
+                if (outcome == RestoreOutcome.RevertToNumber)
+                    await _fieldRepo.RevertToNumberFieldAsync(refField.Id, ct);
+                else if (outcome == RestoreOutcome.Failed)
+                {
+                    Console.WriteLine($"[DeleteRelationship] '{refField.Name}' (fid {refField.Fid}) deleted, not restored: {why}");
+                    await _fieldRepo.DeleteAsync(refField.PublicId, child.Id, ct);
+                }
+            }
             else
             {
-                // The reference field was auto-created for this relationship — delete it.
+                // Auto-created, and its table is being deleted anyway — delete it, with the hidden "(original)" field an
+                // import may have added beside it.
                 await _fieldRepo.DeleteAsync(refField.PublicId, child.Id, ct);
+                if (OriginalFieldOf(refField, childFields) is { } originalField)
+                    await _fieldRepo.DeleteAsync(originalField.PublicId, child.Id, ct);
             }
         }
 
@@ -139,8 +164,8 @@ public class DeleteRelationshipCommandHandler
     }
 
     /// <summary>
-    /// Deleting a relationship removes the fields it created (the reference field when it was auto-created, plus its Lookup,
-    /// Summary, Report Link and Formula-URL fields). Blocks the delete when a PowerFlow uses any of them.
+    /// Deleting a relationship removes the fields it created (its Lookup, Summary, Report Link and Formula-URL fields; the
+    /// reference field is kept as a real field). Blocks the delete when a PowerFlow uses any of them.
     /// <paramref name="ignoreTableId"/> is a table that is itself being deleted — its own fields are covered by the table check.
     /// </summary>
     public async Task EnsurePipelinesDoNotUseAsync(Relationship rel, long? ignoreTableId, CancellationToken ct)
@@ -152,11 +177,8 @@ public class DeleteRelationshipCommandHandler
         var childFields = await _fieldRepo.ListByTableAsync(child.Id, ct);
         var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
 
-        var removedFromChild = new List<AppField>();
-        var refField = childFields.FirstOrDefault(f => f.Id == rel.ReferenceFieldId);
-        if (refField is not null && !rel.ReferenceFieldIsExisting) removedFromChild.Add(refField);
-        removedFromChild.AddRange(childFields.Where(f => f.TypeCode == "Lookup"
-            && FormulaTypeMap.ParseLookupSettings(f.Settings)?.RelationshipId == rel.Id));
+        var removedFromChild = childFields.Where(f => f.TypeCode == "Lookup"
+            && FormulaTypeMap.ParseLookupSettings(f.Settings)?.RelationshipId == rel.Id).ToList();
 
         var removedFromParent = parentFields.Where(f =>
             (f.TypeCode == "Summary" && FormulaTypeMap.ParseSummarySettings(f.Settings)?.RelationshipId == rel.Id) ||
@@ -170,12 +192,16 @@ public class DeleteRelationshipCommandHandler
     }
 
     /// <summary>
-    /// Turns a Reference that was converted from an existing field back into a real field, so deleting the relationship
-    /// loses nothing:
+    /// Turns a Reference that was converted from an existing field (or created with the relationship and holding data) back
+    /// into a real field, so deleting the relationship loses nothing:
     ///   • it was a stored type we can rebuild (Text, Number, Date…) → that type again, each row holding the parent's key
     ///     text (a row whose reference was NULL gets the value kept in the hidden "(original)" field);
     ///   • it was a Formula → the formula again (it recomputes; its physical column is dropped);
     ///   • any other type, or one recorded before this was tracked with a non-numeric key → a Text field with that text;
+    ///   • created with the relationship → the parent key's type (a Date key gives a Date field, with the key's display
+    ///     settings), each row holding the key value; Text when the key is of a type we don't rebuild, or when text kept in
+    ///     the "(original)" field isn't a value of that type; RevertToNumber when the key is Record ID# and no
+    ///     "(original)" text was kept;
     ///   • it was an already-numeric field holding Record IDs (metadata-only conversion) → RevertToNumber, which is exact.
     /// Failed (with the reason) means the schema engine couldn't do it (e.g. SQL-enclave encryption, a blocking index);
     /// nothing has been changed in that case.
@@ -188,8 +214,21 @@ public class DeleteRelationshipCommandHandler
 
         var settings = FormulaTypeMap.ParseReferenceSettings(refField.Settings);
         var displayKey = KeyFieldResolver.ResolveDisplayKey(rel, parent, parentFields);
+        var originalField = OriginalFieldOf(refField, childFields);
         var originalTypeCode = settings?.OriginalTypeCode;
-        if (originalTypeCode is null)
+        string? keyTypeCode = null;   // set when the field comes back as the parent key's type
+        if (originalTypeCode is null && !rel.ReferenceFieldIsExisting)
+        {
+            // Created with the relationship, so there's no earlier type: it comes back as the parent key's type. Record ID#
+            // keys are already the stored values (Number is exact); a key of a type we don't rebuild comes back as Text.
+            if (displayKey is null && originalField is null) return (RestoreOutcome.RevertToNumber, null);
+            var keyCode = displayKey is null || displayKey.Fid == RecordIdFid
+                ? nameof(Domain.Enums.FieldTypeCode.Number)
+                : displayKey.TypeCode;
+            keyTypeCode = KeyRestorableTypeCodes.Contains(keyCode) ? keyCode : null;
+            originalTypeCode = keyTypeCode ?? nameof(Domain.Enums.FieldTypeCode.Text);
+        }
+        else if (originalTypeCode is null)
         {
             // Not recorded: a numeric key means the field was already numeric (Record IDs) — Number is exactly right.
             // Otherwise it held the parent's key text (an older relationship), so give that back as Text.
@@ -197,8 +236,6 @@ public class DeleteRelationshipCommandHandler
                 return (RestoreOutcome.RevertToNumber, null);
             originalTypeCode = nameof(Domain.Enums.FieldTypeCode.Text);
         }
-
-        var originalField = settings?.OriginalFid is int ofid ? childFields.FirstOrDefault(f => f.Fid == ofid) : null;
 
         if (originalTypeCode.StartsWith("Formula", StringComparison.OrdinalIgnoreCase))
         {
@@ -212,12 +249,11 @@ public class DeleteRelationshipCommandHandler
             return (RestoreOutcome.Restored, null);
         }
 
-        // Anything that isn't a stored type we can rebuild comes back as Text (its settings no longer apply).
-        var rebuildAsItself = RestorableTypeCodes.Contains(originalTypeCode);
-        var restoredType = await _fieldTypeRepo.GetByCodeAsync(
-            rebuildAsItself ? originalTypeCode : nameof(Domain.Enums.FieldTypeCode.Text), ct);
-        if (restoredType is null) return (RestoreOutcome.Failed, $"field type '{originalTypeCode}' not found");
-        var restoredSettings = rebuildAsItself ? settings?.OriginalSettings : null;
+        // Anything that isn't a stored type we can rebuild comes back as Text (its settings no longer apply). One rebuilt
+        // as the key's type takes the key's display settings (decimals, currency symbol, date format…).
+        var rebuildAsItself = keyTypeCode is null && RestorableTypeCodes.Contains(originalTypeCode);
+        var restoredTypeCode = keyTypeCode ?? (rebuildAsItself ? originalTypeCode : nameof(Domain.Enums.FieldTypeCode.Text));
+        var restoredSettings = keyTypeCode is not null ? displayKey?.Settings : rebuildAsItself ? settings?.OriginalSettings : null;
 
         var originalCol = originalField is null ? null : PhysicalNaming.ColumnName(originalField.Fid!.Value);
         var refCol = PhysicalNaming.ColumnName(refField.Fid!.Value);
@@ -235,9 +271,11 @@ public class DeleteRelationshipCommandHandler
         var keyFidCol = displayKey?.Fid is int kf ? PhysicalNaming.ColumnName(kf) : null;
 
         var textByRow = new Dictionary<long, string>();
+        var originalTextRows = new List<long>();
         foreach (var row in rows)
         {
             if (!row.TryGetValue("Id", out var idVal) || idVal is null) continue;
+            var rowId = Convert.ToInt64(idVal);
             string? text = null;
             if (row.TryGetValue(refCol, out var rv) && rv is not null && long.TryParse(rv.ToString(), out var parentId))
             {
@@ -245,18 +283,39 @@ public class DeleteRelationshipCommandHandler
                 else if (parentRows.TryGetValue(parentId, out var prow))
                 {
                     if (!prow.TryGetValue(keyCol, out var keyValue) && keyFidCol is not null) prow.TryGetValue(keyFidCol, out keyValue);
-                    if (keyValue is not null) text = KeyFieldResolver.FormatForSubmit(keyValue);
+                    if (keyValue is not null) text = KeyValueText(keyValue, keyTypeCode);
                 }
             }
             if (string.IsNullOrEmpty(text) && originalCol is not null && row.TryGetValue(originalCol, out var ov))
+            {
                 text = ov?.ToString();
+                if (!string.IsNullOrEmpty(text)) originalTextRows.Add(rowId);
+            }
             if (string.IsNullOrEmpty(text)) continue;
-
-            // A Text - Multiple Choice column holds a JSON array of the chosen values.
-            textByRow[Convert.ToInt64(idVal)] = restoredType.Code.Equals("MultiSelect", StringComparison.OrdinalIgnoreCase)
-                ? System.Text.Json.JsonSerializer.Serialize(new[] { text })
-                : text;
+            textByRow[rowId] = text;
         }
+
+        // Text an import kept for rows that matched no parent goes into a field of the key's type only when it is a value
+        // of that type (e.g. a date for a Date key); when some isn't, the field comes back as Text so nothing is lost.
+        if (keyTypeCode is not null && originalTextRows.Count > 0)
+        {
+            var typedTexts = originalTextRows.ToDictionary(id => id, id => AsKeyTypeText(keyTypeCode, textByRow[id]));
+            if (typedTexts.Values.Any(t => t is null))
+            {
+                restoredTypeCode = nameof(Domain.Enums.FieldTypeCode.Text);
+                restoredSettings = null;
+            }
+            else
+                foreach (var (id, typed) in typedTexts) textByRow[id] = typed!;
+        }
+
+        var restoredType = await _fieldTypeRepo.GetByCodeAsync(restoredTypeCode, ct);
+        if (restoredType is null) return (RestoreOutcome.Failed, $"field type '{restoredTypeCode}' not found");
+
+        // A Text - Multiple Choice column holds a JSON array of the chosen values.
+        if (restoredType.Code.Equals("MultiSelect", StringComparison.OrdinalIgnoreCase))
+            foreach (var id in textByRow.Keys.ToList())
+                textByRow[id] = System.Text.Json.JsonSerializer.Serialize(new[] { textByRow[id] });
 
         var restoredField = new AppField
         {
@@ -274,4 +333,31 @@ public class DeleteRelationshipCommandHandler
         if (originalField is not null) await _fieldRepo.DeleteAsync(originalField.PublicId, child.Id, ct);
         return (RestoreOutcome.Restored, null);
     }
+
+    /// <summary>The hidden "(original)" text field a reference keeps unmatched values in, if it has one.</summary>
+    private static AppField? OriginalFieldOf(AppField refField, IReadOnlyList<AppField> childFields) =>
+        FormulaTypeMap.ParseReferenceSettings(refField.Settings)?.OriginalFid is int ofid
+            ? childFields.FirstOrDefault(f => f.Fid == ofid)
+            : null;
+
+    /// <summary>The text a parent key value is stored as in the rebuilt field. A Date &amp; Time key keeps its time.</summary>
+    private static string KeyValueText(object keyValue, string? keyTypeCode) =>
+        keyValue is DateTime dt && keyTypeCode == "DateTime"
+            ? dt.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture)
+            : KeyFieldResolver.FormatForSubmit(keyValue);
+
+    /// <summary>Text kept in the "(original)" field as a value of the key's type, in the form its column takes; null when
+    /// it isn't one.</summary>
+    private static string? AsKeyTypeText(string keyTypeCode, string text) => keyTypeCode switch
+    {
+        "Number" or "Currency" or "Percent" =>
+            decimal.TryParse(text, NumberStyles.Number, CultureInfo.InvariantCulture, out var d) ? d.ToString(CultureInfo.InvariantCulture) : null,
+        "Rating" =>
+            int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i) ? i.ToString(CultureInfo.InvariantCulture) : null,
+        "Date" =>
+            DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) ? date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : null,
+        "DateTime" =>
+            DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? dt.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture) : null,
+        _ => text,
+    };
 }

@@ -38,6 +38,7 @@ public class SaveFormLayoutCommandValidator : AbstractValidator<SaveFormLayoutCo
             section.RuleForEach(s => s.Blocks).ChildRules(block =>
             {
                 block.RuleFor(b => b.Heading).MaximumLength(200).When(b => b.Heading != null);
+                block.RuleFor(b => b.Name).MaximumLength(200).When(b => b.Name != null);
                 block.RuleFor(b => b.Width).GreaterThan(0).When(b => b.Width.HasValue)
                     .WithMessage("Block Width must be a positive integer.");
                 block.RuleFor(b => b.BackgroundColor)

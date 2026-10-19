@@ -77,15 +77,21 @@ public class SaveFormRuleCommandHandler
             {
                 var tableFields = await _fieldRepo.ListByTableAsync(tid, ct);
                 Dictionary<long, long?>? elementFieldMap = null;
+                List<FormElement>? layoutElements = null;
                 foreach (var a in expressionActions)
                 {
                     FormulaType? expected = null;
-                    if (a.ActionType == "ChangeValue" && a.TargetElementId is { } elementId)
+                    if (a.ActionType == "ChangeValue" && (a.TargetElementId is not null || a.TargetElementPublicId is not null))
                     {
-                        elementFieldMap ??= (await _formRepo.GetLayoutAsync(rule.FormId, ct))
-                            .SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements)
-                            .ToDictionary(e => e.Id, e => e.AppFieldId);
-                        if (elementFieldMap.TryGetValue(elementId, out var fid) && fid is { } fidVal)
+                        layoutElements ??= (await _formRepo.GetLayoutAsync(rule.FormId, ct))
+                            .SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements).ToList();
+                        elementFieldMap ??= layoutElements.ToDictionary(e => e.Id, e => e.AppFieldId);
+                        // The GUID is authoritative (an element added in the designer may not have a numeric id the
+                        // client knew about); fall back to the numeric id for older clients.
+                        var elementId = a.TargetElementPublicId is { } pid
+                            ? layoutElements.FirstOrDefault(e => e.PublicId == pid)?.Id
+                            : a.TargetElementId;
+                        if (elementId is { } eid && elementFieldMap.TryGetValue(eid, out var fid) && fid is { } fidVal)
                         {
                             var target = tableFields.FirstOrDefault(f => f.Fid.HasValue && (long)f.Fid.Value == fidVal);
                             expected = ExpectedTypeForTarget(target?.TypeCode);
@@ -125,9 +131,17 @@ public class SaveFormRuleCommandHandler
             TargetElementId     = a.TargetElementId,
             TargetSectionId     = a.TargetSectionId,
             TargetBlockId       = a.TargetBlockId,
+            TargetElementPublicId = a.TargetElementPublicId,
+            TargetSectionPublicId = a.TargetSectionPublicId,
+            TargetBlockPublicId   = a.TargetBlockPublicId,
+            TargetPagePublicId    = a.TargetPagePublicId,
             ActionValue         = a.ActionValue,
             RunOnceOnActivation = a.RunOnceOnActivation,
             IsExpressionValue   = a.IsExpressionValue,
+            ValueSource         = a.ValueSource,
+            SourceFieldId       = a.SourceFieldId,
+            MessageType         = a.MessageType,
+            MessageSeverity     = a.MessageSeverity,
             DisplayOrder        = a.DisplayOrder,
         }).ToList();
 

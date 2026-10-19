@@ -33,6 +33,9 @@ public static class FormRuleReferenceExtractor
             if (a.TargetElementId is { } elementId && elementFids.TryGetValue(elementId, out var fid))
                 collector.Add(table.IdOfFid(fid), FieldReferenceUsages.RuleTarget);
 
+            if (a.ValueSource == "field")
+                collector.Add(table.IdOfFid(a.SourceFieldId), FieldReferenceUsages.RuleActionFormula);
+
             if (a.IsExpressionValue)
                 collector.AddAll(table.FieldsReadBy(engine, a.ActionValue), FieldReferenceUsages.RuleActionFormula);
         }

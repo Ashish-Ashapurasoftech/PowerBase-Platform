@@ -51,11 +51,14 @@ public class GetFormLayoutQueryHandler
                 ShowDividers    = s.ShowDividers,
                 DividerColor    = s.DividerColor,
                 DividerWidthPx  = s.DividerWidthPx,
+                ShowHeading     = s.ShowHeading,
                 Blocks       = s.Blocks.Select(b => new FormBlockDetail
                 {
                     DbId            = b.Id,
                     Id              = b.PublicId,
                     Heading         = b.Heading,
+                    Name            = b.Name,
+                    ShowHeading     = b.ShowHeading,
                     BackgroundColor = b.BackgroundColor,
                     Width           = b.Width,
                     DisplayOrder    = b.DisplayOrder,
@@ -99,6 +102,7 @@ public class GetFormLayoutQueryHandler
                         ContentWidthMode  = e.ContentWidthMode,
                         ContentWidthValue = e.ContentWidthValue,
                         ContentWidthUnit  = e.ContentWidthUnit,
+                        Name              = e.Name,
                     }).ToList(),
                 }).ToList(),
             }).ToList(),

@@ -335,13 +335,14 @@ public class FormsController : ControllerBase
                     e.ColStart, e.RowStart, e.ColSpan, e.RowSpan,
                     e.GroupId, e.CloneGroupId, e.PagePublicId, e.TextStyle,
                     e.BackgroundColor, e.BorderColor, e.BorderWidth,
-                    e.ContentWidthMode, e.ContentWidthValue, e.ContentWidthUnit)).ToList(),
+                    e.ContentWidthMode, e.ContentWidthValue, e.ContentWidthUnit, e.Name)).ToList(),
                 b.ColStart, b.ColSpan, b.BackgroundType, b.BackgroundImage,
-                b.DividerMode, b.DividerColor, b.DividerWidthPx
+                b.DividerMode, b.DividerColor, b.DividerWidthPx,
+                b.Name, b.ShowHeading
             )).ToList(),
             s.GridCols, s.PagePublicId, s.IsPinned, s.BackgroundColor, s.BackgroundType,
             s.BackgroundImage, s.BorderColor, s.BorderWidth, s.ShowDividers,
-            s.DividerColor, s.DividerWidthPx
+            s.DividerColor, s.DividerWidthPx, s.ShowHeading
         )).ToList();
 
         var pages = request.Pages?.Select(p => new FormPageLayout(p.PublicId, p.Heading, p.DisplayOrder)).ToList();
@@ -422,7 +423,9 @@ public class FormsController : ControllerBase
                 c.ChangeFromOperator, c.ChangeFromValue, c.ChangeFromValueType, c.ChangeFromValueFieldId,
                 c.ChangeToOperator, c.ChangeToValue, c.ChangeToValueType, c.ChangeToValueFieldId)).ToList();
         var actions = request.Actions.Select(a =>
-            new FormRuleActionSpec(a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder, a.RunOnceOnActivation, a.IsExpressionValue)).ToList();
+            new FormRuleActionSpec(a.ActionType, a.TargetType, a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue, a.DisplayOrder, a.RunOnceOnActivation, a.IsExpressionValue,
+                a.TargetElementPublicId, a.TargetSectionPublicId, a.TargetBlockPublicId, a.TargetPagePublicId,
+                a.ValueSource, a.SourceFieldId, a.MessageType, a.MessageSeverity)).ToList();
 
         await _saveRuleHandler.HandleAsync(new SaveFormRuleCommand(
             ruleId, request.Name, request.Description, request.Tags, request.IsActive,
@@ -541,11 +544,14 @@ public class FormsController : ControllerBase
             ShowDividers    = s.ShowDividers,
             DividerColor    = s.DividerColor,
             DividerWidthPx  = s.DividerWidthPx,
+            ShowHeading     = s.ShowHeading,
             Blocks       = s.Blocks.Select(b => new FormBlockResponse
             {
                 DbId            = b.DbId,
                 Id              = b.Id,
                 Heading         = b.Heading,
+                Name            = b.Name,
+                ShowHeading     = b.ShowHeading,
                 BackgroundColor = b.BackgroundColor,
                 Width           = b.Width,
                 DisplayOrder    = b.DisplayOrder,
@@ -589,6 +595,7 @@ public class FormsController : ControllerBase
                     ContentWidthMode  = e.ContentWidthMode,
                     ContentWidthValue = e.ContentWidthValue,
                     ContentWidthUnit  = e.ContentWidthUnit,
+                    Name              = e.Name,
                 }).ToList(),
             }).ToList(),
         }).ToList(),
@@ -645,8 +652,16 @@ public class FormsController : ControllerBase
             TargetElementId     = a.TargetElementId,
             TargetSectionId     = a.TargetSectionId,
             TargetBlockId       = a.TargetBlockId,
+            TargetElementPublicId = a.TargetElementPublicId,
+            TargetSectionPublicId = a.TargetSectionPublicId,
+            TargetBlockPublicId   = a.TargetBlockPublicId,
+            TargetPagePublicId    = a.TargetPagePublicId,
             ActionValue         = a.ActionValue,
             RunOnceOnActivation = a.RunOnceOnActivation,
+            ValueSource         = a.ValueSource,
+            SourceFieldId       = a.SourceFieldId,
+            MessageType         = a.MessageType,
+            MessageSeverity     = a.MessageSeverity,
             IsExpressionValue   = a.IsExpressionValue,
             DisplayOrder        = a.DisplayOrder,
         }).ToList(),

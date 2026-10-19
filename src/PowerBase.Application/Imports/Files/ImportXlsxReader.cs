@@ -158,6 +158,8 @@ public sealed class ImportXlsxReader : IImportRowReader
             if (value is >= 0 and < 2_958_466)
             {
                 var date = DateTime.FromOADate(value);
+                // A cell holding only a time of day (a fraction of a day) is a time: 09:00:00, not a date in 1899.
+                if (value < 1) return date.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
                 return date.TimeOfDay == TimeSpan.Zero ? date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
                     : date.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture);
             }

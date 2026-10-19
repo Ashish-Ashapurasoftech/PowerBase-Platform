@@ -51,6 +51,10 @@ public interface IImportRunRepository
     Task<IReadOnlyList<ImportRunListItem>> ListByDefinitionAsync(long definitionId, int take, CancellationToken ct = default);
     /// <summary>True when the definition already has a queued or running run (prevents overlapping runs).</summary>
     Task<bool> HasActiveRunAsync(long definitionId, CancellationToken ct = default);
+
+    /// <summary>When the import's last run that finished (success or partial) started, with that run's copy of the definition; null when there is none. Failed
+    /// and cancelled runs do not count: they did not read everything.</summary>
+    Task<(DateTime StartedOn, string SnapshotJson)?> GetLastFinishedRunAsync(long definitionId, CancellationToken ct = default);
     /// <summary>Marks the run running. The source range is pinned on the first start only.</summary>
     /// <summary>Returns false when the run was cancelled before it could start, in which case it must not run.</summary>
     Task<bool> MarkRunningAsync(long runId, long sourceMaxId, CancellationToken ct = default);

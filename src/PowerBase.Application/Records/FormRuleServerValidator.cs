@@ -144,7 +144,7 @@ public static class FormRuleServerValidator
         // A rule's Require/PreventSave actions target a form-layout element (TargetElementId),
         // not an AppField directly — resolved to AppFieldId via that rule's own form layout,
         // cached per FormId since several rules across the table can share one form.
-        var elementFieldCache = new Dictionary<long, Dictionary<long, long?>>();
+        var elementFieldCache = new Dictionary<long, LayoutIndex>();
 
         foreach (var rule in rules)
         {
@@ -159,14 +159,12 @@ public static class FormRuleServerValidator
             }
             if (!met) continue;
 
-            if (!elementFieldCache.TryGetValue(rule.FormId, out var elementFieldMap))
+            if (!elementFieldCache.TryGetValue(rule.FormId, out var layoutIndex))
             {
                 var sections = await formRepo.GetLayoutAsync(rule.FormId, ct);
-                elementFieldMap = sections
-                    .SelectMany(s => s.Blocks)
-                    .SelectMany(b => b.Elements)
-                    .ToDictionary(e => e.Id, e => e.AppFieldId);
-                elementFieldCache[rule.FormId] = elementFieldMap;
+                var pages = await formRepo.GetPagesAsync(rule.FormId, ct);
+                layoutIndex = new LayoutIndex(sections, pages);
+                elementFieldCache[rule.FormId] = layoutIndex;
             }
 
             foreach (var action in rule.Actions)
@@ -184,26 +182,30 @@ public static class FormRuleServerValidator
                 }
 
                 if (action.ActionType != "Require") continue;
-                if (action.TargetElementId is not { } elementId) continue;
-                if (!elementFieldMap.TryGetValue(elementId, out var fid) || fid is not { } fidVal) continue;
-                if (!fieldsByFid.TryGetValue(fidVal, out var field)) continue;
-                // A computed field (Formula/Lookup/Summary/…) is never supplied by the user or present in
-                // the write payload — it only exists as a live value the client computes for display —
-                // so "required" would ALWAYS fail for it here even though the form shows a value.
-                // Requiring one is meaningless (nothing to type into); skip it, same fail-open posture
-                // as a rule aimed at a since-deleted field.
-                if (PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
 
-                var hasValue = effectiveValues.TryGetValue(fidVal, out var value);
-                // Update: a field this write never touched isn't checked (mirrors
-                // RecordConstraintValidator's own Required check for the same reason — nothing
-                // about this write is responsible for that field's existing, already-saved value).
-                if (!hasValue && !isCreate) continue;
-                var isBlank = !hasValue || PhysicalNaming.IsRequiredMissing(field.TypeCode, value);
-                if (!isBlank) continue;
+                // A Require action can target one field, or a whole column / section / page: every
+                // field element inside it is then required.
+                foreach (var fidVal in layoutIndex.FieldIdsFor(action))
+                {
+                    if (!fieldsByFid.TryGetValue(fidVal, out var field)) continue;
+                    // A computed field (Formula/Lookup/Summary/…) is never supplied by the user or present in
+                    // the write payload — it only exists as a live value the client computes for display —
+                    // so "required" would ALWAYS fail for it here even though the form shows a value.
+                    // Requiring one is meaningless (nothing to type into); skip it, same fail-open posture
+                    // as a rule aimed at a since-deleted field.
+                    if (PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
 
-                var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
-                violations.Add(new RecordConstraintViolation(recordId, fidVal, "FormRule", $"'{label}' is required."));
+                    var hasValue = effectiveValues.TryGetValue(fidVal, out var value);
+                    // Update: a field this write never touched isn't checked (mirrors
+                    // RecordConstraintValidator's own Required check for the same reason — nothing
+                    // about this write is responsible for that field's existing, already-saved value).
+                    if (!hasValue && !isCreate) continue;
+                    var isBlank = !hasValue || PhysicalNaming.IsRequiredMissing(field.TypeCode, value);
+                    if (!isBlank) continue;
+
+                    var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
+                    violations.Add(new RecordConstraintViolation(recordId, fidVal, "FormRule", $"'{label}' is required."));
+                }
             }
         }
 
@@ -839,5 +841,46 @@ public static class FormRuleServerValidator
             return raw is null ? null : Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture);
         }
         catch (FormulaEvaluationException) { return null; }
+    }
+
+    /// <summary>A form's layout, indexed so a rule action can be resolved to the fields it covers.</summary>
+    private sealed class LayoutIndex
+    {
+        private readonly IReadOnlyList<FormSection> _sections;
+        private readonly IReadOnlyList<FormPage> _pages;
+
+        public LayoutIndex(IReadOnlyList<FormSection> sections, IReadOnlyList<FormPage> pages)
+        {
+            _sections = sections;
+            _pages = pages;
+        }
+
+        /// <summary>The AppField Fids an action points at: one field for a Field target, or every field
+        /// element inside the targeted column / section / page. The target's PublicId is authoritative; the
+        /// numeric id is the fallback for actions saved before PublicId targets existed. A target that no
+        /// longer exists yields nothing (fail-open, like a rule aimed at a deleted field).</summary>
+        public IEnumerable<long> FieldIdsFor(FormRuleAction a)
+        {
+            IEnumerable<FormElement> elements = a.TargetType switch
+            {
+                "Section" => _sections
+                    .Where(sec => a.TargetSectionPublicId is { } sg ? sec.PublicId == sg : sec.Id == a.TargetSectionId)
+                    .SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements),
+                "Block" => _sections.SelectMany(sec => sec.Blocks)
+                    .Where(b => a.TargetBlockPublicId is { } bg ? b.PublicId == bg : b.Id == a.TargetBlockId)
+                    .SelectMany(b => b.Elements),
+                "Page" => a.TargetPagePublicId is { } pg
+                    ? _pages.Where(p => p.PublicId == pg)
+                        .SelectMany(p => _sections.Where(sec => !sec.IsPinned && sec.FormPageId == p.Id))
+                        .SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements)
+                    : Enumerable.Empty<FormElement>(),
+                _ => _sections.SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements)
+                    .Where(e => a.TargetElementPublicId is { } eg ? e.PublicId == eg : e.Id == a.TargetElementId),
+            };
+            return elements
+                .Where(e => e.AppFieldId.HasValue && e.ElementType == "Field")
+                .Select(e => e.AppFieldId!.Value)
+                .Distinct();
+        }
     }
 }

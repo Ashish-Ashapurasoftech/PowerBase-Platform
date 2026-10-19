@@ -192,7 +192,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
     private const string GetSectionsSql = """
         SELECT Id, PublicId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder,
                GridCols, FormPageId, IsPinned, BackgroundColor, BackgroundType, BackgroundImage,
-               BorderColor, BorderWidth, ShowDividers, DividerColor, DividerWidthPx
+               BorderColor, BorderWidth, ShowDividers, DividerColor, DividerWidthPx, ShowHeading
         FROM meta.FormSection WHERE FormId = @formId ORDER BY DisplayOrder
         """;
 
@@ -200,7 +200,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         SELECT fsb.Id, fsb.PublicId, fsb.FormSectionId,
                fsb.Heading, fsb.BackgroundColor, fsb.Width, fsb.DisplayOrder,
                fsb.ColStart, fsb.ColSpan, fsb.BackgroundType, fsb.BackgroundImage,
-               fsb.DividerMode, fsb.DividerColor, fsb.DividerWidthPx
+               fsb.DividerMode, fsb.DividerColor, fsb.DividerWidthPx, fsb.Name, fsb.ShowHeading
         FROM meta.FormSectionBlock fsb
         JOIN meta.FormSection fs ON fs.Id = fsb.FormSectionId
         WHERE fs.FormId = @formId
@@ -215,7 +215,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                fe.IsRequired, fe.DisplayAs, fe.DisplayOrder,
                fe.ColStart, fe.RowStart, fe.ColSpan, fe.RowSpan, fe.GroupId, fe.CloneGroupId,
                fe.FormPageId, fe.TextStyle, fe.BackgroundColor, fe.BorderColor, fe.BorderWidth,
-               fe.ContentWidthMode, fe.ContentWidthValue, fe.ContentWidthUnit
+               fe.ContentWidthMode, fe.ContentWidthValue, fe.ContentWidthUnit, fe.Name
         FROM meta.FormElement fe
         JOIN meta.FormSection fs ON fs.Id = fe.FormSectionId
         JOIN meta.Form f ON f.Id = fs.FormId
@@ -271,6 +271,26 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         WHERE r.FormId = @formId
         """;
 
+    // Rule actions also carry their targets' PublicIds (migration 077) — authoritative, and the only
+    // way a rule can point at something that was unsaved when the rule was made. Once the layout rows
+    // exist, re-derive the numeric ids from those GUIDs: a GUID whose row is gone resolves to NULL.
+    private const string ResolveRuleActionTargetsSql = """
+        UPDATE ra
+        SET ra.TargetElementId = CASE WHEN ra.TargetElementPublicId IS NOT NULL
+                                      THEN (SELECT Id FROM meta.FormElement WHERE PublicId = ra.TargetElementPublicId)
+                                      ELSE ra.TargetElementId END,
+            ra.TargetSectionId = CASE WHEN ra.TargetSectionPublicId IS NOT NULL
+                                      THEN (SELECT Id FROM meta.FormSection WHERE PublicId = ra.TargetSectionPublicId)
+                                      ELSE ra.TargetSectionId END,
+            ra.TargetBlockId   = CASE WHEN ra.TargetBlockPublicId IS NOT NULL
+                                      THEN (SELECT Id FROM meta.FormSectionBlock WHERE PublicId = ra.TargetBlockPublicId)
+                                      ELSE ra.TargetBlockId END
+        FROM meta.FormRuleAction ra
+        JOIN meta.FormRule r ON r.Id = ra.FormRuleId
+        WHERE r.FormId = @formId
+          AND (ra.TargetElementPublicId IS NOT NULL OR ra.TargetSectionPublicId IS NOT NULL OR ra.TargetBlockPublicId IS NOT NULL)
+        """;
+
     private const string RestoreRuleActionTargetSql = """
         UPDATE meta.FormRuleAction
         SET TargetElementId = @targetElementId,
@@ -289,22 +309,24 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
         INSERT INTO meta.FormSection
             (PublicId, FormId, Name, ColumnCount, ColumnWidths, IsCollapsed, DisplayOrder,
              GridCols, FormPageId, IsPinned, BackgroundColor, BackgroundType, BackgroundImage,
-             BorderColor, BorderWidth, ShowDividers, DividerColor, DividerWidthPx)
+             BorderColor, BorderWidth, ShowDividers, DividerColor, DividerWidthPx, ShowHeading)
         OUTPUT INSERTED.Id
         VALUES
             (ISNULL(@publicId, NEWID()), @formId, @name, @columnCount, @columnWidths, @isCollapsed, @displayOrder,
              @gridCols, @formPageId, @isPinned, @backgroundColor, @backgroundType, @backgroundImage,
-             @borderColor, @borderWidth, @showDividers, @dividerColor, @dividerWidthPx)
+             @borderColor, @borderWidth, @showDividers, @dividerColor, @dividerWidthPx, @showHeading)
         """;
 
     private const string InsertBlockSql = """
         INSERT INTO meta.FormSectionBlock
             (PublicId, FormSectionId, Heading, BackgroundColor, Width, DisplayOrder,
-             ColStart, ColSpan, BackgroundType, BackgroundImage, DividerMode, DividerColor, DividerWidthPx)
+             ColStart, ColSpan, BackgroundType, BackgroundImage, DividerMode, DividerColor, DividerWidthPx,
+             Name, ShowHeading)
         OUTPUT INSERTED.Id
         VALUES
             (ISNULL(@publicId, NEWID()), @formSectionId, @heading, @backgroundColor, @width, @displayOrder,
-             @colStart, @colSpan, @backgroundType, @backgroundImage, @dividerMode, @dividerColor, @dividerWidthPx)
+             @colStart, @colSpan, @backgroundType, @backgroundImage, @dividerMode, @dividerColor, @dividerWidthPx,
+             @name, @showHeading)
         """;
 
     private const string InsertElementSql = """
@@ -314,7 +336,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
              WidthMode, WidthValue, HelpTextOverride, IsReadOnly, IsRequired, DisplayAs, DisplayOrder,
              ColStart, RowStart, ColSpan, RowSpan, GroupId, CloneGroupId, FormPageId,
              TextStyle, BackgroundColor, BorderColor, BorderWidth,
-             ContentWidthMode, ContentWidthValue, ContentWidthUnit)
+             ContentWidthMode, ContentWidthValue, ContentWidthUnit, Name)
         OUTPUT INSERTED.Id
         VALUES
             (ISNULL(@publicId, NEWID()), @formSectionId, @formSectionBlockId, @appFieldId, @elementType, @elementContent,
@@ -322,7 +344,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
              @widthMode, @widthValue, @helpTextOverride, @isReadOnly, @isRequired, @displayAs, @displayOrder,
              @colStart, @rowStart, @colSpan, @rowSpan, @groupId, @cloneGroupId, @formPageId,
              @textStyle, @backgroundColor, @borderColor, @borderWidth,
-             @contentWidthMode, @contentWidthValue, @contentWidthUnit)
+             @contentWidthMode, @contentWidthValue, @contentWidthUnit, @name)
         """;
 
     private const string AppendFieldSql = """
@@ -617,6 +639,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                     showDividers    = section.ShowDividers,
                     dividerColor    = section.DividerColor,
                     dividerWidthPx  = section.DividerWidthPx,
+                    showHeading     = section.ShowHeading,
                 }, tx, cancellationToken: ct));
 
             if (section.PublicId != Guid.Empty)
@@ -641,6 +664,8 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                         dividerMode     = block.DividerMode,
                         dividerColor    = block.DividerColor,
                         dividerWidthPx  = block.DividerWidthPx,
+                        name            = block.Name,
+                        showHeading     = block.ShowHeading,
                     }, tx, cancellationToken: ct));
 
                 if (block.PublicId != Guid.Empty)
@@ -686,6 +711,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                         contentWidthMode   = el.ContentWidthMode,
                         contentWidthValue  = el.ContentWidthValue,
                         contentWidthUnit   = el.ContentWidthUnit,
+                        name               = el.Name,
                     }, tx, cancellationToken: ct));
 
                     if (el.PublicId != Guid.Empty)
@@ -715,6 +741,8 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                 targetBlockId   = blockId,
             }, tx, cancellationToken: ct));
         }
+
+        await conn.ExecuteAsync(new CommandDefinition(ResolveRuleActionTargetsSql, new { formId }, tx, cancellationToken: ct));
 
         // Skipped entirely while the caller sends none of the three (today: every existing client),
         // so an old client's save never touches these columns. themeJson is a plain overwrite (not
@@ -796,6 +824,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
             showDividers    = section.ShowDividers,
             dividerColor    = section.DividerColor,
             dividerWidthPx  = section.DividerWidthPx,
+            showHeading     = section.ShowHeading,
         }, tx, cancellationToken: ct));
 
         for (var bi = 0; bi < section.Blocks.Count; bi++)
@@ -816,6 +845,8 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                 dividerMode     = block.DividerMode,
                 dividerColor    = block.DividerColor,
                 dividerWidthPx  = block.DividerWidthPx,
+                name            = block.Name,
+                showHeading     = block.ShowHeading,
             }, tx, cancellationToken: ct));
 
             for (var ei = 0; ei < block.Elements.Count; ei++)
@@ -855,6 +886,7 @@ public class FormRepository : TenantRepositoryBase, IFormRepository
                     contentWidthMode   = el.ContentWidthMode,
                     contentWidthValue  = el.ContentWidthValue,
                     contentWidthUnit   = el.ContentWidthUnit,
+                    name               = el.Name,
                 }, tx, cancellationToken: ct));
             }
         }

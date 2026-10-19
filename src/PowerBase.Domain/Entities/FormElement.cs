@@ -11,6 +11,9 @@ public class FormElement
     public string? ElementContent { get; set; }
     public string LabelMode { get; set; } = "Default";
     public string? CustomLabel { get; set; }
+    /// <summary>Internal component name for non-field elements ("Text 1", "Divider 1"). Null for fields,
+    /// which are known by their field label. Lets form rules reference every component reliably.</summary>
+    public string? Name { get; set; }
     public bool ShowOnAdd { get; set; } = true;
     public bool ShowOnEdit { get; set; } = true;
     public bool ShowOnView { get; set; } = true;

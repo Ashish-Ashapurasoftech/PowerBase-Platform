@@ -62,8 +62,9 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 
     private const string ListActiveByTableIdActionsSql = """
         SELECT a.Id, a.FormRuleId, a.ActionType, a.TargetType,
-               a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue,
-               a.RunOnceOnActivation, a.IsExpressionValue, a.DisplayOrder
+               a.TargetElementId, a.TargetSectionId, a.TargetBlockId,
+               a.TargetElementPublicId, a.TargetSectionPublicId, a.TargetBlockPublicId, a.TargetPagePublicId, a.ActionValue,
+               a.RunOnceOnActivation, a.IsExpressionValue, a.ValueSource, a.SourceFieldId, a.MessageType, a.MessageSeverity, a.DisplayOrder
         FROM meta.FormRuleAction a
         JOIN meta.FormRule r ON r.Id = a.FormRuleId
         JOIN meta.Form f ON f.Id = r.FormId
@@ -83,8 +84,9 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
 
     private const string ListActionsSql = """
         SELECT a.Id, a.FormRuleId, a.ActionType, a.TargetType,
-               a.TargetElementId, a.TargetSectionId, a.TargetBlockId, a.ActionValue,
-               a.RunOnceOnActivation, a.IsExpressionValue, a.DisplayOrder
+               a.TargetElementId, a.TargetSectionId, a.TargetBlockId,
+               a.TargetElementPublicId, a.TargetSectionPublicId, a.TargetBlockPublicId, a.TargetPagePublicId, a.ActionValue,
+               a.RunOnceOnActivation, a.IsExpressionValue, a.ValueSource, a.SourceFieldId, a.MessageType, a.MessageSeverity, a.DisplayOrder
         FROM meta.FormRuleAction a
         JOIN meta.FormRule r ON r.Id = a.FormRuleId
         WHERE r.FormId = @formId AND r.IsDeleted = 0
@@ -131,8 +133,20 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
         """;
 
     private const string InsertActionSql = """
-        INSERT INTO meta.FormRuleAction (FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, TargetBlockId, ActionValue, RunOnceOnActivation, IsExpressionValue, DisplayOrder)
-        VALUES (@formRuleId, @actionType, @targetType, @targetElementId, @targetSectionId, @targetBlockId, @actionValue, @runOnceOnActivation, @isExpressionValue, @displayOrder)
+        INSERT INTO meta.FormRuleAction (FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, TargetBlockId,
+                                         TargetElementPublicId, TargetSectionPublicId, TargetBlockPublicId, TargetPagePublicId,
+                                         ActionValue, RunOnceOnActivation, IsExpressionValue, ValueSource, SourceFieldId, MessageType, MessageSeverity, DisplayOrder)
+        VALUES (@formRuleId, @actionType, @targetType,
+                -- The GUID is authoritative: the numeric id is resolved from it (NULL while the target is not saved yet
+                -- or was deleted). A caller that only knows the numeric id (importer, older clients) gets its GUID filled in.
+                CASE WHEN @targetElementPublicId IS NOT NULL THEN (SELECT Id FROM meta.FormElement WHERE PublicId = @targetElementPublicId) ELSE @targetElementId END,
+                CASE WHEN @targetSectionPublicId IS NOT NULL THEN (SELECT Id FROM meta.FormSection WHERE PublicId = @targetSectionPublicId) ELSE @targetSectionId END,
+                CASE WHEN @targetBlockPublicId   IS NOT NULL THEN (SELECT Id FROM meta.FormSectionBlock WHERE PublicId = @targetBlockPublicId) ELSE @targetBlockId END,
+                COALESCE(@targetElementPublicId, (SELECT PublicId FROM meta.FormElement WHERE Id = @targetElementId)),
+                COALESCE(@targetSectionPublicId, (SELECT PublicId FROM meta.FormSection WHERE Id = @targetSectionId)),
+                COALESCE(@targetBlockPublicId,   (SELECT PublicId FROM meta.FormSectionBlock WHERE Id = @targetBlockId)),
+                @targetPagePublicId,
+                @actionValue, @runOnceOnActivation, @isExpressionValue, @valueSource, @sourceFieldId, @messageType, @messageSeverity, @displayOrder)
         """;
 
     private const string SoftDeleteSql = """
@@ -166,7 +180,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
         rule.Conditions = conditions.ToList();
 
         var actions = await conn.QueryAsync<FormRuleAction>(
-            new CommandDefinition("SELECT Id, FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, TargetBlockId, ActionValue, RunOnceOnActivation, IsExpressionValue, DisplayOrder FROM meta.FormRuleAction WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
+            new CommandDefinition("SELECT Id, FormRuleId, ActionType, TargetType, TargetElementId, TargetSectionId, TargetBlockId, TargetElementPublicId, TargetSectionPublicId, TargetBlockPublicId, TargetPagePublicId, ActionValue, RunOnceOnActivation, IsExpressionValue, ValueSource, SourceFieldId, MessageType, MessageSeverity, DisplayOrder FROM meta.FormRuleAction WHERE FormRuleId = @ruleId ORDER BY DisplayOrder",
                 new { ruleId = rule.Id }, cancellationToken: ct));
         rule.Actions = actions.ToList();
 
@@ -275,7 +289,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
                 changeToOperator = c.ChangeToOperator, changeToValue = c.ChangeToValue, changeToValueType = c.ChangeToValueType, changeToValueFieldId = c.ChangeToValueFieldId }, tx, cancellationToken: ct));
 
         foreach (var a in actions)
-            await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new { formRuleId = ruleId, actionType = a.ActionType, targetType = a.TargetType, targetElementId = a.TargetElementId, targetSectionId = a.TargetSectionId, targetBlockId = a.TargetBlockId, actionValue = a.ActionValue, runOnceOnActivation = a.RunOnceOnActivation, isExpressionValue = a.IsExpressionValue, displayOrder = a.DisplayOrder }, tx, cancellationToken: ct));
+            await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new { formRuleId = ruleId, actionType = a.ActionType, targetType = a.TargetType, targetElementId = a.TargetElementId, targetSectionId = a.TargetSectionId, targetBlockId = a.TargetBlockId, targetElementPublicId = a.TargetElementPublicId, targetSectionPublicId = a.TargetSectionPublicId, targetBlockPublicId = a.TargetBlockPublicId, targetPagePublicId = a.TargetPagePublicId, actionValue = a.ActionValue, runOnceOnActivation = a.RunOnceOnActivation, isExpressionValue = a.IsExpressionValue, valueSource = a.ValueSource, sourceFieldId = a.SourceFieldId, messageType = a.MessageType, messageSeverity = a.MessageSeverity, displayOrder = a.DisplayOrder }, tx, cancellationToken: ct));
 
         await tx.CommitAsync(ct);
     }
@@ -334,7 +348,7 @@ public class FormRuleRepository : TenantRepositoryBase, IFormRuleRepository
                 changeFromOperator = c.ChangeFromOperator, changeFromValue = c.ChangeFromValue, changeFromValueType = c.ChangeFromValueType, changeFromValueFieldId = c.ChangeFromValueFieldId,
                 changeToOperator = c.ChangeToOperator, changeToValue = c.ChangeToValue, changeToValueType = c.ChangeToValueType, changeToValueFieldId = c.ChangeToValueFieldId }, tx, cancellationToken: ct));
             foreach (var a in source.Actions)
-                await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new { formRuleId = newId, actionType = a.ActionType, targetType = a.TargetType, targetElementId = a.TargetElementId, targetSectionId = a.TargetSectionId, targetBlockId = a.TargetBlockId, actionValue = a.ActionValue, runOnceOnActivation = a.RunOnceOnActivation, isExpressionValue = a.IsExpressionValue, displayOrder = a.DisplayOrder }, tx, cancellationToken: ct));
+                await conn.ExecuteAsync(new CommandDefinition(InsertActionSql, new { formRuleId = newId, actionType = a.ActionType, targetType = a.TargetType, targetElementId = a.TargetElementId, targetSectionId = a.TargetSectionId, targetBlockId = a.TargetBlockId, targetElementPublicId = a.TargetElementPublicId, targetSectionPublicId = a.TargetSectionPublicId, targetBlockPublicId = a.TargetBlockPublicId, targetPagePublicId = a.TargetPagePublicId, actionValue = a.ActionValue, runOnceOnActivation = a.RunOnceOnActivation, isExpressionValue = a.IsExpressionValue, valueSource = a.ValueSource, sourceFieldId = a.SourceFieldId, messageType = a.MessageType, messageSeverity = a.MessageSeverity, displayOrder = a.DisplayOrder }, tx, cancellationToken: ct));
             await tx.CommitAsync(ct);
         }
 

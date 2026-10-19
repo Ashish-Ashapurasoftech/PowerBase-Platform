@@ -224,7 +224,9 @@ public sealed class ImportChunkWriter
             if (updates.Count > 0)
             {
                 var current = stored ?? await _records.GetRowsByIdsAsync(_plan.Destination, MappedFields(), updates.Select(r => r.MatchedId!.Value).ToList(), ct);
-                unchanged = updates.Where(r => IsUnchanged(r, current)).ToList();
+                var diff = updates.ToDictionary(r => r, r => ChangedFields(r, current));
+                unchanged = updates.Where(r => diff[r].Count == 0).ToList();
+                foreach (var r in updates.Where(r => diff[r].Count > 0)) r.Warning = r.Warning is null ? $"Changed: {string.Join(", ", diff[r])}" : $"{r.Warning}. Changed: {string.Join(", ", diff[r])}";
                 if (unchanged.Count > 0) updates = updates.Except(unchanged).ToList();
             }
             updatedRows = await WriteAsync(updates, async batch =>
@@ -327,10 +329,12 @@ public sealed class ImportChunkWriter
 
     private async Task LookUpParentsAsync(ImportReferenceTarget target, List<string> texts, Dictionary<string, long?> cache, CancellationToken ct)
     {
-        // 1. A Record ID# of a live record of the parent table (a number a spreadsheet wrote with a decimal point counts).
+        // 1. A Record ID# of a live record of the parent table (a number a spreadsheet wrote with a decimal point counts). Not when the relationship has a
+        //    key field: its records are then known by that key, and a value such as 1 must not be taken for the record whose Record ID# happens to be 1.
         var candidates = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        foreach (var text in texts)
-            if (ImportNumber.TryParse(text, out var number) && number > 0 && number == decimal.Truncate(number) && number <= long.MaxValue) candidates[text] = (long)number;
+        if (!target.ByKey)
+            foreach (var text in texts)
+                if (ImportNumber.TryParse(text, out var number) && number > 0 && number == decimal.Truncate(number) && number <= long.MaxValue) candidates[text] = (long)number;
         var live = candidates.Count == 0 ? [] : await _store.ExistingRecordIdsAsync(target.Parent, candidates.Values.Distinct().ToList(), ct);
         foreach (var (text, id) in candidates)
             if (live.Contains(id)) cache[text] = id;
@@ -370,19 +374,21 @@ public sealed class ImportChunkWriter
         return _plan.DestinationFields.Where(f => f.Fid.HasValue && (mapped.Contains(f.Fid) || ImportTypeCompatibility.IsRecordId(f))).ToList();
     }
 
-    /// <summary>True when the record the row matched already holds every value the row would write. An encrypted field cannot be compared
-    /// (its stored value is ciphertext), and a value of a kind that is not plainly comparable counts as changed: a write that was not
-    /// needed is harmless, a skipped write that was is not.</summary>
-    private bool IsUnchanged(Row row, IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> current)
+    /// <summary>The names of the fields whose stored value differs from what the row would write; empty when the matched record already holds every value
+    /// (nothing to write). The stored values are read back decrypted (one that could not be decrypted stays ciphertext and so differs), and a value of a kind that is not plainly comparable
+    /// counts as changed: a write that was not needed is harmless, a skipped write that was is not.</summary>
+    private List<string> ChangedFields(Row row, IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> current)
     {
-        if (!current.TryGetValue(row.MatchedId!.Value, out var existing) || row.Values.Count == 0) return false;
+        if (!current.TryGetValue(row.MatchedId!.Value, out var existing) || row.Values.Count == 0) return ["(record not read)"];
+        List<string> changed = [];
         foreach (var (fid, value) in row.Values)
         {
             var field = _plan.DestinationFields.FirstOrDefault(f => f.Fid == fid);
-            if (field is null || field.IsEncrypted) return false;
-            if (!existing.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var stored) || !ImportValueEquality.Same(stored, value)) return false;
+            if (field is null) { changed.Add($"#{fid}"); continue; }
+            if (!existing.TryGetValue(PhysicalNaming.GetPhysicalColumnName(field), out var stored) || !ImportValueEquality.Same(stored, value))
+                changed.Add(field.Name);
         }
-        return true;
+        return changed;
     }
 
     private List<ImportWrittenRow> WrittenRows(List<Row> inserted, List<Row> updated, List<Row> unchanged)
@@ -462,7 +468,7 @@ public sealed class ImportChunkWriter
                         source.TryGetValue(map.SourceColumn!, out raw);
                         break;
                 }
-                if (!ImportTypeCompatibility.TryConvert(raw, map.Destination, out var converted, out var error))
+                if (!ImportTypeCompatibility.TryConvert(raw, map.Destination, out var converted, out var error, _plan.DateFormat))
                     failure = (fid, ImportReason.TypeMismatch, error!);
                 else if (_formats.TryGetValue(fid, out var format) && format.Check(converted) is { } formatError)
                     failure = (fid, ImportReason.FormatViolation, formatError);
@@ -483,7 +489,7 @@ public sealed class ImportChunkWriter
         error = null;
         try
         {
-            raw = FormulaRawValue.ToRaw(_engine.Evaluate(map.Formula!, new RowRecordContext(row.Source, _fidToColumn), _plan.FormulaOptions));
+            raw = FormulaRawValue.ToRaw(_engine.Evaluate(map.Formula!, _plan.File is not null ? new ImportFileFormulaContext(row.Source, _fidToColumn, _plan.DateFormat) : new RowRecordContext(row.Source, _fidToColumn), _plan.FormulaOptions));
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

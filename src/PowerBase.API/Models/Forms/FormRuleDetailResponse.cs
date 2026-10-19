@@ -44,8 +44,16 @@ public class FormRuleActionResponse
     public long? TargetElementId { get; init; }
     public long? TargetSectionId { get; init; }
     public long? TargetBlockId { get; init; }
+    public Guid? TargetElementPublicId { get; init; }
+    public Guid? TargetSectionPublicId { get; init; }
+    public Guid? TargetBlockPublicId { get; init; }
+    public Guid? TargetPagePublicId { get; init; }
     public string? ActionValue { get; init; }
     public bool RunOnceOnActivation { get; init; }
+    public string? ValueSource { get; init; }
+    public long? SourceFieldId { get; init; }
+    public string? MessageType { get; init; }
+    public string? MessageSeverity { get; init; }
     public bool IsExpressionValue { get; init; }
     public int DisplayOrder { get; init; }
 }

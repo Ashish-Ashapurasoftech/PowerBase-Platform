@@ -39,6 +39,7 @@ public class FormSectionResponse
     public bool ShowDividers { get; init; } = true;
     public string? DividerColor { get; init; }
     public int? DividerWidthPx { get; init; }
+    public bool ShowHeading { get; init; } = true;
 }
 
 public class FormBlockResponse
@@ -46,6 +47,8 @@ public class FormBlockResponse
     public long DbId { get; init; }
     public Guid Id { get; init; }
     public string? Heading { get; init; }
+    public string? Name { get; init; }
+    public bool ShowHeading { get; init; } = true;
     public string? BackgroundColor { get; init; }
     public int? Width { get; init; }
     public int DisplayOrder { get; init; }
@@ -92,4 +95,5 @@ public class FormElementResponse
     public string? ContentWidthMode { get; init; }
     public int? ContentWidthValue { get; init; }
     public string? ContentWidthUnit { get; init; }
+    public string? Name { get; init; }
 }
