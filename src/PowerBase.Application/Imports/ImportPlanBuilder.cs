@@ -34,7 +34,7 @@ public sealed class ResolvedMapping
     /// <summary>Dynamic, into a Date, Date and Time or Time field from text: the formats the dates and times of the column are written in.</summary>
     public string? DateFormat { get; init; }
     public string? TimeFormat { get; init; }
-    /// <summary>Into a Date and Time field from text: the time zone the times in the file are in (null: UTC).</summary>
+    /// <summary>Into a Date and Time field from text: the time zone the clock readings in the file are in (null: stored as written, as UTC).</summary>
     public TimeZoneInfo? Zone { get; init; }
 }
 
@@ -193,7 +193,7 @@ public sealed class ImportPlanBuilder(
             }
             mappings.Add(m.Source switch
             {
-                ImportMappingSource.Dynamic => ResolveDynamic(m, dest, sourceWithVirtuals, anySourceType: file is not null || (m.SourceFid is { } sf && ImportVirtual.IsVirtualFid(sf))),
+                ImportMappingSource.Dynamic => ResolveDynamic(m, dest, sourceWithVirtuals, anySourceType: file is not null || (m.SourceFid is { } sf && ImportVirtual.IsVirtualFid(sf)), cfg.RunTimeZone),
                 ImportMappingSource.Static => ResolveStatic(m, dest, dest.Fid == mergeKey?.Fid),
                 ImportMappingSource.Formula => ResolveFormula(m, dest, sourceSchema),
                 _ => throw Invalid($"'{ImportTypeCompatibility.DisplayName(dest)}' has an unknown value source.")
@@ -460,7 +460,7 @@ public sealed class ImportPlanBuilder(
         };
     }
 
-    private ResolvedMapping ResolveDynamic(ImportFieldMapping m, AppField dest, IReadOnlyList<AppField> visibleSource, bool anySourceType)
+    private ResolvedMapping ResolveDynamic(ImportFieldMapping m, AppField dest, IReadOnlyList<AppField> visibleSource, bool anySourceType, string? runTimeZone = null)
     {
         var src = m.SourceFid.HasValue ? visibleSource.FirstOrDefault(f => f.Fid == m.SourceFid && !f.IsDeleted) : null;
         if (src is null) throw Invalid($"The source field for '{ImportTypeCompatibility.DisplayName(dest)}' is missing or not visible to you.");
@@ -474,7 +474,8 @@ public sealed class ImportPlanBuilder(
         {
             Destination = dest, Kind = ImportMappingSource.Dynamic, Source = src, SourceColumn = PhysicalNaming.GetPhysicalColumnName(src),
             DateFormat = needsDate ? m.DateFormat : null, TimeFormat = needsTime ? m.TimeFormat : null,
-            Zone = dest.TypeCode == "DateTime" ? ImportDateFormats.ZoneOf(m.TimeZone) : null
+            // The zone the mapping names, else that of the person running it: a Date and Time shows as written in their browser.
+            Zone = dest.TypeCode == "DateTime" ? ImportDateFormats.ZoneOf(m.TimeZone) ?? ImportDateFormats.ZoneOf(runTimeZone) : null
         };
     }
 

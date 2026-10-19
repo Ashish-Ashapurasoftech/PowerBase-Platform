@@ -154,50 +154,42 @@ public class ImportDateFormatTests
         Time("21:05:00 PM", "HH:mm:ss").Should().Be("21:05:00");
     }
 
-    // ---- the time zone of a date and time ----
+    // ---- the time zone of a date and time (filled in from the browser; none stores the reading as written) ----
 
     [Fact]
-    public void A_date_and_time_in_a_zone_is_stored_as_the_moment_it_was_in_utc()
+    public void A_date_and_time_in_a_zone_is_stored_as_the_moment_it_was_in_utc_so_it_shows_as_written()
     {
         var india = ImportDateFormats.ZoneOf("Asia/Calcutta");
         india.Should().NotBeNull();
 
         ImportDateFormats.TryParseDate("05/01/2024 07:15 AM", "DD-MM-YYYY", "hh:mm AM/PM", true, out var utc, out _, india).Should().BeTrue();
         utc.Should().Be(new DateTime(2024, 1, 5, 1, 45, 0, DateTimeKind.Utc));
+        TimeZoneInfo.ConvertTimeFromUtc(utc, india!).Should().Be(new DateTime(2024, 1, 5, 7, 15, 0));
 
         ImportDateFormats.TryParseDate("05/01/2024 07:15 AM", "DD-MM-YYYY", "hh:mm AM/PM", true, out var none, out _).Should().BeTrue();
-        none.Should().Be(new DateTime(2024, 1, 5, 7, 15, 0, DateTimeKind.Utc), "no zone is UTC");
+        none.Should().Be(new DateTime(2024, 1, 5, 7, 15, 0, DateTimeKind.Utc), "no zone: stored as written");
     }
 
     [Fact]
-    public void A_late_evening_stays_on_its_own_day_once_the_zone_is_known()
+    public void A_late_evening_stays_on_its_own_day_and_a_month_word_date_is_in_the_zone_too()
     {
         var india = ImportDateFormats.ZoneOf("Asia/Calcutta");
 
-        // 21 December 21:05 in India is 15:35 UTC the same day; read as UTC it would show 02:35 on the 22nd in India.
-        ImportDateFormats.TryParseDate("21/12/2005 9:05:00 PM", "DD-MM-YYYY", "hh:mm:ss AM/PM", true, out var utc, out _, india).Should().BeTrue();
-        utc.Should().Be(new DateTime(2005, 12, 21, 15, 35, 0, DateTimeKind.Utc));
-        TimeZoneInfo.ConvertTimeFromUtc(utc, india!).Should().Be(new DateTime(2005, 12, 21, 21, 5, 0));
-    }
-
-    [Fact]
-    public void A_month_written_as_a_word_keeps_its_time_and_is_in_the_zone_too()
-    {
-        var india = ImportDateFormats.ZoneOf("Asia/Calcutta");
-
+        ImportDateFormats.TryParseDate("21/12/2005 9:05:00 PM", "DD-MM-YYYY", "hh:mm:ss AM/PM", true, out var evening, out _, india).Should().BeTrue();
+        TimeZoneInfo.ConvertTimeFromUtc(evening, india!).Should().Be(new DateTime(2005, 12, 21, 21, 5, 0));
         ImportDateFormats.TryParseDate("9-Mar-2022 06:30:00", "DD-MM-YYYY", "HH:mm:ss", true, out var morning, out _, india).Should().BeTrue();
-        morning.Should().Be(new DateTime(2022, 3, 9, 1, 0, 0, DateTimeKind.Utc));
+        TimeZoneInfo.ConvertTimeFromUtc(morning, india!).Should().Be(new DateTime(2022, 3, 9, 6, 30, 0));
         ImportDateFormats.TryParseDate("31 October 2026 12:00 PM", "DD-MM-YYYY", "hh:mm AM/PM", true, out var noon, out _, india).Should().BeTrue();
-        noon.Should().Be(new DateTime(2026, 10, 31, 6, 30, 0, DateTimeKind.Utc));
         TimeZoneInfo.ConvertTimeFromUtc(noon, india!).Should().Be(new DateTime(2026, 10, 31, 12, 0, 0));
     }
 
     [Fact]
-    public void A_zone_that_does_not_exist_is_refused()
+    public void A_zone_that_does_not_exist_is_refused_but_none_is_allowed()
     {
         ImportDateFormats.ZoneOf("Nowhere/Land").Should().BeNull();
         ImportDateFormats.Problem("When", Field("DateTime"), Field("Text"), "DD-MM-YYYY", "HH:mm", "Nowhere/Land").Should().Contain("not a time zone");
         ImportDateFormats.Problem("When", Field("DateTime"), Field("Text"), "DD-MM-YYYY", "HH:mm", "Asia/Calcutta").Should().BeNull();
+        ImportDateFormats.Problem("When", Field("DateTime"), Field("Text"), "DD-MM-YYYY", "HH:mm").Should().BeNull("an older mapping has none and is stored as written");
     }
 
     // ---- which columns need a format ----
@@ -210,8 +202,7 @@ public class ImportDateFormatTests
         ImportDateFormats.Problem("When", Field("Date"), Field("Text"), null, null).Should().Contain("date format");
         ImportDateFormats.Problem("When", Field("Time"), Field("Text"), null, null).Should().Contain("time format");
         ImportDateFormats.Problem("When", Field("DateTime"), Field("Text"), "DD-MM-YYYY", null).Should().Contain("time format");
-        ImportDateFormats.Problem("When", Field("DateTime"), Field("Text"), "DD-MM-YYYY", "HH:mm").Should().Contain("time zone");
-        ImportDateFormats.Problem("When", Field("DateTime"), Field("Text"), "DD-MM-YYYY", "HH:mm", "UTC").Should().BeNull();
+        ImportDateFormats.Problem("When", Field("DateTime"), Field("Text"), "DD-MM-YYYY", "HH:mm").Should().BeNull();
         ImportDateFormats.Problem("When", Field("Date"), Field("DateTime"), null, null).Should().BeNull("a source that is already a date carries its own value");
         ImportDateFormats.Problem("Qty", Field("Number"), Field("Text"), null, null).Should().BeNull();
     }
@@ -382,8 +373,28 @@ public class ImportDateFormatTests
         rows[0][13].Should().Be("19:15");
         rows[0][14].Should().Be(new DateTime(2024, 1, 5, 1, 45, 0, DateTimeKind.Utc), "07:15 in India is 01:45 UTC, which the grid shows back as 07:15");
         rows[1][12].Should().Be(new DateTime(1985, 11, 12));
-        rows[1][14].Should().Be(new DateTime(2023, 12, 11, 9, 10, 0, DateTimeKind.Utc), "11-12-2023 14:40 day first is 11 December, 14:40 IST");
+        rows[1][14].Should().Be(new DateTime(2023, 12, 11, 9, 10, 0, DateTimeKind.Utc), "11-12-2023 14:40 day first is 11 December, 14:40 India");
         h.Issues.Single().SourceRowRef.Should().Be(4);
         h.Issues.Single().Message.Should().Contain("12/21/2005").And.Contain("DD-MM-YYYY");
+    }
+
+    [Fact]
+    public async Task A_run_started_from_a_browser_uses_its_zone_for_a_date_and_time_whose_mapping_names_none()
+    {
+        var cfg = new ImportDefinitionConfig
+        {
+            Name = "f.csv", SourceKind = ImportSourceKinds.File, RunTimeZone = "Asia/Calcutta",
+            File = new ImportFileOptions { Format = "csv", HeaderRow = 1, ColumnBy = "name", Columns = ["Name", "When"] },
+            Mappings = [new() { DestFid = 6, SourceFid = 1001 }, new() { DestFid = 14, SourceFid = 1002, DateFormat = "DD-MM-YYYY", TimeFormat = "hh:mm AM/PM" }]
+        };
+        var h = ImportHarness.Create(cfg, new HarnessOptions
+        {
+            UploadedFile = Encoding.UTF8.GetBytes("Name,When\nPen,05/01/2024 07:15 AM\n"),
+            ConfigureDestination = d => d.Add(ImportHarness.Field(11, 14, "When", "DateTime"))
+        });
+
+        await h.RunAsync();
+
+        h.Store.Inserted.Single()[14].Should().Be(new DateTime(2024, 1, 5, 1, 45, 0, DateTimeKind.Utc), "it shows as 07:15 in the browser of the person who ran it");
     }
 }
