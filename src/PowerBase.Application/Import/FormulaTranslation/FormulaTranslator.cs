@@ -3,6 +3,7 @@ using PowerBase.Application.Formulas;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.FieldSettings;
 using PowerBase.Formula;
+using PowerBase.Formula.Binding;
 using PowerBase.Formula.Types;
 
 namespace PowerBase.Application.Import.FormulaTranslation;
@@ -50,7 +51,8 @@ public class FormulaTranslator
         _engine = engine;
     }
 
-    public FormulaTranslationResult Translate(string? resultType, string? expression, IReadOnlyList<AppField> tableFields)
+    /// <param name="aliasSchema">Resolves <c>[_DBID_*]</c> table tokens (used by Quickbase "add record" URL formulas). Null = none resolve.</param>
+    public FormulaTranslationResult Translate(string? resultType, string? expression, IReadOnlyList<AppField> tableFields, ITableAliasSchema? aliasSchema = null)
     {
         if (string.IsNullOrWhiteSpace(expression))
             return new FormulaTranslationResult
@@ -61,7 +63,7 @@ public class FormulaTranslator
 
         var schema = new AppFieldSchema(tableFields);
         var expectedType = FormulaTypeMap.ParseExpected(resultType);
-        var compiled = _engine.Compile(expression, schema, expectedType);
+        var compiled = _engine.Compile(expression, schema, expectedType, aliasSchema);
 
         if (compiled.HasErrors)
         {
@@ -72,7 +74,7 @@ public class FormulaTranslator
             var rewritten = QuickbaseDialectRewriter.TryRewrite(expression, compiled.Diagnostics);
             if (rewritten is not null)
             {
-                var recompiled = _engine.Compile(rewritten, schema, expectedType);
+                var recompiled = _engine.Compile(rewritten, schema, expectedType, aliasSchema);
                 if (!recompiled.HasErrors)
                     return Success(FormulaTranslationStatus.Adjusted, recompiled.ResultType.ToString(), rewritten);
 

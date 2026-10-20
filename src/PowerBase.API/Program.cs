@@ -347,6 +347,13 @@ builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListNavPages.List
 builder.Services.AddScoped<IAppRepository, AppRepository>();
 builder.Services.AddScoped<IAppVariableRepository, AppVariableRepository>();
 builder.Services.AddScoped<IImportSourceRefRepository, ImportSourceRefRepository>();
+builder.Services.AddScoped<IAppImportJobRepository, AppImportJobRepository>();
+builder.Services.AddScoped<IEmailTemplateRepository, EmailTemplateRepository>();
+builder.Services.AddSingleton<PowerBase.Application.Import.Jobs.AppImportJobQueue>();
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.AppImportJobService>();
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.EmailTemplateService>();
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.AppImportJobRunner>();
+builder.Services.AddHostedService<PowerBase.API.Workers.AppImportJobWorker>();
 builder.Services.AddScoped<IAppRoleRepository, AppRoleRepository>();
 builder.Services.AddScoped<IAppRolePermissionRepository, AppRolePermissionRepository>();
 builder.Services.AddScoped<IAppUserRepository, AppUserRepository>();
@@ -489,6 +496,9 @@ builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.Formu
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblExtrasImporter>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblDeferredResolver>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportFieldSanitizer>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblSettingsApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPermissionsApplier>();
 builder.Services.AddScoped<PowerBase.Application.Import.Diff.ImportDiffBuilder>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportDiff.ImportDiffQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Commands.UpdateAppFromPbl.UpdateAppFromPblCommandHandler>();

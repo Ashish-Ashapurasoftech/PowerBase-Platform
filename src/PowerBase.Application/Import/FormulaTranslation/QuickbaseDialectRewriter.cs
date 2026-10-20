@@ -58,12 +58,11 @@ internal static class QuickbaseDialectRewriter
             return null;
 
         // Right-to-left so each edit leaves earlier offsets untouched.
+        var edits = operands.Select(span => (Span: span, Text: $"ToText({expression[span.Start..span.End]})"))
+            .OrderByDescending(e => e.Span.Start);
         var rewritten = expression;
-        foreach (var span in operands.OrderByDescending(s => s.Start))
-        {
-            var inner = rewritten[span.Start..span.End];
-            rewritten = rewritten[..span.Start] + $"ToText({inner})" + rewritten[span.End..];
-        }
+        foreach (var (span, text) in edits)
+            rewritten = rewritten[..span.Start] + text + rewritten[span.End..];
 
         return rewritten;
     }

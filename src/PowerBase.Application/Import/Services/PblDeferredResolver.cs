@@ -1,6 +1,7 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Pbl;
+using PowerBase.Application.Reports;
 using PowerBase.Application.Relationships;
 using PowerBase.Application.Relationships.Commands.AddLookupFields;
 using PowerBase.Application.Relationships.Commands.AddSummaryField;
@@ -89,8 +90,30 @@ public class PblDeferredResolver
         {
             var childFields = await _fieldRepo.ListByTableAsync(item.ChildTable.Id, ct);
             var map = FieldFids.ByNameOrLabel(childFields);
-            if (item.Summary.TargetFieldName is null || !map.TryGetValue(item.Summary.TargetFieldName, out var targetFid))
-                continue;
+
+            // Count / Exists have no target field. Anything else waits until its target exists.
+            long? targetFid = null;
+            if (item.Summary.TargetFieldName is not null)
+            {
+                if (!map.TryGetValue(item.Summary.TargetFieldName, out var resolvedTarget))
+                    continue;
+                targetFid = resolvedTarget;
+            }
+
+            // A filter on a field that does not exist yet waits too.
+            FilterGroup? matching = null;
+            if (item.Summary.Filter is not null)
+            {
+                matching = PblPermissionsApplier.ToFilterGroup(item.Summary.Filter, childFields, out var filterProblem);
+                if (matching is null)
+                {
+                    if (filterProblem is not null && filterProblem.Contains("does not exist", StringComparison.Ordinal))
+                        continue;
+                    pending.Remove(item);
+                    skipped.Add(Skip(item.Summary.LogicalRef, item.Summary.Name, $"Summary not created: its filter could not be built ({filterProblem})."));
+                    continue;
+                }
+            }
 
             pending.Remove(item);
 
@@ -109,10 +132,10 @@ public class PblDeferredResolver
 
             try
             {
-                var target = childFields.FirstOrDefault(f => f.Fid == targetFid);
-                SummaryTargetValidator.Validate(function, (int)targetFid, target, item.Summary.TargetSubField);
+                var target = targetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == targetFid) : null;
+                SummaryTargetValidator.Validate(function, (int?)targetFid, target, item.Summary.TargetSubField);
                 await _addSummaryHandler.HandleAsync(new AddSummaryFieldCommand(
-                    item.RelationshipPublicId, item.Summary.Label ?? item.Summary.Name, function, (int)targetFid, null), ct);
+                    item.RelationshipPublicId, item.Summary.Label ?? item.Summary.Name, function, (int?)targetFid, matching), ct);
                 added++;
             }
             catch (DomainException ex)

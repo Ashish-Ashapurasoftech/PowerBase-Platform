@@ -134,6 +134,7 @@ public static class QblSerializer
             children[key] = val;
         }
 
-        return new QblResourceNode { Type = type, Properties = properties, Children = children };
+        int? sourceId = raw.TryGetValue("Id", out var idRaw) && int.TryParse(idRaw?.ToString(), out var parsedId) ? parsedId : null;
+        return new QblResourceNode { Type = type, SourceId = sourceId, Properties = properties, Children = children };
     }
 }

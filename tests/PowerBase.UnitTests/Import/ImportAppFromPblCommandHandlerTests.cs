@@ -128,7 +128,11 @@ public class ImportAppFromPblCommandHandlerTests
             formulaTranslator, createReportHandler, createRelationshipHandler, createFormHandler, saveFormLayoutHandler,
             getFormLayoutHandler, createFormRuleHandler, saveFormRuleHandler,
             createAppRoleHandler, updateTablePermissionsHandler, extrasImporter, sourceRefRecorder,
-            new PblDeferredResolver(null!, null!, _fieldRepo));
+            new PblDeferredResolver(null!, null!, _fieldRepo),
+            new ImportFieldSanitizer(new FieldSettingsValidatorRegistry(Array.Empty<IFieldSettingsValidator>())),
+            // The settings applier drives other handlers (update app/table/field, set key); it has its own tests — here it is a no-op.
+            Substitute.For<PblSettingsApplier>(new object?[] { null, null, null, null, null, null, null, null }),
+            Substitute.For<PblPermissionsApplier>(new object?[] { null, null, null, null, null, null, null }));
     }
 
     public ImportAppFromPblCommandHandlerTests()

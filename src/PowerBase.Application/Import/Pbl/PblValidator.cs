@@ -527,6 +527,14 @@ public class PblValidator
         {
             foreach (var condition in rule.Conditions ?? [])
             {
+                if (string.Equals(condition.Kind, "role", StringComparison.OrdinalIgnoreCase))
+                {
+                    // A role condition names a role instead of a field.
+                    if (string.IsNullOrWhiteSpace(condition.Value) || condition.Operator is not ("includes" or "notIncludes"))
+                        issues.Add(Error("INVALID_FORM_RULE_ROLE_CONDITION", $"Form rule '{rule.Name}' role condition needs a role name and the operator includes/notIncludes.", rule.LogicalRef));
+                    continue;
+                }
+
                 if (string.IsNullOrWhiteSpace(condition.FieldName) || !validFieldNames.Contains(condition.FieldName))
                     issues.Add(Error("UNKNOWN_FORM_RULE_CONDITION_FIELD", $"Form rule '{rule.Name}' condition references unknown field '{condition.FieldName}'.", rule.LogicalRef));
 
@@ -550,7 +558,9 @@ public class PblValidator
                 continue;
             }
 
-            var resolved = action.TargetType switch
+            // A message or "block the save" without a target is valid: the message is the point.
+            var needsNoTarget = action.ActionType is "DisplayMessage" or "PreventSave" && action.TargetElementRef is null && action.TargetSectionRef is null && action.TargetBlockRef is null;
+            var resolved = needsNoTarget || action.TargetType switch
             {
                 "Field" => action.TargetElementRef is not null && elementRefs.Contains(action.TargetElementRef),
                 "Section" => action.TargetSectionRef is not null && sectionRefs.Contains(action.TargetSectionRef),

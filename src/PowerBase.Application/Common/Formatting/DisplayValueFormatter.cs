@@ -185,7 +185,10 @@ public static class DisplayValueFormatter
         var symbol = !string.IsNullOrEmpty(field?.Symbol) ? field!.Symbol! : !string.IsNullOrEmpty(app.Currency.Symbol) ? app.Currency.Symbol : "$";
         var position = !string.IsNullOrEmpty(field?.Position) ? field!.Position! : app.Currency.Position ?? "Before";
         var number = FormatNumber(value, field, app);
-        return string.Equals(position, "After", StringComparison.OrdinalIgnoreCase) ? number + symbol : symbol + number;
+        if (string.Equals(position, "After", StringComparison.OrdinalIgnoreCase)) return number + symbol;
+        if (string.Equals(position, "BetweenSignAndNumber", StringComparison.OrdinalIgnoreCase) && number.StartsWith('-'))
+            return "-" + symbol + number[1..];
+        return symbol + number;
     }
 
     /// <summary>Western: groups of 3 ("1,234,567"). Indian: last 3, then groups of 2 ("12,34,567").</summary>

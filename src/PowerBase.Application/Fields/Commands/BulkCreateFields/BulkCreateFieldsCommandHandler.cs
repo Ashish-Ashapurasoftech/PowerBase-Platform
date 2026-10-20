@@ -203,10 +203,11 @@ public class BulkCreateFieldsCommandHandler
                 // fields created earlier in this batch, so formulas can reference them.
                 Settings = new FormulaCanonicalizer(fieldsSoFar, variables: variables).ToStoredSettings(fieldType.Code, item.Settings),
                 CreatedBy = _queryContext.UserId,
-                IsSearchable = advancedDefaults.Searchable,
+                IsSearchable = advancedDefaults.Searchable && item.IsSearchable != false,
                 IsSortable = advancedDefaults.Sortable,
                 IsFilterable = advancedDefaults.Filterable,
-                IsReportable = advancedDefaults.Reportable,
+                IsReportable = advancedDefaults.Reportable && item.IsReportable != false,
+                HelpText = NullIfBlank(item.HelpText),
                 IsAuditable = item.IsAuditable,
                 IsEncrypted = item.IsEncrypted && !PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(fieldType.Code),
                 IsAutoFill = FieldAutoFillCapability.IsSupported(fieldType.Code),

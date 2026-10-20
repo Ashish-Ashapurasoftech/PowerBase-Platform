@@ -28,6 +28,10 @@ public sealed class QblResourceNode
 {
     public string Type { get; init; } = string.Empty;
 
+    /// <summary>The node's numeric <c>Id:</c> (a field id, report id, form id…) — null when absent. Every QBL
+    /// field carries one; formulas, record filters and picker/key settings refer to fields by it.</summary>
+    public int? SourceId { get; init; }
+
     /// <summary>Raw property values. May contain nested <see cref="Dictionary{TKey,TValue}"/>,
     /// <see cref="List{T}"/>, scalars, or <see cref="QblRef"/>/<see cref="QblBadRef"/>/
     /// <see cref="QblVarRef"/> markers produced by <see cref="QblTagNodeDeserializer"/>.</summary>

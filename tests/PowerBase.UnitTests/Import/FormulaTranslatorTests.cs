@@ -2,6 +2,7 @@ using FluentAssertions;
 using PowerBase.Application.Import.FormulaTranslation;
 using PowerBase.Domain.Entities;
 using PowerBase.Formula;
+using PowerBase.Formula.Binding;
 
 namespace PowerBase.UnitTests.Import;
 
@@ -116,5 +117,69 @@ public class FormulaTranslatorTests
         var result = _sut.Translate("Number", "[Qty] * 2", fieldsMissingFid);
 
         result.Status.Should().Be(FormulaTranslationStatus.NeedsManualReview);
+    }
+
+    private sealed class Aliases : ITableAliasSchema
+    {
+        public bool TryResolve(string alias, out string tableId)
+        {
+            tableId = "11111111-1111-1111-1111-111111111111";
+            return string.Equals(alias, "_DBID_CLIENTS", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void Translate_AddRecordUrlWithTableAliasAndNumberArgument_ResolvesAliasAndWrapsToText()
+    {
+        const string formula = "\"db/\" & [_DBID_CLIENTS] & \"?x=\" & URLEncode([Qty])";
+
+        _sut.Translate("Text", formula, TableFields()).Status.Should().Be(FormulaTranslationStatus.NeedsManualReview);
+
+        var result = _sut.Translate("Text", formula, TableFields(), new Aliases());
+        result.Status.Should().Be(FormulaTranslationStatus.Adjusted);
+        result.SettingsJson.Should().Contain("ToText([Qty])");
+    }
+
+    [Fact]
+    public void Translate_LeftAndRightWithTextDelimiter_CompileCleanly()
+    {
+        _sut.Translate("Text", "Left([Name], \";\")", TableFields()).Status.Should().Be(FormulaTranslationStatus.Clean);
+        _sut.Translate("Text", "If(Contains([Name], \";\"), Right([Name], \";\"), [Name])", TableFields()).Status.Should().Be(FormulaTranslationStatus.Clean);
+    }
+
+    [Fact]
+    public void Translate_LeftWithCount_IsLeftAlone()
+    {
+        _sut.Translate("Text", "Left([Name], 3)", TableFields()).Status.Should().Be(FormulaTranslationStatus.Clean);
+    }
+
+    [Fact]
+    public void Translate_DateTimeVariableTypeAndTwoArgumentToTimestamp_Compile()
+    {
+        const string formula = "var dateTime stamp = ToTimestamp(ToDate(\"2026-06-11\"), ToTimeOfDay(\"1:30 PM\")); $stamp";
+
+        var result = _sut.Translate("DateTime", formula, TableFields());
+
+        result.Status.Should().NotBe(FormulaTranslationStatus.NeedsManualReview, string.Join("; ", result.Diagnostics));
+    }
+
+    [Fact]
+    public void Translate_FormulaReadingReferenceField_Compiles()
+    {
+        var fields = TableFields();
+        fields.Add(new AppField { Name = "Related Client", TypeCode = "Reference", Fid = 9 });
+
+        var result = _sut.Translate("Text", "[Name] & \"/\" & [Related Client]", fields);
+
+        result.Status.Should().Be(FormulaTranslationStatus.Clean, string.Join("; ", result.Diagnostics));
+    }
+
+    [Fact]
+    public void Translate_ReferenceCompareToNumber_NeedsToNumber()
+    {
+        var fields = TableFields();
+        fields.Add(new AppField { Name = "Related Client", TypeCode = "Reference", Fid = 9 });
+
+        _sut.Translate("Bool", "ToNumber([Related Client]) = [Qty]", fields).Status.Should().Be(FormulaTranslationStatus.Clean);
     }
 }

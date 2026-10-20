@@ -47,7 +47,9 @@ public class AppSeeder : IAppSeeder
         // at all, so every table created via that wizard got the entity default (empty string) —
         // fine for the first table in an app, but the second one collided on
         // UX_AppTable_AppId_Alias since both had the same (AppId, '') key.
-        table.Alias = await GenerateUniqueAliasAsync(table.AppId, table.Name, ct);
+        // An alias supplied by the caller (QBL/PBL import keeps the source table's _DBID_* alias) wins when it is free.
+        if (string.IsNullOrWhiteSpace(table.Alias) || await _tableRepo.AliasExistsInAppAsync(table.AppId, table.Alias, ct))
+            table.Alias = await GenerateUniqueAliasAsync(table.AppId, table.Name, ct);
 
         var (id, publicId) = await _tableRepo.CreateAsync(table, ct);
         table.Id = id;

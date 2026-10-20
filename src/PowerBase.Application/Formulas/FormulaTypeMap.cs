@@ -18,7 +18,7 @@ internal static class FormulaTypeMap
     /// <summary>
     /// The <see cref="FormulaType"/> a field's values present to a formula, or null
     /// when the field type cannot be referenced in a scalar formula (File, Address,
-    /// ranges). For Formula fields, the declared result type is used.
+    /// ranges). References, Lookups and Summaries can be. For Formula fields, the declared result type is used.
     /// </summary>
     public static FormulaType? FieldType(string typeCode, string? settingsJson) => typeCode switch
     {
@@ -33,6 +33,9 @@ internal static class FormulaTypeMap
         "User" => FormulaType.User,
         "MultiUser" => FormulaType.UserList,
         "Formula" => ResultType(ParseSettings(settingsJson)?.ResultType),
+        // A Reference reads as the related record's key, as text: a readable key value when the parent table has a
+        // custom key (the relational projection supplies it), otherwise the Record ID#. Wrap it in ToNumber() to do arithmetic.
+        "Reference" => FormulaType.Text,
         "Lookup" => LookupResultType(settingsJson),
         "Summary" => SummaryResultType(settingsJson),
         _ when typeCode.StartsWith("Formula_", StringComparison.Ordinal) => FormulaVariantResultType(typeCode),

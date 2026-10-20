@@ -2,6 +2,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using PowerBase.API.Attributes;
 using PowerBase.API.Models;
+using PowerBase.Application.Import.Jobs;
+using PowerBase.Application.Imports;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Commands.UpdateAppFromPbl;
 using PowerBase.Application.Import.Diff;
@@ -28,8 +30,12 @@ public class ImportController : ControllerBase
     private readonly ImportAppFromPblCommandHandler _importHandler;
     private readonly ImportDiffQueryHandler _diffHandler;
     private readonly UpdateAppFromPblCommandHandler _updateHandler;
+    private readonly AppImportJobService _jobs;
+    private readonly IConfiguration _configuration;
 
     public ImportController(
+        AppImportJobService jobs,
+        IConfiguration configuration,
         ImportPreviewQueryHandler previewHandler,
         ImportAppFromPblCommandHandler importHandler,
         ImportDiffQueryHandler diffHandler,
@@ -39,6 +45,8 @@ public class ImportController : ControllerBase
         _importHandler = importHandler;
         _diffHandler = diffHandler;
         _updateHandler = updateHandler;
+        _jobs = jobs;
+        _configuration = configuration;
     }
 
     /// <summary>Parse and validate a QBL/PBL document, returning a preview of the tables/fields
@@ -66,6 +74,7 @@ public class ImportController : ControllerBase
     [RequestSizeLimit(UploadLimit)]
     [RequestFormLimits(MultipartBodyLengthLimit = UploadLimit)]
     [ProducesResponseType(typeof(ApiResponse<ImportReport>), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ApiResponse<AppImportJobDto>), StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Import(
@@ -74,6 +83,15 @@ public class ImportController : ControllerBase
         [FromQuery] ImportMode mode = ImportMode.CreateNewApp,
         CancellationToken ct = default)
     {
+        // Big files take minutes: accept the upload now, import in the background and email the result.
+        if (mode == ImportMode.CreateNewApp && file is not null && AppImportJobPolicy.RunsInBackground(file.Length))
+        {
+            using var buffer = new MemoryStream();
+            await file.CopyToAsync(buffer, ct);
+            var job = await _jobs.StartAsync(file.FileName, buffer.ToArray(), mapping, FrontendBaseUrl(), ct);
+            return Accepted(new ApiResponse<AppImportJobDto>(job));
+        }
+
         var content = await ReadFileAsync(file, ct);
         var result = await _importHandler.HandleAsync(new ImportAppFromPblCommand(content, mode, ImportMapping.Parse(mapping)), ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<ImportReport>(result));
@@ -115,6 +133,38 @@ public class ImportController : ControllerBase
         var result = await _updateHandler.HandleAsync(new UpdateAppFromPblCommand(content, targetAppId, ImportMapping.Parse(mapping)), ct);
         return Ok(new ApiResponse<ImportUpdateReport>(result));
     }
+
+    /// <summary>The caller's background imports (running first, then recent), for the app list.</summary>
+    [HttpGet("jobs")]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<AppImportJobDto>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListJobs(CancellationToken ct) =>
+        Ok(new ApiResponse<IReadOnlyList<AppImportJobDto>>(await _jobs.ListMineAsync(ct)));
+
+    [HttpGet("jobs/{jobId:guid}")]
+    [ProducesResponseType(typeof(ApiResponse<AppImportJobDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetJob(Guid jobId, CancellationToken ct) =>
+        Ok(new ApiResponse<AppImportJobDto>(await _jobs.GetAsync(jobId, ct)));
+
+    /// <summary>The full import report (skipped items, formula diagnostics) of a finished background import.</summary>
+    [HttpGet("jobs/{jobId:guid}/report")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetJobReport(Guid jobId, CancellationToken ct) =>
+        Ok(new { data = await _jobs.GetResultAsync(jobId, ct) });
+
+    /// <summary>Hides a finished background import from the list.</summary>
+    [HttpDelete("jobs/{jobId:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> DismissJob(Guid jobId, CancellationToken ct)
+    {
+        await _jobs.DismissAsync(jobId, ct);
+        return NoContent();
+    }
+
+    /// <summary>The address the completion email links to: the configured frontend, or the caller's Origin when it is a known frontend.</summary>
+    private string? FrontendBaseUrl() => ImportLinks.TrustedBaseUrl(
+        _configuration["Frontend:BaseUrl"], Request.Headers.Origin.ToString(), _configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? []);
 
     private static async Task<string> ReadFileAsync(IFormFile? file, CancellationToken ct)
     {

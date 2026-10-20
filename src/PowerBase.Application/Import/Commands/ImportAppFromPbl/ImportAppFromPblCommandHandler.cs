@@ -1,3 +1,5 @@
+using PowerBase.Application.Import.Jobs;
+using PowerBase.Application.Formulas;
 using System.Text.Json;
 using PowerBase.Application.Apps.Commands.CreateApp;
 using PowerBase.Application.Apps.Commands.CreateAppRole;
@@ -17,6 +19,7 @@ using PowerBase.Application.Import.Services;
 using PowerBase.Application.Relationships;
 using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Reports;
+using PowerBase.Application.Reports.Validation;
 using PowerBase.Application.Reports.Commands.CreateReport;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -89,6 +92,9 @@ public class ImportAppFromPblCommandHandler
     private readonly PblExtrasImporter _extrasImporter;
     private readonly ImportSourceRefRecorder _sourceRefRecorder;
     private readonly PblDeferredResolver _deferredResolver;
+    private readonly ImportFieldSanitizer _fieldSanitizer;
+    private readonly PblSettingsApplier _settingsApplier;
+    private readonly PblPermissionsApplier _permissionsApplier;
 
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
@@ -113,7 +119,10 @@ public class ImportAppFromPblCommandHandler
         UpdateTablePermissionsCommandHandler updateTablePermissionsHandler,
         PblExtrasImporter extrasImporter,
         ImportSourceRefRecorder sourceRefRecorder,
-        PblDeferredResolver deferredResolver)
+        PblDeferredResolver deferredResolver,
+        ImportFieldSanitizer fieldSanitizer,
+        PblSettingsApplier settingsApplier,
+        PblPermissionsApplier permissionsApplier)
     {
         _validator = validator;
         _createAppHandler = createAppHandler;
@@ -138,6 +147,9 @@ public class ImportAppFromPblCommandHandler
         _extrasImporter = extrasImporter;
         _sourceRefRecorder = sourceRefRecorder;
         _deferredResolver = deferredResolver;
+        _fieldSanitizer = fieldSanitizer;
+        _settingsApplier = settingsApplier;
+        _permissionsApplier = permissionsApplier;
     }
 
     public async Task<ImportReport> HandleAsync(ImportAppFromPblCommand command, CancellationToken ct = default)
@@ -151,6 +163,7 @@ public class ImportAppFromPblCommandHandler
         List<PblIssue> conversionIssues;
         try
         {
+            ImportProgress.Report("Reading the file", 3);
             (document, conversionIssues) = ImportDocumentParser.Parse(command.PblJson);
         }
         catch (JsonException ex)
@@ -214,7 +227,11 @@ public class ImportAppFromPblCommandHandler
 
                 // Preserve the imported file's exact Name (its stable third-party identifier) rather
                 // than regenerating one — see AppFieldSpec.Name.
-                fieldSpecs.Add(new AppFieldSpec(field.Label ?? field.Name, field.TypeCode, field.Settings, Name: field.Name));
+                var item = BuildScalarItem(field, skipped);
+                fieldSpecs.Add(new AppFieldSpec(
+                    item.Label, item.TypeCode, item.Settings, Name: item.Name, Description: item.Description, HelpText: item.HelpText,
+                    IsRequired: item.IsRequired, DefaultValue: item.DefaultValue, IsAuditable: item.IsAuditable,
+                    IsSearchable: item.IsSearchable, IsReportable: item.IsReportable));
             }
 
             // Only let the seeder add its stock "Main Form"/"List All"/"List Changes" when this
@@ -233,7 +250,8 @@ public class ImportAppFromPblCommandHandler
                 table.Description,
                 Config: null,
                 Fields: fieldSpecs,
-                SeedDefaultViews: !suppliesOwnViews));
+                SeedDefaultViews: !suppliesOwnViews,
+                Alias: table.AliasHint));
         }
 
         var createCommand = new CreateAppCommand(
@@ -243,6 +261,7 @@ public class ImportAppFromPblCommandHandler
             document.App.Color,
             tableSpecs);
 
+        ImportProgress.Report("Creating tables and fields", 8);
         var createResult = await _createAppHandler.HandleAsync(createCommand, ct);
         var fieldsCreated = tableSpecs.Sum(t => t.Fields?.Count ?? 0);
 
@@ -257,7 +276,13 @@ public class ImportAppFromPblCommandHandler
         // without blocking every other user of that tenant.
         try
         {
+            await _settingsApplier.ApplyAppSettingsAsync(document.App, createResult.PublicId, skipped, ct);
+            await _settingsApplier.ApplyTableKeysAsync(document, createResult.PublicId, skipped, ct);
+            ImportProgress.Report("Creating roles, relationships and formulas", 30);
             applied = await ApplyDocumentAsync(document, createResult.PublicId, null, skipped, formulaTranslations, ct);
+            ImportProgress.Report("Applying table settings", 92);
+            await _settingsApplier.ApplyTableSettingsAsync(document, createResult.PublicId, skipped, ct);
+            await _settingsApplier.ApplyCustomDataRulesAsync(document, createResult.PublicId, skipped, ct);
         }
         catch (Exception ex)
         {
@@ -345,9 +370,11 @@ public class ImportAppFromPblCommandHandler
             var deferredSummaries = new List<DeferredSummary>();
 
             if (roles.Count > 0)
+                ImportProgress.Report("Creating roles", 35);
                 rolesCreated = await CreateRolesAsync(roles, tableNameByRef, tableByName, appPublicId, skipped, ct);
 
             if (relationships.Count > 0)
+                ImportProgress.Report("Creating relationships", 42);
                 relationshipsCreated = await CreateRelationshipsAsync(relationships, tableNameByRef, tableByName, appPublicId, deferredLookups, deferredSummaries, skipped, ct);
 
             // Formula fields must exist before forms and reports are built: a form element or
@@ -358,6 +385,7 @@ public class ImportAppFromPblCommandHandler
             var formulaCandidates = (document.Tables ?? [])
                 .SelectMany(t => (t.Fields ?? []).Where(IsFormulaField).Select(f => (Table: t, Field: f)))
                 .ToList();
+            ImportProgress.Report("Creating formula fields", 55);
             var (formulasCreated, pendingFormulas) = await CreateFormulaFieldsAsync(formulaCandidates, tableByName, formulaTranslations, ct);
             fieldsCreated += formulasCreated;
 
@@ -391,14 +419,12 @@ public class ImportAppFromPblCommandHandler
                 skipped.Add(new ImportSkippedItem { LogicalRef = field.LogicalRef, Name = field.Name, Reason = $"Formula needs manual review: {string.Join("; ", diagnostics)}" });
             }
 
-            if (forms.Count > 0)
-            {
-                var createdFormLayouts = await CreateFormsAsync(forms, tableNameByRef, tableByName, tablesKeepingDefaults, skipped, ct);
-                formsCreated = createdFormLayouts.Count;
+            ImportProgress.Report("Creating reports", 68);
+            // Role refs → the roles this app has now, for report visibility.
+            var roleIdsByRef = await ResolveRoleIdsByRefAsync(document, appPublicId, ct);
 
-                if (forms.Any(f => f.Rules.Count > 0))
-                    formRulesCreated = await CreateFormRulesAsync(forms, createdFormLayouts, tableNameByRef, tableByName, skipped, ct);
-            }
+            // Reports go in before forms: an embedded related-records grid on a form points at a report that must already exist.
+            var createdReports = new Dictionary<string, CreatedReport>(StringComparer.Ordinal);
 
             foreach (var table in document.Tables ?? [])
             {
@@ -456,46 +482,222 @@ public class ImportAppFromPblCommandHandler
                         });
                     }
 
-                    var createdReport = await _createReportHandler.HandleAsync(new CreateReportCommand(
-                        createdTable.PublicId,
-                        report.Name,
-                        Description: null,
-                        Visibility: "Shared",
-                        ReportType: report.ReportType,
-                        Columns: columns,
-                        SortFields: sortFields,
-                        FilterTree: null,
-                        GroupByFieldId: null,
-                        GroupByMode: "EqualValues",
-                        HideTotals: false,
-                        GroupDefaultCollapsed: false,
-                        GroupByDescending: false,
-                        Aggregations: [],
-                        DynamicFilterType: "Default",
-                        CustomDynamicFilterFields: [],
-                        CustomDynamicFilterItems: null,
-                        AllowQuickSearch: true,
-                        VisibleToRoleIds: null), ct);
+                    var createdReport = await CreateReportAsync(report, createdTable, allFields, columns, sortFields, roleIdsByRef, skipped, ct);
+                    if (createdReport is null)
+                        continue;
 
                     // Same reasoning as forms: reports are created IsDefault=false and the seeded
                     // default was suppressed, so the first one that imports for a table becomes it.
-                    if (!tableHasDefaultReport)
+                    // Only a report everyone can see may become the table's default.
+                    var visibleToAll = report.VisibleToRoleRefs is null || roleIdsByRef.Count == 0 || report.VisibleToRoleRefs.Count(roleIdsByRef.ContainsKey) >= roleIdsByRef.Count;
+                    if (!tableHasDefaultReport && visibleToAll)
                     {
                         await _reportRepo.SetDefaultAsync(createdTable.PublicId, createdReport.Id, ct);
                         tableHasDefaultReport = true;
                     }
 
                     reportsCreated++;
+                    createdReports[report.LogicalRef] = new CreatedReport(createdReport.Id, report.Name, createdTable.PublicId);
                 }
+            }
+
+            if (forms.Count > 0)
+            {
+                ImportProgress.Report("Creating forms and rules", 80);
+                var createdFormLayouts = await CreateFormsAsync(forms, tableNameByRef, tableByName, tablesKeepingDefaults, createdReports, relationships, skipped, ct);
+                formsCreated = createdFormLayouts.Count;
+
+                if (forms.Any(f => f.Rules.Count > 0))
+                    formRulesCreated = await CreateFormRulesAsync(forms, createdFormLayouts, tableNameByRef, tableByName, skipped, ct);
             }
         }
 
 
+        // Role switches, record filters and field-level access need every field to exist.
+        ImportProgress.Report("Applying permissions", 88);
+        await _permissionsApplier.ApplyAsync(document, appPublicId, skipped, ct);
+
+        ImportProgress.Report("Creating variables and pages", 90);
         var variablesCreated = await _extrasImporter.CreateVariablesAsync(document.Variables ?? [], appPublicId, skipped, ct);
         var pagesCreated = await _extrasImporter.CreatePagesAsync(document.Pages ?? [], appPublicId, skipped, ct);
 
         return new PblApplyResult(fieldsCreated, reportsCreated, relationshipsCreated, formsCreated, formRulesCreated, rolesCreated, variablesCreated, pagesCreated);
     }
+
+    /// <summary>
+    /// One scalar field's creation item. Settings/flags the target type rejects are dropped individually and reported
+    /// (see <see cref="ImportFieldSanitizer"/>) so a single bad value never fails the table. Unique is applied afterwards
+    /// (it needs a physical index), see <see cref="PblSettingsApplier"/>.
+    /// </summary>
+    public BulkCreateFieldItem BuildScalarItem(PblField field, List<ImportSkippedItem> skipped)
+    {
+        var label = (field.Label ?? field.Name).Trim();
+        var clean = _fieldSanitizer.Sanitize(field.TypeCode, label, field.Settings, field.DefaultValue, field.IsRequired, field.IsUnique == true);
+        foreach (var note in clean.Notes)
+            skipped.Add(new ImportSkippedItem { LogicalRef = field.LogicalRef, Name = field.Name, Reason = note });
+
+        return new BulkCreateFieldItem(
+            field.TypeCode, label, field.Description, clean.IsRequired, field.IsAuditable == true, clean.Settings, clean.DefaultValue,
+            IsEncrypted: false, Name: field.Name, HelpText: field.HelpText, IsSearchable: field.IsSearchable, IsReportable: field.IsReportable);
+    }
+
+    /// <summary>Final PowerBase type code and settings JSON for a formula: the source type can force Url/Email/Phone/RichText
+    /// when the expression is text; the source display options are merged with the translated expression (a URL formula keeps it
+    /// as <c>template</c>); display options the chosen type does not accept are dropped, never the expression.</summary>
+    private (string TypeCode, string Settings) BuildFormulaSettings(PblField field, FormulaTranslationResult translation, List<string> diagnostics)
+    {
+        var typeCode = translation.TypeCode ?? "Formula_Text";
+        if (typeCode == "Formula_Text" && !string.IsNullOrEmpty(field.FormulaVariant))
+            typeCode = "Formula_" + field.FormulaVariant;
+
+        string? expression = null;
+        if (translation.SettingsJson is not null)
+        {
+            using var doc = JsonDocument.Parse(translation.SettingsJson);
+            expression = doc.RootElement.GetProperty("expression").GetString();
+        }
+
+        var settings = new Dictionary<string, object?>(StringComparer.Ordinal);
+        if (!string.IsNullOrEmpty(field.Settings))
+        {
+            foreach (var prop in JsonDocument.Parse(field.Settings).RootElement.EnumerateObject())
+                settings[prop.Name] = prop.Value.Clone();
+        }
+        settings[typeCode == "Formula_Url" ? "template" : "expression"] = expression;
+
+        var withDisplay = JsonSerializer.Serialize(settings);
+        if (_fieldSanitizer.Sanitize(typeCode, field.Name, withDisplay, null, false, false).Settings is not null)
+            return (typeCode, withDisplay);
+
+        // Display options the type rejects: keep the formula itself.
+        diagnostics.Add("Some source display options were not applied to this formula field.");
+        var expressionOnly = new Dictionary<string, object?> { [typeCode == "Formula_Url" ? "template" : "expression"] = expression };
+        return (typeCode, JsonSerializer.Serialize(expressionOnly));
+    }
+
+    private async Task<Dictionary<string, Guid>> ResolveRoleIdsByRefAsync(PblDocument document, Guid appPublicId, CancellationToken ct)
+    {
+        var result = new Dictionary<string, Guid>(StringComparer.Ordinal);
+        if ((document.Roles ?? []).Count == 0)
+            return result;
+
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var byName = (await _appRoleRepo.ListDetailsByAppIdAsync(appId, ct)).ToDictionary(r => r.Name, r => r.PublicId, StringComparer.OrdinalIgnoreCase);
+        foreach (var role in document.Roles!)
+            if (byName.TryGetValue(role.Name, out var id))
+                result[role.LogicalRef] = id;
+        return result;
+    }
+
+    /// <summary>
+    /// Creates one report with everything the source said (filter, grouping, options, role visibility). PowerBase validates a report as a
+    /// whole, so if it rejects the full definition the report is retried with just columns and sort — and the reason is reported — rather
+    /// than losing the report or failing the import. A report restricted to roles is never created visible to everyone: if its roles
+    /// cannot be resolved it is created private to the importer.
+    /// </summary>
+    private async Task<ReportDetailResult?> CreateReportAsync(
+        PblReport report, AppTable table, IReadOnlyList<AppField> fields, List<long> columns, List<SortSpec> sortFields,
+        Dictionary<string, Guid> roleIdsByRef, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        var byName = FieldFids.ByNameOrLabel(fields);
+
+        FilterGroup? filter = null;
+        string? filterProblem = null;
+        if (report.Filter is not null)
+            filter = PblPermissionsApplier.ToFilterGroup(report.Filter, fields, out filterProblem);
+        if (report.Filter is not null && filter is null)
+            skipped.Add(new ImportSkippedItem { LogicalRef = report.LogicalRef, Name = report.Name, Reason = $"Report filter not applied: {filterProblem ?? "no usable condition"}." });
+
+        // Grouping: when any level groups, the whole ordered list goes through the sort-and-group levels.
+        List<SortGroupLevelCommand>? tableSortGroup = null;
+        if (report.ReportType == "Table" && report.SortFields.Any(s => s.IsGroup))
+        {
+            tableSortGroup = [];
+            foreach (var level in report.SortFields)
+            {
+                if (!byName.TryGetValue(level.FieldName, out var fid)) continue;
+                var fieldType = fields.First(f => f.Fid == fid).TypeCode;
+                var mode = level.IsGroup ? level.GroupMode ?? "EqualValues" : "EqualValues";
+                if (!GroupByModeCategoryHelper.GetAllowedGroupByModes(fieldType).Contains(mode, StringComparer.OrdinalIgnoreCase))
+                    mode = "EqualValues";
+                tableSortGroup.Add(new SortGroupLevelCommand(fid, level.Desc, level.IsGroup, mode));
+            }
+        }
+
+        // Visibility from the source's per-role "listed" switches.
+        var visibility = "Shared";
+        List<Guid>? visibleRoles = null;
+        if (report.VisibleToRoleRefs is { } roleRefs)
+        {
+            var resolved = roleRefs.Where(roleIdsByRef.ContainsKey).Select(r => roleIdsByRef[r]).Distinct().ToList();
+            if (resolved.Count == 0)
+            {
+                visibility = "Personal";
+            }
+            else if (resolved.Count < roleIdsByRef.Count)
+            {
+                visibility = "SpecificRoles";
+                visibleRoles = resolved;
+            }
+        }
+
+        var dynamicFields = report.DynamicFilterFieldNames.Where(byName.ContainsKey).Select(n => byName[n]).ToList();
+        var options = new ReportOptionsCommand(
+            ColumnHeaderText: report.ColumnHeaderText ?? "Default",
+            ShowEditIcon: report.ShowEditIcon ?? true,
+            ShowViewIcon: report.ShowViewIcon ?? true,
+            ShowQuickPeekIcon: true,
+            DisableBulkDelete: report.DisableBulkDelete ?? false,
+            DisableBulkUpdate: false,
+            DisableGridEdit: report.DisableGridEdit ?? false,
+            ShowDescriptionOnReportPage: report.ShowDescription);
+
+        CreateReportCommand Command(bool minimal) => new(
+            table.PublicId,
+            report.Name,
+            Description: report.Description,
+            Visibility: minimal ? (visibility == "Personal" ? "Personal" : "Shared") : visibility,
+            ReportType: report.ReportType,
+            Columns: columns,
+            SortFields: sortFields,
+            FilterTree: minimal ? null : filter,
+            GroupByFieldId: null,
+            GroupByMode: "EqualValues",
+            HideTotals: !minimal && report.HideTotals == true,
+            GroupDefaultCollapsed: minimal ? false : report.GroupDefaultCollapsed ?? false,
+            GroupByDescending: false,
+            Aggregations: [],
+            DynamicFilterType: !minimal && report.DynamicFilterType == "Custom" && dynamicFields.Count > 0 ? "Custom" : !minimal && report.DynamicFilterType == "None" ? "None" : "Default",
+            CustomDynamicFilterFields: minimal ? [] : dynamicFields,
+            CustomDynamicFilterItems: null,
+            AllowQuickSearch: minimal || report.AllowQuickSearch != false,
+            VisibleToRoleIds: minimal ? null : visibleRoles,
+            Options: minimal ? null : options,
+            TableSortGroup: minimal ? null : tableSortGroup);
+
+        try
+        {
+            return await _createReportHandler.HandleAsync(Command(minimal: false), ct);
+        }
+        catch (DomainException ex)
+        {
+            try
+            {
+                var created = await _createReportHandler.HandleAsync(Command(minimal: true), ct);
+                skipped.Add(new ImportSkippedItem { LogicalRef = report.LogicalRef, Name = report.Name,
+                    Reason = $"Report imported with columns and sort only; its filter, grouping and options were rejected: {Describe(ex)}" });
+                return created;
+            }
+            catch (DomainException retryEx)
+            {
+                skipped.Add(new ImportSkippedItem { LogicalRef = report.LogicalRef, Name = report.Name, Reason = $"Report not created: {Describe(retryEx)}" });
+                return null;
+            }
+        }
+    }
+
+    private static string Describe(DomainException ex) =>
+        ex is ValidationException ve ? string.Join(" ", ve.Errors.SelectMany(e => e.Value)) : ex.Message;
 
     /// <summary>Translates and creates every table's formula fields, returning how many were
     /// created. Runs after relationships (a formula can reference a Lookup/Summary field) but
@@ -510,6 +712,8 @@ public class ImportAppFromPblCommandHandler
     {
         var created = 0;
         var stillPending = new List<(PblTable Table, PblField Field)>();
+
+        AppTableAliasSchema? aliasSchema = null;
 
         foreach (var tableGroup in candidates.GroupBy(c => c.Table))
         {
@@ -533,7 +737,8 @@ public class ImportAppFromPblCommandHandler
 
             foreach (var field in formulaFields)
             {
-                var translation = _formulaTranslator.Translate(field.ResultType, field.FormulaExpression, currentFields);
+                aliasSchema ??= await AppTableAliasSchema.BuildAsync(_tableRepo, createdTable.AppId, ct);
+                var translation = _formulaTranslator.Translate(field.ResultType, field.FormulaExpression, currentFields, aliasSchema);
 
                 var reportItem = new FormulaTranslationReportItem
                 {
@@ -559,7 +764,11 @@ public class ImportAppFromPblCommandHandler
                 if (!string.Equals(label, (field.Label ?? field.Name).Trim(), StringComparison.Ordinal))
                     reportItem.Diagnostics.Add($"Label '{(field.Label ?? field.Name).Trim()}' is already used by another field on this table; imported as '{label}'.");
 
-                formulaItems.Add(new BulkCreateFieldItem(translation.TypeCode ?? "Formula_Text", label, Settings: translation.SettingsJson, Name: field.Name));
+                var (formulaTypeCode, formulaSettings) = BuildFormulaSettings(field, translation, reportItem.Diagnostics);
+                formulaItems.Add(new BulkCreateFieldItem(
+                    formulaTypeCode, label, field.Description, IsRequired: false, IsAuditable: field.IsAuditable == true,
+                    Settings: formulaSettings, Name: field.Name, HelpText: field.HelpText,
+                    IsSearchable: field.IsSearchable, IsReportable: field.IsReportable));
             }
 
             if (formulaItems.Count > 0)
@@ -639,6 +848,19 @@ public class ImportAppFromPblCommandHandler
             var summarySpecs = new List<CreateSummarySpec>();
             foreach (var summary in rel.Summaries)
             {
+                if (summary.SkipReason is not null)
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = summary.LogicalRef, Name = summary.Name, Reason = $"Summary not created: {summary.SkipReason}." });
+                    continue;
+                }
+
+                // CreateRelationship cannot carry matching criteria; AddSummaryField can, so a filtered summary is added right after.
+                if (summary.Filter is not null)
+                {
+                    pendingSummaries.Add(summary);
+                    continue;
+                }
+
                 int? targetFid = null;
                 if (summary.TargetFieldName is not null)
                 {
@@ -701,6 +923,61 @@ public class ImportAppFromPblCommandHandler
     /// them to re-fetch the layout and match the real, persisted DbIds back to the
     /// PblForm*.LogicalRef each Guid was generated for. PowerBase itself has no need for these
     /// ids to be stable across requests.</summary>
+    /// <summary>
+    /// The JSON PowerBase keeps for an embedded report element: the report, the table it belongs to, and the parent's ReportLink field that
+    /// filters it to related records. The link is found through the relationship between the form's table and the report's table.
+    /// Null when any of those do not exist.
+    /// </summary>
+    private async Task<string?> BuildReportElementContentAsync(
+        PblFormElement element, PblForm form, AppTable parentTable, Dictionary<string, CreatedReport> createdReports,
+        List<PblRelationship> relationships, Dictionary<string, string> tableNameByRef, Dictionary<string, AppTable> tableByName, CancellationToken ct)
+    {
+        if (element.EmbeddedReportRef is null || !createdReports.TryGetValue(element.EmbeddedReportRef, out var report))
+            return null;
+        if (element.EmbeddedReportTableRef is null || !tableNameByRef.TryGetValue(element.EmbeddedReportTableRef, out var childName) || !tableByName.TryGetValue(childName, out var childTable))
+            return null;
+
+        var relationship = relationships.FirstOrDefault(r => r.ParentTableRef == form.TableRef && r.ChildTableRef == element.EmbeddedReportTableRef);
+        if (relationship is null)
+            return null;
+
+        var parentFields = await _fieldRepo.ListByTableAsync(parentTable.Id, ct);
+        var childFields = await _fieldRepo.ListByTableAsync(childTable.Id, ct);
+        var referenceLabel = (relationship.ReferenceFieldLabel ?? relationship.ReferenceFieldName).Trim();
+        var referenceField = childFields.FirstOrDefault(f => string.Equals(f.TypeCode, "Reference", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(f.Label?.Trim(), referenceLabel, StringComparison.OrdinalIgnoreCase));
+        if (referenceField?.Fid is not { } referenceFid)
+            return null;
+
+        var reportLink = parentFields.FirstOrDefault(f => string.Equals(f.TypeCode, "ReportLink", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrEmpty(f.Settings)
+            && JsonSerializer.Deserialize<ReportLinkSettings>(f.Settings!, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) is { } rl
+            && string.Equals(rl.TargetTablePublicId, childTable.PublicId.ToString(), StringComparison.OrdinalIgnoreCase)
+            && rl.TargetFid == referenceFid);
+        if (reportLink?.Fid is not { } reportLinkFid)
+            return null;
+
+        var appPublicId = await _appRepo.GetPublicIdByIdAsync(parentTable.AppId, ct);
+        return JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["reportId"] = report.PublicId.ToString(),
+            ["reportName"] = report.Name,
+            ["reportAppPublicId"] = appPublicId.ToString(),
+            ["reportTablePublicId"] = report.TablePublicId.ToString(),
+            ["filterMode"] = "reportLink",
+            ["reportLinkFid"] = reportLinkFid,
+            ["heightMode"] = "auto",
+            ["heightPx"] = null,
+            ["showToolbar"] = element.ShowToolbar,
+            ["showCreateButton"] = element.AllowCreateRecords,
+            ["openInSubForm"] = element.OpenInSubForm,
+            ["subFormId"] = null,
+            ["embeddedForFid"] = null,
+        });
+    }
+
+    private sealed record CreatedReport(Guid PublicId, string Name, Guid TablePublicId);
+
     private sealed record CreatedFormLayout(
         Guid FormPublicId,
         Dictionary<string, Guid> SectionGuidByRef,
@@ -715,6 +992,8 @@ public class ImportAppFromPblCommandHandler
         Dictionary<string, string> tableNameByRef,
         Dictionary<string, AppTable> tableByName,
         ISet<string>? tablesKeepingDefaults,
+        Dictionary<string, CreatedReport> createdReports,
+        List<PblRelationship> relationships,
         List<ImportSkippedItem> skipped,
         CancellationToken ct)
     {
@@ -737,6 +1016,12 @@ public class ImportAppFromPblCommandHandler
             var elementGuidByRef = new Dictionary<string, Guid>(StringComparer.Ordinal);
             var sectionLayouts = new List<FormSectionLayout>();
 
+            // Pages (only a multi-page form has them) and element groups get stable ids for this save.
+            var pageGuidByRef = form.Pages.ToDictionary(pg => pg.LogicalRef, _ => Guid.NewGuid(), StringComparer.Ordinal);
+            var groupGuidByRef = new Dictionary<string, Guid>(StringComparer.Ordinal);
+            IReadOnlyList<FormPageLayout>? pageLayouts = form.Pages.Count == 0 ? null
+                : form.Pages.OrderBy(pg => pg.DisplayOrder).Select(pg => new FormPageLayout(pageGuidByRef[pg.LogicalRef], pg.Heading, pg.DisplayOrder)).ToList();
+
             foreach (var section in form.Sections)
             {
                 var blockLayouts = new List<FormBlockLayout>();
@@ -748,6 +1033,19 @@ public class ImportAppFromPblCommandHandler
                     foreach (var element in block.Elements)
                     {
                         long? appFieldId = null;
+                        var elementContent = element.ElementContent;
+
+                        if (string.Equals(element.ElementType, "Report", StringComparison.OrdinalIgnoreCase))
+                        {
+                            elementContent = await BuildReportElementContentAsync(element, form, table, createdReports, relationships, tableNameByRef, tableByName, ct);
+                            if (elementContent is null)
+                            {
+                                skipped.Add(new ImportSkippedItem { LogicalRef = element.LogicalRef, Name = element.EmbeddedReportRef ?? element.LogicalRef,
+                                    Reason = "Embedded report not added: the report, or the relationship it hangs off, was not created." });
+                                continue;
+                            }
+                        }
+
                         if (string.Equals(element.ElementType, "Field", StringComparison.OrdinalIgnoreCase))
                         {
                             if (element.FieldName is null || !fidByName.TryGetValue(element.FieldName, out var fid))
@@ -760,10 +1058,18 @@ public class ImportAppFromPblCommandHandler
 
                         var elementGuid = Guid.NewGuid();
                         elementGuidByRef[element.LogicalRef] = elementGuid;
+                        Guid? groupId = null;
+                        if (element.GroupRef is not null)
+                        {
+                            if (!groupGuidByRef.TryGetValue(element.GroupRef, out var g)) groupGuidByRef[element.GroupRef] = g = Guid.NewGuid();
+                            groupId = g;
+                        }
+
                         elementLayouts.Add(new FormElementLayout(
-                            elementGuid, appFieldId, element.ElementType, element.ElementContent,
+                            elementGuid, appFieldId, element.ElementType, elementContent,
                             element.LabelMode, element.CustomLabel, element.ShowOnAdd, element.ShowOnEdit, element.ShowOnView,
-                            element.WidthMode, element.WidthValue, element.HelpTextOverride, element.IsReadOnly, element.IsRequired, element.DisplayAs));
+                            element.WidthMode, element.WidthValue, element.HelpTextOverride, element.IsReadOnly, element.IsRequired, element.DisplayAs,
+                            GroupId: groupId));
                     }
 
                     var blockGuid = Guid.NewGuid();
@@ -773,7 +1079,11 @@ public class ImportAppFromPblCommandHandler
 
                 var sectionGuid = Guid.NewGuid();
                 sectionGuidByRef[section.LogicalRef] = sectionGuid;
-                sectionLayouts.Add(new FormSectionLayout(sectionGuid, section.Name, section.IsCollapsed, blockLayouts));
+                sectionLayouts.Add(new FormSectionLayout(
+                    sectionGuid, section.Name, section.IsCollapsed, blockLayouts,
+                    PagePublicId: section.PageRef is not null && pageGuidByRef.TryGetValue(section.PageRef, out var pageGuid) ? pageGuid : null,
+                    IsPinned: section.IsPinned ? true : null,
+                    ShowDividers: section.ShowDividers));
             }
 
             if (sectionLayouts.Count == 0)
@@ -783,7 +1093,24 @@ public class ImportAppFromPblCommandHandler
             }
 
             var createdForm = await _createFormHandler.HandleAsync(new CreateFormCommand(table.PublicId, form.Name), ct);
-            await _saveFormLayoutHandler.HandleAsync(new SaveFormLayoutCommand(createdForm.Id, sectionLayouts), ct);
+            await _saveFormLayoutHandler.HandleAsync(new SaveFormLayoutCommand(
+                createdForm.Id, sectionLayouts, pageLayouts, form.PageNavMode, form.AlwaysTabsOnView), ct);
+
+            // Form-level switches (auto-add fields, built-in fields footer, save buttons).
+            if (form.AutoAddNewFields.HasValue || form.ShowBuiltInFields.HasValue || !string.IsNullOrEmpty(form.SaveOptions))
+            {
+                try
+                {
+                    var current = await _formRepo.GetByPublicIdAsync(createdForm.Id, ct);
+                    await _formRepo.UpdateSettingsAsync(
+                        createdForm.Id, current.Name, form.AutoAddNewFields ?? current.AutoAddNewFields,
+                        form.ShowBuiltInFields ?? current.ShowBuiltInFields, form.SaveOptions ?? current.SaveOptions, current.RowVersion, ct: ct);
+                }
+                catch (DomainException ex)
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = form.LogicalRef, Name = form.Name, Reason = $"Form settings not applied: {Describe(ex)}" });
+                }
+            }
 
             // Forms are created IsDefault=false, and the seeder's default form was suppressed for
             // any table supplying its own — so without this the table would have no default form
@@ -837,6 +1164,12 @@ public class ImportAppFromPblCommandHandler
                 {
                     foreach (var condition in rule.Conditions)
                     {
+                        if (string.Equals(condition.Kind, "role", StringComparison.OrdinalIgnoreCase))
+                        {
+                            conditionSpecs.Add(new FormRuleConditionSpec(null, condition.Operator, condition.Value, null, null, condition.DisplayOrder, ConditionKind: "role"));
+                            continue;
+                        }
+
                         if (!fidByName.TryGetValue(condition.FieldName, out var fid))
                         {
                             unresolvedCondition = true;
@@ -859,6 +1192,15 @@ public class ImportAppFromPblCommandHandler
                 {
                     long? targetElementId = null, targetSectionId = null, targetBlockId = null;
                     var ok = false;
+
+                    // A message or "block the save" that names no target is complete as it is.
+                    if (action.ActionType is "DisplayMessage" or "PreventSave" && action.TargetElementRef is null && action.TargetSectionRef is null && action.TargetBlockRef is null)
+                    {
+                        actionSpecs.Add(new FormRuleActionSpec(
+                            action.ActionType, "Field", null, null, null, action.ActionValue, action.DisplayOrder,
+                            MessageType: action.MessageType, MessageSeverity: action.MessageSeverity));
+                        continue;
+                    }
 
                     if (action.TargetType == "Field" && action.TargetElementRef is not null &&
                         layout.ElementGuidByRef.TryGetValue(action.TargetElementRef, out var eg) && elementDbIdByPublicId.TryGetValue(eg, out var elementDbId))
@@ -885,7 +1227,20 @@ public class ImportAppFromPblCommandHandler
                         break;
                     }
 
-                    actionSpecs.Add(new FormRuleActionSpec(action.ActionType, action.TargetType, targetElementId, targetSectionId, targetBlockId, action.ActionValue, action.DisplayOrder));
+                    long? sourceFieldId = null;
+                    if (action.ValueSource == "field")
+                    {
+                        if (action.SourceFieldName is null || !fidByName.TryGetValue(action.SourceFieldName, out var sourceFid))
+                        {
+                            unresolvedAction = true;
+                            break;
+                        }
+                        sourceFieldId = sourceFid; // like a condition's field, a rule action refers to the source field by Fid
+                    }
+
+                    actionSpecs.Add(new FormRuleActionSpec(
+                        action.ActionType, action.TargetType, targetElementId, targetSectionId, targetBlockId, action.ActionValue, action.DisplayOrder,
+                        ValueSource: action.ValueSource, SourceFieldId: sourceFieldId, MessageType: action.MessageType, MessageSeverity: action.MessageSeverity));
                 }
 
                 if (unresolvedAction || actionSpecs.Count == 0)
@@ -894,12 +1249,20 @@ public class ImportAppFromPblCommandHandler
                     continue;
                 }
 
-                var createdRule = await _createFormRuleHandler.HandleAsync(new CreateFormRuleCommand(layout.FormPublicId, rule.Name), ct);
-                await _saveFormRuleHandler.HandleAsync(new SaveFormRuleCommand(
-                    createdRule.Id, rule.Name, rule.Description, Tags: null, rule.IsActive, rule.RunTrigger, rule.ConditionLogic,
-                    rule.IsExpressionMode, rule.ExpressionText, conditionSpecs, actionSpecs, createdRule.RowVersion), ct);
+                try
+                {
+                    var createdRule = await _createFormRuleHandler.HandleAsync(new CreateFormRuleCommand(layout.FormPublicId, rule.Name), ct);
+                    await _saveFormRuleHandler.HandleAsync(new SaveFormRuleCommand(
+                        createdRule.Id, rule.Name, rule.Description, Tags: null, rule.IsActive, rule.RunTrigger, rule.ConditionLogic,
+                        rule.IsExpressionMode, rule.ExpressionText, conditionSpecs, actionSpecs, createdRule.RowVersion), ct);
 
-                created++;
+                    created++;
+                }
+                catch (DomainException ex)
+                {
+                    // One rule PowerBase rejects must not take the import down with it.
+                    skipped.Add(new ImportSkippedItem { LogicalRef = rule.LogicalRef, Name = rule.Name, Reason = $"Form rule not created: {Describe(ex)}" });
+                }
             }
         }
 

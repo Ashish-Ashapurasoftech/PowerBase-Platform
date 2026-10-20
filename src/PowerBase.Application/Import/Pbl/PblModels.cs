@@ -56,6 +56,42 @@ public sealed class PblApp
 
     /// <summary>Cosmetic only — a source DBID carried through for human traceability. Never used for matching.</summary>
     public string? AliasHint { get; set; }
+
+    /// <summary>App-level number/currency/date formatting; the fallback when a field sets none of its own.</summary>
+    public PblAppFormatting? Formatting { get; set; }
+
+    /// <summary>Copy/export/connect/token/search switches.</summary>
+    public PblAppSecurity? Security { get; set; }
+
+    /// <summary>Brand colour (hex), from the source app header background.</summary>
+    public string? BrandColorHex { get; set; }
+}
+
+public sealed class PblAppFormatting
+{
+    /// <summary>One of $ ₹ € £ ¥ — anything else has been defaulted to "$" by the converter.</summary>
+    public string CurrencySymbol { get; set; } = "$";
+
+    /// <summary>"Before", "Between" or "After".</summary>
+    public string CurrencyPosition { get; set; } = "Before";
+
+    /// <summary>Digit-grouping character: "," or ".".</summary>
+    public string ThousandSeparator { get; set; } = ",";
+
+    /// <summary>Decimal character: "." or ",".</summary>
+    public string DecimalSeparator { get; set; } = ".";
+
+    /// <summary>Date pattern with "-" separators, e.g. "MM-DD-YYYY".</summary>
+    public string DateFormat { get; set; } = "MM-DD-YYYY";
+}
+
+public sealed class PblAppSecurity
+{
+    public bool? AllowNonAdminsToCopy { get; set; }
+    public bool? AllowNonAdminsToExport { get; set; }
+    public bool? AllowNonAdminsToConnect { get; set; }
+    public bool? RequireAppTokens { get; set; }
+    public bool? HideFromPublicSearch { get; set; }
 }
 
 public sealed class PblTable
@@ -74,6 +110,47 @@ public sealed class PblTable
     public List<PblReport> Reports { get; set; } = [];
 
     public string? AliasHint { get; set; }
+
+    /// <summary>Position in the source app's table order (0-based).</summary>
+    public int DisplayOrder { get; set; }
+
+    /// <summary>Null = leave PowerBase's default (shown). False hides the table from the sidebar only.</summary>
+    public bool? IsShowInBar { get; set; }
+
+    /// <summary>A <see cref="PblField.Name"/> on this table: the unique key used by relationships.</summary>
+    public string? KeyFieldName { get; set; }
+
+    /// <summary>A <see cref="PblField.Name"/> on this table that titles a record (only when the source enables a custom title).</summary>
+    public string? RecordTitleFieldName { get; set; }
+
+    /// <summary>Up to three <see cref="PblField.Name"/>s, in order, for the record picker.</summary>
+    public List<string> RecordPickerFieldNames { get; set; } = [];
+
+    /// <summary>Custom data rule formula in PowerBase syntax (already translated) and whether it is switched on.</summary>
+    public string? CustomDataRule { get; set; }
+    public bool CustomDataRuleEnabled { get; set; }
+
+    /// <summary>"Save on exit" → auto-save when leaving the page.</summary>
+    public bool? AutoSaveOnLeave { get; set; }
+
+    /// <summary>Table default-report settings (sort, header text, grid edit, group display, row numbers, quick search, dynamic filters).</summary>
+    public PblDefaultReportSettings? DefaultReportSettings { get; set; }
+}
+
+/// <summary>Mirrors the JSON PowerBase keeps in <c>AppTable.DefaultReportSettings</c>.</summary>
+public sealed class PblDefaultReportSettings
+{
+    /// <summary>A <see cref="PblField.Name"/> on the table; null = default order.</summary>
+    public string? SortFieldName { get; set; }
+    public bool SortDescending { get; set; }
+
+    /// <summary>"Default", "Wrap" or "Truncate".</summary>
+    public string? ColumnHeaderText { get; set; }
+    public bool? InlineEditing { get; set; }
+    public bool? GroupDefaultCollapsed { get; set; }
+    public bool? ShowRowNumbers { get; set; }
+    public bool? AllowQuickSearch { get; set; }
+    public string? DynamicFilterType { get; set; }
 }
 
 public sealed class PblField
@@ -105,6 +182,19 @@ public sealed class PblField
     public string? FormulaExpression { get; set; }
 
     public string? AliasHint { get; set; }
+
+    /// <summary>The source field's numeric <c>Id:</c>. Formulas, record filters and picker/key settings refer to fields by it.</summary>
+    public int? SourceId { get; set; }
+
+    /// <summary>For formula fields whose source type decides the PowerBase variant even though they evaluate to text:
+    /// "Url", "Email", "Phone" or "RichText". Null = pick the variant from the compiled result type.</summary>
+    public string? FormulaVariant { get; set; }
+
+    public string? HelpText { get; set; }
+    public bool? IsUnique { get; set; }
+    public bool? IsAuditable { get; set; }
+    public bool? IsSearchable { get; set; }
+    public bool? IsReportable { get; set; }
 }
 
 public sealed class PblReport
@@ -120,6 +210,58 @@ public sealed class PblReport
     /// show as columns, in order.</summary>
     public List<string> Columns { get; set; } = [];
     public List<PblSortSpec> SortFields { get; set; } = [];
+
+    public string? Description { get; set; }
+    public bool ShowDescription { get; set; }
+
+    /// <summary>Row filter — the translated source criteria. Null = unfiltered.</summary>
+    public PblFilterGroup? Filter { get; set; }
+
+    public bool? HideTotals { get; set; }
+    public bool? GroupDefaultCollapsed { get; set; }
+    public bool? AllowQuickSearch { get; set; }
+    public string? DynamicFilterType { get; set; }
+
+    /// <summary>For DynamicFilterType "Custom": the fields users may filter by on the fly (a <see cref="PblField.Name"/> each).</summary>
+    public List<string> DynamicFilterFieldNames { get; set; } = [];
+
+    /// <summary>"Default", "Wrap" or "Truncate".</summary>
+    public string? ColumnHeaderText { get; set; }
+    public bool? ShowEditIcon { get; set; }
+    public bool? ShowViewIcon { get; set; }
+    public bool? DisableBulkDelete { get; set; }
+    public bool? DisableGridEdit { get; set; }
+
+    /// <summary>Roles allowed to see the report. Null = no restriction information in the source (visible to all with table access).</summary>
+    public List<string>? VisibleToRoleRefs { get; set; }
+}
+
+/// <summary>An AND/OR tree of field conditions — the translation of a Quickbase query.</summary>
+public sealed class PblFilterGroup
+{
+    /// <summary>"and" or "or".</summary>
+    public string Logic { get; set; } = "and";
+    public List<PblFilterCondition> Conditions { get; set; } = [];
+    public List<PblFilterGroup> Groups { get; set; } = [];
+
+    public int Count => Conditions.Count + Groups.Sum(g => g.Count);
+}
+
+public sealed class PblFilterCondition
+{
+    /// <summary>A <see cref="PblField.Name"/> on the table the filter applies to.</summary>
+    public string FieldName { get; set; } = string.Empty;
+
+    /// <summary>One of PowerBase's filter operators (eq, ne, contains, notContains, startsWith, notStartsWith, gt, gte, lt, lte, includes, notIncludes).</summary>
+    public string Operator { get; set; } = "eq";
+    public string? Value { get; set; }
+
+    /// <summary>The source compared to the signed-in user (<c>_curuser_</c>).</summary>
+    public bool UseCurrentUser { get; set; }
+
+    /// <summary>"ask" (the viewer is prompted when the report runs) or "field" (compare to <see cref="ValueFieldName"/> on the same record); null = a literal value.</summary>
+    public string? ValueMode { get; set; }
+    public string? ValueFieldName { get; set; }
 }
 
 public sealed class PblSortSpec
@@ -127,4 +269,10 @@ public sealed class PblSortSpec
     /// <summary>A field Name (matching a <see cref="PblField.Name"/> in the same table).</summary>
     public string FieldName { get; set; } = string.Empty;
     public bool Desc { get; set; }
+
+    /// <summary>True when this level also groups the report (not just sorts it).</summary>
+    public bool IsGroup { get; set; }
+
+    /// <summary>How values are combined when grouping ("EqualValues", "Month", …); null = equal values.</summary>
+    public string? GroupMode { get; set; }
 }

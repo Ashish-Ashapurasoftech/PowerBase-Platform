@@ -81,8 +81,8 @@ two disagree again.
 | Field-level permissions | — | **Not found anywhere in the real sample** (`RolePermissions:` appears 214 times, all on Tables/Reports, none on Fields) — `PblFieldPermission` import stays unpopulated for real QBL data. |
 | Report-level `RolePermissions` (boolean map) | 5 (stretch) | Maps directly to `CreateReportCommand.VisibleToRoleIds`. |
 | `Table.Forms.Properties.RoleDefaults`/`ReportOverrides` | — (stretch) | Conceptually maps to `AppRoleTableFormOverride`/`AppRoleReport` — real data exists for this in exports, treated as optional refinement, not core path. |
-| `QB::CodePage` | — | **Unsupported.** App-level custom HTML/JS pages — no PowerBase equivalent, out of scope. |
-| `QB::Application::Variable` | — | **Unsupported.** App-level parameters/variables — no PowerBase equivalent, informational only. |
+| `QB::CodePage` | 6 | Imported as a PowerBase `Code` page (`ContentType` html, whole `RawCode` in `CodeHtml`). Created only when the tenant has Code Pages enabled and the importing user holds the Code Page capability — otherwise reported as skipped. Other page types (rich-text pages, homepages) are flagged `QBL_UNSUPPORTED_PAGE_TYPE`. |
+| `QB::Application::Variable` | 6 | Imported as a PowerBase app variable (formulas read it as `[Name]`). A name PowerBase rejects (brackets, or an id-style name like `var_5`), a value over 500 characters, or a duplicate name is flagged and skipped — never altered. |
 | Connected tables | — | Not committed (see scope doc: "We cannot promise this in QBL"). |
 | Pipelines / automations | — | Not committed for PBL in M2; deferred to M4+. |
 | Dashboards, charts (app-level) | — | Not in current PBL scope. |
@@ -130,5 +130,26 @@ Quickbase-shaped, so the link needs rewriting by hand even though the field impo
 | Mode | Availability |
 |---|---|
 | Create New App | Available |
-| Update Existing App | Needs Master/ownership infra (M4) |
+| Update Existing App | Available (`POST /apps/import/diff`, `POST /apps/import/update`) — see below |
 | Create Child App Linked to Master | Needs Master App feature (M4) |
+
+### Update Existing App
+
+Matching is by source logical ref (a ref recorded in `meta.ImportSourceRef` when the element was
+imported), falling back to name for apps not built by import; a user mapping can override either.
+Never by DBID.
+
+| File element vs app | Status | What an import may do |
+|---|---|---|
+| Not in the app | New | Add (default) or Skip |
+| In the app, label/description/variable value differs | Changed | Overwrite or Skip — an explicit decision is required, there is no silent overwrite |
+| In the app, same | Identical | Nothing |
+| In the app, field type differs | Conflict | Nothing (types are never changed by an import) |
+| Only in the app | — | Always preserved. Update never deletes |
+
+Overwrite is deliberately narrow: table labels/description, a field's label/description, an app
+variable's value/description. Matched reports, forms, roles, relationships and pages are never
+modified. Update cannot run in one transaction (see `UpdateAppFromPblCommandHandler`), so each element
+is applied independently and reported; re-running the same import is safe.
+
+"Create Child App Linked to Master" remains unavailable (needs the Master App feature).

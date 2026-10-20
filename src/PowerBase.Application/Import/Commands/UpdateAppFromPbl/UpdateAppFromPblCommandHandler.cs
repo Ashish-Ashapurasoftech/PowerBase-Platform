@@ -148,7 +148,7 @@ public class UpdateAppFromPblCommandHandler
                     continue;
                 }
 
-                items.Add(new BulkCreateFieldItem(field.TypeCode, field.Label ?? field.Name, Settings: field.Settings, Name: field.Name));
+                items.Add(_importer.BuildScalarItem(field, skipped));
                 pending.Add(field);
             }
 

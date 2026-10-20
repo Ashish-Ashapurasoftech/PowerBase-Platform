@@ -62,4 +62,15 @@ public sealed class PblSummaryField
     /// <summary>When <see cref="TargetFieldName"/> is a composite Address field, the JSON
     /// sub-key to aggregate instead of the whole value. Only meaningful with Count/Exists/Min/Max.</summary>
     public string? TargetSubField { get; set; }
+
+    /// <summary>The source's "only summarize records where…" query, verbatim (Quickbase syntax). The converter translates it into
+    /// <see cref="Filter"/>; both are kept so a failed translation can be reported with the original text.</summary>
+    public string? QueryCriteria { get; set; }
+
+    /// <summary>Child-table conditions limiting which records are summarized. Null = all child records.</summary>
+    public PblFilterGroup? Filter { get; set; }
+
+    /// <summary>When set, the importer does not create this summary and reports the reason. The field stays in the document so everything
+    /// that refers to it (lookups, report columns, form elements) still validates and is skipped individually, with its own message.</summary>
+    public string? SkipReason { get; set; }
 }

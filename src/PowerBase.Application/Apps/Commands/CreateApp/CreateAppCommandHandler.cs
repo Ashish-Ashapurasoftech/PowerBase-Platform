@@ -231,6 +231,7 @@ public class CreateAppCommandHandler
             PluralLabel = pluralLabel,
             Description = description,
             Icon = spec.Icon,
+            Alias = spec.Alias ?? string.Empty,
             CreatedBy = userId,
         };
 
@@ -239,7 +240,7 @@ public class CreateAppCommandHandler
         // Process Custom Fields
         if (spec.Fields != null && spec.Fields.Any())
         {
-            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label.Trim(), Settings: f.Settings, IsEncrypted: f.IsEncrypted, Name: f.Name)).ToList();
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label.Trim(), f.Description, f.IsRequired, f.IsAuditable, f.Settings, f.DefaultValue, f.IsEncrypted, f.Name, f.HelpText, f.IsSearchable, f.IsReportable)).ToList();
             await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
         }
     }
