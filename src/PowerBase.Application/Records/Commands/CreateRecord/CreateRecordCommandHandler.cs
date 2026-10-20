@@ -28,6 +28,7 @@ public class CreateRecordCommandHandler
     private readonly IFormRuleRepository _formRuleRepo;
     private readonly IFormRepository _formRepo;
     private readonly IAppUserRepository _appUserRepo;
+    private readonly IReferenceRelinkService? _relink;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -46,7 +47,8 @@ public class CreateRecordCommandHandler
         IAppRepository appRepo,
         IFormRuleRepository formRuleRepo,
         IFormRepository formRepo,
-        IAppUserRepository appUserRepo)
+        IAppUserRepository appUserRepo,
+        IReferenceRelinkService? relink = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -65,6 +67,7 @@ public class CreateRecordCommandHandler
         _formRuleRepo = formRuleRepo;
         _formRepo = formRepo;
         _appUserRepo = appUserRepo;
+        _relink = relink;
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -154,6 +157,11 @@ public class CreateRecordCommandHandler
 
             var recordId = await _recordRepo.GetRecordIdByPublicIdAsync(table, publicId, _uow.Transaction, ct);
             effectiveValues[3] = recordId;
+
+            // Child records whose reference found no parent until now (their text kept in the hidden "(original)" field) and
+            // whose text is this record's key are linked to it by a background job, queued here to run once this save commits.
+            if (_relink is not null)
+                await _relink.QueueAddedAsync(table, [new RelinkParent(recordId, effectiveValues)], ct);
 
             // Date Created / Record Owner are system-managed — never present in effectiveValues
             // otherwise, since nothing submits them — so a pipeline trigger firing off this create

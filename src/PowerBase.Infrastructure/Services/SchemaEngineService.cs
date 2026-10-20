@@ -289,6 +289,19 @@ public class SchemaEngineService : ISchemaEngineService
                 ["referenceFieldFid"] = ["This field's column can't be converted (its type, or a unique/indexed setting, doesn't allow it)."],
             });
         }
+
+        // The index every relationship read (and the re-link of unmatched rows) seeks this column with — a column created as a
+        // Reference gets it in AddColumnAsync, this one held text or numbers until now. Built after the commit, because it only
+        // speeds reads up: failing to build it (e.g. a timeout on a very large table) leaves the conversion in place, and
+        // database/scripts/index_reference_columns.sql can build it later. Relationship delete drops it before replacing the column.
+        try
+        {
+            await EnsureReferenceIndexAsync(connection, physicalTable, PhysicalNaming.TableName(table.Id), physicalColumn, ct);
+        }
+        catch (SqlException ex)
+        {
+            Console.WriteLine($"[ConvertColumnToReference] {physicalTable}.{physicalColumn} converted, but its reference index was not built: {ex.Message}");
+        }
     }
 
     public async Task<bool> RestoreColumnFromReferenceAsync(

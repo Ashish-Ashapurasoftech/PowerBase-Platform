@@ -149,13 +149,15 @@ public sealed class ImportDefinitionChecker(
             if (!destByFid.TryGetValue(m.DestFid, out var dest))
                 return "A field this import writes to was deleted (field " + m.DestFid + ").";
             var name = ImportTypeCompatibility.DisplayName(dest);
-            if (!ImportTypeCompatibility.IsWritable(dest) || (ImportTypeCompatibility.IsRecordId(dest) && dest.Fid != mergeKey?.Fid))
+            if (!ImportTypeCompatibility.CanReceive(dest) || (ImportTypeCompatibility.IsRecordId(dest) && dest.Fid != mergeKey?.Fid))
                 return $"'{name}' can no longer be imported into.";
 
             var problem = m.Source switch
             {
+                ImportMappingSource.Dynamic when ImportTypeCompatibility.IsUserDestination(dest) => null, // one chosen user: looked up when the import is planned
                 ImportMappingSource.Dynamic => DynamicProblem(m, dest, sourceByFid, isFile),
                 ImportMappingSource.Formula => FormulaProblem(m, dest, schema),
+                ImportMappingSource.Static when ImportTypeCompatibility.IsUserDestination(dest) => null,
                 ImportMappingSource.Static => StaticProblem(m, dest, dest.Fid == mergeKey?.Fid),
                 _ => null
             };
@@ -174,6 +176,8 @@ public sealed class ImportDefinitionChecker(
     {
         if (m.SourceFid is not { } sourceFid || !sourceByFid.TryGetValue(sourceFid, out var src))
             return $"The source field for '{ImportTypeCompatibility.DisplayName(dest)}' was deleted.";
+        var formatProblem = ImportDateFormats.Problem(ImportTypeCompatibility.DisplayName(dest), dest, src, m.DateFormat, m.TimeFormat, m.TimeZone);
+        if (formatProblem is not null) return formatProblem;
         return anySourceType || ImportVirtual.IsVirtualFid(sourceFid) ? null : ImportTypeCompatibility.CheckMapping(src, dest);
     }
 

@@ -73,9 +73,9 @@ public interface IRecordRepository
         AppTable table, string columnName, IReadOnlyCollection<object> values, CancellationToken ct = default);
 
     /// <summary>Aggregate a child field grouped by the reference column, restricted to the given parent key
-    /// values (row Ids for the default Record ID# key, or the parent's key-field raw values for a Set-Key
-    /// table — drives Summary projection and the parent-delete restrict check). Returns parentKeyValue →
-    /// aggregate value.</summary>
+    /// values — always the parent row Ids, which is what a reference column stores even when the parent
+    /// table has a Set Key (drives Summary projection and the parent-delete restrict check). Returns
+    /// parentKeyValue → aggregate value.</summary>
     /// <param name="targetSubField">When the target field is a composite Address field, the JSON
     /// sub-key (see <see cref="PowerBase.Domain.FieldSettings.AddressSubFields"/>) to aggregate
     /// instead of the whole value. Only meaningful with Count/Exists/DistinctCount.</param>
@@ -124,6 +124,20 @@ public interface IRecordRepository
     /// field both unencrypted, or an encryption-exempt type). Used to refill a column with ciphertext in bulk.</summary>
     Task<IReadOnlyDictionary<long, string>> EncryptColumnTextsAsync(
         AppTable table, AppField field, IReadOnlyDictionary<long, string> plainByRowId, CancellationToken ct = default);
+
+    /// <summary>The live rows of <paramref name="child"/> whose <paramref name="reference"/> is blank and whose hidden
+    /// <paramref name="original"/> field kept the text that matched no parent record (see <c>ReferenceSettings.OriginalFid</c>),
+    /// with that text decrypted. The blank references are found through the reference column's index, so the cost follows the
+    /// number of such rows, not the size of the table.</summary>
+    Task<IReadOnlyList<(long Id, string Text)>> ListUnlinkedOriginalsAsync(
+        AppTable child, AppField reference, AppField original, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
+
+    /// <summary>Points each row of <paramref name="parentIdByRowId"/> (row Id → parent Record ID) at its parent and clears its
+    /// <paramref name="original"/> text — only while its reference is still blank, so a link made in the meantime is never
+    /// overwritten. Returns the rows changed (PublicId and the parent Record ID they now hold).</summary>
+    Task<IReadOnlyList<(Guid PublicId, long ParentId)>> LinkUnlinkedReferencesAsync(
+        AppTable child, AppField reference, AppField original, IReadOnlyDictionary<long, long> parentIdByRowId,
+        System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,

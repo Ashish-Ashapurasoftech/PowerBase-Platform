@@ -1841,7 +1841,7 @@ public partial class PipelineEngine : IPipelineEngine
                     var colName = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                     if (record.TryGetValue(colName, out var val))
                     {
-                        norm[$"fid_{f.Fid.Value}"] = val;
+                        norm[$"fid_{f.Fid.Value}"] = StoredFieldValue(record, f, val);
                     }
                     else if (record.TryGetValue(f.Name, out var valByName))
                     {
@@ -1875,6 +1875,14 @@ public partial class PipelineEngine : IPipelineEngine
 
             FilterGroup? filterTree = null;
             string? evaluatedFilterVal = null;
+
+            // A rule on a person's detail ("Record Owner → Email is x") becomes a condition on the user ids the column holds.
+            var userDetailFilters = config.IsSimpleFilter || string.IsNullOrWhiteSpace(config.AdvancedQuery)
+                ? await ResolveUserDetailFilterRulesAsync(
+                    PipelineUserFieldFilter.DetailRules(config.FilterGroups, fields).Concat(PipelineUserFieldFilter.DetailRules(config.Filters, fields)).ToList(),
+                    table, fields, payloadJson, executionPath, allSteps, recordRepo, ct)
+                : null;
+            _userDetailFilterRules.Value = userDetailFilters?.Conditions;
 
             if (!config.IsSimpleFilter && !string.IsNullOrWhiteSpace(config.AdvancedQuery))
             {
@@ -1932,6 +1940,8 @@ public partial class PipelineEngine : IPipelineEngine
                 }
             }
 
+            _userDetailFilterRules.Value = null;
+
             // The flow reads as its owner: only the records and fields that identity may see.
             var searchAccess = await GetRestrictedAccessAsync(table, ct);
             filterTree = ApplyRoleRowRestrictions(filterTree, searchAccess, fields);
@@ -1963,6 +1973,8 @@ public partial class PipelineEngine : IPipelineEngine
             // column holds the parent's Record ID#. Id-style conditions on a Reference stay in SQL.
             var labelReferenceFids = PipelineComputedFilter.LabelStyleReferenceFids(fields, filterTree);
             inMemoryFilterFids.UnionWith(labelReferenceFids);
+            // A user-detail rule naming more users than one SQL query can carry.
+            if (userDetailFilters != null) inMemoryFilterFids.UnionWith(userDetailFilters.InMemoryFids);
             var canStreamFilter = inMemoryFilterFids.Count == 0 ||
                 !FormulaFilterSorter.TreeContainsFormulaField(filterTree, inMemoryFilterFids);
 
@@ -2266,7 +2278,7 @@ public partial class PipelineEngine : IPipelineEngine
                         var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
                         if (record.TryGetValue(colKey, out var val))
                         {
-                            norm[$"fid_{f.Fid.Value}"] = val;
+                            norm[$"fid_{f.Fid.Value}"] = StoredFieldValue(record, f, val);
                         }
                         else if (record.TryGetValue(f.Name, out var valByName))
                         {
@@ -3202,7 +3214,7 @@ public partial class PipelineEngine : IPipelineEngine
             if (root.SelectedFieldFids != null)
             {
                 foreach (var field in fields.Where(f => f.Fid.HasValue && root.SelectedFieldFids.Contains(f.Fid.Value) && !f.IsSystem))
-                    rowValues[field.Fid!.Value] = ParseBulkUpsertValueType("", field.TypeCode);
+                    rowValues[field.Fid!.Value] = ParseBulkUpsertValueType("", field.TypeCode, field.Settings);
             }
 
             var resolvedMappings = new Dictionary<string, object?>();
@@ -3217,7 +3229,7 @@ public partial class PipelineEngine : IPipelineEngine
                     if (field != null && field.Fid.HasValue)
                     {
                         var resolvedValStr = mapping.Value != null ? EvaluateTokens(await RenderUserTokensForTextAsync(mapping.Value, field, payloadJson, executionPath, allSteps, fieldRepo, tableRepo, ct), payloadJson, executionPath, allSteps) : null;
-                        var parsedVal = mapping.Value != null ? ParseBulkUpsertValueType(resolvedValStr, field.TypeCode) : null;
+                        var parsedVal = mapping.Value != null ? ParseBulkUpsertValueType(resolvedValStr, field.TypeCode, field.Settings) : null;
                         rowValues[field.Fid.Value] = parsedVal;
                         resolvedMappings[mapping.Field] = parsedVal;
                     }
@@ -3248,18 +3260,18 @@ public partial class PipelineEngine : IPipelineEngine
                             else if (el.ValueKind == JsonValueKind.String)
                             {
                                 var resolvedValStr = EvaluateTokens(el.GetString(), payloadJson, executionPath, allSteps);
-                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode, field.Settings);
                             }
                             else
                             {
                                 var resolvedValStr = EvaluateTokens(el.GetRawText(), payloadJson, executionPath, allSteps);
-                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                                parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode, field.Settings);
                             }
                         }
                         else if (rawVal is string s)
                         {
                             var resolvedValStr = EvaluateTokens(s, payloadJson, executionPath, allSteps);
-                            parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode);
+                            parsedVal = ParseBulkUpsertValueType(resolvedValStr, field.TypeCode, field.Settings);
                         }
                         else
                         {
@@ -4139,6 +4151,19 @@ public partial class PipelineEngine : IPipelineEngine
         }
     }
 
+    /// <summary>A stored field's value as a step hands it on. A Date / Numeric Range lives in two columns (f_N and f_N_e) and goes on
+    /// as one { start, end } value, as the Records API returns it: read from its start column alone, the end was lost on the way to the
+    /// next step (a range copied by Search Records + Create Record kept only its start). An encrypted app stores the whole range as
+    /// JSON text in the start column; that, and any other field, is passed on as it is.</summary>
+    internal static object? StoredFieldValue(IReadOnlyDictionary<string, object?> record, AppField field, object? value)
+    {
+        if (!field.Fid.HasValue || !PhysicalNaming.IsRangeTypeCode(field.TypeCode)) return value;
+        if (value is string text && text.TrimStart().StartsWith('{')) return value;
+        if (!record.TryGetValue(PhysicalNaming.EndColumnName(field.Fid.Value), out var end)) return value;
+        if (value is null && end is null) return null;
+        return new Dictionary<string, object?> { ["start"] = value, ["end"] = end };
+    }
+
     public static Dictionary<string, object?> BuildCreatedRecordOutput(
         Guid recordPublicId,
         long recordId,
@@ -4167,7 +4192,7 @@ public partial class PipelineEngine : IPipelineEngine
             var key = $"fid_{fid}";
             var column = PhysicalNaming.GetPhysicalColumnName(field);
             if (persistedRecord is not null && persistedRecord.TryGetValue(column, out var persistedValue))
-                output[key] = persistedValue;
+                output[key] = StoredFieldValue(persistedRecord, field, persistedValue);
             else if (persistedRecord is not null && persistedRecord.TryGetValue(field.Name, out var namedValue))
                 output[key] = namedValue;
             else if (submittedValues.TryGetValue(fid, out var submittedValue))
@@ -4211,7 +4236,7 @@ public partial class PipelineEngine : IPipelineEngine
         {
             var key = $"fid_{field.Fid!.Value}";
             var column = PhysicalNaming.GetPhysicalColumnName(field);
-            if (record.TryGetValue(column, out var value)) normalized[key] = value;
+            if (record.TryGetValue(column, out var value)) normalized[key] = StoredFieldValue(record, field, value);
             else if (record.TryGetValue(field.Name, out var namedValue)) normalized[key] = namedValue;
         }
         return normalized;
@@ -4493,12 +4518,10 @@ public partial class PipelineEngine : IPipelineEngine
     /// <summary>A User / MultiUser field offers its person's details as sub-fields in the field picker (Id, Name, First name, Last name, Email),
     /// the way Quickbase does: <c>{{trigger.fid_4.email}}</c>. The field itself carries only the user id, so these are looked up.</summary>
     private static readonly Regex UserSubTokenRegex = new(
-        @"\{\{\s*([^{}]*?\.fid_\d+)\.(id|name|first_name|last_name|email)\s*\}\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"\{\{\s*([^{}]*?\.fid_\d+)\.(id|name|first_name|last_name|email|screen_name)\s*\}\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, UserTokenInfo> _userTokenInfo = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, PipelineUserDetails> _userTokenInfo = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, AppField?> _tokenSourceFieldCache = new();
-
-    private sealed record UserTokenInfo(string Name, string FirstName, string LastName, string Email);
 
     private static List<long> ParseUserIds(string? raw)
     {
@@ -4524,21 +4547,7 @@ public partial class PipelineEngine : IPipelineEngine
             try { foreach (var id in ParseUserIds(EvaluateTokens("{{" + match.Groups[1].Value + "}}", payloadJson, executionPath, allSteps))) wanted.Add(id); }
             catch (Exception) { /* the token's own evaluation reports an unresolvable reference */ }
         }
-        foreach (var id in wanted)
-        {
-            try
-            {
-                var user = await userRepo.GetByIdAsync(id, ct);
-                var first = user.FirstName?.Trim() ?? string.Empty;
-                var last = user.LastName?.Trim() ?? string.Empty;
-                var name = $"{first} {last}".Trim();
-                _userTokenInfo[id] = new UserTokenInfo(name.Length > 0 ? name : user.Email, first, last, user.Email);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning("User {UserId} referenced by a token could not be loaded: {Message}", id, ex.Message);
-            }
-        }
+        await PipelineUserFieldFilter.LoadAsync(userRepo, wanted, _userTokenInfo, _logger, ct);
     }
 
     private string ExpandUserSubTokens(string input, string payloadJson, string? executionPath, List<PipelineStep>? allSteps)
@@ -4553,8 +4562,7 @@ public partial class PipelineEngine : IPipelineEngine
             return string.Join(", ", ids.Select(id =>
             {
                 if (property == "id") return id.ToString(CultureInfo.InvariantCulture);
-                if (!_userTokenInfo.TryGetValue(id, out var info)) return string.Empty;
-                return property switch { "email" => info.Email, "first_name" => info.FirstName, "last_name" => info.LastName, _ => info.Name };
+                return _userTokenInfo.TryGetValue(id, out var info) ? PipelineUserFieldFilter.DetailOf(id, info, property) : string.Empty;
             }));
         });
 
@@ -5263,6 +5271,9 @@ public partial class PipelineEngine : IPipelineEngine
         {
             _stepsAccessor = new StepsDictionaryAccessor(rootContext);
             _proxyAccessor = new FallbackRootProxy(rootContext);
+            // Scriban cuts every value it renders at 1,048,576 characters by default (and appends "..."). A token carries a
+            // record's value as it is — a Rich Text with an embedded image is several MB — so a mapped value is never cut.
+            LimitToString = 0;
         }
 
         protected override Scriban.Runtime.IObjectAccessor GetMemberAccessorImpl(object target)
@@ -5612,6 +5623,9 @@ public partial class PipelineEngine : IPipelineEngine
     private object? ParseRecordMappingValueWithFormat(string value, AppField field, string? expression, string? dateFormat)
     {
         var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label : field.Name;
+        // A Multi-select Text field stores a JSON array of its choices, as the record form saves it.
+        if (string.Equals(field.TypeCode, "MultiSelect", StringComparison.OrdinalIgnoreCase))
+            return PipelineChoiceValues.ToStoredMultiSelect(value, field.Settings);
         try { return ParseValueTypeWithFormat(value, field.TypeCode, label, dateFormat); }
         catch (FormatException ex)
         {
@@ -5628,6 +5642,14 @@ public partial class PipelineEngine : IPipelineEngine
         }
     }
 
+    /// <summary>How a mapped date / time text is read: a value with an offset ("…Z" — a record's Date Created — or "+05:30") is
+    /// converted to UTC, one without is taken as written. Read as local time, a UTC Date Created mapped into a Date &amp; Time
+    /// field moved by the server's own offset (07:13 written as 12:43 on a server in India); a server running on UTC never saw it.</summary>
+    private const DateTimeStyles WallClockStyles = DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal;
+
+    /// <summary>The parsed value as the wall-clock time a Date / Date &amp; Time / Time column stores (no time-zone kind).</summary>
+    private static DateTime WallClock(DateTime parsed) => DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
+
     private object? ParseValueType(string valueStr, string typeCode, string fieldName)
         => ParseValueTypeWithFormat(valueStr, typeCode, fieldName, null);
 
@@ -5643,9 +5665,8 @@ public partial class PipelineEngine : IPipelineEngine
 
         if (normalizedCode == "CHECKBOX" || normalizedCode == "BOOLEAN")
         {
-            if (bool.TryParse(valueStr, out var bVal)) return bVal;
-            if (valueStr == "1") return true;
-            if (valueStr == "0") return false;
+            // true / false, 1 / 0, and the Yes / No a step's Select tab writes.
+            if (PipelineChoiceValues.TryParseCheckbox(valueStr, out var bVal)) return bVal;
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
         if (new[] { "NUMERIC", "CURRENCY", "PERCENT", "INTEGER", "FLOAT", "NUMBER", "RATING", "DURATION" }.Contains(normalizedCode))
@@ -5667,10 +5688,10 @@ public partial class PipelineEngine : IPipelineEngine
             };
             var canonicalFormats = normalizedCode == "DATE" ? new[] { "yyyy-MM-dd" } : isoFormats;
             if (DateTime.TryParseExact(valueStr.Trim(), canonicalFormats, CultureInfo.InvariantCulture,
-                DateTimeStyles.AllowWhiteSpaces, out var dtVal)) return dtVal;
+                WallClockStyles, out var dtVal)) return WallClock(dtVal);
             // A Date field fed a full timestamp keeps its calendar day.
             if (normalizedCode == "DATE" && DateTime.TryParseExact(valueStr.Trim(), isoFormats, CultureInfo.InvariantCulture,
-                DateTimeStyles.AllowWhiteSpaces, out var dateFromTimestamp)) return dateFromTimestamp.Date;
+                WallClockStyles, out var dateFromTimestamp)) return WallClock(dateFromTimestamp).Date;
 
             var dotNetDateFormat = dateFormat?.ToUpperInvariant() switch
             {
@@ -5690,32 +5711,36 @@ public partial class PipelineEngine : IPipelineEngine
                     dotNetDateFormat, dotNetDateFormat.Replace('-', '/')
                 };
             if (DateTime.TryParseExact(valueStr.Trim(), localizedFormats, CultureInfo.InvariantCulture,
-                DateTimeStyles.AllowWhiteSpaces, out dtVal)) return dtVal;
+                WallClockStyles, out dtVal)) return WallClock(dtVal);
             // The text of a DateTime formatted by the host ("10/8/2026 5:57:12 AM" — single-digit month/day,
             // which the fixed MM/dd patterns above reject). Tried last so the configured format always wins.
-            if (DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out dtVal))
-                return normalizedCode == "DATE" ? dtVal.Date : dtVal;
+            if (DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, WallClockStyles, out dtVal))
+                return normalizedCode == "DATE" ? WallClock(dtVal).Date : WallClock(dtVal);
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
         if (normalizedCode is "TIME" or "TIME_OF_DAY")
         {
             if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm", "HH:mm:ss", "h:mm tt", "h:mm:ss tt" },
-                CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeVal)) return timeVal;
+                CultureInfo.InvariantCulture, WallClockStyles, out var timeVal)) return WallClock(timeVal);
             // A time with fractional seconds, or a full timestamp (a record's Date Created mapped into a Time
             // field): keep the time of day.
             if (DateTime.TryParseExact(valueStr.Trim(), new[] { "HH:mm:ss.FFFFFFF", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss" },
-                CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var timeFromStamp) ||
-                DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out timeFromStamp))
-                return DateTime.Today.Add(timeFromStamp.TimeOfDay);
+                CultureInfo.InvariantCulture, WallClockStyles, out var timeFromStamp) ||
+                DateTime.TryParse(valueStr.Trim(), CultureInfo.InvariantCulture, WallClockStyles, out timeFromStamp))
+                return DateTime.Today.Add(WallClock(timeFromStamp).TimeOfDay);
             throw new FormatException($"Validation error: cannot convert value to {typeCode} for field '{fieldName}'.");
         }
 
         return valueStr; // Default to string
     }
 
-    private object? ParseBulkUpsertValueType(string? valueStr, string? typeCode)
+    private object? ParseBulkUpsertValueType(string? valueStr, string? typeCode, string? settings = null)
     {
         if (valueStr == null) return null;
+
+        // A Multi-select Text field stores a JSON array of its choices, as the record form saves it.
+        if (string.Equals(typeCode, "MultiSelect", StringComparison.OrdinalIgnoreCase))
+            return PipelineChoiceValues.ToStoredMultiSelect(valueStr, settings);
 
         // Normalize resolved row values before merge-key lookup and persistence.
         // Trim only the edges; spaces within a value are meaningful.
@@ -5746,9 +5771,8 @@ public partial class PipelineEngine : IPipelineEngine
 
         if (normalizedCode == "CHECKBOX" || normalizedCode == "BOOLEAN" || normalizedCode == "BOOL")
         {
-            if (bool.TryParse(valueStr, out var bVal)) return bVal;
-            if (valueStr == "1") return true;
-            if (valueStr == "0") return false;
+            // true / false, 1 / 0, and the Yes / No a step's Select tab writes.
+            if (PipelineChoiceValues.TryParseCheckbox(valueStr, out var bVal)) return bVal;
             return null;
         }
 
@@ -6143,6 +6167,56 @@ public partial class PipelineEngine : IPipelineEngine
         };
     }
 
+    /// <summary>
+    /// Search Records rules on a person's detail ("Record Owner → Email is x", "List Of Users → Screen name contains y"). The table
+    /// stores user ids, so each rule is worked out over the people its column holds — read once per field — and becomes a condition
+    /// on their ids (see <see cref="PipelineUserFieldFilter.BuildDbNode"/>). Null when there are none.
+    /// </summary>
+    private sealed record UserDetailFilters(IReadOnlyDictionary<TriggerFilterRule, FilterNode?> Conditions, IReadOnlyCollection<long> InMemoryFids);
+
+    private async Task<UserDetailFilters?> ResolveUserDetailFilterRulesAsync(
+        IReadOnlyList<TriggerFilterRule> rules, AppTable table, IReadOnlyList<AppField> fields, string payloadJson, string? executionPath,
+        List<PipelineStep>? allSteps, IRecordRepository recordRepo, CancellationToken ct)
+    {
+        if (rules.Count == 0) return null;
+        var resolved = new Dictionary<TriggerFilterRule, FilterNode?>(ReferenceEqualityComparer.Instance);
+        var inMemoryFids = new HashSet<long>();
+        var sqlIds = 0;
+        var idsByField = new Dictionary<long, List<long>>();
+        var userRepo = CurrentStepServices.GetService<IUserRepository>();
+        foreach (var rule in rules)
+        {
+            if (!PipelineUserFieldFilter.TryResolve(rule.Field, fields, out var field, out var detail) || !field.Fid.HasValue) continue;
+            if (!idsByField.TryGetValue(field.Id, out var ids))
+            {
+                // Every person the column holds — no limit, so "none of these people" is exact.
+                var (values, _) = await recordRepo.GetDistinctFieldValuesAsync(table, field, int.MaxValue, null, ct);
+                ids = values.SelectMany(PipelineUserFieldFilter.ParseUserIds).Distinct().ToList();
+                idsByField[field.Id] = ids;
+            }
+            if (detail != "id") await PipelineUserFieldFilter.LoadAsync(userRepo, ids, _userTokenInfo, _logger, ct);
+            var value = EvaluateTokens(rule.Value, payloadJson, executionPath, allSteps);
+            var filter = PipelineUserFieldFilter.BuildDbFilter(field, detail, rule.Operator, value, ids, _userTokenInfo);
+            resolved[rule] = filter.Node;
+            // Too many ids for one SQL query (each is a parameter): the field is checked on each page of the search in memory
+            // instead — the same streamed path as an encrypted field, so nothing is left out however many users or records.
+            if (inMemoryFids.Contains(field.Fid.Value)) continue;
+            if (sqlIds + filter.IdCount > PipelineUserFieldFilter.SqlIdBudget)
+            {
+                inMemoryFids.Add(field.Fid.Value);
+                _logger.LogInformation("Search Records: the filter on {Detail} of field {FieldId} names {Count} users; it is checked in memory.",
+                    detail, field.Fid, filter.IdCount);
+            }
+            else sqlIds += filter.IdCount;
+        }
+        return new UserDetailFilters(resolved, inMemoryFids);
+    }
+
+    /// <summary>Conditions for the running Search Records step's rules on a person's detail, worked out by
+    /// <see cref="ResolveUserDetailFilterRulesAsync"/> before it maps its filter (a null condition: every record passes the rule).
+    /// Per async flow, so steps running side by side in a loop never see each other's.</summary>
+    private readonly AsyncLocal<IReadOnlyDictionary<TriggerFilterRule, FilterNode?>?> _userDetailFilterRules = new();
+
     private FilterGroup? MapTriggerFilterGroupToDbFilterGroup(
         TriggerFilterGroup group,
         IReadOnlyList<AppField> fields,
@@ -6196,6 +6270,12 @@ public partial class PipelineEngine : IPipelineEngine
             else
             {
                 if (string.IsNullOrWhiteSpace(rule.Field)) continue;
+
+                if (_userDetailFilterRules.Value is { } userDetailRules && userDetailRules.TryGetValue(rule, out var userDetailNode))
+                {
+                    if (userDetailNode != null) dbGroup.Nodes.Add(userDetailNode);
+                    continue;
+                }
 
                 var field = ResolvePipelineField(rule.Field, fields);
 

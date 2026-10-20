@@ -69,7 +69,7 @@ public sealed class ImportDefinitionsController(
     /// <summary>Queues a run and returns at once; the run executes in the background.</summary>
     [HttpPost("import-definitions/{id:guid}/runs")]
     public async Task<IActionResult> Run(Guid id, [FromBody] StartImportRunRequest? request, CancellationToken ct) =>
-        Accepted(new { data = new { runId = (await start.StartAsync(id, ImportTrigger.Manual, request?.NotifyEmails, FrontendBaseUrl(), null, null, request?.FileId, ct)).RunId } });
+        Accepted(new { data = new { runId = (await start.StartAsync(id, ImportTrigger.Manual, request?.NotifyEmails, FrontendBaseUrl(), null, null, request?.FileId, ct, Request.Headers["X-Time-Zone"].ToString())).RunId } });
 
     [HttpGet("import-definitions/{id:guid}/runs")]
     public async Task<IActionResult> Runs(Guid id, [FromQuery] int take = 20, CancellationToken ct = default) =>

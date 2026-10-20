@@ -42,8 +42,10 @@ public class PipelineUserFieldTokenTests
         var users = Substitute.For<IUserRepository>();
         users.GetNamesByIdsAsync(Arg.Any<IEnumerable<long>>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<long, string> { [40021] = "Dipak Patel", [40022] = "Ronak Dhamsaniya" });
-        users.GetByIdAsync(40021, Arg.Any<CancellationToken>()).Returns(new User { Id = 40021, FirstName = "Dipak", LastName = "Patel", Email = "dipak@example.com" });
-        users.GetByIdAsync(40022, Arg.Any<CancellationToken>()).Returns(new User { Id = 40022, FirstName = "Ronak", LastName = "Dhamsaniya", Email = "ronak@example.com" });
+        users.GetByIdAsync(40021, Arg.Any<CancellationToken>()).Returns(new User { Id = 40021, Name = "dipak.p", FirstName = "Dipak", LastName = "Patel", Email = "dipak@example.com" });
+        users.GetByIdAsync(40022, Arg.Any<CancellationToken>()).Returns(new User { Id = 40022, Name = "ronak.d", FirstName = "Ronak", LastName = "Dhamsaniya", Email = "ronak@example.com" });
+        users.GetByIdAsync(40023, Arg.Any<CancellationToken>()).Returns(new User { Id = 40023, Name = " ", FirstName = "Asha", Email = "asha@example.com" });
+        users.GetByIdAsync(40024, Arg.Any<CancellationToken>()).Returns(new User { Id = 40024, Name = "", Email = "only@example.com" });
         tableRepo.GetByPublicIdAsync(Table.PublicId, Arg.Any<CancellationToken>()).Returns(Table);
         fieldRepo.ListByTableAsync(Table.Id, Arg.Any<CancellationToken>()).Returns(Fields());
         uow.Transaction.Returns(Substitute.For<IDbTransaction>());
@@ -130,6 +132,42 @@ public class PipelineUserFieldTokenTests
         var (_, written) = await RunAsync($"{{{{trigger.fid_4.{detail}}}}}", "", "{\"trigger\":{\"fid_4\":40021}}");
 
         Assert.Equal(expected, written[7]);
+    }
+
+    [Fact]
+    public async Task UserScreenName_IsTheNameTheAppShowsForThePerson()
+    {
+        var (_, written) = await RunAsync("{{trigger.fid_4.screen_name}}", "", "{\"trigger\":{\"fid_4\":40021}}");
+
+        Assert.Equal("dipak.p", written[7]);
+    }
+
+    [Theory]
+    [InlineData(40023, "Asha")]
+    [InlineData(40024, "only@example.com")]
+    public async Task UserScreenName_FallsBackToTheNameThenTheEmail_WhenThePersonHasNoScreenName(long userId, string expected)
+    {
+        var (_, written) = await RunAsync("{{trigger.fid_4.screen_name}}", "", $"{{\"trigger\":{{\"fid_4\":{userId}}}}}");
+
+        Assert.Equal(expected, written[7]);
+    }
+
+    [Fact]
+    public async Task MultiUserScreenName_JoinsEveryPerson()
+    {
+        var (_, written) = await RunAsync("{{trigger.fid_10.screen_name}} | {{trigger.fid_10.id}}", "", "{\"trigger\":{\"fid_10\":\"[40021,40022]\"}}");
+
+        Assert.Equal("dipak.p, ronak.d | 40021, 40022", written[7]);
+    }
+
+    [Fact]
+    public async Task EveryQuickbaseUserDetail_ResolvesTogether()
+    {
+        var (_, written) = await RunAsync(
+            "{{trigger.fid_4.id}}|{{trigger.fid_4.first_name}}|{{trigger.fid_4.last_name}}|{{trigger.fid_4.email}}|{{trigger.fid_4.screen_name}}", "",
+            "{\"trigger\":{\"fid_4\":40021}}");
+
+        Assert.Equal("40021|Dipak|Patel|dipak@example.com|dipak.p", written[7]);
     }
 
     [Fact]

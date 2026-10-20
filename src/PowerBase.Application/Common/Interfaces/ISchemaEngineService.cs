@@ -34,6 +34,8 @@ public interface ISchemaEngineService
     /// When <paramref name="preserveUnmatched"/> is given, the original value of every row that did NOT
     /// resolve to a parent is first saved into that (text) field's column, in the same transaction — so
     /// those rows get a NULL reference without losing what the user had typed.
+    /// After the commit the column gets the same reference index a Reference created as such has (a failure to build it is
+    /// logged and does not undo the conversion).
     /// </summary>
     Task ConvertColumnToReferenceAsync(
         AppTable table, AppField field, IReadOnlyDictionary<long, long> parentIdByRowId,

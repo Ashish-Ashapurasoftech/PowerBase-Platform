@@ -73,7 +73,7 @@ public class BulkDeleteRecordsCommandHandler
         if (parentRels.Count > 0)
         {
             var ids = await _recordRepo.GetIdsByPublicIdsAsync(table, uniqueRecordPublicIds, ct);
-            await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _fieldRepo, _recordRepo, ct);
+            await ParentDeleteGuard.EnsureNotReferencedAsync(table, parentRels, ids, _tableRepo, _recordRepo, ct);
         }
 
         await _uow.BeginAsync(ct);
@@ -130,13 +130,16 @@ public class BulkDeleteRecordsCommandHandler
 
 
 
-            await _auditRepo.LogActivityAsync(
-                AuditActions.Deleted,
-                AuditEntityTypes.Record,
-                command.TablePublicId.ToString(),
-                $"{uniqueRecordPublicIds.Count} record(s) bulk-deleted from {table.Name}",
-                appId: table.AppId,
-                ct: ct);
+            if (!command.SkipAudit)
+            {
+                await _auditRepo.LogActivityAsync(
+                    AuditActions.Deleted,
+                    AuditEntityTypes.Record,
+                    command.TablePublicId.ToString(),
+                    $"{uniqueRecordPublicIds.Count} record(s) bulk-deleted from {table.Name}",
+                    appId: table.AppId,
+                    ct: ct);
+            }
 
             await _uow.CommitAsync(ct);
 

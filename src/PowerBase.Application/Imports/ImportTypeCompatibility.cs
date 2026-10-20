@@ -22,6 +22,13 @@ public static class ImportTypeCompatibility
         f.Fid.HasValue && !f.IsDeleted && !f.IsHidden && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)
         && (!f.IsSystem || IsRecordId(f)) && !UnsupportedDestination.Contains(f.TypeCode);
 
+    /// <summary>A User field is filled with one chosen user, the same for every row: only a fixed value can write it (the source cannot name a user).</summary>
+    public static bool IsUserDestination(AppField f) =>
+        f.Fid.HasValue && !f.IsDeleted && !f.IsHidden && !f.IsSystem && string.Equals(f.TypeCode, "User", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A field a mapping may name as its destination: one that is written like any other, or a User field (fixed value only).</summary>
+    public static bool CanReceive(AppField f) => IsWritable(f) || IsUserDestination(f);
+
     /// <summary>A Reference field stores the Record ID# of a record of its parent table. An import fills it from the parent's key (the value
     /// the relationship shows for a record, e.g. a course's title) or, as every Reference write accepts, the Record ID# itself; the run turns
     /// each into the Record ID# (see <c>ImportChunkWriter</c>), so the value that goes through conversion is just the text from the source.</summary>
@@ -117,7 +124,7 @@ public static class ImportTypeCompatibility
 
     /// <summary>Converts a value to the destination's type. Returns false with an error message when the value cannot be
     /// converted safely (the row is then reported, never written as NULL). A blank stays blank.</summary>
-    public static bool TryConvert(object? value, AppField destination, out object? result, out string? error)
+    public static bool TryConvert(object? value, AppField destination, out object? result, out string? error, string? dateFormat = null, string? mappingDateFormat = null, string? mappingTimeFormat = null, TimeZoneInfo? mappingZone = null)
     {
         result = null;
         error = null;
@@ -153,15 +160,33 @@ public static class ImportTypeCompatibility
                 }
                 // A date or date-time calculated by a formula arrives as ISO text: store a real date, not text the database parses
                 // in whatever culture it happens to run in.
+                // A column of text the person said how its dates and times are written in: read exactly so (see ImportDateFormats).
+                if (value is string chosen && !string.IsNullOrWhiteSpace(chosen) && (mappingDateFormat is not null || mappingTimeFormat is not null))
+                {
+                    var code = KindOf(destination).Code;
+                    if (code is "Date" or "DateTime" && mappingDateFormat is not null)
+                    {
+                        if (ImportDateFormats.TryParseDate(chosen, mappingDateFormat, mappingTimeFormat, withTime: code == "DateTime", out var date, out var dateError, mappingZone)) { result = date; return true; }
+                        error = $"'{DisplayName(destination)}': {dateError}";
+                        return false;
+                    }
+                    if (code == "Time" && mappingTimeFormat is not null)
+                    {
+                        if (ImportDateFormats.TryParseTime(chosen, mappingTimeFormat, out var time, out var timeError)) { result = time; return true; }
+                        error = $"'{DisplayName(destination)}': {timeError}";
+                        return false;
+                    }
+                }
                 if (value is string text && KindOf(destination).Code is "Date" or "DateTime")
                 {
                     if (string.IsNullOrWhiteSpace(text)) return true;
-                    if (DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+                    // Any way a date can be written in a file; the app's own date format settles which of day and month comes first.
+                    if (ImportDateParser.TryParse(text, dateFormat, withTime: KindOf(destination).Code == "DateTime", out var parsed))
                     {
                         result = parsed;
                         return true;
                     }
-                    error = $"'{text}' is not a valid date for '{DisplayName(destination)}'.";
+                    error = $"'{text}' is not a date that '{DisplayName(destination)}' can read. Use a form like 2026-03-09, 09-03-2026 or 9 Mar 2026.";
                     return false;
                 }
                 result = value;

@@ -34,6 +34,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
     private readonly IRelationalProjector? _relationalProjector;
     /// <summary>Reads that do not wait on the lock of the write being intercepted; falls back to the ordinary projector.</summary>
     private readonly PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector? _writeTimeProjector;
+    /// <summary>Reads the people a filter on a User field's detail ("Record Owner → Email") compares; without it only the Id is known.</summary>
+    private readonly IUserRepository? _userRepo;
 
     public PipelineTriggerInterceptor(
         IPipelineRepository pipelineRepo,
@@ -47,9 +49,11 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         ITenantConnectionResolver? tenantResolver = null,
         IFormulaProjector? formulaProjector = null,
         IRelationalProjector? relationalProjector = null,
-        PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector? writeTimeProjector = null)
+        PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector? writeTimeProjector = null,
+        IUserRepository? userRepo = null)
     {
         _writeTimeProjector = writeTimeProjector;
+        _userRepo = userRepo;
         _formulaProjector = formulaProjector;
         _relationalProjector = relationalProjector;
         _tenantResolver = tenantResolver;
@@ -189,6 +193,30 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
     /// <summary>The values a trigger filter reads: the event values, with each Reference replaced by its
     /// display text (the user-visible value) and the stored Record ID# kept under the negated Fid so an
     /// exact-match condition on the id still matches.</summary>
+    /// <summary>The people a change's User / User List fields hold, when a filter compares a person's detail ("Record Owner →
+    /// Email is x"). Null when no rule does, so ordinary filters cost nothing extra.</summary>
+    private async Task<IReadOnlyDictionary<long, PowerBase.Application.Pipelines.PipelineUserDetails>?> LoadFilterUsersAsync(
+        IReadOnlyList<PowerBase.Application.Pipelines.TriggerFilterGroup>? groups, IReadOnlyList<PowerBase.Application.Pipelines.TriggerFilterRule>? rules,
+        IReadOnlyDictionary<long, object?> valuesSource, IReadOnlyList<AppField> fields, CancellationToken ct)
+    {
+        var detailRules = PowerBase.Application.Pipelines.PipelineUserFieldFilter.DetailRules(groups, fields)
+            .Concat(PowerBase.Application.Pipelines.PipelineUserFieldFilter.DetailRules(rules, fields))
+            .ToList();
+        if (detailRules.Count == 0 || _userRepo == null) return null;
+        var ids = new HashSet<long>();
+        foreach (var rule in detailRules)
+        {
+            if (!PowerBase.Application.Pipelines.PipelineUserFieldFilter.TryResolve(rule.Field, fields, out var field, out var detail) || detail == "id") continue;
+            object? value = null;
+            if (field.Fid.HasValue && valuesSource.TryGetValue(field.Fid.Value, out var byFid)) value = byFid;
+            else if (valuesSource.TryGetValue(field.Id, out var byId)) value = byId;
+            foreach (var id in PowerBase.Application.Pipelines.PipelineUserFieldFilter.ParseUserIds(value?.ToString())) ids.Add(id);
+        }
+        var users = new Dictionary<long, PowerBase.Application.Pipelines.PipelineUserDetails>();
+        await PowerBase.Application.Pipelines.PipelineUserFieldFilter.LoadAsync(_userRepo, ids, users, _logger, ct);
+        return users;
+    }
+
     private static IReadOnlyDictionary<long, object?> FilterValues(PipelineRecordChange change, IReadOnlyDictionary<long, object?> values)
     {
         if (change.ReferenceLabels is not { Count: > 0 } labels) return values;
@@ -622,14 +650,15 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                                     .Where(r => !PowerBase.Application.Pipelines.PipelineFilterEvaluator.IsRuleCompletelyBlank(r))
                                     .ToList();
 
+                                var filterUsers = await LoadFilterUsersAsync(nonBlankGroups, nonBlankRules, valuesSource, fields, ct);
                                 if (nonBlankGroups != null && nonBlankGroups.Any())
                                 {
-                                    filtersMatch = nonBlankGroups.Any(g => PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(g, valuesSource, fields, _logger));
+                                    filtersMatch = nonBlankGroups.Any(g => PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(g, valuesSource, fields, _logger, filterUsers));
                                 }
                                 else if (nonBlankRules != null && nonBlankRules.Any())
                                 {
                                     var mockGroup = new PowerBase.Application.Pipelines.TriggerFilterGroup { LogicalOp = "AND", Rules = nonBlankRules };
-                                    filtersMatch = PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(mockGroup, valuesSource, fields, _logger);
+                                    filtersMatch = PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(mockGroup, valuesSource, fields, _logger, filterUsers);
                                 }
                             }
 

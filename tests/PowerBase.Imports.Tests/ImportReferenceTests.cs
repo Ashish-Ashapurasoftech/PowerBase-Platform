@@ -179,9 +179,9 @@ public class ImportReferenceTests
     }
 
     [Fact]
-    public async Task A_value_that_is_the_record_id_of_a_parent_record_is_accepted_too()
+    public async Task A_value_that_is_the_record_id_of_a_parent_record_is_accepted_when_the_parent_has_no_key_field()
     {
-        var h = Run("Name,Course\nAda,1\nBen,3.0\n");
+        var h = Run("Name,Course\nAda,1\nBen,3.0\n", keyed: false);
 
         await h.RunAsync();
 
@@ -189,14 +189,16 @@ public class ImportReferenceTests
     }
 
     [Fact]
-    public async Task A_number_that_is_a_record_id_is_that_record_even_when_it_is_also_somebodys_key()
+    public async Task When_the_parent_has_a_key_field_a_value_is_looked_up_by_that_key_and_never_taken_for_a_record_id()
     {
-        // 2 is a live Record ID#; "101" is no Record ID# but is the key of course 7.
-        var h = Run("Name,Course\nAda,2\nBen,101\n");
+        // "101" is the key of course 7; 2 is a live Record ID# but no course has the key "2", so it is not that record.
+        var h = Run("Name,Course\nAda,101\nBen,2\n");
 
         await h.RunAsync();
 
-        h.Store.Inserted.Select(CourseOf).Should().Equal(2L, 7L);
+        h.Store.Inserted.Select(CourseOf).Should().Equal(7L, null);
+        OriginalOf(h.Store.Inserted.Single(r => Equals(r[6], "Ben"))).Should().Be("2");
+        h.Store.ParentChecks.Should().Be(0, "no Record ID# is looked for when the relationship has a key");
     }
 
     [Fact]
@@ -291,7 +293,7 @@ public class ImportReferenceTests
     [Fact]
     public async Task A_parent_used_by_many_rows_is_looked_up_once()
     {
-        var h = Run("Name,Course\n" + string.Join('\n', Enumerable.Range(1, 30).Select(i => $"s{i},1")) + "\n");
+        var h = Run("Name,Course\n" + string.Join('\n', Enumerable.Range(1, 30).Select(i => $"s{i},1")) + "\n", keyed: false);
 
         await h.RunAsync();
 

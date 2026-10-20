@@ -270,10 +270,24 @@ public class ImportDetailsTests
         ImportValueEquality.Same("Abc", "Abc").Should().BeTrue();
         ImportValueEquality.Same("Abc", "abc").Should().BeFalse();
         ImportValueEquality.Same("Abc", "Abc ").Should().BeFalse();
-        ImportValueEquality.Same("5", 5m).Should().BeFalse("writing it again is harmless; skipping a real change is not");
+        ImportValueEquality.Same("Abc", 5m).Should().BeFalse("writing it again is harmless; skipping a real change is not");
         ImportValueEquality.Same(true, true).Should().BeTrue();
         ImportValueEquality.Same(true, false).Should().BeFalse();
         ImportValueEquality.Same(new DateTime(2026, 3, 9), new DateTime(2026, 3, 9)).Should().BeTrue();
         ImportValueEquality.Same(new DateTime(2026, 3, 9), new DateTime(2026, 3, 10)).Should().BeFalse();
+    }
+
+    [Fact]
+    public void A_value_stored_as_text_by_an_encrypted_field_is_read_back_as_the_kind_the_import_writes()
+    {
+        ImportValueEquality.Same("6.2", 6.2m).Should().BeTrue();
+        ImportValueEquality.Same("6.20", 6.2m).Should().BeTrue();
+        ImportValueEquality.Same("6.3", 6.2m).Should().BeFalse();
+        ImportValueEquality.Same("abc", 6.2m).Should().BeFalse();
+        ImportValueEquality.Same("True", true).Should().BeTrue();
+        ImportValueEquality.Same("True", false).Should().BeFalse();
+        ImportValueEquality.Same("2000-02-02T00:00:00.0000000Z", new DateTime(2000, 2, 2, 0, 0, 0, DateTimeKind.Utc)).Should().BeTrue();
+        ImportValueEquality.Same("2000-02-03T00:00:00.0000000Z", new DateTime(2000, 2, 2, 0, 0, 0, DateTimeKind.Utc)).Should().BeFalse();
+        ImportValueEquality.Same("not a date", new DateTime(2000, 2, 2)).Should().BeFalse();
     }
 }
