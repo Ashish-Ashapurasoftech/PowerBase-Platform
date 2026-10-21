@@ -1970,6 +1970,8 @@ public partial class PipelineEngine : IPipelineEngine
             var inMemoryFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
                 .Select(f => (long)f.Fid!.Value).ToHashSet();
             inMemoryFilterFids.UnionWith(computedFieldFids);
+            // A Rich Text holds the editor's HTML: SQL cannot read the text it shows, so its conditions are matched in memory.
+            inMemoryFilterFids.UnionWith(fields.Where(f => f.Fid.HasValue && PipelineFilterEvaluator.IsRichTextField(f)).Select(f => (long)f.Fid!.Value));
             // A Reference searched by its display text ("contains Hardik") can't be matched in SQL — the
             // column holds the parent's Record ID#. Id-style conditions on a Reference stay in SQL.
             var labelReferenceFids = PipelineComputedFilter.LabelStyleReferenceFids(fields, filterTree);
@@ -4530,9 +4532,25 @@ public partial class PipelineEngine : IPipelineEngine
         }
         // A File (or a Lookup of one) holds its files as JSON: compare their names, as the filters do. Only a value that is such JSON
         // needs its field looked up.
-        if (category == "TEXT" && !string.IsNullOrWhiteSpace(leftToken) && leftVal.TrimStart() is var json && (json.StartsWith('[') || json.StartsWith('{'))
+        // A Rich Text is compared by the text it shows, not the editor's HTML ("<p>hello</p>" is "hello"). Only a value that holds markup
+        // needs its field looked up.
+        if (!string.IsNullOrWhiteSpace(leftToken) && (leftVal.Contains('<') || leftVal.Contains('&'))
+            && PipelineFilterEvaluator.IsRichTextField(await CachedTokenSourceFieldAsync(leftToken, payloadJson, allSteps, fieldRepo, tableRepo, ct)))
+            leftVal = PipelineFilterEvaluator.RichTextPlain(leftVal);
+        // A blank File is one with no files, compared the same way (no name matches).
+        if (category == "TEXT" && !string.IsNullOrWhiteSpace(leftToken) && leftVal.TrimStart() is var json
+            && (json.StartsWith('[') || json.StartsWith('{') || json.Length == 0)
             && PipelineFilterEvaluator.IsFileField(await CachedTokenSourceFieldAsync(leftToken, payloadJson, allSteps, fieldRepo, tableRepo, ct)))
             return PipelineFilterEvaluator.EvaluateFileOperator(leftVal, op, rightVal, _logger);
+        // "equals" / "not equals" on a list (a Multi-select, a User list, a formula or lookup returning one) compares the items, in any
+        // order — as the trigger filter and Search Records do. Compared as text, "Red" never equalled the stored ["Red"].
+        if (!string.IsNullOrWhiteSpace(leftToken) && op.Trim().ToLowerInvariant().Replace('-', '_') is "equals" or "not_equals" or "is" or "is_not"
+            && await CachedTokenSourceFieldAsync(leftToken, payloadJson, allSteps, fieldRepo, tableRepo, ct) is { } equalityField
+            && PipelineFilterEvaluator.IsListField(equalityField))
+        {
+            var same = PipelineFilterEvaluator.SameItems(leftVal, rightVal);
+            return op.Trim().ToLowerInvariant().Replace('-', '_') is "equals" or "is" ? same : !same;
+        }
         // "is empty" / "is not empty" on a list (a Multi-select, a User list, a formula or lookup returning one): a list with no items
         // ("[]") is empty, as in the trigger filter and Search Records. Only a value that is a JSON array needs its field looked up.
         if (!string.IsNullOrWhiteSpace(leftToken) && leftVal.TrimStart().StartsWith('[')
@@ -4683,6 +4701,10 @@ public partial class PipelineEngine : IPipelineEngine
 
         var stepRef = match.Groups[1].Value;
         var fieldRef = match.Groups[2].Value;
+
+        // Handle Errors' "On Error" branch reads the error a step failed with ({{steps.ERROR.error_message}}): no step of the
+        // PowerFlow, and its details (reference id, name, step, channel, message) are text.
+        if (stepRef.Equals("ERROR", StringComparison.Ordinal)) return ("TEXT", null);
 
         PipelineStep? sourceStep = null;
         if (allSteps != null && allSteps.Count > 0)

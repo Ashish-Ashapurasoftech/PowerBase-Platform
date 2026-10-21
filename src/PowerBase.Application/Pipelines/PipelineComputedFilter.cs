@@ -133,6 +133,14 @@ public static class PipelineComputedFilter
     private static object? ReadValue((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p,
         long fieldId, AppField? field)
     {
+        // A Rich Text is compared by the text it shows, not the editor's HTML.
+        if (PipelineFilterEvaluator.IsRichTextField(field))
+        {
+            var html = PhysicalNaming.IsComputedTypeCode(field!.TypeCode)
+                ? (p.Computed.TryGetValue(fieldId, out var rich) ? rich : null)
+                : ReadRaw(p, fieldId, field);
+            return html is null ? null : PipelineFilterEvaluator.RichTextPlain(ToText(html));
+        }
         // A Lookup of an encrypted parent field arrives as decrypted text too: compare it as the type it presents.
         if (field != null && PhysicalNaming.IsComputedTypeCode(field.TypeCode))
             return p.Computed.TryGetValue(fieldId, out var cv) ? StoredValueCoercion.ToFieldType(cv, field) : null;

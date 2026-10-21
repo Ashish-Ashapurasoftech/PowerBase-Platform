@@ -154,6 +154,8 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             .Select(f => (long)f.Fid!.Value).ToHashSet();
         var inMemoryFilterFids = new HashSet<long>(computedFids);
         inMemoryFilterFids.UnionWith(encryptedFilterFids);
+        // A Rich Text holds the editor's HTML: its conditions read the text it shows, in memory.
+        inMemoryFilterFids.UnionWith(sourceFields.Where(f => f.Fid.HasValue && PipelineFilterEvaluator.IsRichTextField(f)).Select(f => (long)f.Fid!.Value));
         // A Reference searched by its display text can't be matched in SQL (the column holds the
         // parent's Record ID#); id-style conditions on it stay in SQL.
         inMemoryFilterFids.UnionWith(PipelineComputedFilter.LabelStyleReferenceFids(sourceFields, effectiveFilter));

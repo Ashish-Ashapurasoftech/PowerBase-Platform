@@ -735,6 +735,24 @@ public static class PipelineFilterEvaluator
     // ── File ───────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>A File field, or a Lookup of one: its value is the files' JSON (<c>[{"name":"a.pdf","path":…}]</c>).</summary>
+    /// <summary>A Rich Text (a formula returning one, a Lookup of one): its value is HTML from the editor ("&lt;p&gt;hello&lt;/p&gt;").</summary>
+    public static bool IsRichTextField(AppField? field) =>
+        field != null && (field.TypeCode is "RichText" or "Formula_RichText"
+            || (field.TypeCode == "Lookup" && PowerBase.Application.Relationships.SummaryLookupSources.Settings(field)?.SourceTypeCode is "RichText" or "Formula_RichText"));
+
+    private static readonly Regex HtmlTag = new("<[^>]*>", RegexOptions.Compiled);
+    private static readonly Regex Spaces = new(@"\s+", RegexOptions.Compiled);
+
+    /// <summary>The text a Rich Text value shows: its tags taken out, its entities decoded and its spacing collapsed — so "is hello",
+    /// "starts with hello" and "is empty" read what the user sees, not the editor's "&lt;p&gt;hello&lt;/p&gt;" (or "&lt;p&gt;&lt;br&gt;&lt;/p&gt;").</summary>
+    public static string RichTextPlain(string? html)
+    {
+        if (string.IsNullOrEmpty(html)) return string.Empty;
+        if (html.IndexOf('<') < 0 && html.IndexOf('&') < 0) return html.Trim();
+        var text = HtmlTag.Replace(html, " ");
+        return Spaces.Replace(System.Net.WebUtility.HtmlDecode(text), " ").Trim();
+    }
+
     public static bool IsFileField(AppField? field) =>
         field != null && (field.TypeCode == "File"
             || (field.TypeCode == "Lookup" && PowerBase.Application.Relationships.SummaryLookupSources.Settings(field)?.SourceTypeCode == "File"));
@@ -837,6 +855,8 @@ public static class PipelineFilterEvaluator
         }
 
         var leftVal = ReadFieldValue(field, valuesSource);
+        // A Rich Text is compared by the text it shows, not the editor's HTML.
+        if (IsRichTextField(field)) leftVal = RichTextPlain(leftVal);
 
         string rightVal;
         if (string.Equals(condition.ValueMode, "field", StringComparison.OrdinalIgnoreCase))
@@ -1139,6 +1159,8 @@ public static class PipelineFilterEvaluator
         }
 
         var leftVal = ValueText(valObj);
+        // A Rich Text is compared by the text it shows, not the editor's HTML.
+        if (IsRichTextField(field)) leftVal = RichTextPlain(leftVal);
         var rightVal = rule.Value ?? string.Empty;
         var op = rule.Operator ?? "is";
 

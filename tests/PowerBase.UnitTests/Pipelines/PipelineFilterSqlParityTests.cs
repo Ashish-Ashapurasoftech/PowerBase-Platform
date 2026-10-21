@@ -49,7 +49,9 @@ public class PipelineFilterSqlParityTests
     [
         new("Text", "NVARCHAR(MAX)", "text", TextValues, TextOperands),
         new("TextMultiLine", "NVARCHAR(MAX)", "text", TextValues, TextOperands),
-        new("RichText", "NVARCHAR(MAX)", "text", TextValues, TextOperands),
+        // The record form's editor saves HTML: "<p>Apple</p>"; an emptied one "<p><br></p>".
+        new("RichText", "NVARCHAR(MAX)", "text", [null, "", "<p>Apple</p>", "<p>apple <b>pie</b></p>", "<p><br></p>", "<p>Fish &amp; Chips</p>", "Banana"],
+            ["apple", "Apple pie", "pie", "Fish & Chips", "A*"]),
         new("Email", "NVARCHAR(MAX)", "text", [null, "", "a@x.com", "B@Y.com"], ["a@x.com", "x.com", "*@x.com"]),
         new("Phone", "NVARCHAR(MAX)", "text", [null, "", "9876543210", "+1 555"], ["98765", "9876543210", "+1*"]),
         new("Url", "NVARCHAR(MAX)", "text", [null, "", "https://a.com/x", "http://b.org"], ["https", "https://a.com/x", "*.org"]),
@@ -205,6 +207,8 @@ public class PipelineFilterSqlParityTests
                                     (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>())), tree, fields)
                             .Select(p => (long)p.Row["Id"]!).ToHashSet();
 
+                    // Search Records matches a Rich Text in memory (its HTML is not what SQL could read): that half is what it answers.
+                    if (PipelineFilterEvaluator.IsRichTextField(field)) sql = memory;
                     checkedCount++;
                     if (trigTyped.SetEquals(sql) && trigText.SetEquals(sql) && memory.SetEquals(sql)) continue;
                     mismatches++;
@@ -319,6 +323,7 @@ public class PipelineFilterSqlParityTests
                                 (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>())), searchTree, fields)
                         .Select(p => (long)p.Row["Id"]!).ToHashSet();
 
+                    if (PipelineFilterEvaluator.IsRichTextField(fields[i])) sql = memory;
                     checkedCount++;
                     if (trigger.SetEquals(sql) && memory.SetEquals(sql)) continue;
                     mismatches++;

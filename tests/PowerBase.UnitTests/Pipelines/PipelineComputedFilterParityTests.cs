@@ -17,7 +17,7 @@ public class PipelineComputedFilterParityTests
     private readonly ITestOutputHelper _output;
     public PipelineComputedFilterParityTests(ITestOutputHelper output) => _output = output;
 
-    private sealed record ComputedCase(string TypeCode, string? Settings, string Group, object?[] Values, string[] Operands);
+    internal sealed record ComputedCase(string TypeCode, string? Settings, string Group, object?[] Values, string[] Operands);
 
     private static readonly string[] DateOperands = ["2026-10-15", "2026-10-14T18:30:00.000Z", "2026-10-15T00:00:00.000Z"];
     private static readonly object?[] Dates = [null, new DateTime(2026, 10, 14), new DateTime(2026, 10, 15), new DateTime(2026, 10, 16)];
@@ -27,10 +27,17 @@ public class PipelineComputedFilterParityTests
     private static readonly object?[] Numbers = [null, 0m, 5m, 5.5m, 12m];
     private static readonly string[] NumberOperands = ["5", "5.5", "0"];
 
-    private static readonly ComputedCase[] Cases =
+    internal static readonly ComputedCase[] Cases =
     [
         new("Formula_Text", null, "text", Texts, TextOperands),
-        new("Formula_RichText", null, "text", Texts, TextOperands),
+        new("Formula_RichText", null, "text", [null, "", "<p>Apple</p>", "<p>apple <b>pie</b></p>", "<p><br></p>"], ["apple", "pie", "Apple pie"]),
+        new("Lookup", "{\"sourceTypeCode\":\"RichText\"}", "text", [null, "<p>Apple</p>", "<p>apple <b>pie</b></p>"], ["apple", "pie"]),
+        new("Lookup", "{\"sourceTypeCode\":\"User\"}", "user", [null, "40021", "40022"], ["40021"]),
+        new("Lookup", "{\"sourceTypeCode\":\"MultiUser\"}", "userList", [null, "[\"40021\"]", "[\"40021\",\"40022\"]"], ["40021", "40022,40021"]),
+        new("Lookup", "{\"sourceTypeCode\":\"SingleSelect\"}", "text", [null, "Open", "Closed"], ["Open", "Clo"]),
+        new("Summary", "{\"function\":\"Avg\"}", "none", [null, 0m, 2.5m, 10m], ["2.5", "0"]),
+        new("Summary", "{\"function\":\"DistinctCount\"}", "none", [null, 0L, 3L], ["3", "0"]),
+        new("Summary", "{\"function\":\"Min\",\"targetTypeCode\":\"Number\"}", "none", [null, 1m, 5m], ["5", "1"]),
         new("Formula_Email", null, "text", [null, "", "a@x.com", "b@y.com"], ["a@x.com", "x.com"]),
         new("Formula_Phone", null, "text", [null, "", "98765"], ["98765", "987"]),
         new("Formula_Url", null, "text", [null, "", "https://a.com"], ["https", "https://a.com"]),
