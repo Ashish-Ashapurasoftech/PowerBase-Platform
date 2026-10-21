@@ -1,3 +1,4 @@
+using System.Globalization;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -734,6 +735,24 @@ public static class PipelineFilterEvaluator
     // ── File ───────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>A File field, or a Lookup of one: its value is the files' JSON (<c>[{"name":"a.pdf","path":…}]</c>).</summary>
+    /// <summary>A Rich Text (a formula returning one, a Lookup of one): its value is HTML from the editor ("&lt;p&gt;hello&lt;/p&gt;").</summary>
+    public static bool IsRichTextField(AppField? field) =>
+        field != null && (field.TypeCode is "RichText" or "Formula_RichText"
+            || (field.TypeCode == "Lookup" && PowerBase.Application.Relationships.SummaryLookupSources.Settings(field)?.SourceTypeCode is "RichText" or "Formula_RichText"));
+
+    private static readonly Regex HtmlTag = new("<[^>]*>", RegexOptions.Compiled);
+    private static readonly Regex Spaces = new(@"\s+", RegexOptions.Compiled);
+
+    /// <summary>The text a Rich Text value shows: its tags taken out, its entities decoded and its spacing collapsed — so "is hello",
+    /// "starts with hello" and "is empty" read what the user sees, not the editor's "&lt;p&gt;hello&lt;/p&gt;" (or "&lt;p&gt;&lt;br&gt;&lt;/p&gt;").</summary>
+    public static string RichTextPlain(string? html)
+    {
+        if (string.IsNullOrEmpty(html)) return string.Empty;
+        if (html.IndexOf('<') < 0 && html.IndexOf('&') < 0) return html.Trim();
+        var text = HtmlTag.Replace(html, " ");
+        return Spaces.Replace(System.Net.WebUtility.HtmlDecode(text), " ").Trim();
+    }
+
     public static bool IsFileField(AppField? field) =>
         field != null && (field.TypeCode == "File"
             || (field.TypeCode == "Lookup" && PowerBase.Application.Relationships.SummaryLookupSources.Settings(field)?.SourceTypeCode == "File"));
@@ -836,6 +855,8 @@ public static class PipelineFilterEvaluator
         }
 
         var leftVal = ReadFieldValue(field, valuesSource);
+        // A Rich Text is compared by the text it shows, not the editor's HTML.
+        if (IsRichTextField(field)) leftVal = RichTextPlain(leftVal);
 
         string rightVal;
         if (string.Equals(condition.ValueMode, "field", StringComparison.OrdinalIgnoreCase))
@@ -853,6 +874,11 @@ public static class PipelineFilterEvaluator
         // A File is matched by its files' names.
         if (IsFileField(field) && FileRuleOperator(condition.Operator) is { } fileOperator)
             return EvaluateFileOperator(leftVal, fileOperator, rightVal, logger);
+
+        // "is" / "is not" on a list (Multi-select, User list) compares the items in any order — as the filter editor's rules do and as
+        // Search Records' SQL does — not the stored JSON text, which never equalled "Red" for ["Red"].
+        if (condition.Operator is "eq" or "ne" && !string.Equals(condition.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && IsListField(field))
+            return SameItems(leftVal, rightVal) == (condition.Operator == "eq");
 
         // A Reference is matched by its display text; exact-match operators also accept the stored Record ID#.
         if (condition.Operator is "eq" or "ne" or "in" or "notIn" && TryReferenceIdSource(field, valuesSource, out var byIdSource))
@@ -880,6 +906,21 @@ public static class PipelineFilterEvaluator
 
     private static bool EvaluateFilterConditionCore(FilterCondition condition, string leftVal, string rightVal, string typeCategory, ILogger? logger)
     {
+        // Contains / starts with / ends with read the value as shown, whatever its type — "5.5" contains "5" — as SQL does.
+        if (condition.Operator is "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" or "notEndsWith")
+            typeCategory = "TEXT";
+        // A blank value is in no order (as in SQL): "is before x" never holds for it, nor anything "before nothing".
+        if (condition.Operator is "gt" or "gte" or "lt" or "lte" && (string.IsNullOrWhiteSpace(leftVal) || string.IsNullOrEmpty(rightVal)))
+            return false;
+        // HAS / XHAS: the list holds any of the values (it was missing here, so an Advanced Query's HAS never matched in a trigger).
+        if (condition.Operator is "includes") return ListIncludesAny(leftVal, rightVal);
+        if (condition.Operator is "notIncludes") return !ListIncludesAny(leftVal, rightVal);
+        // Text in order: case-insensitive and culture-aware, close to SQL Server's collation ("a_b" comes before "apple").
+        if (typeCategory == "TEXT" && condition.Operator is "gt" or "gte" or "lt" or "lte")
+        {
+            var order = string.Compare(leftVal, rightVal, CultureInfo.InvariantCulture, CompareOptions.IgnoreCase);
+            return condition.Operator switch { "gt" => order > 0, "gte" => order >= 0, "lt" => order < 0, _ => order <= 0 };
+        }
         switch (condition.Operator)
         {
             case "eq": return EvaluateConditionOperator(leftVal, "equals", rightVal, typeCategory, logger);
@@ -1118,6 +1159,8 @@ public static class PipelineFilterEvaluator
         }
 
         var leftVal = ValueText(valObj);
+        // A Rich Text is compared by the text it shows, not the editor's HTML.
+        if (IsRichTextField(field)) leftVal = RichTextPlain(leftVal);
         var rightVal = rule.Value ?? string.Empty;
         var op = rule.Operator ?? "is";
 

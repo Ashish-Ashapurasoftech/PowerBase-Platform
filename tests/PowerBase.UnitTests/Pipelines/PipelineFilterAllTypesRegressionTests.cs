@@ -204,7 +204,7 @@ public class PipelineFilterAllTypesRegressionTests
         var result = (FilterGroup?)map.Invoke(Engine(), new object?[] { Group($"fid_{fid}", op, value), Fields, "{}", "path", new List<PipelineStep>(), null });
 
         Assert.NotNull(result);
-        var conditions = Flatten(result!).ToList();
+        var conditions = SearchFilterNodes.Conditions(result!).ToList();
         Assert.NotEmpty(conditions);
         Assert.All(conditions, c => Assert.Equal(fid, c.FieldId));
         var expected = (string)mapOperator.Invoke(null, new object?[] { op })!;
@@ -214,6 +214,12 @@ public class PipelineFilterAllTypesRegressionTests
         {
             Assert.All(conditions, c => Assert.Contains(c.SubField, new[] { "start", "end" }));
             Assert.All(conditions, c => Assert.Contains(c.Operator, new[] { "gt", "gte", "lt", "lte", "isEmpty", "isNotEmpty" }));
+            return;
+        }
+        // A checkbox is matched on its state: "is not true" is "is false" (a blank one is unchecked, so it passes too).
+        if (PipelineFilterEvaluator.GetTypeCategory(field) == "BOOLEAN" && expected is "eq" or "ne")
+        {
+            Assert.Equal("eq", Assert.Single(conditions).Operator);
             return;
         }
         // A date field may use the date_ form, or a relative-date window; every other type keeps the mapped operator.

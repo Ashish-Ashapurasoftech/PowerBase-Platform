@@ -310,8 +310,10 @@ public class PipelineFilterRangeTimeFileTests
     public void Time_SearchRecords_ComparesTheTime_NotADay(string op, string sqlOp)
     {
         var tree = Map("fid_13", op, "9:30");
-        var condition = Assert.Single(tree.Nodes).Condition!;
+        var node = Assert.Single(tree.Nodes);
+        var condition = SearchFilterNodes.WithoutBlank(node).Condition!;
         Assert.Equal((sqlOp, "09:30:00"), (condition.Operator, condition.Value));
+        Assert.Equal(sqlOp == "ne", SearchFilterNodes.IsOrBlank(node));
 
         // A TIME parameter: never a date window (DATEADD), which SQL refuses to compare with a TIME column.
         var (sql, p) = Sql(tree);
@@ -431,8 +433,8 @@ public class PipelineFilterRangeTimeFileTests
         // The checks SQL makes on the two columns, run here on the same values (and on an encrypted range, stored as JSON).
         var columns = Keys(NumberRanges.Where(r => InMemory(tree, new Dictionary<string, object?> { ["f_10"] = r.Value.Start, ["f_10_e"] = r.Value.End })).Select(r => r.Key));
         var encrypted = Keys(NumberRanges.Where(r => InMemory(tree, new Dictionary<string, object?> { ["f_10"] = NumberRangeJson(r.Value) })).Select(r => r.Key));
-        // SQL leaves out a blank range for "is not", as for every other column; the trigger keeps it.
-        var sqlExpected = Keys(expected.Split(',', StringSplitOptions.RemoveEmptyEntries).Where(k => !(op == "is-not" && k == "R4")));
+        // "is not" keeps a blank range, as the trigger does (it used to be left out by SQL's NOT on NULL).
+        var sqlExpected = expected;
         Assert.Equal(sqlExpected, columns);
         Assert.Equal(sqlExpected, encrypted);
 
@@ -520,7 +522,8 @@ public class PipelineFilterRangeTimeFileTests
         Assert.All(Flatten(tree), c => Assert.Contains(c.SubField, new[] { "start", "end" }));
         var columns = Keys(DateRanges.Where(r => InMemory(tree, new Dictionary<string, object?> { ["f_14"] = r.Value.Start, ["f_14_e"] = r.Value.End })).Select(r => r.Key));
         var encrypted = Keys(DateRanges.Where(r => InMemory(tree, new Dictionary<string, object?> { ["f_14"] = DateRangeJson(r.Value) })).Select(r => r.Key));
-        var sqlExpected = Keys(expected.Split(',', StringSplitOptions.RemoveEmptyEntries).Where(k => !(op == "is-not" && k == "R4")));
+        // "is not" keeps a blank range, as the trigger does (it used to be left out by SQL's NOT on NULL).
+        var sqlExpected = expected;
         Assert.Equal(sqlExpected, columns);
         Assert.Equal(sqlExpected, encrypted);
 

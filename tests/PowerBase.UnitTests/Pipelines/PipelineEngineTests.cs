@@ -1627,7 +1627,10 @@ public class PipelineEngineTests
 
         var result = (FilterGroup)method!.Invoke(_engine, [group, fields, "{}", "path", new List<PipelineStep>(), null])!;
 
-        result.Nodes.Should().ContainSingle().Which.Condition!.Operator.Should().Be(expectedDbOperator);
+        var node = result.Nodes.Should().ContainSingle().Subject;
+        SearchFilterNodes.WithoutBlank(node).Condition!.Operator.Should().Be(expectedDbOperator);
+        // "is not" lets a blank record through, as the trigger filters do.
+        SearchFilterNodes.IsOrBlank(node).Should().Be(expectedDbOperator == "date_ne");
     }
 
     [Fact]
@@ -2479,7 +2482,8 @@ public class PipelineEngineTests
         var rule = new TriggerFilterGroup { Rules = new List<TriggerFilterRule> { new() { Field = "fid_1", Operator = op, Value = "@relative-date|today|0|Asia/Kolkata" } } };
         var method = typeof(PipelineEngine).GetMethod("MapTriggerFilterGroupToDbFilterGroup", BindingFlags.NonPublic | BindingFlags.Instance);
         var result = (FilterGroup)method!.Invoke(_engine, new object?[] { rule, fields, "{}", "path", new List<PipelineStep>(), null })!;
-        var window = result.Nodes.Single().Group!;
+        SearchFilterNodes.IsOrBlank(result.Nodes.Single()).Should().Be(op == "is-not");
+        var window = SearchFilterNodes.WithoutBlank(result.Nodes.Single()).Group!;
         window.Logic.Should().Be(logic);
         window.Nodes[0].Condition!.Operator.Should().Be(startOp);
         window.Nodes[1].Condition!.Operator.Should().Be(endOp);
