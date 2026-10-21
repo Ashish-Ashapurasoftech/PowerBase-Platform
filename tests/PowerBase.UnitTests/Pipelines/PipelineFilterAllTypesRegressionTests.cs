@@ -15,7 +15,8 @@ namespace PowerBase.UnitTests.Pipelines;
 /// <summary>
 /// Regression: filtering on a person's detail ("Record Owner › Email") was added next to the existing filters. A rule on any plain
 /// field — every field type a table can have, its system fields, formulas, lookups, summaries and relationships — with any operator
-/// its type allows must validate, evaluate (trigger filters) and map to SQL (Search Records) exactly as before.
+/// its type allows must validate, evaluate (trigger filters) and map to SQL (Search Records) exactly as before — save for the types whose
+/// filters were wrong and were fixed since: a time of day compares times (TIME), a Date / Numeric Range compares the whole range.
 /// </summary>
 public class PipelineFilterAllTypesRegressionTests
 {
@@ -95,12 +96,22 @@ public class PipelineFilterAllTypesRegressionTests
     {
         "NUMBER" => "12",
         "DATE" => "2026-10-15",
+        "TIME" => "10:30:00",
         "BOOLEAN" => "true",
         _ => "abc"
     };
 
+    /// <summary>The report filter's operators added later (wildcard, includes, is during, the current user): they have their own
+    /// behaviour, covered by PipelineFilterReportOperatorsTests. Every operator before them must behave exactly as it did.</summary>
+    internal static readonly HashSet<string> ReportOperators = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "wildcard", "not-wildcard", "not_wildcard", "includes", "not-includes", "not_includes", "during", "not-during", "not_during",
+        "is-current-user", "is_current_user", "is-not-current-user", "is_not_current_user"
+    };
+
     public static IEnumerable<object[]> FieldsAndOperators() =>
         Fields.SelectMany(f => PipelineFilterEvaluator.AllowedOperatorsByTypeCategory[PipelineFilterEvaluator.GetTypeCategory(f)]
+            .Where(op => !ReportOperators.Contains(op))
             .Select(op => new object[] { f.Fid!.Value, op }));
 
     private static TriggerFilterGroup Group(string field, string op, string value) =>
@@ -197,6 +208,14 @@ public class PipelineFilterAllTypesRegressionTests
         Assert.NotEmpty(conditions);
         Assert.All(conditions, c => Assert.Equal(fid, c.FieldId));
         var expected = (string)mapOperator.Invoke(null, new object?[] { op })!;
+        // A Date / Numeric Range is compared as a whole range, on its start and end columns (PipelineFilterRangeTimeFileTests covers
+        // what each operator means); it used to compare its start column alone, as text against a range value.
+        if (PowerBase.Domain.Constants.PhysicalNaming.IsRangeTypeCode(field.TypeCode) && expected is "eq" or "ne" or "gt" or "gte" or "lt" or "lte" or "isEmpty" or "isNotEmpty")
+        {
+            Assert.All(conditions, c => Assert.Contains(c.SubField, new[] { "start", "end" }));
+            Assert.All(conditions, c => Assert.Contains(c.Operator, new[] { "gt", "gte", "lt", "lte", "isEmpty", "isNotEmpty" }));
+            return;
+        }
         // A date field may use the date_ form, or a relative-date window; every other type keeps the mapped operator.
         if (PipelineFilterEvaluator.GetTypeCategory(field) != "DATE")
             Assert.Equal(expected, Assert.Single(conditions).Operator);

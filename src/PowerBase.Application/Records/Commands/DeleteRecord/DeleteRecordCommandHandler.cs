@@ -70,7 +70,8 @@ public class DeleteRecordCommandHandler
                 var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(field);
                 if (oldRecord.TryGetValue(colKey, out var val))
                 {
-                    oldValuesDict[field.Fid.Value] = val;
+                    // A Date / Numeric Range is its two columns, as one { start, end } value.
+                    oldValuesDict[field.Fid.Value] = PowerBase.Application.Pipelines.PipelineEngine.StoredFieldValue(oldRecord, field, val);
                 }
             }
         }

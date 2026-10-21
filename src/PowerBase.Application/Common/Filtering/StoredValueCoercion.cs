@@ -33,6 +33,8 @@ public static class StoredValueCoercion
                     DateTime.TryParse(text, CultureInfo.CurrentCulture, DateTimeStyles.None, out date))
                     return date;
                 return value;
+            case "TIME":
+                return PipelineFilterEvaluator.TryParseTimeOfDay(text, out var time) ? time : value;
             case "BOOLEAN":
                 if (bool.TryParse(text, out var flag)) return flag;
                 if (text == "1") return true;

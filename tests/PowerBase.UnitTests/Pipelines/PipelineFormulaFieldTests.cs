@@ -58,7 +58,8 @@ public class PipelineFormulaFieldTests
     [InlineData("Formula_Duration", "NUMBER")]
     [InlineData("Formula_Date", "DATE")]
     [InlineData("Formula_DateTime", "DATE")]
-    [InlineData("Formula_Time", "DATE")]
+    // A time of day has its own category: it compares times, not the day a time falls on.
+    [InlineData("Formula_Time", "TIME")]
     [InlineData("Formula_Bool", "BOOLEAN")]
     public void TypeCategory_FormulaVariants_UseTheirResultType(string typeCode, string expected)
     {

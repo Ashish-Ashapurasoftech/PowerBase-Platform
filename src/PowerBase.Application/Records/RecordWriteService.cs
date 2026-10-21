@@ -216,7 +216,10 @@ public sealed class RecordWriteService : IRecordWriteService
             if (f.Fid.HasValue)
             {
                 var colKey = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(f);
-                var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
+                var storedVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
+                // A Date / Numeric Range is its two columns, as one { start, end } value: from the start column alone a trigger
+                // filter saw a single number or date ("is 5" never held for a range from 1 to 9).
+                var oldVal = PowerBase.Application.Pipelines.PipelineEngine.StoredFieldValue(oldRecord, f, storedVal);
 
                 // Key by both Id and Fid for full evaluator & snapshot lookup compatibility
                 beforeValues[f.Id] = oldVal;
@@ -227,7 +230,7 @@ public sealed class RecordWriteService : IRecordWriteService
                     afterValues[f.Id] = newVal;
                     afterValues[f.Fid.Value] = newVal;
 
-                    if (!f.IsSystem && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode) && !AreValuesEqual(oldVal, newVal, f.TypeCode))
+                    if (!f.IsSystem && !PowerBase.Domain.Constants.PhysicalNaming.IsComputedTypeCode(f.TypeCode) && !AreValuesEqual(storedVal, newVal, f.TypeCode))
                     {
                         pipelineChangedFields.Add(f);
                     }

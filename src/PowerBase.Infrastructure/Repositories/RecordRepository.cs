@@ -2324,11 +2324,16 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     /// SQL wildcards, only THEN are '*'/'?' substituted for '%'/'_'.</summary>
     private static string TranslateWildcardPattern(string raw)
     {
-        var escaped = raw
-            .Replace("[", "[[]")
-            .Replace("%", "[%]")
-            .Replace("_", "[_]");
-        return escaped.Replace("*", "%").Replace("?", "_");
+        // '*' = any run of characters, '?' = one character; "\*" and "\?" are the characters themselves (Quickbase's grammar, as the
+        // in-memory filters read it). LIKE's own wildcards typed by the user are text.
+        var like = new System.Text.StringBuilder(raw.Length + 8);
+        for (var i = 0; i < raw.Length; i++)
+        {
+            var c = raw[i];
+            if (c == '\\' && i + 1 < raw.Length && raw[i + 1] is '*' or '?') { like.Append(raw[++i]); continue; }
+            like.Append(c switch { '*' => "%", '?' => "_", '[' => "[[]", '%' => "[%]", '_' => "[_]", _ => c.ToString() });
+        }
+        return like.ToString();
     }
 
     /// <summary>A numeric column as text the way it reads on screen — "42500", "5.5", not the
@@ -2350,6 +2355,18 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private static bool IsDateTimeColumn(string col, AppField? field) =>
         col is "CreatedOn" or "ModifiedOn"
         || (field is not null && field.TypeCode.Equals("DateTime", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>How a filter operator compares a File's names: the comparison ("eq", "contains", "startsWith", "endsWith",
+    /// "wildcard") and whether no name may pass it. Null for an operator that looks at the value itself (is blank…).</summary>
+    private static (string Kind, bool Negated)? FileNameComparison(string op) => op switch
+    {
+        "eq" => ("eq", false), "ne" => ("eq", true),
+        "contains" => ("contains", false), "notContains" => ("contains", true),
+        "startsWith" => ("startsWith", false), "notStartsWith" => ("startsWith", true),
+        "endsWith" => ("endsWith", false), "notEndsWith" => ("endsWith", true),
+        "wildcard" => ("wildcard", false), "notWildcard" => ("wildcard", true),
+        _ => null,
+    };
 
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
         IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null, string? lookupAlias = null)
@@ -2526,7 +2543,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             resolvedField.TypeCode.Equals("Date", StringComparison.OrdinalIgnoreCase) ||
             resolvedField.TypeCode.Equals("DateTime", StringComparison.OrdinalIgnoreCase) ||
             resolvedField.TypeCode.Equals("Date_Time", StringComparison.OrdinalIgnoreCase) ||
-            resolvedField.TypeCode.Equals("Timestamp", StringComparison.OrdinalIgnoreCase));
+            resolvedField.TypeCode.Equals("Timestamp", StringComparison.OrdinalIgnoreCase) ||
+            // One end of a Date Range (a DATE column) against an instant — the start of a picked day (PipelineEngine's range rules).
+            (isRangeSubField && !string.IsNullOrWhiteSpace(cond.SubField) && resolvedField.TypeCode.Equals("DateRange", StringComparison.OrdinalIgnoreCase)));
+
+        // A TIME column: its value is a time of day ("10:30", "10:30:00").
+        var isTimeCol = resolvedField != null && resolvedField.TypeCode.Equals("Time", StringComparison.OrdinalIgnoreCase);
 
         Func<string?, object?> formatVal = rawVal =>
         {
@@ -2546,6 +2568,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                     System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
                     out var date))
                 return date;
+            if (isTimeCol && PowerBase.Application.Pipelines.PipelineFilterEvaluator.TryParseTimeOfDay(rawVal, out var time))
+                return time;
             return rawVal;
         };
 
@@ -2562,6 +2586,28 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var stringColExpr = isStringCol ? colExpr
             : isNumericCol ? NumberAsShownExpr(colExpr)
             : $"CAST({colExpr} AS NVARCHAR(MAX))";
+
+        // A File column holds its files as JSON ([{"name":"a.pdf","path":…}]): "filename is / contains / starts with / ends with"
+        // compare each file's name, never the JSON text — whose path and type "contains" also matched, and which "starts with" /
+        // "ends with" could never match. A positive operator holds when any file's name matches, a negated one when none does (a blank
+        // value matches neither, as in every other column). Text that is not JSON (an old value holding a link) is compared whole.
+        // The trigger filters and the in-memory search read the names the same way (PipelineFilterEvaluator.FileNames).
+        if (resolvedField is { TypeCode: "File" } && string.IsNullOrWhiteSpace(cond.SubField) && FileNameComparison(cond.Operator) is { } fileCheck)
+        {
+            var needle = (cond.Value ?? string.Empty).ToLower();
+            p.Add(pname, fileCheck.Kind switch
+            {
+                "eq" => needle,
+                "contains" => $"%{needle}%",
+                "startsWith" => $"{needle}%",
+                "endsWith" => $"%{needle}",
+                _ => TranslateWildcardPattern(cond.Value ?? string.Empty).ToLower(),   // wildcard
+            });
+            var compare = fileCheck.Kind == "eq" ? $"= @{pname}" : $"LIKE @{pname}";
+            var anyName = $"(EXISTS (SELECT 1 FROM OPENJSON(CASE WHEN ISJSON({colExpr}) = 1 THEN {colExpr} END) WITH (name NVARCHAR(MAX) '$.name') fn "
+                        + $"WHERE LOWER(fn.name) {compare}) OR (ISJSON({colExpr}) = 0 AND LOWER({colExpr}) {compare}))";
+            return fileCheck.Negated ? $"({colExpr} IS NOT NULL AND NOT {anyName})" : anyName;
+        }
 
         // A Date & Time column against a plain date ("is after 09-28-2026", "today", "during the
         // current day" — which arrives here as gte/lte of dates) compares whole days: the date
