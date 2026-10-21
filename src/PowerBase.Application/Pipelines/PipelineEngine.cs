@@ -2665,7 +2665,7 @@ public partial class PipelineEngine : IPipelineEngine
                     var right = EvaluateTokens(config.RightOperand, payloadJson, executionPath, allSteps);
                     var op = config.Operator ?? "equals";
                     var typeCategory = await ResolveRuleTypeCategoryAsync(config.LeftOperand, payloadJson, allSteps, fieldRepo, tableRepo, ct);
-                    isMatched = PipelineFilterEvaluator.EvaluateConditionOperator(left, op, right, typeCategory, _logger);
+                    isMatched = await EvaluateConditionRuleAsync(config.LeftOperand, left, op, right, typeCategory, payloadJson, allSteps, fieldRepo, tableRepo, ct);
                     _logger.LogInformation("Condition step {StepId} resolved Left: '{Left}', Operator: '{Op}', Right: '{Right}'. Result: {Result}", step.Id, left, op, right, isMatched);
 
                     stepRun.InputContext = SerializeAndSanitizeAudit(new {
@@ -4456,13 +4456,15 @@ public partial class PipelineEngine : IPipelineEngine
                     if (!string.IsNullOrWhiteSpace(rule.Right) && System.Text.RegularExpressions.Regex.IsMatch(rule.Right.Trim(), @"\{\{\s*(?:steps\.|trigger\.|variables\.)"))
                     {
                         var rightCategory = await ResolveRuleTypeCategoryAsync(rule.Right, payloadJson, allSteps, fieldRepo, tableRepo, ct);
-                        if (!leftCategory.Equals(rightCategory, StringComparison.OrdinalIgnoreCase))
+                        // A time of day against a date & time compares the time it holds (both were dates before times had their own type).
+                        var timeAndDate = leftCategory is "TIME" or "DATE" && rightCategory is "TIME" or "DATE";
+                        if (!leftCategory.Equals(rightCategory, StringComparison.OrdinalIgnoreCase) && !timeAndDate)
                         {
                             throw new PipelineStepException($"Incompatible dynamic operand types: Left operand '{rule.Left}' ({leftCategory}) vs Right operand '{rule.Right}' ({rightCategory}).");
                         }
                     }
 
-                    ruleResult = PipelineFilterEvaluator.EvaluateConditionOperator(leftVal, rule.Op ?? "equals", rightVal, leftCategory, _logger);
+                    ruleResult = await EvaluateConditionRuleAsync(rule.Left, leftVal, rule.Op ?? "equals", rightVal, leftCategory, payloadJson, allSteps, fieldRepo, tableRepo, ct);
 
                     auditTrail?.Add(new {
                         Type = "rule",
@@ -4504,6 +4506,52 @@ public partial class PipelineEngine : IPipelineEngine
         }
 
         return isAnd;
+    }
+
+    /// <summary>One Condition rule. "is the current user" is the user the step runs as; "wildcard match" on a User / User List value
+    /// matches its person's name or email (the value itself is the user id), as the filters do. Everything else compares the values.</summary>
+    private async Task<bool> EvaluateConditionRuleAsync(string? leftToken, string leftVal, string op, string rightVal, string category,
+        string payloadJson, List<PipelineStep>? allSteps, IAppFieldRepository fieldRepo, IAppTableRepository tableRepo, CancellationToken ct)
+    {
+        if (PipelineFilterEvaluator.IsCurrentUserOperator(op, out var notCurrent))
+            return PipelineFilterEvaluator.MatchesCurrentUser(leftVal, notCurrent, StepActingUserId);
+        var normalized = op.Trim().ToLowerInvariant().Replace('_', '-');
+        if (normalized is "wildcard" or "not-wildcard" && !string.IsNullOrWhiteSpace(leftToken))
+        {
+            var source = (await ResolveTokenSourceFieldAsync(leftToken, payloadJson, allSteps, fieldRepo, tableRepo, ct)).Field;
+            var ids = PipelineUserFieldFilter.ParseUserIds(leftVal);
+            // A stored user field, or a formula / lookup that returns users: the value is their ids.
+            if ((PipelineUserFieldFilter.IsUserField(source) || PipelineUserFieldFilter.IsComputedUser(source)) && ids.Count > 0)
+            {
+                await PipelineUserFieldFilter.LoadAsync(CurrentStepServices.GetService<IUserRepository>(), ids, _userTokenInfo, _logger, ct);
+                return PipelineUserFieldFilter.Matches(ids, _userTokenInfo, PipelineUserFieldFilter.PersonDetail, op, rightVal);
+            }
+        }
+        // A File (or a Lookup of one) holds its files as JSON: compare their names, as the filters do. Only a value that is such JSON
+        // needs its field looked up.
+        if (category == "TEXT" && !string.IsNullOrWhiteSpace(leftToken) && leftVal.TrimStart() is var json && (json.StartsWith('[') || json.StartsWith('{'))
+            && PipelineFilterEvaluator.IsFileField(await CachedTokenSourceFieldAsync(leftToken, payloadJson, allSteps, fieldRepo, tableRepo, ct)))
+            return PipelineFilterEvaluator.EvaluateFileOperator(leftVal, op, rightVal, _logger);
+        // "is empty" / "is not empty" on a list (a Multi-select, a User list, a formula or lookup returning one): a list with no items
+        // ("[]") is empty, as in the trigger filter and Search Records. Only a value that is a JSON array needs its field looked up.
+        if (!string.IsNullOrWhiteSpace(leftToken) && leftVal.TrimStart().StartsWith('[')
+            && PipelineFilterEvaluator.EvaluateListBlank(leftVal, op) is { } listBlank
+            && await CachedTokenSourceFieldAsync(leftToken, payloadJson, allSteps, fieldRepo, tableRepo, ct) is { } listField
+            && PipelineFilterEvaluator.IsListField(listField))
+            return listBlank;
+        return PipelineFilterEvaluator.EvaluateConditionOperator(leftVal, op, rightVal, category, _logger);
+    }
+
+    /// <summary>The field a token reads, worked out once per run (a loop evaluates the same rule for every record); null when it
+    /// cannot be — the normal token evaluation reports that.</summary>
+    private async Task<AppField?> CachedTokenSourceFieldAsync(string token, string payloadJson, List<PipelineStep>? allSteps,
+        IAppFieldRepository fieldRepo, IAppTableRepository tableRepo, CancellationToken ct)
+    {
+        if (_tokenSourceFieldCache.TryGetValue(token, out var source)) return source;
+        try { source = (await ResolveTokenSourceFieldAsync(token, payloadJson, allSteps, fieldRepo, tableRepo, ct)).Field; }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return null; }
+        _tokenSourceFieldCache[token] = source;
+        return source;
     }
 
     private async Task<string> ResolveRuleTypeCategoryAsync(
@@ -6158,7 +6206,14 @@ public partial class PipelineEngine : IPipelineEngine
             "contains" => "contains",
             "not-contains" => "notContains",
             "starts-with" => "startsWith",
+            "not-starts-with" => "notStartsWith",
             "ends-with" => "endsWith",
+            "not-ends-with" => "notEndsWith",
+            "wildcard" => "wildcard",
+            "not-wildcard" => "notWildcard",
+            "includes" => "includes",
+            "not-includes" => "notIncludes",
+            "not-during" => "notDuring",
             "is-empty" => "isEmpty",
             "is-not-empty" => "isNotEmpty",
             "is-true" => "eq",
@@ -6186,7 +6241,13 @@ public partial class PipelineEngine : IPipelineEngine
         var userRepo = CurrentStepServices.GetService<IUserRepository>();
         foreach (var rule in rules)
         {
-            if (!PipelineUserFieldFilter.TryResolve(rule.Field, fields, out var field, out var detail) || !field.Fid.HasValue) continue;
+            if (!PipelineUserFieldFilter.TryResolveRule(rule, fields, out var field, out var detail) || !field.Fid.HasValue) continue;
+            // A formula or lookup user field has no column to list its people from: its "wildcard match" is worked out over the app's users.
+            if (PipelineUserFieldFilter.IsComputedUser(field))
+            {
+                resolved[rule] = await FormulaUserPersonConditionAsync(field, table, rule.Operator, EvaluateTokens(rule.Value, payloadJson, executionPath, allSteps), ct);
+                continue;
+            }
             if (!idsByField.TryGetValue(field.Id, out var ids))
             {
                 // Every person the column holds — no limit, so "none of these people" is exact.
@@ -6210,6 +6271,43 @@ public partial class PipelineEngine : IPipelineEngine
             else sqlIds += filter.IdCount;
         }
         return new UserDetailFilters(resolved, inMemoryFids);
+    }
+
+    /// <summary>"wildcard match" on a formula or lookup user field in Search Records: the users whose screen name, name or email matches (as
+    /// a stored user field's does), as a condition on the ids the formula returns — "in" those users for a single user, "includes" any of them
+    /// for a list; the negated operator the other way round. Nobody matching is a condition no user id meets.</summary>
+    private async Task<FilterNode> FormulaUserPersonConditionAsync(AppField field, AppTable table, string? op, string? pattern, CancellationToken ct)
+    {
+        var (positive, negated) = PipelineUserFieldFilter.Split(op);
+        var ids = new List<long>();
+        var userRepo = CurrentStepServices.GetService<IUserRepository>();
+        if (userRepo != null)
+        {
+            // Everyone the field could hold: the tenant's users (a user field may hold someone who is not a member of this app),
+            // and the app's users as well.
+            var candidates = new HashSet<Guid>();
+            if (CurrentStepServices.GetService<ITenantRepository>() is { } tenants)
+                foreach (var user in await tenants.ListUsersAsync(ct: ct)) candidates.Add(user.UserPublicId);
+            if (CurrentStepServices.GetService<IAppUserRepository>() is { } appUsers)
+                foreach (var user in await appUsers.ListByAppIdAsync(table.AppId, ct)) candidates.Add(user.UserPublicId);
+            foreach (var publicId in candidates)
+            {
+                PipelineUserDetails person;
+                try { person = PipelineUserDetails.From(await userRepo.GetByPublicIdAsync(publicId, ct)); }
+                catch (Exception ex) when (ex is not OperationCanceledException) { continue; /* a user that can no longer be read matches no record */ }
+                // The same details a stored user field's "wildcard match" checks: screen name, name or email.
+                if (new[] { person.ScreenName, person.Name, person.Email }.Any(text => PipelineFilterEvaluator.EvaluateConditionOperator(text ?? string.Empty, positive, pattern ?? string.Empty, "TEXT")))
+                    ids.Add(person.Id);
+            }
+        }
+        var idTexts = ids.Count == 0 ? new List<string> { "-1" } : ids.Distinct().Select(id => id.ToString(CultureInfo.InvariantCulture)).ToList();
+        var isList = PipelineUserFieldFilter.IsComputedUserList(field);
+        return new FilterNode { Condition = new FilterCondition
+        {
+            FieldId = field.Fid!.Value,
+            Operator = isList ? (negated ? "notIncludes" : "includes") : (negated ? "notIn" : "in"),
+            Value = isList ? string.Join(",", idTexts) : JsonSerializer.Serialize(idTexts)
+        }};
     }
 
     /// <summary>Conditions for the running Search Records step's rules on a person's detail, worked out by
@@ -6277,7 +6375,28 @@ public partial class PipelineEngine : IPipelineEngine
                     continue;
                 }
 
-                var field = ResolvePipelineField(rule.Field, fields);
+                // "is the current user": the user the step runs as. On a User List it means the list holds them.
+                if (PipelineFilterEvaluator.IsCurrentUserOperator(rule.Operator, out var notCurrentUser))
+                {
+                    var userField = ResolvePipelineField(rule.Field, fields);
+                    if (!userField.Fid.HasValue) continue;
+                    var isUserList = userField.TypeCode is "MultiUser" or "Formula_ListUser" || PipelineUserFieldFilter.IsComputedUserList(userField);
+                    var currentUserId = StepActingUserId;
+                    dbGroup.Nodes.Add(notCurrentUser
+                        ? new FilterNode { Group = PowerBase.Application.Reports.Queries.RunReport.RunReportQueryHandler.NotCurrentUserGroup(userField.Fid.Value, isUserList, currentUserId) }
+                        : new FilterNode { Condition = new FilterCondition { FieldId = userField.Fid.Value, Operator = isUserList ? "includes" : "eq", Value = currentUserId.ToString(CultureInfo.InvariantCulture) } });
+                    continue;
+                }
+
+                // One part of an Address ("Address: City") is the property of the stored address JSON.
+                string? subField = null;
+                AppField field;
+                if (PipelineAddressFieldFilter.TryResolve(rule.Field, fields, out var addressField, out var addressPart))
+                {
+                    field = addressField;
+                    subField = addressPart;
+                }
+                else field = ResolvePipelineField(rule.Field, fields);
 
                 if (field.Fid.HasValue)
                 {
@@ -6308,6 +6427,61 @@ public partial class PipelineEngine : IPipelineEngine
                     }
 
                     var evaluatedValue = EvaluateTokens(rawValue, payloadJson, executionPath, allSteps);
+                    // "is during" / "is not during": the period's window, start included and end excluded. A record without a date is
+                    // in no period, so it is left out by both — as the report filter does.
+                    if (dbOp is "during" or "notDuring")
+                    {
+                        if (!RelativeFilterDate.IsPeriod(evaluatedValue))
+                        {
+                            // No period to be in: no record passes (as the trigger filters treat it).
+                            _logger.LogWarning("Search Records rule on field {FieldId} has no period for '{Operator}'; no record matches it.", field.Fid, rule.Operator);
+                            dbGroup.Nodes.Add(new FilterNode { Group = new FilterGroup
+                            {
+                                Logic = "and",
+                                Nodes = new List<FilterNode>
+                                {
+                                    new() { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isEmpty" } },
+                                    new() { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isNotEmpty" } }
+                                }
+                            }});
+                            continue;
+                        }
+                        var period = RelativeFilterDate.PeriodWindow(evaluatedValue!);
+                        FilterNode Edge(string op, DateTime value) => new FilterNode
+                        {
+                            Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = op, Value = value.ToString("O") }
+                        };
+                        var during = dbOp == "during";
+                        dbGroup.Nodes.Add(new FilterNode { Group = new FilterGroup
+                        {
+                            Logic = during ? "and" : "or",
+                            Nodes = new List<FilterNode> { Edge(during ? "gte" : "lt", period.Start), Edge(during ? "lt" : "gte", period.End) }
+                        }});
+                        continue;
+                    }
+                    // A Date / Numeric Range: the rule compares the whole range, on its start and end columns — the checks the trigger
+                    // filters make (see PipelineFilterEvaluator's range notes).
+                    if (subField is null && PhysicalNaming.IsRangeTypeCode(field.TypeCode) && MapRangeRule(field.Fid.Value, field.TypeCode, dbOp, evaluatedValue) is { } rangeNode)
+                    {
+                        dbGroup.Nodes.Add(rangeNode);
+                        continue;
+                    }
+
+                    // A time of day compares as one: "10:30" is the TIME 10:30:00. A value that is no time matches nothing ("is not": every
+                    // time), as in the trigger filters — it never reaches SQL, which would fail to convert it.
+                    if (fieldCategory == "TIME" && dbOp is "eq" or "ne" or "gt" or "gte" or "lt" or "lte")
+                    {
+                        if (PipelineFilterEvaluator.TryParseTimeOfDay(evaluatedValue, out var timeOfDay))
+                            evaluatedValue = timeOfDay.ToString("c", CultureInfo.InvariantCulture);
+                        else
+                        {
+                            dbGroup.Nodes.Add(dbOp == "ne"
+                                ? new FilterNode { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isNotEmpty" } }
+                                : MatchesNothing(field.Fid.Value));
+                            continue;
+                        }
+                    }
+
                     if (fieldCategory == "DATE" && RelativeFilterDate.IsRelative(evaluatedValue))
                     {
                         var window = RelativeFilterDate.Window(evaluatedValue);
@@ -6336,7 +6510,7 @@ public partial class PipelineEngine : IPipelineEngine
 
                     // contains / starts with / ends with are SQL LIKE patterns: "%", "_" and "[" typed by the user are text, not
                     // wildcards ("contains a_b" must not match "axb") — the same escaping the advanced query applies.
-                    if (dbOp is "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" && evaluatedValue != null)
+                    if (dbOp is "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" or "notEndsWith" && evaluatedValue != null)
                         evaluatedValue = PipelineComputedFilter.EscapeLike(evaluatedValue);
 
                     dbGroup.Nodes.Add(new FilterNode
@@ -6345,7 +6519,8 @@ public partial class PipelineEngine : IPipelineEngine
                         {
                             FieldId = field.Fid.Value,
                             Operator = dbOp,
-                            Value = evaluatedValue
+                            Value = evaluatedValue,
+                            SubField = subField
                         }
                     });
                 }
@@ -6353,6 +6528,88 @@ public partial class PipelineEngine : IPipelineEngine
         }
 
         return dbGroup.Nodes.Any() ? dbGroup : null;
+    }
+
+    /// <summary>A condition no record meets (blank and not blank at once).</summary>
+    private static FilterNode MatchesNothing(int fid) => new()
+    {
+        Group = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = new List<FilterNode>
+            {
+                new() { Condition = new FilterCondition { FieldId = fid, Operator = "isEmpty" } },
+                new() { Condition = new FilterCondition { FieldId = fid, Operator = "isNotEmpty" } }
+            }
+        }
+    };
+
+    /// <summary>
+    /// A Search Records rule on a Date / Numeric Range as conditions on its two columns (SubField "start" / "end"): the checks
+    /// PipelineFilterEvaluator makes on the range in a trigger, so both answer alike. "is" — the range includes the value — is start ≤ value
+    /// and end ≥ value; "after" start &gt; value; "on or after" start ≥ value; "before" end &lt; value; "on or before" end ≤ value; "is
+    /// not" the opposite of "is". A day is the whole day, and the value may also be another range ({"start":…,"end":…}). A range with
+    /// only one end is that one value, and one with neither is blank. Null for an operator these do not cover.
+    /// </summary>
+    internal static FilterNode? MapRangeRule(int fid, string typeCode, string dbOp, string? value)
+    {
+        var op = dbOp.StartsWith("date_", StringComparison.Ordinal) ? dbOp["date_".Length..] : dbOp;
+        FilterNode Part(string part, string partOp, string? partValue = null) =>
+            new() { Condition = new FilterCondition { FieldId = fid, Operator = partOp, Value = partValue, SubField = part } };
+        FilterNode All(params FilterNode[] nodes) => new() { Group = new FilterGroup { Logic = "and", Nodes = nodes.ToList() } };
+        FilterNode Any(params FilterNode[] nodes) => new() { Group = new FilterGroup { Logic = "or", Nodes = nodes.ToList() } };
+        // One end against a value; where that end is missing, the other end stands in for it.
+        FilterNode End(string part, string partOp, string partValue) =>
+            Any(Part(part, partOp, partValue), All(Part(part, "isEmpty"), Part(part == "start" ? "end" : "start", partOp, partValue)));
+
+        switch (op)
+        {
+            case "isEmpty": return All(Part("start", "isEmpty"), Part("end", "isEmpty"));
+            case "isNotEmpty": return Any(Part("start", "isNotEmpty"), Part("end", "isNotEmpty"));
+            case "eq" or "ne" or "gt" or "gte" or "lt" or "lte": break;
+            default: return null;
+        }
+
+        // A value that is not a number / day: nothing matches ("is not": every range that has a value), as in the trigger filters.
+        var unreadable = op == "ne" ? Any(Part("start", "isNotEmpty"), Part("end", "isNotEmpty")) : MatchesNothing(fid);
+        if (typeCode == "NumericRange")
+        {
+            const NumberStyles numberStyles = NumberStyles.Number | NumberStyles.AllowExponent;
+            decimal low, high;
+            if (PipelineFilterEvaluator.TryReadRange(value, out var first, out var last))
+            {
+                var hasLow = decimal.TryParse(first, numberStyles, CultureInfo.InvariantCulture, out low);
+                var hasHigh = decimal.TryParse(last, numberStyles, CultureInfo.InvariantCulture, out high);
+                if (!hasLow && !hasHigh) return unreadable;
+                if (!hasLow) low = high;
+                if (!hasHigh) high = low;
+            }
+            else if (decimal.TryParse(value, out low)) high = low;
+            else return unreadable;
+            var lowText = low.ToString(CultureInfo.InvariantCulture);
+            var highText = high.ToString(CultureInfo.InvariantCulture);
+            return op switch
+            {
+                "eq" => All(End("start", "lte", lowText), End("end", "gte", highText)),
+                "ne" => Any(End("start", "gt", lowText), End("end", "lt", highText)),
+                "gt" => End("start", "gt", highText),
+                "gte" => End("start", "gte", lowText),
+                "lt" => End("end", "lt", lowText),
+                _ => End("end", "lte", highText),
+            };
+        }
+
+        if (!PipelineFilterEvaluator.TryDayWindows(value, null, out var lowDay, out var highDay)) return unreadable;
+        static string Instant(DateTime at) => DateTime.SpecifyKind(at, DateTimeKind.Utc).ToString("O", CultureInfo.InvariantCulture);
+        return op switch
+        {
+            "eq" => All(End("start", "lt", Instant(lowDay.End)), End("end", "gte", Instant(highDay.Start))),
+            "ne" => Any(End("start", "gte", Instant(lowDay.End)), End("end", "lt", Instant(highDay.Start))),
+            "gt" => End("start", "gte", Instant(highDay.End)),
+            "gte" => End("start", "gte", Instant(lowDay.Start)),
+            "lt" => End("end", "lt", Instant(lowDay.Start)),
+            _ => End("end", "lt", Instant(highDay.End)),
+        };
     }
 
     private class LookUpRecordStepConfig
