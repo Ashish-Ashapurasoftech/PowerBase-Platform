@@ -189,15 +189,15 @@ public static class PipelineComputedFilter
             "wildcard"      => text is not null && Wildcard(text, needle),
             "notWildcard"   => text is null || !Wildcard(text, needle),
             // Several values picked at once are joined with commas: the list holds any of them.
-            "includes"      => IncludesAny(Members(val), needle),
-            "notIncludes"   => !IncludesAny(Members(val), needle),
+            "includes"      => IncludesAny(Members(val), likeNeedle),
+            "notIncludes"   => !IncludesAny(Members(val), likeNeedle),
             // The operand is the exact UTC instant of the picked day's local midnight: match the [dv, dv+1day) window.
-            "date_eq"       => TryDate(val, out var a1) && DateTime.TryParse(operand, out var b1) && a1 >= b1 && a1 < b1.AddDays(1),
-            "date_ne"       => !(TryDate(val, out var a2) && DateTime.TryParse(operand, out var b2) && a2 >= b2 && a2 < b2.AddDays(1)),
-            "date_gt"       => TryDate(val, out var a3) && DateTime.TryParse(operand, out var b3) && a3 >= b3.AddDays(1),
-            "date_gte"      => TryDate(val, out var a4) && DateTime.TryParse(operand, out var b4) && a4 >= b4,
-            "date_lt"       => TryDate(val, out var a5) && DateTime.TryParse(operand, out var b5) && a5 < b5,
-            "date_lte"      => TryDate(val, out var a6) && DateTime.TryParse(operand, out var b6) && a6 < b6.AddDays(1),
+            "date_eq"       => TryDate(val, out var a1) && TryInstant(operand, out var b1) && a1 >= b1 && a1 < b1.AddDays(1),
+            "date_ne"       => !(TryDate(val, out var a2) && TryInstant(operand, out var b2) && a2 >= b2 && a2 < b2.AddDays(1)),
+            "date_gt"       => TryDate(val, out var a3) && TryInstant(operand, out var b3) && a3 >= b3.AddDays(1),
+            "date_gte"      => TryDate(val, out var a4) && TryInstant(operand, out var b4) && a4 >= b4,
+            "date_lt"       => TryDate(val, out var a5) && TryInstant(operand, out var b5) && a5 < b5,
+            "date_lte"      => TryDate(val, out var a6) && TryInstant(operand, out var b6) && a6 < b6.AddDays(1),
             "in"            => ParseValueList(operand).Any(v => Compare(val, v) == 0),
             "notIn"         => !ParseValueList(operand).Any(v => Compare(val, v) == 0),
             _               => true,
@@ -325,6 +325,11 @@ public static class PipelineComputedFilter
         _ => v.ToString(),
     };
 
+    /// <summary>A date or instant as text, read as UTC — what the columns hold. "…Z" (the date picker's instant) stays that instant
+    /// instead of moving into the server's own time zone, which shifted "is 15 Oct" by a day on a server not running on UTC.</summary>
+    private static bool TryInstant(string? text, out DateTime date) =>
+        DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out date);
+
     private static bool TryDate(object? v, out DateTime date)
     {
         switch (v)
@@ -332,7 +337,7 @@ public static class PipelineComputedFilter
             case DateTime dt: date = dt; return true;
             case DateTimeOffset dto: date = dto.UtcDateTime; return true;
             case DateOnly d: date = d.ToDateTime(TimeOnly.MinValue); return true;
-            case string s when DateTime.TryParse(s, out var parsed): date = parsed; return true;
+            case string s when TryInstant(s, out var parsed): date = parsed; return true;
             default: date = default; return false;
         }
     }
@@ -413,9 +418,9 @@ public static class PipelineComputedFilter
         if (b is null) return 1;
         if (TryNumber(a, out var da) && decimal.TryParse(b, NumberStyles.Number | NumberStyles.AllowExponent, CultureInfo.InvariantCulture, out var db))
             return da.CompareTo(db);
-        if (a is DateTime or DateTimeOffset or DateOnly && TryDate(a, out var dt) && DateTime.TryParse(b, out var dtb))
+        if (a is DateTime or DateTimeOffset or DateOnly && TryDate(a, out var dt) && TryInstant(b, out var dtb))
             return dt.CompareTo(dtb);
         if (a is bool bl && bool.TryParse(b, out var blb)) return bl.CompareTo(blb);
-        return string.Compare(ToText(a), b, StringComparison.OrdinalIgnoreCase);
+        return string.Compare(ToText(a), b, CultureInfo.InvariantCulture, CompareOptions.IgnoreCase);
     }
 }

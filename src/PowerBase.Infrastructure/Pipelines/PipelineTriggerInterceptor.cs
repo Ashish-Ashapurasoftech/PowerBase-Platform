@@ -624,7 +624,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                             {
                                 try
                                 {
-                                    var parsedTree = PowerBase.Application.Pipelines.CopyRecordsDefinition.ParseQuery(sub.AdvancedQuery, fields);
+                                    var parsedTree = PowerBase.Application.Pipelines.PipelineAdvancedQuery.ForTrigger(
+                                        PowerBase.Application.Pipelines.CopyRecordsDefinition.ParseQuery(sub.AdvancedQuery, fields)!);
                                     filtersMatch = PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateFilterGroup(parsedTree, valuesSource, fields, _logger);
                                 }
                                 catch (Exception ex)

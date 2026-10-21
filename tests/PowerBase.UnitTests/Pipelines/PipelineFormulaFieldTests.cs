@@ -532,7 +532,7 @@ public class PipelineFormulaFieldTests
 
         await h.RunStepAsync(SearchStep("fid_6", uiOperator, "50%_off[1]"));
 
-        var condition = h.CapturedFilter!.Nodes.Select(n => n.Condition).Single(c => c != null && c.FieldId == NameFid)!;
+        var condition = h.CapturedFilter!.Nodes.Select(n => SearchFilterNodes.WithoutBlank(n).Condition).Single(c => c != null && c.FieldId == NameFid)!;
         Assert.Equal(dbOperator, condition.Operator);
         Assert.Equal("50[%][_]off[[]1]", condition.Value);
     }

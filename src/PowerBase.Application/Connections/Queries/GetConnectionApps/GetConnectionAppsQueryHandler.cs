@@ -44,6 +44,9 @@ public class GetConnectionAppsQueryHandler
         var visible = connection.TokenAccessAllApps
             ? apps
             : apps.Where(a => connection.AllowedAppIds.Contains(a.Id)).ToList();
+        // Only apps whose PowerFlows the account can read: their tables and fields ask for that permission next.
+        visible = await PowerBase.Application.Pipelines.PipelineAppAccess.ReadableAsync(
+            targetScope.GetRequiredService<IAppAccessService>(), visible, ct);
 
         return visible
             .Select(a => new ConnectionAppDto { PublicId = a.PublicId, Name = a.Name })

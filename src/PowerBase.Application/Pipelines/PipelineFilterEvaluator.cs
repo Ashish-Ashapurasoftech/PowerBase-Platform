@@ -1,3 +1,4 @@
+using System.Globalization;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -854,6 +855,11 @@ public static class PipelineFilterEvaluator
         if (IsFileField(field) && FileRuleOperator(condition.Operator) is { } fileOperator)
             return EvaluateFileOperator(leftVal, fileOperator, rightVal, logger);
 
+        // "is" / "is not" on a list (Multi-select, User list) compares the items in any order — as the filter editor's rules do and as
+        // Search Records' SQL does — not the stored JSON text, which never equalled "Red" for ["Red"].
+        if (condition.Operator is "eq" or "ne" && !string.Equals(condition.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && IsListField(field))
+            return SameItems(leftVal, rightVal) == (condition.Operator == "eq");
+
         // A Reference is matched by its display text; exact-match operators also accept the stored Record ID#.
         if (condition.Operator is "eq" or "ne" or "in" or "notIn" && TryReferenceIdSource(field, valuesSource, out var byIdSource))
         {
@@ -880,6 +886,21 @@ public static class PipelineFilterEvaluator
 
     private static bool EvaluateFilterConditionCore(FilterCondition condition, string leftVal, string rightVal, string typeCategory, ILogger? logger)
     {
+        // Contains / starts with / ends with read the value as shown, whatever its type — "5.5" contains "5" — as SQL does.
+        if (condition.Operator is "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" or "notEndsWith")
+            typeCategory = "TEXT";
+        // A blank value is in no order (as in SQL): "is before x" never holds for it, nor anything "before nothing".
+        if (condition.Operator is "gt" or "gte" or "lt" or "lte" && (string.IsNullOrWhiteSpace(leftVal) || string.IsNullOrEmpty(rightVal)))
+            return false;
+        // HAS / XHAS: the list holds any of the values (it was missing here, so an Advanced Query's HAS never matched in a trigger).
+        if (condition.Operator is "includes") return ListIncludesAny(leftVal, rightVal);
+        if (condition.Operator is "notIncludes") return !ListIncludesAny(leftVal, rightVal);
+        // Text in order: case-insensitive and culture-aware, close to SQL Server's collation ("a_b" comes before "apple").
+        if (typeCategory == "TEXT" && condition.Operator is "gt" or "gte" or "lt" or "lte")
+        {
+            var order = string.Compare(leftVal, rightVal, CultureInfo.InvariantCulture, CompareOptions.IgnoreCase);
+            return condition.Operator switch { "gt" => order > 0, "gte" => order >= 0, "lt" => order < 0, _ => order <= 0 };
+        }
         switch (condition.Operator)
         {
             case "eq": return EvaluateConditionOperator(leftVal, "equals", rightVal, typeCategory, logger);

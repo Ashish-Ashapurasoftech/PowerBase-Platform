@@ -402,8 +402,11 @@ public class PipelineFilterReportOperatorsTests
     [InlineData("not-wildcard", "a?", "notWildcard", "a?")]
     public void SearchRecords_TextOperators(string op, string value, string sqlOp, string sqlValue)
     {
-        var condition = Assert.Single(Flatten(Sql("fid_10", op, value)));
+        var tree = Sql("fid_10", op, value);
+        var condition = Assert.Single(SearchFilterNodes.Conditions(tree));
         Assert.Equal((10, sqlOp, sqlValue), (condition.FieldId, condition.Operator, condition.Value));
+        // A negated operator lets a blank record through, as the trigger filters do.
+        Assert.Equal(sqlOp.StartsWith("not", StringComparison.Ordinal), SearchFilterNodes.IsOrBlank(Assert.Single(tree.Nodes)));
     }
 
     [Theory]
@@ -411,8 +414,10 @@ public class PipelineFilterReportOperatorsTests
     [InlineData("not-includes", "notIncludes")]
     public void SearchRecords_Includes(string op, string sqlOp)
     {
-        var condition = Assert.Single(Flatten(Sql("fid_14", op, "Red, Blue")));
+        var tree = Sql("fid_14", op, "Red, Blue");
+        var condition = Assert.Single(SearchFilterNodes.Conditions(tree));
         Assert.Equal((14, sqlOp, "Red, Blue"), (condition.FieldId, condition.Operator, condition.Value));
+        Assert.Equal(sqlOp == "notIncludes", SearchFilterNodes.IsOrBlank(Assert.Single(tree.Nodes)));
     }
 
     [Fact]

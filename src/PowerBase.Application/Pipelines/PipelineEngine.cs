@@ -1888,7 +1888,8 @@ public partial class PipelineEngine : IPipelineEngine
             {
                 try
                 {
-                    filterTree = CopyRecordsDefinition.ParseQuery(config.AdvancedQuery, fields);
+                    if (CopyRecordsDefinition.ParseQuery(config.AdvancedQuery, fields) is { } parsedQuery)
+                        filterTree = PipelineAdvancedQuery.ForSearch(parsedQuery, fields, _logger);
                 }
                 catch (PowerBase.Domain.Exceptions.ValidationException vex)
                 {
@@ -6427,107 +6428,205 @@ public partial class PipelineEngine : IPipelineEngine
                     }
 
                     var evaluatedValue = EvaluateTokens(rawValue, payloadJson, executionPath, allSteps);
-                    // "is during" / "is not during": the period's window, start included and end excluded. A record without a date is
-                    // in no period, so it is left out by both — as the report filter does.
-                    if (dbOp is "during" or "notDuring")
-                    {
-                        if (!RelativeFilterDate.IsPeriod(evaluatedValue))
-                        {
-                            // No period to be in: no record passes (as the trigger filters treat it).
-                            _logger.LogWarning("Search Records rule on field {FieldId} has no period for '{Operator}'; no record matches it.", field.Fid, rule.Operator);
-                            dbGroup.Nodes.Add(new FilterNode { Group = new FilterGroup
-                            {
-                                Logic = "and",
-                                Nodes = new List<FilterNode>
-                                {
-                                    new() { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isEmpty" } },
-                                    new() { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isNotEmpty" } }
-                                }
-                            }});
-                            continue;
-                        }
-                        var period = RelativeFilterDate.PeriodWindow(evaluatedValue!);
-                        FilterNode Edge(string op, DateTime value) => new FilterNode
-                        {
-                            Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = op, Value = value.ToString("O") }
-                        };
-                        var during = dbOp == "during";
-                        dbGroup.Nodes.Add(new FilterNode { Group = new FilterGroup
-                        {
-                            Logic = during ? "and" : "or",
-                            Nodes = new List<FilterNode> { Edge(during ? "gte" : "lt", period.Start), Edge(during ? "lt" : "gte", period.End) }
-                        }});
-                        continue;
-                    }
-                    // A Date / Numeric Range: the rule compares the whole range, on its start and end columns — the checks the trigger
-                    // filters make (see PipelineFilterEvaluator's range notes).
-                    if (subField is null && PhysicalNaming.IsRangeTypeCode(field.TypeCode) && MapRangeRule(field.Fid.Value, field.TypeCode, dbOp, evaluatedValue) is { } rangeNode)
-                    {
-                        dbGroup.Nodes.Add(rangeNode);
-                        continue;
-                    }
-
-                    // A time of day compares as one: "10:30" is the TIME 10:30:00. A value that is no time matches nothing ("is not": every
-                    // time), as in the trigger filters — it never reaches SQL, which would fail to convert it.
-                    if (fieldCategory == "TIME" && dbOp is "eq" or "ne" or "gt" or "gte" or "lt" or "lte")
-                    {
-                        if (PipelineFilterEvaluator.TryParseTimeOfDay(evaluatedValue, out var timeOfDay))
-                            evaluatedValue = timeOfDay.ToString("c", CultureInfo.InvariantCulture);
-                        else
-                        {
-                            dbGroup.Nodes.Add(dbOp == "ne"
-                                ? new FilterNode { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isNotEmpty" } }
-                                : MatchesNothing(field.Fid.Value));
-                            continue;
-                        }
-                    }
-
-                    if (fieldCategory == "DATE" && RelativeFilterDate.IsRelative(evaluatedValue))
-                    {
-                        var window = RelativeFilterDate.Window(evaluatedValue);
-                        FilterNode Boundary(string op, DateTime value) => new FilterNode
-                        {
-                            Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = op, Value = value.ToString("O") }
-                        };
-                        if (dbOp == "date_eq" || dbOp == "date_ne")
-                        {
-                            var equal = dbOp == "date_eq";
-                            dbGroup.Nodes.Add(new FilterNode { Group = new FilterGroup
-                            {
-                                Logic = equal ? "and" : "or",
-                                Nodes = new List<FilterNode> { Boundary(equal ? "gte" : "lt", window.Start), Boundary(equal ? "lt" : "gte", window.End) }
-                            }});
-                            continue;
-                        }
-                        if (dbOp is "date_gt" or "date_gte" or "date_lt" or "date_lte")
-                        {
-                            dbGroup.Nodes.Add(Boundary(dbOp is "date_gt" or "date_gte" ? "gte" : "lt",
-                                dbOp is "date_gt" or "date_lte" ? window.End : window.Start));
-                            continue;
-                        }
-                    }
-
-
-                    // contains / starts with / ends with are SQL LIKE patterns: "%", "_" and "[" typed by the user are text, not
-                    // wildcards ("contains a_b" must not match "axb") — the same escaping the advanced query applies.
-                    if (dbOp is "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" or "notEndsWith" && evaluatedValue != null)
-                        evaluatedValue = PipelineComputedFilter.EscapeLike(evaluatedValue);
-
-                    dbGroup.Nodes.Add(new FilterNode
-                    {
-                        Condition = new FilterCondition
-                        {
-                            FieldId = field.Fid.Value,
-                            Operator = dbOp,
-                            Value = evaluatedValue,
-                            SubField = subField
-                        }
-                    });
+                    if (MapCondition(field, subField, dbOp, evaluatedValue, valueIsLikeEscaped: false, _logger) is { } node)
+                        dbGroup.Nodes.Add(node);
                 }
             }
         }
 
         return dbGroup.Nodes.Any() ? dbGroup : null;
+    }
+
+    /// <summary>One Search Records condition on a field, worded the way the trigger filters read it (see PipelineFilterSqlParityTests):
+    /// a period, a blank value, a range, a time of day, a relative day, a checkbox, and "or blank" for a negated operator. Shared by the
+    /// filter editor's rules and the Advanced Query (whose CT / SW values come already escaped for LIKE). Null when the rule holds for
+    /// every record.</summary>
+    internal static FilterNode? MapCondition(AppField field, string? subField, string dbOp, string? evaluatedValue, bool valueIsLikeEscaped, ILogger? logger)
+    {
+        var fieldCategory = PipelineFilterEvaluator.GetTypeCategory(field);
+                // "is during" / "is not during": the period's window, start included and end excluded. A record without a date is
+                // in no period, so it is left out by both — as the report filter does.
+                if (dbOp is "during" or "notDuring")
+                {
+                    if (!RelativeFilterDate.IsPeriod(evaluatedValue))
+                    {
+                        // No period to be in: no record passes (as the trigger filters treat it).
+                        logger?.LogWarning("Search Records rule on field {FieldId} has no period for '{Operator}'; no record matches it.", field.Fid, dbOp);
+                        return MatchesNothing(field.Fid.Value);
+                    }
+                    var period = RelativeFilterDate.PeriodWindow(evaluatedValue!);
+                    FilterNode Edge(string op, DateTime value) => new FilterNode
+                    {
+                        Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = op, Value = value.ToString("O") }
+                    };
+                    var during = dbOp == "during";
+                    return new FilterNode { Group = new FilterGroup
+                    {
+                        Logic = during ? "and" : "or",
+                        Nodes = new List<FilterNode> { Edge(during ? "gte" : "lt", period.Start), Edge(during ? "lt" : "gte", period.End) }
+                    }};
+                }
+                // No value (a rule saved without one, or a token that came out blank): the rule compares with "" as the trigger
+                // filters do, never dropping out — a dropped rule made the search return the whole table to the steps after it.
+                if (string.IsNullOrEmpty(evaluatedValue) && subField is null && !PhysicalNaming.IsRangeTypeCode(field.TypeCode)
+                    && BlankValueNode(field, fieldCategory, dbOp) is { } blankRule)
+                {
+                    return blankRule.Group is { Nodes.Count: 0 } ? null : blankRule;   // an empty group: every record
+                }
+
+                // A Date / Numeric Range: the rule compares the whole range, on its start and end columns — the checks the trigger
+                // filters make (see PipelineFilterEvaluator's range notes).
+                if (subField is null && PhysicalNaming.IsRangeTypeCode(field.TypeCode) && MapRangeRule(field.Fid.Value, field.TypeCode, dbOp, evaluatedValue) is { } rangeNode)
+                {
+                    // "is not" holds for a blank range too (it does not include the value), as in the trigger filters.
+                    if (dbOp is "ne" or "date_ne" && !string.IsNullOrEmpty(evaluatedValue))
+                        rangeNode = new FilterNode { Group = new FilterGroup { Logic = "or", Nodes = new List<FilterNode>
+                        {
+                            rangeNode,
+                            new() { Group = new FilterGroup { Logic = "and", Nodes = new List<FilterNode>
+                            {
+                                new() { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isEmpty", SubField = "start" } },
+                                new() { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isEmpty", SubField = "end" } },
+                            } } },
+                        } } };
+                    return rangeNode;
+                }
+
+                // A time of day compares as one: "10:30" is the TIME 10:30:00. A value that is no time matches nothing ("is not": every
+                // time), as in the trigger filters — it never reaches SQL, which would fail to convert it.
+                if (fieldCategory == "TIME" && dbOp is "eq" or "ne" or "gt" or "gte" or "lt" or "lte")
+                {
+                    if (PipelineFilterEvaluator.TryParseTimeOfDay(evaluatedValue, out var timeOfDay))
+                        evaluatedValue = timeOfDay.ToString("c", CultureInfo.InvariantCulture);
+                    else
+                    {
+                        return dbOp == "ne"
+                            ? new FilterNode { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isNotEmpty" } }
+                            : MatchesNothing(field.Fid.Value);
+                    }
+                }
+
+                if (fieldCategory == "DATE" && RelativeFilterDate.IsRelative(evaluatedValue))
+                {
+                    var window = RelativeFilterDate.Window(evaluatedValue);
+                    FilterNode Boundary(string op, DateTime value) => new FilterNode
+                    {
+                        Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = op, Value = value.ToString("O") }
+                    };
+                    if (dbOp == "date_eq" || dbOp == "date_ne")
+                    {
+                        var equal = dbOp == "date_eq";
+                        var dayWindow = new FilterNode { Group = new FilterGroup
+                        {
+                            Logic = equal ? "and" : "or",
+                            Nodes = new List<FilterNode> { Boundary(equal ? "gte" : "lt", window.Start), Boundary(equal ? "lt" : "gte", window.End) }
+                        }};
+                        return equal ? dayWindow : OrBlank(dayWindow, field.Fid.Value, null);
+                    }
+                    if (dbOp is "date_gt" or "date_gte" or "date_lt" or "date_lte")
+                    {
+                        return Boundary(dbOp is "date_gt" or "date_gte" ? "gte" : "lt",
+                            dbOp is "date_gt" or "date_lte" ? window.End : window.Start);
+                    }
+                }
+
+
+                // contains / starts with / ends with are SQL LIKE patterns: "%", "_" and "[" typed by the user are text, not
+                // wildcards ("contains a_b" must not match "axb") — the same escaping the advanced query applies.
+                if (!valueIsLikeEscaped && dbOp is "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" or "notEndsWith" && evaluatedValue != null)
+                    evaluatedValue = PipelineComputedFilter.EscapeLike(evaluatedValue);
+                // "includes" is a LIKE on the comma-wrapped list too ("includes a_b" matched "axb"); the advanced query does not escape HAS.
+                if (dbOp is "includes" or "notIncludes" && evaluatedValue != null)
+                    evaluatedValue = PipelineComputedFilter.EscapeLike(evaluatedValue);
+
+                // A blank checkbox is unchecked: "is false" / "is not true" hold for it, "is true" / "is not false" do not — as in the
+                // trigger filters. SQL keeps the NULL apart, so the blank is added to the unchecked side.
+                if (fieldCategory == "BOOLEAN" && dbOp is "eq" or "ne" && TryReadCheckbox(evaluatedValue, out var asked))
+                {
+                    var wantsChecked = (dbOp == "eq") == asked;
+                    var isChecked = new FilterNode { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "eq", Value = wantsChecked ? "true" : "false" } };
+                    return wantsChecked ? isChecked : OrBlank(isChecked, field.Fid.Value, null);
+                }
+
+                var condition = new FilterNode
+                {
+                    Condition = new FilterCondition
+                    {
+                        FieldId = field.Fid.Value,
+                        Operator = dbOp,
+                        Value = evaluatedValue,
+                        SubField = subField
+                    }
+                };
+                // "is not" / "does not contain"…: a blank value is not the value asked for, so it passes — as in the trigger filters and
+                // the in-memory half of the search. SQL's NOT on a NULL column is unknown, so the blank records are added back.
+                // A rule with no value is no condition at all (the SQL builder skips it): adding "or blank" to it would leave only
+                // the blank records.
+                // Text in order (an Advanced Query's LT / GT): a blank value is in no order — SQL put "" before every word.
+                if (fieldCategory == "TEXT" && dbOp is "gt" or "gte" or "lt" or "lte")
+                    return new FilterNode { Group = new FilterGroup { Logic = "and", Nodes = new List<FilterNode>
+                        { condition, new() { Condition = new FilterCondition { FieldId = field.Fid.Value, Operator = "isNotEmpty", SubField = subField } } } } };
+                return IsNegatedDbOperator(dbOp) && !string.IsNullOrEmpty(evaluatedValue)
+                    ? OrBlank(condition, field.Fid.Value, subField)
+                    : condition;
+    }
+
+    /// <summary>A rule whose value is blank, as the trigger filters read it: "is" / "wildcard" — the field is blank; "is not" /
+    /// "not wildcard" — it is not; "contains" / "starts with" / "ends with" — every record (an empty group); the negated ones and the
+    /// orderings — none. A checkbox reads a blank value as unchecked. Null for an operator that takes no value.</summary>
+    private static FilterNode? BlankValueNode(AppField field, string category, string dbOp)
+    {
+        var fid = field.Fid!.Value;
+        FilterNode Is(string op) => new() { Condition = new FilterCondition { FieldId = fid, Operator = op } };
+        var everyRecord = new FilterNode { Group = new FilterGroup { Logic = "and", Nodes = new List<FilterNode>() } };
+        if (category == "BOOLEAN" && dbOp is "eq" or "ne")
+        {
+            var isUnchecked = new FilterNode { Condition = new FilterCondition { FieldId = fid, Operator = "eq", Value = "false" } };
+            return dbOp == "eq" ? OrBlank(isUnchecked, fid, null) : new FilterNode { Condition = new FilterCondition { FieldId = fid, Operator = "eq", Value = "true" } };
+        }
+        // A File compares its files' names: no name is "" — "is" holds for none, "is not" for every record.
+        if (PipelineFilterEvaluator.IsFileField(field))
+            return dbOp switch
+            {
+                "eq" or "wildcard" => MatchesNothing(fid),
+                "ne" or "notWildcard" => everyRecord,
+                "contains" or "startsWith" or "endsWith" => Is("isNotEmpty"),
+                "notContains" or "notStartsWith" or "notEndsWith" => Is("isEmpty"),
+                _ => null,
+            };
+        return dbOp switch
+        {
+            "eq" or "date_eq" or "wildcard" => Is("isEmpty"),
+            "ne" or "date_ne" or "notWildcard" => Is("isNotEmpty"),
+            "contains" or "startsWith" or "endsWith" => everyRecord,
+            // A list holds no blank item.
+            "includes" => MatchesNothing(fid),
+            "notContains" or "notStartsWith" or "notEndsWith" or "gt" or "gte" or "lt" or "lte"
+                or "date_gt" or "date_gte" or "date_lt" or "date_lte" => MatchesNothing(fid),
+            _ => null,
+        };
+    }
+
+    private static bool IsNegatedDbOperator(string op) =>
+        op is "ne" or "date_ne" or "notContains" or "notStartsWith" or "notEndsWith" or "notWildcard" or "notIncludes";
+
+    /// <summary>The node, or the field (one part of it, for an address) being blank.</summary>
+    private static FilterNode OrBlank(FilterNode node, int fid, string? subField) => new()
+    {
+        Group = new FilterGroup
+        {
+            Logic = "or",
+            Nodes = new List<FilterNode> { node, new() { Condition = new FilterCondition { FieldId = fid, Operator = "isEmpty", SubField = subField } } }
+        }
+    };
+
+    /// <summary>A checkbox value a rule compares with: true / false, or 1 / 0.</summary>
+    private static bool TryReadCheckbox(string? value, out bool isChecked)
+    {
+        var text = value?.Trim();
+        if (bool.TryParse(text, out isChecked)) return true;
+        if (text is "1" or "0") { isChecked = text == "1"; return true; }
+        return false;
     }
 
     /// <summary>A condition no record meets (blank and not blank at once).</summary>
@@ -6570,6 +6669,14 @@ public partial class PipelineEngine : IPipelineEngine
             default: return null;
         }
 
+        // No value: "is" holds for a blank range, "is not" for one with a value, the orderings for none — as in the trigger filters.
+        if (string.IsNullOrEmpty(value))
+            return op switch
+            {
+                "eq" => All(Part("start", "isEmpty"), Part("end", "isEmpty")),
+                "ne" => Any(Part("start", "isNotEmpty"), Part("end", "isNotEmpty")),
+                _ => MatchesNothing(fid),
+            };
         // A value that is not a number / day: nothing matches ("is not": every range that has a value), as in the trigger filters.
         var unreadable = op == "ne" ? Any(Part("start", "isNotEmpty"), Part("end", "isNotEmpty")) : MatchesNothing(fid);
         if (typeCode == "NumericRange")

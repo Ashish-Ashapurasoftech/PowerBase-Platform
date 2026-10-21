@@ -93,7 +93,8 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             throw new UnauthorizedActionException("A destination field is not editable by this account.");
         var merge = CopyRecordsDefinition.Field(config.MergeField, destinationFields);
         var visibleSourceFields = sourceAccess.Unrestricted ? sourceFields : sourceAccess.VisibleFields;
-        var filter = CopyRecordsDefinition.ParseQuery(query, visibleSourceFields);
+        var filter = CopyRecordsDefinition.ParseQuery(query, visibleSourceFields) is { } parsedQuery
+            ? PipelineAdvancedQuery.ForSearch(parsedQuery, visibleSourceFields) : null;
         var effectiveFilter = new FilterGroup();
         if (filter != null) effectiveFilter.Nodes.Add(new() { Group = filter });
         if (sourceAccess.ViewFilter != null) effectiveFilter.Nodes.Add(new() { Group = sourceAccess.ViewFilter });
