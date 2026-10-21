@@ -92,6 +92,12 @@ public sealed class ImportFieldMapping
     public string? StaticValue { get; set; }
     public string? Formula { get; set; }
     public bool DoNotImport { get; set; }
+    /// <summary>For a column of text that goes to a Date or Date and Time field: how its dates are written (one of <see cref="ImportDateFormats.Date"/>), chosen by the person who set the import up.</summary>
+    public string? DateFormat { get; set; }
+    /// <summary>The same for a time (one of <see cref="ImportDateFormats.Time"/>), for a Time or Date and Time field.</summary>
+    public string? TimeFormat { get; set; }
+    /// <summary>For a Date and Time field: the time zone (an IANA id) the clock readings in the file are in, filled in from the browser of the person who set the import up. A Date and Time is stored in UTC and shown in the viewer's zone, so converting from this zone makes it show as written; none means it is stored as written, as UTC.</summary>
+    public string? TimeZone { get; set; }
 }
 
 /// <summary>Data-quality rules for one mapped column, evaluated independently of every other column.</summary>
@@ -187,6 +193,8 @@ public sealed class ImportDefinitionConfig
     /// <summary>For one run: the moment the records must have been created or changed after (set when the run is queued, from the last run that finished; null reads
     /// every record). Part of the run's own copy of the definition, never saved with the definition itself.</summary>
     public DateTime? ChangedSinceUtc { get; set; }
+    /// <summary>For one run: the time zone of the person who started it (from their browser), used for a Date and Time column whose mapping names no zone of its own, so the times show as written. Part of the run's own copy of the definition, never saved with it.</summary>
+    public string? RunTimeZone { get; set; }
     /// <summary>The same as <see cref="ImportTargetConfig.SheetMappings"/>, for the import's own table.</summary>
     public List<ImportSheetMapping> SheetMappings { get => _sheetMappings; set => _sheetMappings = value ?? new(); }
     private List<ImportSheetMapping> _sheetMappings = new();

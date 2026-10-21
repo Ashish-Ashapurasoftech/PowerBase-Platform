@@ -268,7 +268,7 @@ public class ImportFileRunTests
         var cfg = Config(c =>
         {
             c.File = new ImportFileOptions { Format = "xlsx", HeaderRow = 1, Columns = ["Name", "When", "Active", "Text date"] };
-            c.Mappings = [new() { DestFid = 6, SourceFid = 1001 }, new() { DestFid = 12, SourceFid = 1002 }, new() { DestFid = 13, SourceFid = 1003 }, new() { DestFid = 14, SourceFid = 1004 }];
+            c.Mappings = [new() { DestFid = 6, SourceFid = 1001 }, new() { DestFid = 12, SourceFid = 1002, DateFormat = "MM-DD-YYYY" }, new() { DestFid = 13, SourceFid = 1003 }, new() { DestFid = 14, SourceFid = 1004 }];
         });
         var h = ImportHarness.Create(cfg, new HarnessOptions
         {

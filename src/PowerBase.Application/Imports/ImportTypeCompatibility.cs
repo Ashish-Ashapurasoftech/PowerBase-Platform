@@ -124,7 +124,7 @@ public static class ImportTypeCompatibility
 
     /// <summary>Converts a value to the destination's type. Returns false with an error message when the value cannot be
     /// converted safely (the row is then reported, never written as NULL). A blank stays blank.</summary>
-    public static bool TryConvert(object? value, AppField destination, out object? result, out string? error, string? dateFormat = null)
+    public static bool TryConvert(object? value, AppField destination, out object? result, out string? error, string? dateFormat = null, string? mappingDateFormat = null, string? mappingTimeFormat = null, TimeZoneInfo? mappingZone = null)
     {
         result = null;
         error = null;
@@ -160,6 +160,23 @@ public static class ImportTypeCompatibility
                 }
                 // A date or date-time calculated by a formula arrives as ISO text: store a real date, not text the database parses
                 // in whatever culture it happens to run in.
+                // A column of text the person said how its dates and times are written in: read exactly so (see ImportDateFormats).
+                if (value is string chosen && !string.IsNullOrWhiteSpace(chosen) && (mappingDateFormat is not null || mappingTimeFormat is not null))
+                {
+                    var code = KindOf(destination).Code;
+                    if (code is "Date" or "DateTime" && mappingDateFormat is not null)
+                    {
+                        if (ImportDateFormats.TryParseDate(chosen, mappingDateFormat, mappingTimeFormat, withTime: code == "DateTime", out var date, out var dateError, mappingZone)) { result = date; return true; }
+                        error = $"'{DisplayName(destination)}': {dateError}";
+                        return false;
+                    }
+                    if (code == "Time" && mappingTimeFormat is not null)
+                    {
+                        if (ImportDateFormats.TryParseTime(chosen, mappingTimeFormat, out var time, out var timeError)) { result = time; return true; }
+                        error = $"'{DisplayName(destination)}': {timeError}";
+                        return false;
+                    }
+                }
                 if (value is string text && KindOf(destination).Code is "Date" or "DateTime")
                 {
                     if (string.IsNullOrWhiteSpace(text)) return true;
