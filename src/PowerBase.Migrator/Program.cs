@@ -24,6 +24,8 @@ var tenantMigrationsPath  = Path.Combine(dbRoot, "migrations", "tenant");
 //   dotnet run -- migrate tenants              → tenant baseline against ALL provisioned tenant DBs
 //   dotnet run -- backfill-field-names --id N  → regenerate AppField.Name from Label for tenant N
 //   dotnet run -- backfill-field-names         → same, for ALL provisioned tenant DBs
+//   dotnet run -- inspect-exempt-encryption    → scan all tenants for exempt-but-encrypted fields
+//   dotnet run -- migrate-exempt-encryption    → decrypt & alter exempt columns to native SQL types
 
 Console.WriteLine("PowerBase Migrator");
 Console.WriteLine($"Server   : {MaskConnectionString(controlConnectionString)}");
@@ -41,7 +43,15 @@ try
                     ? await RunFieldNameBackfillSingleTenantAsync(backfillIdStr)
                     : args is ["backfill-field-names"]
                         ? await RunFieldNameBackfillAllTenantsAsync()
-                        : await RunRootAsync();
+                        : args is ["inspect-exempt-encryption"]
+                            ? await RunInspectExemptEncryptionAsync()
+                            : args is ["migrate-exempt-encryption", "--dry-run"]
+                                ? await RunMigrateExemptEncryptionAsync(dryRun: true)
+                                : args is ["migrate-exempt-encryption", "--one-table"]
+                                    ? await RunMigrateExemptEncryptionAsync(dryRun: false, singleTableOnly: true)
+                                    : args is ["migrate-exempt-encryption"]
+                                        ? await RunMigrateExemptEncryptionAsync(dryRun: false)
+                                        : await RunRootAsync();
 
     return exitCode;
 }
@@ -174,6 +184,88 @@ async Task<int> RunFieldNameBackfillAllTenantsAsync()
     Console.WriteLine();
     Console.WriteLine($"Tenants processed: {tenants.Count}  Errors: {errors}");
     return errors > 0 ? 1 : 0;
+}
+
+async Task<int> RunInspectExemptEncryptionAsync()
+{
+    Console.WriteLine("Mode     : Inspect exempt field encryption across all tenants");
+    Console.WriteLine();
+
+    var tenants = await GetAllProvisionedTenantsAsync();
+    Console.WriteLine($"Found {tenants.Count} provisioned tenant(s) in meta.Tenant:\n");
+
+    int totalAffectedFields = 0;
+    foreach (var (id, dbName) in tenants)
+    {
+        var tenantCs = BuildTenantConnectionString(controlConnectionString, dbName);
+        Console.WriteLine($"── Tenant {id} ({dbName}) ──────────────────────────");
+        try
+        {
+            var affected = await ExemptFieldEncryptionMigrator.ScanTenantAsync(tenantCs, id);
+            if (affected.Count == 0)
+            {
+                Console.WriteLine("  ✓ No exempt-but-encrypted fields.");
+            }
+            else
+            {
+                totalAffectedFields += affected.Count;
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"  ⚠ Found {affected.Count} exempt-but-encrypted field(s):");
+                Console.ResetColor();
+                foreach (var f in affected)
+                {
+                    Console.WriteLine($"    • [{f.AppName} -> {f.TableName}] {f.FieldName} (Fid={f.Fid}, Type={f.TypeCode}) — Rows: {f.NonNullRows}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  Error checking tenant: {ex.Message}");
+            Console.ResetColor();
+        }
+    }
+
+    Console.WriteLine($"\nInspection complete. Total affected fields found: {totalAffectedFields}");
+    return 0;
+}
+
+async Task<int> RunMigrateExemptEncryptionAsync(bool dryRun, bool singleTableOnly = false)
+{
+    Console.WriteLine($"Mode     : Migrate exempt field encryption (DryRun={dryRun}, SingleTableOnly={singleTableOnly})");
+    Console.WriteLine();
+
+    var masterKey = config["Encryption:MasterKey"] ?? "aGkhZGV2ZWxvcG1lbnQtdGVzdC1rZXktMzJieXRlcyE=";
+    var tenants = await GetAllProvisionedTenantsAsync();
+
+    foreach (var (id, dbName) in tenants)
+    {
+        var tenantCs = BuildTenantConnectionString(controlConnectionString, dbName);
+        try
+        {
+            var didMigrate = await ExemptFieldEncryptionMigrator.RunMigrationForTenantAsync(
+                tenantCs, id, $"Tenant {id} ({dbName})", masterKey, dryRun, singleTableOnly);
+
+            if (singleTableOnly && didMigrate)
+            {
+                Console.WriteLine("\n=======================================================");
+                Console.WriteLine(">>> SINGLE TABLE MIGRATION COMPLETE! <<<");
+                Console.WriteLine("Paused as requested so you can check the live database.");
+                Console.WriteLine("=======================================================");
+                return 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  Tenant {id} failed: {ex.Message}");
+            Console.ResetColor();
+            return 1;
+        }
+    }
+
+    Console.WriteLine("\nMigration complete.");
+    return 0;
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
