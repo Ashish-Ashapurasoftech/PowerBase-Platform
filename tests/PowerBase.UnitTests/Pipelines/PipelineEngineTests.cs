@@ -237,7 +237,8 @@ public class PipelineEngineTests
         InvokeParseValueType("true", "checkbox").Should().Be(true);
         InvokeParseValueType("1", "boolean").Should().Be(true);
         InvokeParseValueType("123.45", "numeric").Should().Be(123.45m);
-        InvokeParseValueType("2026-08-06T18:00:00Z", "date_time").Should().Be(DateTime.Parse("2026-08-06T18:00:00Z"));
+        // A UTC timestamp is written as its UTC wall-clock time on every server (it used to move by the server's own offset).
+        InvokeParseValueType("2026-08-06T18:00:00Z", "date_time").Should().Be(new DateTime(2026, 8, 6, 18, 0, 0));
         InvokeParseValueType("plain text", "text").Should().Be("plain text");
         InvokeParseValueType("123", "text").Should().Be("123");
         InvokeParseValueType("123", "Integer").Should().Be(123m);
@@ -1626,7 +1627,10 @@ public class PipelineEngineTests
 
         var result = (FilterGroup)method!.Invoke(_engine, [group, fields, "{}", "path", new List<PipelineStep>(), null])!;
 
-        result.Nodes.Should().ContainSingle().Which.Condition!.Operator.Should().Be(expectedDbOperator);
+        var node = result.Nodes.Should().ContainSingle().Subject;
+        SearchFilterNodes.WithoutBlank(node).Condition!.Operator.Should().Be(expectedDbOperator);
+        // "is not" lets a blank record through, as the trigger filters do.
+        SearchFilterNodes.IsOrBlank(node).Should().Be(expectedDbOperator == "date_ne");
     }
 
     [Fact]
@@ -2478,7 +2482,8 @@ public class PipelineEngineTests
         var rule = new TriggerFilterGroup { Rules = new List<TriggerFilterRule> { new() { Field = "fid_1", Operator = op, Value = "@relative-date|today|0|Asia/Kolkata" } } };
         var method = typeof(PipelineEngine).GetMethod("MapTriggerFilterGroupToDbFilterGroup", BindingFlags.NonPublic | BindingFlags.Instance);
         var result = (FilterGroup)method!.Invoke(_engine, new object?[] { rule, fields, "{}", "path", new List<PipelineStep>(), null })!;
-        var window = result.Nodes.Single().Group!;
+        SearchFilterNodes.IsOrBlank(result.Nodes.Single()).Should().Be(op == "is-not");
+        var window = SearchFilterNodes.WithoutBlank(result.Nodes.Single()).Group!;
         window.Logic.Should().Be(logic);
         window.Nodes[0].Condition!.Operator.Should().Be(startOp);
         window.Nodes[1].Condition!.Operator.Should().Be(endOp);

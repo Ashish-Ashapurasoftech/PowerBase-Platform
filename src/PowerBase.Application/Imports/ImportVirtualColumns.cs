@@ -204,7 +204,7 @@ public sealed class ImportVirtualColumnReader(IImportChunkReader inner, ImportPl
         {
             var row = new Dictionary<string, object?>(original);
             // A file's date and time cells are shown to the formula one way, whatever way each was typed (see ImportFormulaText).
-            IRecordContext context = plan.File is not null ? new ImportFileFormulaContext(row, fidToColumn, plan.DateFormat) : new RowRecordContext(row, fidToColumn);
+            IRecordContext context = plan.File is not null ? new ImportFileFormulaContext(row, fidToColumn, plan.DateFormat, plan.ColumnFormats) : new RowRecordContext(row, fidToColumn);
             foreach (var v in plan.Virtuals)
             {
                 if (v.Formula is null) { row[v.Column] = v.Text; continue; }

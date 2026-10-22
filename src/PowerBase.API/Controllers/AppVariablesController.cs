@@ -77,7 +77,6 @@ public class AppVariablesController : ControllerBase
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<AppVariableResponse>(response));
     }
 
-
     /// <summary>Update a variable for this app.</summary>
     [HttpPatch("{id:guid}")]
 

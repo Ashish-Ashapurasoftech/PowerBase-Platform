@@ -37,7 +37,7 @@ public static class SummaryTargetValidator
     /// <summary>Throws <see cref="ValidationException"/> (keyed by <paramref name="paramName"/>)
     /// when <paramref name="function"/> can't aggregate <paramref name="target"/>.</summary>
     public static void Validate(string function, int? targetFid, AppField? target, string? targetSubField, string paramName = "targetFid",
-        IReadOnlyDictionary<long, AppField>? lookupSources = null)
+        IReadOnlyDictionary<long, AppField>? lookupSources = null, IReadOnlyDictionary<long, AppField>? referenceKeys = null)
     {
         if (function is SummaryFunctions.Count or SummaryFunctions.Exists)
             return;
@@ -47,7 +47,7 @@ public static class SummaryTargetValidator
         if (target is null)
             throw new NotFoundException("Field", targetFid.Value);
 
-        if (FindProblem(function, target, targetSubField, lookupSources) is { } problem)
+        if (FindProblem(function, target, targetSubField, lookupSources, referenceKeys) is { } problem)
             throw Error(paramName, problem);
     }
 
@@ -56,8 +56,10 @@ public static class SummaryTargetValidator
     /// (e.g. every summary a field type change would affect) and report them together.</summary>
     /// <param name="lookupSources">The parent field each child lookup pulls down
     /// (<see cref="SummaryLookupSources.LoadAsync"/>); without it a Lookup target is refused.</param>
+    /// <param name="referenceKeys">The key each child Reference shows (<see cref="ReferenceKeys.LoadAsync"/>); without
+    /// it a Reference is judged as the Record ID# it holds.</param>
     public static string? FindProblem(string function, AppField target, string? targetSubField,
-        IReadOnlyDictionary<long, AppField>? lookupSources = null)
+        IReadOnlyDictionary<long, AppField>? lookupSources = null, IReadOnlyDictionary<long, AppField>? referenceKeys = null)
     {
         if (function is SummaryFunctions.Count or SummaryFunctions.Exists)
             return null;
@@ -68,6 +70,9 @@ public static class SummaryTargetValidator
         // field: it must still exist and have a column, and its type is the lookup's type.
         if (SummaryLookupSources.IsLookup(target))
         {
+            // A lookup of a Formula / Summary is worked out per child row like that field, so it's judged as one.
+            if (SummaryLookupSources.ComputedValueKind(target, lookupSources) is { } kind)
+                return FindComputedProblem(function, fieldLabel, target.TypeCode, SummaryComputedTargets.FunctionsForKind(kind));
             if (SummaryLookupSources.ReadableSource(target, lookupSources) is not { } source)
                 return $"'{fieldLabel}' looks up a field that is missing or calculated, so it can't be summarized; choose another field.";
             return FindTypeProblem(function, fieldLabel, source.TypeCode, SummaryLookupSources.SourceSubField(target));
@@ -76,13 +81,12 @@ public static class SummaryTargetValidator
         // A Formula is computed per child row and aggregated in memory (RelationalProjector), with
         // the functions its result type supports (SummaryComputedTargets).
         if (SummaryComputedTargets.IsComputedTarget(target))
-        {
-            if (SummaryComputedTargets.AllowedFunctions(target) is not { } allowed)
-                return $"'{fieldLabel}' is a calculated ({target.TypeCode}) field whose result can't be summarized; choose another field.";
-            return allowed.Contains(function)
-                ? null
-                : $"'{function}' can't summarize the calculated field '{fieldLabel}' ({target.TypeCode}); it supports {string.Join(", ", allowed)}.";
-        }
+            return FindComputedProblem(function, fieldLabel, target.TypeCode, SummaryComputedTargets.AllowedFunctions(target));
+
+        // A Reference whose parent shows a key field is summarized as that key (Combined Text of client names, not
+        // Record IDs), so it's judged by the key's type (ReferenceKeys).
+        if (ReferenceKeys.KeyTypeCode(target, referenceKeys) is { } keyType)
+            return FindTypeProblem(function, fieldLabel, keyType, targetSubField);
 
         // Summary values are computed at read time and have no physical column to
         // aggregate in SQL — summarizing one would fail with "Invalid column name" on every read.
@@ -91,6 +95,17 @@ public static class SummaryTargetValidator
             return $"'{fieldLabel}' is a calculated ({target.TypeCode}) field and can't be summarized; choose a stored field.";
 
         return FindTypeProblem(function, fieldLabel, target.TypeCode, targetSubField);
+    }
+
+    /// <summary>Why <paramref name="function"/> can't summarize a Formula / child Summary, or a lookup of one — by the
+    /// functions its result type supports (<paramref name="allowed"/>; null when none).</summary>
+    private static string? FindComputedProblem(string function, string fieldLabel, string typeCode, IReadOnlySet<string>? allowed)
+    {
+        if (allowed is null)
+            return $"'{fieldLabel}' is a calculated ({typeCode}) field whose result can't be summarized; choose another field.";
+        return allowed.Contains(function)
+            ? null
+            : $"'{function}' can't summarize the calculated field '{fieldLabel}' ({typeCode}); it supports {string.Join(", ", allowed)}.";
     }
 
     /// <summary>Whether <paramref name="function"/> can aggregate a value of this type.</summary>

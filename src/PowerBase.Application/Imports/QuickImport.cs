@@ -19,7 +19,7 @@ public sealed class StartQuickImportHandler(
 {
     public const string NamePrefix = "Quick import - ";
 
-    public async Task<ImportRunStart> HandleAsync(Guid destinationTableId, QuickImportRequest request, string? frontendBaseUrl, CancellationToken ct)
+    public async Task<ImportRunStart> HandleAsync(Guid destinationTableId, QuickImportRequest request, string? frontendBaseUrl, CancellationToken ct, string? clientTimeZone = null)
     {
         await access.RequireMembershipByTablePublicIdAsync(destinationTableId, ct);
         var cfg = request.Config ?? throw Invalid("The import is missing.");
@@ -35,7 +35,7 @@ public sealed class StartQuickImportHandler(
         var definition = await definitions.GetByPublicIdAsync(publicId, ct) ?? throw new NotFoundException("ImportDefinition", publicId);
         try
         {
-            return await start.StartAsync(publicId, ImportTrigger.Manual, request.NotifyEmails, frontendBaseUrl, null, null, request.FileId, ct);
+            return await start.StartAsync(publicId, ImportTrigger.Manual, request.NotifyEmails, frontendBaseUrl, null, null, request.FileId, ct, clientTimeZone);
         }
         finally
         {

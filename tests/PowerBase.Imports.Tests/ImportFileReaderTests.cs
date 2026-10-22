@@ -144,7 +144,7 @@ public class ImportXlsxReaderTests
     }
 
     [Fact]
-    public void Dates_and_times_are_iso_text_and_other_numbers_are_not_mistaken_for_dates()
+    public void Dates_and_times_are_read_as_the_sheet_shows_them_and_other_numbers_are_not_mistaken_for_dates()
     {
         using var stream = Workbook(ws =>
         {
@@ -155,7 +155,49 @@ public class ImportXlsxReaderTests
             ws.Cell("E1").Value = 1234.5; ws.Cell("E1").Style.NumberFormat.Format = "#,##0.00 \"days\"";   // 'd' inside quotes
         });
 
-        ReadAll(stream).Single().Cells.Should().Equal("2026-03-09", "2026-03-09T14:30:05", "45000", "2023-03-15", "1234.5");
+        ReadAll(stream).Single().Cells.Should().Equal("3/9/2026", "3/9/2026 14:30", "45000", "15-Mar-23", "1234.5");
+    }
+
+    [Theory]
+    [InlineData("dd/mm/yyyy", "05/01/1990")]
+    [InlineData("mm\\-dd\\-yyyy", "01-05-1990")]
+    [InlineData("yyyy\\.mm\\.dd", "1990.01.05")]
+    [InlineData("d\\-mmm\\-yyyy", "5-Jan-1990")]
+    [InlineData("dd\\ mmmm\\ yyyy", "05 January 1990")]
+    [InlineData("m/d/yy", "1/5/90")]
+    [InlineData("dddd d mmm", "Friday 5 Jan")]
+    public void A_date_cell_is_read_as_its_number_format_writes_it(string format, string shown)
+    {
+        using var stream = Workbook(ws => { ws.Cell("A1").Value = new DateTime(1990, 1, 5); ws.Cell("A1").Style.NumberFormat.Format = format; });
+
+        ReadAll(stream).Single().Cells.Should().Equal(shown);
+    }
+
+    [Theory]
+    [InlineData("hh:mm\\ AM/PM", "07:15 PM")]
+    [InlineData("h:mm AM/PM", "7:15 PM")]
+    [InlineData("hh:mm", "19:15")]
+    [InlineData("hh:mm:ss", "19:15:30")]
+    [InlineData("dd/mm/yyyy\\ hh:mm\\ AM/PM", "05/01/2024 07:15 PM")]
+    [InlineData("mm\\-dd\\-yyyy\\ hh:mm", "01-05-2024 19:15")]
+    public void A_time_or_date_time_cell_is_read_as_its_number_format_writes_it(string format, string shown)
+    {
+        var value = format.StartsWith("dd") || format.StartsWith("mm") ? new DateTime(2024, 1, 5, 19, 15, 30) : new DateTime(1900, 1, 1).Add(new TimeSpan(19, 15, 30));
+        using var stream = Workbook(ws => { ws.Cell("A1").Value = value; ws.Cell("A1").Style.NumberFormat.Format = format; });
+
+        ReadAll(stream).Single().Cells.Should().Equal(shown);
+    }
+
+    [Fact]
+    public void An_m_after_an_hour_is_a_minute_and_an_m_with_the_day_is_a_month()
+    {
+        using var stream = Workbook(ws =>
+        {
+            ws.Cell("A1").Value = new DateTime(2024, 3, 9, 14, 5, 7); ws.Cell("A1").Style.NumberFormat.Format = "m/d h:m";
+            ws.Cell("B1").Value = new DateTime(2024, 3, 9, 14, 5, 7); ws.Cell("B1").Style.NumberFormat.Format = "mm:ss";
+        });
+
+        ReadAll(stream).Single().Cells.Should().Equal("3/9 14:5", "05:07");
     }
 
     [Fact]

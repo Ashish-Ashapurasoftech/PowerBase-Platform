@@ -14,27 +14,14 @@ public static class ParentDeleteGuard
         IReadOnlyList<Relationship> parentRelationships,
         IReadOnlyCollection<long> parentIds,
         IAppTableRepository tableRepo,
-        IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
         CancellationToken ct)
     {
         if (parentRelationships.Count == 0 || parentIds.Count == 0) return;
 
-        // The value a child's reference column actually stores: the row Id for the default key, or
-        // this table's key-field value for a Set-Key table.
-        var keyField = await KeyFieldResolver.ResolveAsync(parentTable, fieldRepo, ct);
-        IReadOnlyCollection<object> parentKeyValues;
-        if (keyField is null)
-        {
-            parentKeyValues = parentIds.Select(id => (object)id).ToList();
-        }
-        else
-        {
-            var col = KeyFieldResolver.ColumnName(keyField);
-            var keyValues = await recordRepo.GetColumnValuesByIdsAsync(parentTable, col, parentIds, ct);
-            parentKeyValues = keyValues.Values.Where(v => v is not null).Select(v => v!).ToList();
-        }
-        if (parentKeyValues.Count == 0) return;
+        // A child's reference column ALWAYS stores the parent's row Id, even for a Set-Key table (the
+        // key field only changes what the picker and grid show), so match on the row Ids themselves.
+        IReadOnlyCollection<object> parentKeyValues = parentIds.Select(id => (object)id).ToList();
 
         foreach (var rel in parentRelationships)
         {

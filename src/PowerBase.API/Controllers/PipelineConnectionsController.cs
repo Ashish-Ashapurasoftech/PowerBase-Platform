@@ -31,9 +31,10 @@ public class PipelineConnectionsController : ControllerBase
     public async Task<IActionResult> GetCurrentTenantApps(
         [FromServices] PowerBase.Application.Common.Interfaces.IQueryContext queryContext,
         [FromServices] PowerBase.Application.Common.Interfaces.IAppRepository apps,
+        [FromServices] PowerBase.Application.Common.Interfaces.IAppAccessService access,
         CancellationToken ct)
     {
-        var items = (await apps.ListAllByUserAsync(queryContext.UserId, ct))
+        var items = (await PowerBase.Application.Pipelines.PipelineAppAccess.ReadableAsync(access, await apps.ListAllByUserAsync(queryContext.UserId, ct), ct))
             .Select(app => new ConnectionAppDto { PublicId = app.PublicId, Name = app.Name })
             .ToList();
         return Ok(new ApiListResponse<ConnectionAppDto>(items, items.Count, 1, items.Count));

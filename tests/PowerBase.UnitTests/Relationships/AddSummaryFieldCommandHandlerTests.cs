@@ -245,4 +245,38 @@ public class AddSummaryFieldCommandHandlerTests
         group.Logic.Should().Be("or");
         group.Nodes[1].Condition!.ValueMode.Should().Be("duringCurrent");
     }
+
+    // ── A Reference target: summarized as the key its parent shows ──
+
+    private void ClientsShowClientNameAsTheirKey()
+    {
+        _relRepo.ListByChildTableAsync(TaskTableId, Arg.Any<CancellationToken>()).Returns(new List<Relationship>
+        {
+            new() { Id = 1, ParentTableId = ClientTableId, ChildTableId = TaskTableId, ReferenceFid = 10 },
+        });
+        _tableRepo.GetByIdAsync(ClientTableId, Arg.Any<CancellationToken>())
+            .Returns(new AppTable { Id = ClientTableId, PublicId = Guid.NewGuid(), Name = "Client", KeyFieldId = 500 });
+        _fieldRepo.ListByTableAsync(ClientTableId, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            new() { Id = 500, Fid = 6, AppTableId = ClientTableId, Name = "Client Name", TypeCode = "Text" },
+        });
+    }
+
+    [Fact]
+    public async Task Handle_CombinedTextOfAReferenceWhoseParentShowsATextKey_SavesItAsText()
+    {
+        ClientsShowClientNameAsTheirKey();
+
+        await _handler.HandleAsync(Command("CombinedText", 10));
+
+        var saved = SavedSettings();
+        saved.TargetFid.Should().Be(10);
+        saved.TargetTypeCode.Should().Be("Text");
+        saved.ResultTypeCode.Should().Be("Text");
+    }
+
+    [Fact]
+    public async Task Handle_CombinedTextOfAReferenceShowingRecordId_ThrowsValidation() =>
+        await FluentActions.Invoking(() => _handler.HandleAsync(Command("CombinedText", 10)))
+            .Should().ThrowAsync<ValidationException>();
 }

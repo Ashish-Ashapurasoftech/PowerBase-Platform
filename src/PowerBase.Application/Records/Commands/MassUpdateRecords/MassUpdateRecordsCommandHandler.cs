@@ -217,7 +217,9 @@ public class MassUpdateRecordsCommandHandler
                         var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
                         // Keyed by FID only. Also writing each value under the field's internal id put two number spaces in one
                         // dictionary: an internal id equal to ANOTHER field's FID overwrote that field's value (e.g. Record ID# showing a date).
-                        beforeValues[f.Fid.Value] = oldVal;
+                        // A trigger reads a Date / Numeric Range as its two columns, one { start, end } value.
+                        var triggerOldVal = PowerBase.Application.Pipelines.PipelineEngine.StoredFieldValue(oldRecord, f, oldVal);
+                        beforeValues[f.Fid.Value] = triggerOldVal;
                         oldValuesByFid[f.Fid.Value] = oldVal;
 
                         if (triggerValues.TryGetValue(f.Fid.Value, out var newVal))
@@ -227,7 +229,7 @@ public class MassUpdateRecordsCommandHandler
                         }
                         else
                         {
-                            afterValues[f.Fid.Value] = oldVal;
+                            afterValues[f.Fid.Value] = triggerOldVal;
                         }
                     }
                 }

@@ -23,7 +23,7 @@ public sealed class StartImportRunHandler(
     /// (<c>Replayed</c>) instead of starting another, even if that run has finished.</summary>
     public async Task<ImportRunStart> StartAsync(
         Guid definitionId, string triggeredBy, IReadOnlyList<string>? notifyOverride, string? frontendBaseUrl,
-        Guid? appId, string? clientToken, Guid? fileId, CancellationToken ct)
+        Guid? appId, string? clientToken, Guid? fileId, CancellationToken ct, string? clientTimeZone = null)
     {
         var def = await definitions.GetByPublicIdAsync(definitionId, ct) ?? throw new NotFoundException("ImportDefinition", definitionId);
         var destination = await tables.GetByIdAsync(def.DestinationTableId, ct);
@@ -42,6 +42,8 @@ public sealed class StartImportRunHandler(
         var source = isFile ? null : await tables.GetByIdAsync(def.SourceTableId ?? 0, ct);
         var config = ImportConfigMapper.ToConfig(def, source?.PublicId ?? Guid.Empty);
         if (notifyOverride is not null) config.NotifyEmails = ImportNotify.Normalize(notifyOverride);
+        // The browser's own time zone, so a Date and Time column shows as written (see ImportDefinitionConfig.RunTimeZone); a run with no browser (a schedule, the API) has none.
+        if (ImportDateFormats.ZoneOf(clientTimeZone) is not null) config.RunTimeZone = clientTimeZone!.Trim();
         // A scheduled run of an import that only reads what changed since its last finished run says from when (nothing, and so everything, for the first run or
         // after an edit). A run somebody starts by hand always reads every record: they asked for it now.
         if (config.OnlyChangedSinceLastRun && !isFile && triggeredBy == ImportTrigger.Schedule) config.ChangedSinceUtc = ImportRunSince.Since(config, await runs.GetLastFinishedRunAsync(def.Id, ct));

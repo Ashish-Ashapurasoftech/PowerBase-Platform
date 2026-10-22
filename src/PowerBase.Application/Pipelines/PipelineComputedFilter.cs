@@ -83,16 +83,41 @@ public static class PipelineComputedFilter
         FilterCondition c, Dictionary<long, AppField> lookup)
     {
         lookup.TryGetValue(c.FieldId, out var field);
+        // One end of a Date / Numeric Range (Search Records' range rules, on an encrypted range read here).
+        if (field != null && PhysicalNaming.IsRangeTypeCode(field.TypeCode) && c.SubField is "start" or "end")
+            return MatchesRangeEnd(c, ReadRangeEnd(p, field, c.SubField));
         var val = ReadValue(p, c.FieldId, field);
+        // One part of an Address ("Address: City"): the property of the stored address JSON.
+        if (!string.IsNullOrWhiteSpace(c.SubField) && field?.TypeCode == "Address")
+            val = PipelineAddressFieldFilter.ReadPart(val, c.SubField);
 
         var operand = c.Value;
-        if (string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && c.ValueFieldId is { } otherFid)
+        var byField = string.Equals(c.ValueMode, "field", StringComparison.OrdinalIgnoreCase);
+        if (byField && c.ValueFieldId is { } otherFid)
         {
             lookup.TryGetValue(otherFid, out var otherField);
             operand = ToText(ReadValue(p, otherFid, otherField));
         }
 
-        var matched = Evaluate(c.Operator, val, operand);
+        if (!byField && field != null)
+        {
+            // A File (a Lookup of one, or an encrypted one) is matched by its files' names, as in SQL: any name for a positive operator,
+            // none for a negated one.
+            if (PipelineFilterEvaluator.IsFileField(field) && FileNameOperator(c.Operator) is { } fileCheck)
+            {
+                var anyName = PipelineFilterEvaluator.FileNames(ToText(val)).Any(name => Evaluate(fileCheck.Op, name, operand));
+                return fileCheck.Negated ? !anyName : anyName;
+            }
+            // A time of day (a Formula_Time, a Lookup of a Time) compares as one, whatever form it arrives in.
+            if (PipelineFilterEvaluator.GetTypeCategory(field) == "TIME" && c.Operator is "eq" or "ne" or "gt" or "gte" or "lt" or "lte")
+                return MatchesTime(c.Operator, val, operand);
+        }
+
+        // "is" / "is not" on a list (a formula or lookup returning users or choices) compares the items, in any order — as on a stored
+        // Multi-select / User list and in the trigger filters.
+        var matched = field != null && c.Operator is "eq" or "ne" && PipelineFilterEvaluator.IsListField(field)
+            ? PipelineFilterEvaluator.SameItems(ToText(val) ?? string.Empty, operand ?? string.Empty) == (c.Operator == "eq")
+            : Evaluate(c.Operator, val, operand);
 
         // A Reference stores the parent's Record ID# but is searched by display text; exact-match
         // operators also accept the stored id so an id-based condition keeps matching.
@@ -108,6 +133,14 @@ public static class PipelineComputedFilter
     private static object? ReadValue((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p,
         long fieldId, AppField? field)
     {
+        // A Rich Text is compared by the text it shows, not the editor's HTML.
+        if (PipelineFilterEvaluator.IsRichTextField(field))
+        {
+            var html = PhysicalNaming.IsComputedTypeCode(field!.TypeCode)
+                ? (p.Computed.TryGetValue(fieldId, out var rich) ? rich : null)
+                : ReadRaw(p, fieldId, field);
+            return html is null ? null : PipelineFilterEvaluator.RichTextPlain(ToText(html));
+        }
         // A Lookup of an encrypted parent field arrives as decrypted text too: compare it as the type it presents.
         if (field != null && PhysicalNaming.IsComputedTypeCode(field.TypeCode))
             return p.Computed.TryGetValue(fieldId, out var cv) ? StoredValueCoercion.ToFieldType(cv, field) : null;
@@ -148,10 +181,12 @@ public static class PipelineComputedFilter
             "isNotEmpty"    => !IsBlank(val),
             "eq"            => Compare(val, operand) == 0,
             "ne"            => Compare(val, operand) != 0,
-            "gt"            => Compare(val, operand) > 0,
-            "gte"           => Compare(val, operand) >= 0,
-            "lt"            => Compare(val, operand) < 0,
-            "lte"           => Compare(val, operand) <= 0,
+            // A blank value is in no order, as in SQL (NULL < x is not true): "before today" or the edges of "is not during"
+            // never match a record without a date.
+            "gt"            => !IsBlank(val) && Compare(val, operand) > 0,
+            "gte"           => !IsBlank(val) && Compare(val, operand) >= 0,
+            "lt"            => !IsBlank(val) && Compare(val, operand) < 0,
+            "lte"           => !IsBlank(val) && Compare(val, operand) <= 0,
             "contains"      => text?.Contains(likeNeedle, StringComparison.OrdinalIgnoreCase) == true,
             "notContains"   => text?.Contains(likeNeedle, StringComparison.OrdinalIgnoreCase) != true,
             "startsWith"    => text?.StartsWith(likeNeedle, StringComparison.OrdinalIgnoreCase) == true,
@@ -161,22 +196,129 @@ public static class PipelineComputedFilter
             "notEndsWith"   => text?.EndsWith(likeNeedle, StringComparison.OrdinalIgnoreCase) != true,
             "wildcard"      => text is not null && Wildcard(text, needle),
             "notWildcard"   => text is null || !Wildcard(text, needle),
-            "includes"      => Members(val).Any(m => string.Equals(m, needle.Trim(), StringComparison.OrdinalIgnoreCase)),
-            "notIncludes"   => !Members(val).Any(m => string.Equals(m, needle.Trim(), StringComparison.OrdinalIgnoreCase)),
+            // Several values picked at once are joined with commas: the list holds any of them.
+            "includes"      => IncludesAny(Members(val), likeNeedle),
+            "notIncludes"   => !IncludesAny(Members(val), likeNeedle),
             // The operand is the exact UTC instant of the picked day's local midnight: match the [dv, dv+1day) window.
-            "date_eq"       => TryDate(val, out var a1) && DateTime.TryParse(operand, out var b1) && a1 >= b1 && a1 < b1.AddDays(1),
-            "date_ne"       => !(TryDate(val, out var a2) && DateTime.TryParse(operand, out var b2) && a2 >= b2 && a2 < b2.AddDays(1)),
-            "date_gt"       => TryDate(val, out var a3) && DateTime.TryParse(operand, out var b3) && a3 >= b3.AddDays(1),
-            "date_gte"      => TryDate(val, out var a4) && DateTime.TryParse(operand, out var b4) && a4 >= b4,
-            "date_lt"       => TryDate(val, out var a5) && DateTime.TryParse(operand, out var b5) && a5 < b5,
-            "date_lte"      => TryDate(val, out var a6) && DateTime.TryParse(operand, out var b6) && a6 < b6.AddDays(1),
+            "date_eq"       => TryDate(val, out var a1) && TryInstant(operand, out var b1) && a1 >= b1 && a1 < b1.AddDays(1),
+            "date_ne"       => !(TryDate(val, out var a2) && TryInstant(operand, out var b2) && a2 >= b2 && a2 < b2.AddDays(1)),
+            "date_gt"       => TryDate(val, out var a3) && TryInstant(operand, out var b3) && a3 >= b3.AddDays(1),
+            "date_gte"      => TryDate(val, out var a4) && TryInstant(operand, out var b4) && a4 >= b4,
+            "date_lt"       => TryDate(val, out var a5) && TryInstant(operand, out var b5) && a5 < b5,
+            "date_lte"      => TryDate(val, out var a6) && TryInstant(operand, out var b6) && a6 < b6.AddDays(1),
             "in"            => ParseValueList(operand).Any(v => Compare(val, v) == 0),
             "notIn"         => !ParseValueList(operand).Any(v => Compare(val, v) == 0),
             _               => true,
         };
     }
 
-    private static bool IsBlank(object? v) => v is null || (v is string s ? s.Length == 0 : v.ToString() == string.Empty);
+    /// <summary>The name comparison a File condition makes, and whether no name may pass it. Null for "is blank" and the rest.</summary>
+    private static (string Op, bool Negated)? FileNameOperator(string op) => op switch
+    {
+        "eq" => ("eq", false), "ne" => ("eq", true),
+        "contains" => ("contains", false), "notContains" => ("contains", true),
+        "startsWith" => ("startsWith", false), "notStartsWith" => ("startsWith", true),
+        "endsWith" => ("endsWith", false), "notEndsWith" => ("endsWith", true),
+        "wildcard" => ("wildcard", false), "notWildcard" => ("wildcard", true),
+        _ => null,
+    };
+
+    /// <summary>A time of day: a Time column's TimeSpan, a TimeOnly, the time of a DateTime, or text such as "10:30:00".</summary>
+    private static bool TryTimeOfDay(object? v, out TimeSpan time)
+    {
+        switch (v)
+        {
+            case TimeSpan span when span >= TimeSpan.Zero && span < TimeSpan.FromDays(1): time = span; return true;
+            case TimeOnly only: time = only.ToTimeSpan(); return true;
+            case DateTime dt: time = dt.TimeOfDay; return true;
+            case string s: return PipelineFilterEvaluator.TryParseTimeOfDay(s, out time);
+            default: time = default; return false;
+        }
+    }
+
+    /// <summary>eq/ne/gt/gte/lt/lte on times of day. A blank value, like a value that is no time, is only "not equal".</summary>
+    private static bool MatchesTime(string op, object? val, string? operand)
+    {
+        if (!TryTimeOfDay(val, out var time) || !PipelineFilterEvaluator.TryParseTimeOfDay(operand, out var asked)) return op == "ne";
+        return op switch
+        {
+            "eq" => time == asked,
+            "ne" => time != asked,
+            "gt" => time > asked,
+            "gte" => time >= asked,
+            "lt" => time < asked,
+            _ => time <= asked,   // lte
+        };
+    }
+
+    /// <summary>One end of a Date / Numeric Range: from its own column (f_N / f_N_e), or — in an encrypted app, which keeps the whole
+    /// range as JSON in the start column — from that JSON. A date as its UTC instant, a number as a decimal; null when blank.</summary>
+    private static object? ReadRangeEnd((IReadOnlyDictionary<string, object?> Row, IReadOnlyDictionary<long, object?> Computed) p, AppField field, string part)
+    {
+        var start = ReadRaw(p, field.Fid ?? 0, field);
+        object? raw;
+        if (PipelineFilterEvaluator.TryReadRange(ToText(start), out var first, out var last)) raw = part == "end" ? last : first;
+        else raw = part == "end" ? (p.Row.TryGetValue(PhysicalNaming.EndColumnName(field.Fid ?? 0), out var end) ? end : null) : start;
+        if (raw is null || (raw is string blank && string.IsNullOrWhiteSpace(blank))) return null;
+        if (field.TypeCode == "NumericRange")
+        {
+            if (TryNumber(raw, out var n)) return n;
+            return decimal.TryParse(ToText(raw), NumberStyles.Number | NumberStyles.AllowExponent, CultureInfo.InvariantCulture, out n) ? n : null;
+        }
+        return raw switch
+        {
+            DateTime dt => DateTime.SpecifyKind(dt, DateTimeKind.Utc),
+            DateOnly d => DateTime.SpecifyKind(d.ToDateTime(TimeOnly.MinValue), DateTimeKind.Utc),
+            _ => PipelineFilterEvaluator.TryParseDateTime(ToText(raw) ?? string.Empty, out var parsed) ? parsed : null
+        };
+    }
+
+    /// <summary>A condition on one end of a range, with SQL's rule for a blank end: it is in no order and equals nothing.</summary>
+    private static bool MatchesRangeEnd(FilterCondition c, object? end)
+    {
+        if (c.Operator == "isEmpty") return end is null;
+        if (c.Operator == "isNotEmpty") return end is not null;
+        if (end is null) return false;
+        int cmp;
+        if (end is decimal n)
+        {
+            if (!decimal.TryParse(c.Value, NumberStyles.Number | NumberStyles.AllowExponent, CultureInfo.InvariantCulture, out var asked)) return false;
+            cmp = n.CompareTo(asked);
+        }
+        else
+        {
+            if (!PipelineFilterEvaluator.TryParseDateTime(c.Value ?? string.Empty, out var asked)) return false;
+            cmp = ((DateTime)end).CompareTo(asked);
+        }
+        return c.Operator switch
+        {
+            "eq" => cmp == 0,
+            "ne" => cmp != 0,
+            "gt" => cmp > 0,
+            "gte" => cmp >= 0,
+            "lt" => cmp < 0,
+            "lte" => cmp <= 0,
+            _ => false,
+        };
+    }
+
+    private static bool IncludesAny(IEnumerable<string> members, string needle)
+    {
+        var wanted = needle.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // The whole value first: a single choice may itself hold a comma.
+        return members.Any(m => string.Equals(m, needle.Trim(), StringComparison.OrdinalIgnoreCase)
+            || wanted.Any(w => string.Equals(m, w, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    // A list (a formula returning users or choices) with no items is blank too.
+    private static bool IsBlank(object? v) => v switch
+    {
+        null => true,
+        string s => s.Length == 0,
+        System.Collections.IDictionary => false,
+        System.Collections.IEnumerable list => !list.Cast<object?>().Any(item => !IsBlank(item)),
+        _ => v.ToString() == string.Empty
+    };
 
     private static string? ToText(object? v) => v switch
     {
@@ -186,8 +328,15 @@ public static class PipelineComputedFilter
         DateTime dt => dt.ToString("O", CultureInfo.InvariantCulture),
         DateOnly d => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
         IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
+        // A list (a formula returning users or choices) reads as its items, not its type name.
+        System.Collections.IEnumerable list => PipelineFilterEvaluator.ValueText(list),
         _ => v.ToString(),
     };
+
+    /// <summary>A date or instant as text, read as UTC — what the columns hold. "…Z" (the date picker's instant) stays that instant
+    /// instead of moving into the server's own time zone, which shifted "is 15 Oct" by a day on a server not running on UTC.</summary>
+    private static bool TryInstant(string? text, out DateTime date) =>
+        DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out date);
 
     private static bool TryDate(object? v, out DateTime date)
     {
@@ -196,7 +345,7 @@ public static class PipelineComputedFilter
             case DateTime dt: date = dt; return true;
             case DateTimeOffset dto: date = dto.UtcDateTime; return true;
             case DateOnly d: date = d.ToDateTime(TimeOnly.MinValue); return true;
-            case string s when DateTime.TryParse(s, out var parsed): date = parsed; return true;
+            case string s when TryInstant(s, out var parsed): date = parsed; return true;
             default: date = default; return false;
         }
     }
@@ -277,9 +426,9 @@ public static class PipelineComputedFilter
         if (b is null) return 1;
         if (TryNumber(a, out var da) && decimal.TryParse(b, NumberStyles.Number | NumberStyles.AllowExponent, CultureInfo.InvariantCulture, out var db))
             return da.CompareTo(db);
-        if (a is DateTime or DateTimeOffset or DateOnly && TryDate(a, out var dt) && DateTime.TryParse(b, out var dtb))
+        if (a is DateTime or DateTimeOffset or DateOnly && TryDate(a, out var dt) && TryInstant(b, out var dtb))
             return dt.CompareTo(dtb);
         if (a is bool bl && bool.TryParse(b, out var blb)) return bl.CompareTo(blb);
-        return string.Compare(ToText(a), b, StringComparison.OrdinalIgnoreCase);
+        return string.Compare(ToText(a), b, CultureInfo.InvariantCulture, CompareOptions.IgnoreCase);
     }
 }
