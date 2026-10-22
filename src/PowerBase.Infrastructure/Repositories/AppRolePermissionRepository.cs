@@ -66,8 +66,12 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
         }
 
         if (transaction is not null) { await Exec(transaction.Connection!, transaction); return; }
+        // Delete + re-insert must be all-or-nothing: a failure halfway would leave the role without its rows,
+        // and missing rows fall back to the defaults (View "All records", no Custom Rules) — wider access.
         await using var c = await ConnectionFactory.CreateAsync(ct);
-        await Exec(c, null);
+        await using var tx = await c.BeginTransactionAsync(ct);
+        await Exec(c, tx);
+        await tx.CommitAsync(ct);
     }
 
     public async Task<AppRoleTablePermission?> GetTablePermissionAsync(long appRoleId, long appTableId, CancellationToken ct = default)
@@ -127,8 +131,12 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
         }
 
         if (transaction is not null) { await Exec(transaction.Connection!, transaction); return; }
+        // Delete + re-insert must be all-or-nothing: a failure halfway would leave the role without its rows,
+        // and missing rows fall back to the defaults (View "All records", no Custom Rules) — wider access.
         await using var c = await ConnectionFactory.CreateAsync(ct);
-        await Exec(c, null);
+        await using var tx = await c.BeginTransactionAsync(ct);
+        await Exec(c, tx);
+        await tx.CommitAsync(ct);
     }
 
     public async Task<IReadOnlyDictionary<long, string>> GetFieldAccessMapAsync(long appRoleId, long appTableId, CancellationToken ct = default)
@@ -213,8 +221,12 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
         }
 
         if (transaction is not null) { await Exec(transaction.Connection!, transaction); return; }
+        // Delete + re-insert must be all-or-nothing: a failure halfway would leave the role without its rows,
+        // and missing rows fall back to the defaults (View "All records", no Custom Rules) — wider access.
         await using var c = await ConnectionFactory.CreateAsync(ct);
-        await Exec(c, null);
+        await using var tx = await c.BeginTransactionAsync(ct);
+        await Exec(c, tx);
+        await tx.CommitAsync(ct);
     }
 
     public async Task<AppRoleRecordFilter?> GetRecordFilterAsync(long appRoleId, long appTableId, CancellationToken ct = default)

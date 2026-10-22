@@ -120,8 +120,16 @@ public class GetAppPermissionsQueryHandler
             var canDelete = list.Any(r => r.CanDelete);
             var canSaveSharedReports = list.Any(r => r.CanSaveSharedReports);
             var canEditFieldProperties = list.Any(r => r.CanEditFieldProperties);
-            var viewScope = ResolveScope(list.Select(r => r.ViewScope));
-            var modifyScope = ResolveScope(list.Select(r => r.ModifyScope));
+            // Same policy as RolePermissionEnforcer: a role with no row here has the defaults (View All records,
+            // Modify None); View "None" on any role is an explicit deny of the table (nothing to view, edit or
+            // delete); otherwise the roles' grants add up.
+            var hasDefaultRole = list.Count < roleIds.Count;
+            var viewDenied = list.Any(r => r.ViewScope == RecordScopes.None);
+            var viewScope = viewDenied
+                ? RecordScopes.None
+                : ResolveScope(list.Select(r => r.ViewScope).Concat(hasDefaultRole ? [RecordScopes.AllRecords] : []));
+            var modifyScope = viewDenied ? RecordScopes.None : ResolveScope(list.Select(r => r.ModifyScope));
+            if (viewDenied) canDelete = false;
 
             var hasFullAccess = list.Count < roleIds.Count || list.Any(r => r.FieldAccessLevel == TableFieldAccessLevels.FullAccess);
             var fieldAccessLevel = hasFullAccess ? TableFieldAccessLevels.FullAccess : TableFieldAccessLevels.CustomAccess;

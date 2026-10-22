@@ -417,12 +417,18 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
         AppField? primaryLabelField = null, CancellationToken ct = default,
-        IReadOnlyList<ReferenceFilterClause>? filters = null)
+        IReadOnlyList<ReferenceFilterClause>? filters = null,
+        IReadOnlyCollection<long>? onlyRowIds = null)
     {
         take = Math.Clamp(take, 1, 200);
 
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
+        if (onlyRowIds is not null)
+        {
+            parameters.Add("onlyRowIds", System.Text.Json.JsonSerializer.Serialize(onlyRowIds));
+            where += " AND p.Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@onlyRowIds))";
+        }
         if (filters is { Count: > 0 })
             where += $" AND {BuildReferenceFilterSql(filters, parameters, await MatchEncryptedTreesAsync(parentTable, filters, ct))}";
 
@@ -2788,7 +2794,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     public async Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
-        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default)
+        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default,
+        IReadOnlyCollection<long>? onlyRowIds = null)
     {
         var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
             ? field.PhysicalColumnName!
@@ -2808,6 +2815,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             selectExpr = col;
         }
+
+        var parameters = new DynamicParameters();
+        if (onlyRowIds is not null)
+        {
+            parameters.Add("onlyRowIds", System.Text.Json.JsonSerializer.Serialize(onlyRowIds));
+            whereExtra += " AND Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@onlyRowIds))";
+        }
         
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var encContext = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
@@ -2825,7 +2839,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''{whereExtra}
               """;
 
-        var rawValues = await connection.QueryAsync<string>(new CommandDefinition(sql, cancellationToken: ct));
+        var rawValues = await connection.QueryAsync<string>(new CommandDefinition(sql, parameters, cancellationToken: ct));
         
         IEnumerable<string> processedValues = rawValues.Where(v => !string.IsNullOrWhiteSpace(v));
 

@@ -41,7 +41,8 @@ public interface IRecordRepository
     Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
         AppField? primaryLabelField = null, CancellationToken ct = default,
-        IReadOnlyList<ReferenceFilterClause>? filters = null);
+        IReadOnlyList<ReferenceFilterClause>? filters = null,
+        IReadOnlyCollection<long>? onlyRowIds = null);
 
     /// <summary>True when the parent row satisfies every dependent-dropdown clause (used to reject a
     /// Reference value the picker would not have offered).</summary>
@@ -276,8 +277,10 @@ public interface IRecordRepository
         IReadOnlyList<SummarizeSortSpec>? sort = null,
         CancellationToken ct = default);
 
+    /// <param name="onlyRowIds">When given, only these rows are read (the rows the user's role may view).</param>
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
-        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default);
+        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default,
+        IReadOnlyCollection<long>? onlyRowIds = null);
 
     Task<int> SanitizeTableEncryptedDataAsync(AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
     Task<IReadOnlyList<SearchIndexDocument>> GetFieldBackfillBatchAsync(long tenantId, long appId, long tableId, long fieldId, bool isNullify, int page, int pageSize, CancellationToken ct = default);

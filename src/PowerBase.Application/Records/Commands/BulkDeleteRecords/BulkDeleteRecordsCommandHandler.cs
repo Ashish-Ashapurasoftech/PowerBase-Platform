@@ -71,18 +71,8 @@ public class BulkDeleteRecordsCommandHandler
             }
 
             // Modify Custom Rules: only records matching the role's rules may be deleted.
-            if (_modifyGuard is not null && access.ModifyFilter is not null)
-            {
-                if (command.SkipRecordsNotOwned)
-                {
-                    uniqueRecordPublicIds = await _modifyGuard.FilterAllowedAsync(access, table, fields, uniqueRecordPublicIds, ct);
-                    if (uniqueRecordPublicIds.Count == 0) return 0;
-                }
-                else
-                {
-                    await _modifyGuard.EnsureAsync(access, table, fields, uniqueRecordPublicIds, ct);
-                }
-            }
+            if (_modifyGuard is not null)
+                await _modifyGuard.EnsureAsync(access, table, fields, uniqueRecordPublicIds, ct);
         }
 
         // One-to-many restrict: block deletion while child records still reference these parents.
