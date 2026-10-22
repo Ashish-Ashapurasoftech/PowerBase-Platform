@@ -411,6 +411,8 @@ builder.Services.AddScoped<PowerBase.Application.FieldReferences.IFieldReference
 builder.Services.AddScoped<PowerBase.Application.FieldReferences.RebuildFieldReferencesCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IExemptFieldEncryptionCleanupService, PowerBase.Infrastructure.Services.ExemptFieldEncryptionCleanupService>();
+builder.Services.AddScoped<PowerBase.Application.Fields.Commands.CleanupExemptFieldEncryption.CleanupExemptFieldEncryptionCommandHandler>();
 builder.Services.AddScoped<IPermissionRepository, PermissionRepository>();
 builder.Services.AddScoped<IUserPermissionRepository, UserPermissionRepository>();
 builder.Services.AddScoped<IFormRepository, FormRepository>();
