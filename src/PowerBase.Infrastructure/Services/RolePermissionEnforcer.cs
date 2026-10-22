@@ -107,11 +107,16 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
         // ── Record filter (role-defined conditions) ──
         var viewFilter = await BuildCombinedViewFilterAsync(roleIds, appUser, table, fields, ct);
 
+        // ── Modify Custom Rules (which records may be edited / deleted) ──
+        var (modifyFilter, modifyDenied) = await BuildCombinedModifyFilterAsync(permissions, table, fields, modifyScope, ct);
+        if (modifyDenied) modifyScope = RecordScopes.None;
+
         return new TableAccessContext
         {
             Unrestricted = false,
             ViewScope = viewScope,
             ModifyScope = modifyScope,
+            ModifyFilter = modifyFilter,
             CanAdd = canAdd,
             CanDelete = canDelete,
             VisibleFields = visibleFields,
@@ -159,6 +164,39 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
         if (a == FieldAccessLevels.Modify || b == FieldAccessLevels.Modify) return FieldAccessLevels.Modify;
         if (a == FieldAccessLevels.View || b == FieldAccessLevels.View) return FieldAccessLevels.View;
         return FieldAccessLevels.None;
+    }
+
+    /// <summary>
+    /// Combines the Modify Custom Rules of every role that grants "All records" modify access. Only applies when
+    /// the effective scope is AllRecords (an "Own records" scope is enforced by ownership instead). A role with
+    /// no rules is unrestricted, so the user is too (permissions of several roles add up); otherwise the roles'
+    /// rules are OR'd. Fails closed: rules that exist but cannot be used (malformed, every field deleted) grant
+    /// nothing, and when no role grants anything the user cannot modify at all.
+    /// </summary>
+    private async Task<(FilterGroup? Filter, bool Denied)> BuildCombinedModifyFilterAsync(
+        IReadOnlyList<AppRoleTablePermission> permissions, AppTable table, IReadOnlyList<AppField> fields,
+        string effectiveModifyScope, CancellationToken ct)
+    {
+        if (effectiveModifyScope != RecordScopes.AllRecords) return (null, false);
+
+        var groups = new List<FilterGroup>();
+        foreach (var p in permissions.Where(p => p.ModifyScope == RecordScopes.AllRecords))
+        {
+            var stored = await _permRepo.GetModifyRecordFilterAsync(p.AppRoleId, table.Id, ct);
+            if (stored is null || string.IsNullOrWhiteSpace(stored.FilterJson))
+                return (null, false); // this role may modify every record
+
+            var group = await BuildGroupFilterAsync(stored.FilterJson, fields, ct);
+            if (group is not null) groups.Add(group);
+        }
+
+        if (groups.Count == 0) return (null, true);
+        if (groups.Count == 1) return (groups[0], false);
+        return (new FilterGroup
+        {
+            Logic = "or",
+            Nodes = groups.Select(g => new FilterNode { Group = g }).ToList(),
+        }, false);
     }
 
     private async Task<FilterGroup?> BuildCombinedViewFilterAsync(

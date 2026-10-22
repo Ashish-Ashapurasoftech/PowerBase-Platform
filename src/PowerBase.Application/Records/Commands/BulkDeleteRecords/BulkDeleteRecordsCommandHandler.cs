@@ -19,6 +19,7 @@ public class BulkDeleteRecordsCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly IQueryContext _queryContext;
     private readonly IMessagePublisher _messagePublisher;
+    private readonly RecordModifyGuard? _modifyGuard;
 
     public BulkDeleteRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -30,7 +31,8 @@ public class BulkDeleteRecordsCommandHandler
         IPipelineTriggerInterceptor triggerInterceptor,
         ITenantUnitOfWork uow,
         IQueryContext queryContext,
-        IMessagePublisher messagePublisher)
+        IMessagePublisher messagePublisher,
+        RecordModifyGuard? modifyGuard = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -42,6 +44,7 @@ public class BulkDeleteRecordsCommandHandler
         _uow = uow;
         _queryContext = queryContext;
         _messagePublisher = messagePublisher;
+        _modifyGuard = modifyGuard;
     }
 
     public async Task HandleAsync(BulkDeleteRecordsCommand command, CancellationToken ct = default)
@@ -65,6 +68,20 @@ public class BulkDeleteRecordsCommandHandler
             {
                 foreach (var id in uniqueRecordPublicIds)
                     await _enforcer.EnsureRecordOwnedAsync(table, id, ct);
+            }
+
+            // Modify Custom Rules: only records matching the role's rules may be deleted.
+            if (_modifyGuard is not null && access.ModifyFilter is not null)
+            {
+                if (command.SkipRecordsNotOwned)
+                {
+                    uniqueRecordPublicIds = await _modifyGuard.FilterAllowedAsync(access, table, fields, uniqueRecordPublicIds, ct);
+                    if (uniqueRecordPublicIds.Count == 0) return 0;
+                }
+                else
+                {
+                    await _modifyGuard.EnsureAsync(access, table, fields, uniqueRecordPublicIds, ct);
+                }
             }
         }
 

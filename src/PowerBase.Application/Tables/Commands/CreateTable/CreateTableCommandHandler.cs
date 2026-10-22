@@ -1,4 +1,5 @@
 using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Fields.Commands.BulkCreateFields;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
@@ -27,14 +28,17 @@ public class CreateTableCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly IAuditRepository _auditRepo;
     private readonly IAppSeeder _appSeeder;
+    private readonly BulkCreateFieldsCommandHandler? _bulkCreateHandler;
 
     public CreateTableCommandHandler(
         IAppRepository appRepo,
         IAppTableRepository tableRepo,
         IQueryContext queryContext,
         IAuditRepository auditRepo,
-        IAppSeeder appSeeder)
+        IAppSeeder appSeeder,
+        BulkCreateFieldsCommandHandler? bulkCreateHandler = null)
     {
+        _bulkCreateHandler = bulkCreateHandler;
         _appRepo = appRepo;
         _tableRepo = tableRepo;
         _queryContext = queryContext;
@@ -81,6 +85,18 @@ public class CreateTableCommandHandler
         };
 
         table = await _appSeeder.CreateTableWithDefaultsAsync(table, _queryContext.UserId, ct: ct);
+
+        // Custom fields typed into the Create Table dialog — created right after the table, the same
+        // way CreateAppCommandHandler does for each wizard table's Fields.
+        if (command.Fields is { Count: > 0 })
+        {
+            if (_bulkCreateHandler is null)
+                throw new InvalidOperationException("BulkCreateFieldsCommandHandler is required to create fields with a table.");
+            var items = command.Fields
+                .Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label.Trim(), IsRequired: f.IsRequired, Settings: f.Settings, IsEncrypted: f.IsEncrypted))
+                .ToList();
+            await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
+        }
 
         await _auditRepo.LogActivityAsync(
             AuditActions.Created, AuditEntityTypes.AppTable, table.PublicId.ToString(), $"Table added: {table.Name}", appId: app.Id, ct: ct);

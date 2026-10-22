@@ -169,7 +169,7 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
     // ── Record-level row filters ───────────────────────────────────────────────
 
     private const string GetRecordFiltersSql = """
-        SELECT t.PublicId AS TablePublicId, rf.Conjunction, rf.FilterJson
+        SELECT t.PublicId AS TablePublicId, rf.Conjunction, rf.FilterJson, rf.Kind
         FROM meta.AppRoleRecordFilter rf
         JOIN meta.AppTable t ON t.Id = rf.AppTableId AND t.IsDeleted = 0
         WHERE rf.AppRoleId = @appRoleId
@@ -180,14 +180,14 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
         """;
 
     private const string InsertRecordFilterSql = """
-        INSERT INTO meta.AppRoleRecordFilter (AppRoleId, AppTableId, Conjunction, FilterJson)
-        VALUES (@AppRoleId, @AppTableId, @Conjunction, @FilterJson)
+        INSERT INTO meta.AppRoleRecordFilter (AppRoleId, AppTableId, Conjunction, FilterJson, Kind)
+        VALUES (@AppRoleId, @AppTableId, @Conjunction, @FilterJson, @Kind)
         """;
 
     private const string GetRecordFilterSql = """
-        SELECT Id, AppRoleId, AppTableId, Conjunction, FilterJson
+        SELECT Id, AppRoleId, AppTableId, Conjunction, FilterJson, Kind
         FROM meta.AppRoleRecordFilter
-        WHERE AppRoleId = @appRoleId AND AppTableId = @appTableId
+        WHERE AppRoleId = @appRoleId AND AppTableId = @appTableId AND Kind = @kind
         """;
 
     public async Task<IReadOnlyList<RecordFilterRow>> GetRecordFiltersAsync(long appRoleId, CancellationToken ct = default)
@@ -207,7 +207,7 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
             {
                 await conn.ExecuteAsync(new CommandDefinition(InsertRecordFilterSql, new
                 {
-                    AppRoleId = appRoleId, r.AppTableId, r.Conjunction, r.FilterJson,
+                    AppRoleId = appRoleId, r.AppTableId, r.Conjunction, r.FilterJson, r.Kind,
                 }, tx, cancellationToken: ct));
             }
         }
@@ -221,7 +221,14 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
     {
         await using var conn = await ConnectionFactory.CreateAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<AppRoleRecordFilter>(
-            new CommandDefinition(GetRecordFilterSql, new { appRoleId, appTableId }, cancellationToken: ct));
+            new CommandDefinition(GetRecordFilterSql, new { appRoleId, appTableId, kind = "View" }, cancellationToken: ct));
+    }
+
+    public async Task<AppRoleRecordFilter?> GetModifyRecordFilterAsync(long appRoleId, long appTableId, CancellationToken ct = default)
+    {
+        await using var conn = await ConnectionFactory.CreateAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<AppRoleRecordFilter>(
+            new CommandDefinition(GetRecordFilterSql, new { appRoleId, appTableId, kind = "Modify" }, cancellationToken: ct));
     }
 
     // ── Seeding helpers ──────────────────────────────────────────────────────────
