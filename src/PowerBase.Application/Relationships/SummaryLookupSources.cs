@@ -63,6 +63,12 @@ public static class SummaryLookupSources
         return SummaryComputedTargets.ResultKind(source) ?? SummaryComputedTargets.KindOfValueType(FieldValueTypes.Of(source));
     }
 
+    /// <summary>True for a lookup that pulls down a calculated field — a Formula / Summary, or a lookup of one — whatever
+    /// value it shows: it has no column to read, so a summary works its value out per child record.</summary>
+    public static bool ReadsComputedSource(AppField field, IReadOnlyDictionary<long, AppField>? lookupSources) =>
+        IsLookup(field) && string.IsNullOrWhiteSpace(SourceSubField(field)) && field.Fid is int fid
+        && lookupSources?.GetValueOrDefault(fid) is { } source && PhysicalNaming.IsComputedTypeCode(source.TypeCode);
+
     /// <summary>True when a summary can read <paramref name="field"/> in SQL: a stored or system
     /// field, or a lookup of one.</summary>
     public static bool IsReadable(AppField field, IReadOnlyDictionary<long, AppField>? lookupSources) =>
