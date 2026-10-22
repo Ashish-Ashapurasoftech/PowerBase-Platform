@@ -25,9 +25,12 @@ public static class CommonReportValidationHelpers
     };
 
     /// <summary>Operators for which "compare to another field on this table" (ValueMode ==
-    /// "field") is a meaningful SQL comparison — see RecordRepository.BuildConditionClause's
-    /// field-vs-field branch. Pattern/substring-style operators against another field's live
-    /// value aren't supported (semantically odd, not requested).</summary>
+    /// "field", or a summary's "parentField") is a meaningful SQL comparison — see
+    /// RecordRepository.BuildConditionClause's field-vs-field branch. contains / notContains /
+    /// wildcard / notWildcard are only for "contains the user in the field" between user fields
+    /// (the two hold a user in common); the UI offers them on user fields only, the server doesn't
+    /// check the type. Other text-pattern operators (starts with, ends with, …) against another
+    /// field's live value aren't supported (semantically odd, not requested).</summary>
     public static readonly HashSet<string> FieldComparableOperators = new(StringComparer.OrdinalIgnoreCase)
     {
         "eq", "ne", "gt", "gte", "lt", "lte", "date_eq",

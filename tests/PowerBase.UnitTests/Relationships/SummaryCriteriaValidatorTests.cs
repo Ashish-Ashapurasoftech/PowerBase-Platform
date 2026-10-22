@@ -164,6 +164,15 @@ public class SummaryCriteriaValidatorTests
 
     [Fact]
     public void FindProblem_TextOperatorAgainstParentField_IsRefused() =>
-        SummaryCriteriaValidator.FindProblem(Group("and", ParentCond(6, "contains", 6)), ChildFields, ParentFields)
+        SummaryCriteriaValidator.FindProblem(Group("and", ParentCond(6, "startsWith", 6)), ChildFields, ParentFields)
             .Should().Contain("does not support comparing to another field");
+
+    // "Owner contains the user in the parent's Account Manager": the two fields hold a user in common.
+    [Theory]
+    [InlineData("contains")]
+    [InlineData("notContains")]
+    public void FindProblem_ContainsTheUserInAParentUserField_IsFine(string op) =>
+        SummaryCriteriaValidator.FindProblem(Group("and", ParentCond(7, op, 18)), ChildFields,
+                [.. ParentFields, new AppField { Fid = 18, Name = "Account Manager", TypeCode = "User" }])
+            .Should().BeNull();
 }

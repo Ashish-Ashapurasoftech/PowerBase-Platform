@@ -54,8 +54,12 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
         var canAdd = permissions.Any(p => p.CanAdd);
         var canDelete = permissions.Any(p => p.CanDelete);
 
-        var viewScope = ResolveScope(permissions.Select(p => p.ViewScope));
-        var modifyScope = ResolveScope(permissions.Select(p => p.ModifyScope));
+        // ── Records the user may view / modify: see BuildViewAccessAsync / BuildModifyAccessAsync ──
+        var view = await BuildViewAccessAsync(permissions, appUser, table, fields, ct);
+        var modify = view.Scope == RecordScopes.None
+            ? (Scope: RecordScopes.None, Filter: (FilterGroup?)null) // a record the user cannot see cannot be changed
+            : await BuildModifyAccessAsync(permissions, table, fields, ct);
+        if (view.Scope == RecordScopes.None) canDelete = false;
 
         // ── Field visibility ──
         var hidden = new HashSet<long>();
@@ -104,20 +108,18 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
-        // ── Record filter (role-defined conditions) ──
-        var viewFilter = await BuildCombinedViewFilterAsync(roleIds, appUser, table, fields, ct);
-
         return new TableAccessContext
         {
             Unrestricted = false,
-            ViewScope = viewScope,
-            ModifyScope = modifyScope,
+            ViewScope = view.Scope,
+            ModifyScope = modify.Scope,
+            ModifyFilter = modify.Filter,
             CanAdd = canAdd,
             CanDelete = canDelete,
             VisibleFields = visibleFields,
             EditableFieldIds = editableFieldIds,
-            ViewFilter = viewFilter,
-            RestrictToCreatedBy = viewScope == RecordScopes.OwnRecords ? _queryContext.UserId : null,
+            ViewFilter = view.Filter,
+            RestrictToCreatedBy = view.Scope == RecordScopes.OwnRecords ? _queryContext.UserId : null,
         };
     }
 
@@ -146,14 +148,6 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             await EnsureRecordOwnedAsync(table, recordPublicId, ct);
     }
 
-    private static string ResolveScope(IEnumerable<string> scopes)
-    {
-        var scopeList = scopes.ToList();
-        if (scopeList.Contains(RecordScopes.AllRecords)) return RecordScopes.AllRecords;
-        if (scopeList.Contains(RecordScopes.OwnRecords)) return RecordScopes.OwnRecords;
-        return RecordScopes.None;
-    }
-
     private static string GetHigherFieldAccess(string a, string b)
     {
         if (a == FieldAccessLevels.Modify || b == FieldAccessLevels.Modify) return FieldAccessLevels.Modify;
@@ -161,56 +155,147 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
         return FieldAccessLevels.None;
     }
 
-    private async Task<FilterGroup?> BuildCombinedViewFilterAsync(
-        IReadOnlyList<long> roleIds, AppUser? appUser, AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct)
+    /// <summary>
+    /// Which records the user may view when they hold several roles. In order:
+    /// 1. Explicit deny: a role whose View is "None" denies the table, whatever the other roles grant.
+    /// 2. Allow: otherwise the grants add up (union). "All records" without Custom Rules grants every record,
+    ///    "Own records" the records the user owns, "All records" with Custom Rules the records matching them.
+    /// 3. No grant: Custom Rules that exist but cannot be used (malformed, every field deleted) grant nothing,
+    ///    and when no role grants anything the user sees nothing.
+    /// Custom Rules saved on a role whose View is "Own records" are ignored — that role grants its own records.
+    /// </summary>
+    private async Task<(string Scope, FilterGroup? Filter)> BuildViewAccessAsync(
+        IReadOnlyList<AppRoleTablePermission> permissions, AppUser? appUser, AppTable table,
+        IReadOnlyList<AppField> fields, CancellationToken ct)
     {
-        var childGroups = new List<FilterGroup>();
-        foreach (var rId in roleIds)
+        if (permissions.Any(p => p.ViewScope == RecordScopes.None)) return (RecordScopes.None, null);
+
+        var grants = new List<FilterGroup>();
+        var ownRecords = false;
+        foreach (var p in permissions)
         {
-            var stored = await _permRepo.GetRecordFilterAsync(rId, table.Id, ct);
-            if (stored is null || string.IsNullOrWhiteSpace(stored.FilterJson)) continue;
+            if (p.ViewScope == RecordScopes.OwnRecords) { ownRecords = true; continue; }
+            if (p.ViewScope != RecordScopes.AllRecords) continue;
 
-            if (RoleRecordFilterJson.IsGroupFormat(stored.FilterJson))
-            {
-                var treeFilter = await BuildGroupFilterAsync(stored.FilterJson, fields, ct);
-                if (treeFilter is not null) childGroups.Add(treeFilter);
-                continue;
-            }
-
-            List<RoleRecordFilterCondition>? conditions;
-            try { conditions = JsonSerializer.Deserialize<List<RoleRecordFilterCondition>>(stored.FilterJson); }
-            catch { continue; }
-            if (conditions is null || conditions.Count == 0) continue;
-
-            var byPublicId = fields.ToDictionary(f => f.PublicId);
-            var nodes = new List<FilterNode>();
-            foreach (var c in conditions)
-            {
-                if (!byPublicId.TryGetValue(c.FieldPublicId, out var field)) continue;
-                var value = c.UseCurrentUser ? (appUser?.UserPublicId?.ToString() ?? string.Empty) : c.Value;
-                var fieldId = field.Fid.HasValue ? (long)field.Fid.Value : field.Id;
-                nodes.Add(new FilterNode
-                {
-                    Condition = new FilterCondition { FieldId = fieldId, Operator = c.Operator, Value = value },
-                });
-            }
-            if (nodes.Count == 0) continue;
-
-            childGroups.Add(new FilterGroup
-            {
-                Logic = stored.Conjunction.Equals("OR", StringComparison.OrdinalIgnoreCase) ? "or" : "and",
-                Nodes = nodes,
-            });
+            var stored = await _permRepo.GetRecordFilterAsync(p.AppRoleId, table.Id, ct);
+            var rules = await BuildRoleViewRulesAsync(stored, appUser, fields, ct);
+            if (rules.Unrestricted) return (RecordScopes.AllRecords, null);
+            if (rules.Filter is not null) grants.Add(rules.Filter);
         }
 
-        if (childGroups.Count == 0) return null;
-        if (childGroups.Count == 1) return childGroups[0];
+        return CombineGrants(grants, ownRecords, fields);
+    }
 
-        return new FilterGroup
+    /// <summary>
+    /// One role's View Custom Rules. Unrestricted when it has none (or none with a condition); a null filter
+    /// otherwise means the rules exist but cannot be used, so the role grants nothing.
+    /// </summary>
+    private async Task<(bool Unrestricted, FilterGroup? Filter)> BuildRoleViewRulesAsync(
+        AppRoleRecordFilter? stored, AppUser? appUser, IReadOnlyList<AppField> fields, CancellationToken ct)
+    {
+        if (stored is null || string.IsNullOrWhiteSpace(stored.FilterJson)) return (true, null);
+
+        if (RoleRecordFilterJson.IsGroupFormat(stored.FilterJson))
+        {
+            var parsed = RoleRecordFilterJson.ParseGroup(stored.FilterJson);
+            if (parsed is null) return (false, null);
+            if (RoleRecordFilterJson.CountConditions(parsed) == 0) return (true, null);
+            return (false, await BuildGroupFilterAsync(stored.FilterJson, fields, ct));
+        }
+
+        List<RoleRecordFilterCondition>? conditions;
+        try { conditions = JsonSerializer.Deserialize<List<RoleRecordFilterCondition>>(stored.FilterJson); }
+        catch { return (false, null); }
+        if (conditions is null || conditions.Count == 0) return (true, null);
+
+        var byPublicId = fields.ToDictionary(f => f.PublicId);
+        var nodes = new List<FilterNode>();
+        foreach (var c in conditions)
+        {
+            if (!byPublicId.TryGetValue(c.FieldPublicId, out var field)) continue;
+            var value = c.UseCurrentUser ? (appUser?.UserPublicId?.ToString() ?? string.Empty) : c.Value;
+            var fieldId = field.Fid.HasValue ? (long)field.Fid.Value : field.Id;
+            nodes.Add(new FilterNode
+            {
+                Condition = new FilterCondition { FieldId = fieldId, Operator = c.Operator, Value = value },
+            });
+        }
+        if (nodes.Count == 0) return (false, null);
+
+        return (false, new FilterGroup
+        {
+            Logic = stored.Conjunction.Equals("OR", StringComparison.OrdinalIgnoreCase) ? "or" : "and",
+            Nodes = nodes,
+        });
+    }
+
+    /// <summary>
+    /// Which records the user may edit / delete, combined the same way as View (union), except that "None" is
+    /// not a deny: it is every role's default, so it only grants nothing. Fails closed like View: Custom Rules
+    /// that cannot be used grant nothing.
+    /// </summary>
+    private async Task<(string Scope, FilterGroup? Filter)> BuildModifyAccessAsync(
+        IReadOnlyList<AppRoleTablePermission> permissions, AppTable table, IReadOnlyList<AppField> fields,
+        CancellationToken ct)
+    {
+        var grants = new List<FilterGroup>();
+        var ownRecords = false;
+        foreach (var p in permissions)
+        {
+            if (p.ModifyScope == RecordScopes.OwnRecords) { ownRecords = true; continue; }
+            if (p.ModifyScope != RecordScopes.AllRecords) continue;
+
+            var stored = await _permRepo.GetModifyRecordFilterAsync(p.AppRoleId, table.Id, ct);
+            if (stored is null || string.IsNullOrWhiteSpace(stored.FilterJson))
+                return (RecordScopes.AllRecords, null); // this role may modify every record
+
+            var parsed = RoleRecordFilterJson.ParseGroup(stored.FilterJson);
+            if (parsed is not null && RoleRecordFilterJson.CountConditions(parsed) == 0)
+                return (RecordScopes.AllRecords, null); // saved without a condition: no rules
+
+            var group = parsed is null ? null : await BuildGroupFilterAsync(stored.FilterJson, fields, ct);
+            if (group is not null) grants.Add(group);
+        }
+
+        return CombineGrants(grants, ownRecords, fields);
+    }
+
+    /// <summary>
+    /// Union of the roles' Custom Rules plus, when a role grants "Own records", the records the user owns.
+    /// Only own records -> scope OwnRecords (enforced by ownership, as for a single role); nothing -> None.
+    /// </summary>
+    private (string Scope, FilterGroup? Filter) CombineGrants(
+        List<FilterGroup> grants, bool ownRecords, IReadOnlyList<AppField> fields)
+    {
+        if (grants.Count == 0)
+            return (ownRecords ? RecordScopes.OwnRecords : RecordScopes.None, null);
+
+        if (ownRecords)
+        {
+            var owner = fields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
+            if (owner is not null)
+                grants.Add(new FilterGroup
+                {
+                    Logic = "and",
+                    Nodes =
+                    [
+                        new FilterNode
+                        {
+                            Condition = new FilterCondition
+                            {
+                                FieldId = (long)owner.Fid!.Value, Operator = "eq", Value = _queryContext.UserId.ToString(),
+                            },
+                        },
+                    ],
+                });
+        }
+
+        if (grants.Count == 1) return (RecordScopes.AllRecords, grants[0]);
+        return (RecordScopes.AllRecords, new FilterGroup
         {
             Logic = "or",
-            Nodes = childGroups.Select(cg => new FilterNode { Group = cg }).ToList()
-        };
+            Nodes = grants.Select(g => new FilterNode { Group = g }).ToList(),
+        });
     }
 
     /// <summary>

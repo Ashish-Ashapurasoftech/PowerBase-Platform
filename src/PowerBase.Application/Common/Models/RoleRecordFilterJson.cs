@@ -12,6 +12,11 @@ namespace PowerBase.Application.Common.Models;
 /// </summary>
 public static class RoleRecordFilterJson
 {
+    /// <summary>meta.AppRoleRecordFilter.Kind of the rules deciding which records a role can see.</summary>
+    public const string ViewKind = "View";
+    /// <summary>meta.AppRoleRecordFilter.Kind of the rules deciding which records a role can edit / delete.</summary>
+    public const string ModifyKind = "Modify";
+
     private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web);
 
     /// <summary>True when the stored JSON is the nested <see cref="FilterGroup"/> object shape.</summary>

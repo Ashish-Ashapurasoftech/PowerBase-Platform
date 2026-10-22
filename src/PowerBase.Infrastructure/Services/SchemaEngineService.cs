@@ -232,6 +232,72 @@ public class SchemaEngineService : ISchemaEngineService
         await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
     }
 
+    public async Task SetColumnEncryptionAsync(AppTable table, AppField field, bool isEncrypted, CancellationToken ct = default)
+    {
+        if (PhysicalNaming.IsComputedTypeCode(field.TypeCode) || PhysicalNaming.IsEncryptionExemptTypeCode(field.TypeCode))
+            return;
+
+        await using var connection = await _connectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+
+        // In an encrypted App every column was created as ciphertext storage regardless of the field flag.
+        var appIsEncrypted = await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
+            "SELECT IsEncrypted FROM meta.App WHERE Id = @appId AND IsDeleted = 0", new { appId = table.AppId }, cancellationToken: ct));
+        if (appIsEncrypted)
+            return;
+
+        var sqlDataType = await connection.ExecuteScalarAsync<string>(
+            new CommandDefinition(GetFieldTypeSqlDataTypeSql, new { id = field.FieldTypeId }, cancellationToken: ct))
+            ?? throw new InvalidOperationException($"Unknown or inactive field type id: {field.FieldTypeId}");
+
+        // Same column shape AddColumnAsync gives a field created with this encryption setting.
+        var collationClause = "";
+        var encryptionClause = "";
+        if (isEncrypted)
+        {
+            var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(connection.ConnectionString);
+            if (builder.ColumnEncryptionSetting == Microsoft.Data.SqlClient.SqlConnectionColumnEncryptionSetting.Enabled)
+            {
+                collationClause = sqlDataType.Contains("CHAR", StringComparison.OrdinalIgnoreCase) ? " COLLATE Latin1_General_BIN2" : "";
+                encryptionClause = " ENCRYPTED WITH (COLUMN_ENCRYPTION_KEY = [CEK1], ENCRYPTION_TYPE = RANDOMIZED, ALGORITHM = 'AEAD_AES_256_CBC_HMAC_SHA_256', ENCLAVE_COMPUTATIONS)";
+            }
+            else
+            {
+                sqlDataType = "VARCHAR(MAX)";
+            }
+        }
+
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        var tableName = PhysicalNaming.TableName(table.Id);
+        var physicalColumn = PhysicalNaming.GetPhysicalColumnName(field);
+        var columns = new List<string> { physicalColumn };
+        if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
+            columns.Add(PhysicalNaming.EndColumnName(field.Fid!.Value));
+
+        // The unique index (and the digest column a MAX column is indexed through) would block ALTER COLUMN.
+        var indexName = $"UX_{tableName}_{physicalColumn}";
+        var digestColumn = $"{physicalColumn}_unique_hash";
+
+        // Soft-deleted rows can still hold values. Plaintext converts implicitly into the ciphertext column (and is
+        // read back as-is, since decryption falls back to the stored text); ciphertext can't become a DATE/DECIMAL/…,
+        // and is unreadable once the field is no longer decrypted, so it is cleared when encryption is turned off.
+        var sql = new System.Text.StringBuilder($"""
+            DROP INDEX IF EXISTS {indexName} ON {physicalTable};
+            ALTER TABLE {physicalTable} DROP COLUMN IF EXISTS {digestColumn};
+
+            """);
+        foreach (var column in columns)
+        {
+            if (!isEncrypted)
+                sql.AppendLine($"UPDATE {physicalTable} SET {column} = NULL WHERE {column} IS NOT NULL;");
+            sql.AppendLine($"ALTER TABLE {physicalTable} ALTER COLUMN {column} {sqlDataType}{collationClause}{encryptionClause} NULL;");
+        }
+
+        await using var tx = await connection.BeginTransactionAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(sql.ToString(), transaction: tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
+    }
+
     public async Task ConvertColumnToReferenceAsync(
         AppTable table, AppField field, IReadOnlyDictionary<long, long> parentIdByRowId, CancellationToken ct = default,
         PreservedOriginal? preserveUnmatched = null)

@@ -220,6 +220,12 @@ public class UpdateFieldCommandHandler
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, isUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, isEncrypted, ct);
 
+        // Ciphertext needs a text column (see SchemaEngineService.AddColumnAsync); a field created
+        // unencrypted has its type's native column (DATE, DECIMAL, …), so re-type it to match the new
+        // flag. Runs before SetUniqueAsync below, which re-creates the unique index it drops.
+        if (isEncrypted != existing.IsEncrypted)
+            await _schemaEngine.SetColumnEncryptionAsync(table, existing, isEncrypted, ct);
+
         // Build the physical constraint before persisting IsUnique. A failed index build must
         // not leave metadata claiming that uniqueness is enforced. Also repair fields whose
         // metadata was saved by an earlier failed attempt but whose index is missing.

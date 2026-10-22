@@ -16,6 +16,7 @@ public class DeleteRecordCommandHandler
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly ITenantUnitOfWork _uow;
     private readonly IMessagePublisher _messagePublisher;
+    private readonly RecordModifyGuard? _modifyGuard;
 
     public DeleteRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -26,7 +27,8 @@ public class DeleteRecordCommandHandler
         IRelationshipRepository relRepo,
         IPipelineTriggerInterceptor triggerInterceptor,
         ITenantUnitOfWork uow,
-        IMessagePublisher messagePublisher)
+        IMessagePublisher messagePublisher,
+        RecordModifyGuard? modifyGuard = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -37,6 +39,7 @@ public class DeleteRecordCommandHandler
         _triggerInterceptor = triggerInterceptor;
         _uow = uow;
         _messagePublisher = messagePublisher;
+        _modifyGuard = modifyGuard;
     }
 
     public async Task HandleAsync(DeleteRecordCommand command, CancellationToken ct = default)
@@ -51,6 +54,8 @@ public class DeleteRecordCommandHandler
                 throw new UnauthorizedActionException("You do not have permission to delete records from this table.");
             if (access.ViewScope == RecordScopes.OwnRecords || access.ModifyScope == RecordScopes.OwnRecords)
                 await _enforcer.EnsureRecordOwnedAsync(table, command.RecordPublicId, ct);
+            if (_modifyGuard is not null)
+                await _modifyGuard.EnsureAsync(access, table, fields, [command.RecordPublicId], ct);
         }
 
         // One-to-many restrict: block deletion while child records still reference this parent.
