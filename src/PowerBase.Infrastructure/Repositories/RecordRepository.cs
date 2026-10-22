@@ -2350,6 +2350,35 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
              + $"ELSE {noTrailingZeros} END)";
     }
 
+    /// <summary>A parent Lookup / Summary / Formula value for "the value in the parent's field": the values worked out
+    /// for the parents being summarized, as an inline (parent Id, value) list in which each child row finds its own
+    /// parent's. A parent whose value is blank is left out, so its children match nothing — like a blank stored
+    /// parent value. Null when every parent's value is blank.</summary>
+    private static string? ComputedParentValueExpr(IReadOnlyDictionary<long, object?> values, int referenceFid,
+        DynamicParameters p, ref int i)
+    {
+        var rows = new List<string>();
+        foreach (var (parentId, value) in values)
+        {
+            object? param = value switch
+            {
+                null or DBNull => null,
+                string s when string.IsNullOrWhiteSpace(s) => null,
+                DateOnly d => d.ToDateTime(TimeOnly.MinValue),
+                string or bool or DateTime or DateTimeOffset or decimal or double or float or long or int or short or byte => value,
+                _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture),
+            };
+            if (param is null) continue;
+            var pname = $"fv{i++}";
+            p.Add(pname, param);
+            rows.Add($"({parentId}, @{pname})");   // parentId is a row Id (long) — safe to inline
+        }
+        return rows.Count == 0
+            ? null
+            : $"(SELECT pv.v FROM (VALUES {string.Join(", ", rows)}) pv(k, v) "
+              + $"WHERE pv.k = {ChildAlias}.{PhysicalNaming.ColumnName(referenceFid)})";
+    }
+
     /// <summary>True for a Date &amp; Time column (a DateTime field, or the system Date Created /
     /// Date Modified), whose values carry a time of day.</summary>
     private static bool IsDateTimeColumn(string col, AppField? field) =>
@@ -2478,12 +2507,24 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             if (isParentFieldComparison)
             {
                 if (parentScope is null
-                    || !parentScope.ParentFieldsByFid.TryGetValue(cond.ValueFieldId!.Value, out var parentField)
-                    || PhysicalNaming.IsComputedTypeCode(parentField.TypeCode))
+                    || !parentScope.ParentFieldsByFid.TryGetValue(cond.ValueFieldId!.Value, out var parentField))
                     return null;
-                var parentCol = ResolveColumnName(parentField, cond.ValueFieldId.Value);
-                colExpr2 = $"(SELECT p.{parentCol} FROM {PhysicalNaming.FullTableName(parentScope.ParentTableId)} p "
-                         + $"WHERE p.Id = {ChildAlias}.{PhysicalNaming.ColumnName(parentScope.ReferenceFid)})";
+                if (PhysicalNaming.IsComputedTypeCode(parentField.TypeCode) || parentScope.ComputedValues?.ContainsKey(cond.ValueFieldId.Value) == true)
+                {
+                    // A parent Lookup / Summary / Formula has no column — and a parent Reference compared as the key it
+                    // shows holds a Record ID# instead: their values, worked out for the parents being summarized, are
+                    // compared instead. None known (or all blank) matches nothing, never everything.
+                    var values = parentScope.ComputedValues?.GetValueOrDefault(cond.ValueFieldId.Value);
+                    if (values is null || ComputedParentValueExpr(values, parentScope.ReferenceFid, p, ref i) is not { } computedExpr)
+                        return "1 = 0";
+                    colExpr2 = computedExpr;
+                }
+                else
+                {
+                    var parentCol = ResolveColumnName(parentField, cond.ValueFieldId.Value);
+                    colExpr2 = $"(SELECT p.{parentCol} FROM {PhysicalNaming.FullTableName(parentScope.ParentTableId)} p "
+                             + $"WHERE p.Id = {ChildAlias}.{PhysicalNaming.ColumnName(parentScope.ReferenceFid)})";
+                }
             }
             else
             {

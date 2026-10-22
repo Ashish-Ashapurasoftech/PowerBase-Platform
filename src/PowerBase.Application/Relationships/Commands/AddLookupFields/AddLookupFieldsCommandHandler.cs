@@ -52,7 +52,7 @@ public class AddLookupFieldsCommandHandler
         {
             var src = parentFields.FirstOrDefault(f => f.Fid == spec.SourceFid)
                 ?? throw new NotFoundException("Field", spec.SourceFid);
-            var sourceTypeCode = await LookupChain.ResolveForNewLookupAsync(src, _fieldRepo, ct);
+            var (sourceTypeCode, resultTypeCode) = await LookupChain.ResolveForNewLookupAsync(src, null, _fieldRepo, ct);
             var lookup = await _fieldFactory.CreateAsync(child, nameof(Domain.Enums.FieldTypeCode.Lookup),
                 spec.Label.Trim(), false,
                 new LookupSettings
@@ -62,6 +62,7 @@ public class AddLookupFieldsCommandHandler
                     SourceTableId = parent.Id,
                     SourceFid = spec.SourceFid,
                     SourceTypeCode = sourceTypeCode,
+                    ResultTypeCode = resultTypeCode,
                 }, ct);
             firstCreated ??= lookup;
             addedFids.Add(lookup.Fid!.Value);

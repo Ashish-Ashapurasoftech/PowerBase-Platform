@@ -194,8 +194,8 @@ public class SummaryTargetValidatorTests
         Settings = $"{{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":7,\"sourceFid\":8{(subField is null ? "" : $",\"sourceSubField\":\"{subField}\"")}}}",
     };
 
-    private static Dictionary<long, AppField> Sources(string sourceType) =>
-        new() { [20] = new AppField { Id = 8, Fid = 8, Name = "Budget", TypeCode = sourceType } };
+    private static Dictionary<long, AppField> Sources(string sourceType, string? settings = null) =>
+        new() { [20] = new AppField { Id = 8, Fid = 8, Name = "Budget", TypeCode = sourceType, Settings = settings } };
 
     [Theory]
     [InlineData("Sum", "Currency")]
@@ -218,13 +218,54 @@ public class SummaryTargetValidatorTests
         FluentActions.Invoking(() => SummaryTargetValidator.Validate("Min", 20, Lookup(subField: "city"), null, lookupSources: Sources("Address")))
             .Should().Throw<ValidationException>();
 
+    // A lookup of a Summary / Formula ("Dept - Min of Salary") has no column, but is worked out per child row and
+    // summarized as the type that field produces.
     [Theory]
-    [InlineData("Formula_Number")]
-    [InlineData("Summary")]
-    [InlineData("Lookup")]
-    public void Validate_LookupOfCalculatedField_ThrowsValidation(string sourceType) =>
+    [InlineData("Sum", "Summary", """{"function":"Min","targetTypeCode":"Currency"}""")]
+    [InlineData("Avg", "Summary", """{"function":"Count"}""")]
+    [InlineData("Max", "Summary", """{"function":"Max","targetTypeCode":"Date"}""")]
+    [InlineData("CombinedText", "Summary", """{"function":"CombinedText"}""")]
+    [InlineData("Sum", "Formula_Number", null)]
+    [InlineData("Max", "Lookup", """{"sourceTypeCode":"Summary","resultTypeCode":"Date"}""")]   // a chain: its saved type
+    public void Validate_LookupOfCalculatedField_IsSummarizedAsItsResult(string function, string sourceType, string? settings) =>
+        FluentActions.Invoking(() => SummaryTargetValidator.Validate(function, 20, Lookup(), null, lookupSources: Sources(sourceType, settings)))
+            .Should().NotThrow();
+
+    [Theory]
+    [InlineData("CombinedText", "Summary", """{"function":"Min","targetTypeCode":"Currency"}""")]   // a number
+    [InlineData("Sum", "Summary", """{"function":"Max","targetTypeCode":"Date"}""")]                // a date
+    [InlineData("Sum", "Lookup", """{"sourceTypeCode":"Summary","resultTypeCode":"Date"}""")]
+    public void Validate_LookupOfCalculatedField_WithAFunctionItsResultDoesntSupport_ThrowsValidation(string function, string sourceType, string? settings) =>
+        FluentActions.Invoking(() => SummaryTargetValidator.Validate(function, 20, Lookup(), null, lookupSources: Sources(sourceType, settings)))
+            .Should().Throw<ValidationException>().Which.Errors["targetFid"].Single().Should().Contain("supports");
+
+    [Theory]
+    [InlineData("Formula_Time")]   // a result no summary can aggregate
+    [InlineData("Summary")]        // its result can't be told (no settings)
+    [InlineData("Lookup")]         // a chain saved before its type was kept
+    public void Validate_LookupOfCalculatedField_WithNoSummarizableResult_ThrowsValidation(string sourceType) =>
         FluentActions.Invoking(() => SummaryTargetValidator.Validate("DistinctCount", 20, Lookup(), null, lookupSources: Sources(sourceType)))
             .Should().Throw<ValidationException>().Which.Errors["targetFid"].Single().Should().Contain("calculated");
+
+    // A Reference whose parent shows a key field ("Related Client", keyed by Client Name) is summarized as that key:
+    // judged by the key's type. With no key it holds — and is judged as — a Record ID, whatever type it was converted from.
+    [Theory]
+    [InlineData("CombinedText", "Text", true)]
+    [InlineData("DistinctCount", "Text", true)]
+    [InlineData("Sum", "Text", false)]
+    [InlineData("Max", "Date", true)]
+    [InlineData("Sum", "Currency", true)]
+    [InlineData("CombinedText", null, false)]   // no key: a Record ID
+    [InlineData("DistinctCount", null, true)]
+    public void Validate_ReferenceTarget_FollowsTheKeyItShows(string function, string? keyType, bool valid)
+    {
+        var reference = Field("Reference", """{"parentTableId":9,"originalTypeCode":"Text"}""");
+        var keys = keyType is null
+            ? new Dictionary<long, AppField>()
+            : new Dictionary<long, AppField> { [5] = new() { Id = 906, Fid = 6, AppTableId = 9, Name = "Key", TypeCode = keyType } };
+        var run = () => SummaryTargetValidator.Validate(function, 5, reference, null, referenceKeys: keys);
+        if (valid) run.Should().NotThrow(); else run.Should().Throw<ValidationException>();
+    }
 
     [Fact]
     public void Validate_LookupWhoseSourceIsGone_ThrowsValidation() =>

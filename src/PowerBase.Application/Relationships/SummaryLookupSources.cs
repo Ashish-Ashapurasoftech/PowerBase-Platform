@@ -51,6 +51,18 @@ public static class SummaryLookupSources
             : null;
     }
 
+    /// <summary>The kind of value (as <see cref="SummaryComputedTargets.ResultKind"/>: Number, Date, Text, …) a lookup
+    /// shows when it pulls down a calculated field — a Summary / Formula ("Dept - Min of Salary" shows a Number) or a
+    /// lookup of one — or null for any other field, or one whose value can't be summarized or compared (a time formula).
+    /// Such a lookup has no column to read: a summary works its value out per child record, as it does a formula's.</summary>
+    public static string? ComputedValueKind(AppField field, IReadOnlyDictionary<long, AppField>? lookupSources)
+    {
+        if (!IsLookup(field) || !string.IsNullOrWhiteSpace(SourceSubField(field)) || field.Fid is not int fid
+            || lookupSources?.GetValueOrDefault(fid) is not { } source || !PhysicalNaming.IsComputedTypeCode(source.TypeCode))
+            return null;
+        return SummaryComputedTargets.ResultKind(source) ?? SummaryComputedTargets.KindOfValueType(FieldValueTypes.Of(source));
+    }
+
     /// <summary>True when a summary can read <paramref name="field"/> in SQL: a stored or system
     /// field, or a lookup of one.</summary>
     public static bool IsReadable(AppField field, IReadOnlyDictionary<long, AppField>? lookupSources) =>

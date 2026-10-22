@@ -104,16 +104,19 @@ public static class EncryptedRowFilter
         return (copies, withLookup);
     }
 
-    /// <summary>Formula and Summary fields have no column: for those the criteria or the sort read, each row gets the
-    /// computed value (<paramref name="computed"/>, per row, by Fid) under the field's own column, and the field is
-    /// replaced in the returned list by one of the type it returns — so it is compared and sorted like a stored field.</summary>
+    /// <summary>Formula and Summary fields — and lookups of them (<paramref name="lookupSources"/>) — have no column: for
+    /// those the criteria or the sort read, each row gets the computed value (<paramref name="computed"/>, per row, by
+    /// Fid) under the field's own column, and the field is replaced in the returned list by one of the type it returns —
+    /// so it is compared and sorted like a stored field.</summary>
     public static (IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows, IReadOnlyList<AppField> Fields) WithComputedValues(
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, IReadOnlyList<AppField> fields,
-        IReadOnlyList<IReadOnlyDictionary<long, object?>> computed, IEnumerable<long> readFids)
+        IReadOnlyList<IReadOnlyDictionary<long, object?>> computed, IEnumerable<long> readFids,
+        IReadOnlyDictionary<long, AppField>? lookupSources = null)
     {
+        string? KindOf(AppField f) => SummaryComputedTargets.ResultKind(f) ?? SummaryLookupSources.ComputedValueKind(f, lookupSources);
         var computedFields = readFids.Distinct()
             .Select(fid => fields.FirstOrDefault(f => f.Fid == fid))
-            .Where(f => f is not null && SummaryComputedTargets.ResultKind(f) is not null)
+            .Where(f => f is not null && KindOf(f) is not null)
             .Select(f => f!).ToList();
         if (computedFields.Count == 0) return (rows, fields);
 
@@ -130,7 +133,7 @@ public static class EncryptedRowFilter
             ? new AppField
             {
                 Id = f.Id, Fid = f.Fid, Name = f.Name, Label = f.Label,
-                TypeCode = SummaryComputedTargets.ResultKind(f) is { } kind ? (kind == "Bool" ? "Checkbox" : kind) : f.TypeCode,
+                TypeCode = KindOf(f) is { } kind ? (kind == "Bool" ? "Checkbox" : kind) : f.TypeCode,
             }
             : f).ToList();
         return (copies, typed);
