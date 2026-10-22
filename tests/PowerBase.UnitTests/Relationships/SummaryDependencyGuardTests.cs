@@ -71,14 +71,14 @@ public class SummaryDependencyGuardTests
     }
 
     [Fact]
-    public async Task Combined_text_blocks_a_change_to_a_type_with_no_text_form()
+    public async Task Combined_text_allows_a_change_to_any_type_with_a_value()
     {
-        // A Reference value is a bare record id — Combined Text can't show it, so the change is refused.
+        // Combined Text shows any value as the grid does — a Reference as its Record ID#, a user by name.
         _fieldRepo.ListByTableAsync(ClientTableId, Arg.Any<CancellationToken>())
             .Returns(new List<AppField> { Summary(33, "All Amounts", "CombinedText") });
 
-        (await FluentActions.Invoking(() => Run("Reference")).Should().ThrowAsync<ConflictException>())
-            .Which.Message.Should().Contain("Client › All Amounts (Combined Text)");
+        await FluentActions.Invoking(() => Run("Reference")).Should().NotThrowAsync();
+        await FluentActions.Invoking(() => Run("User")).Should().NotThrowAsync();
     }
 
     [Fact]

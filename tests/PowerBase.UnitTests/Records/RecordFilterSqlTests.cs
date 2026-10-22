@@ -327,4 +327,39 @@ public class RecordFilterSqlTests
         sql.Should().Contain("LIKE @fv0");
         p.Get<string>("fv0").Should().Be(like);
     }
+
+    // ── Combined Text of a range: both ends, the end being a second column ──
+
+    private static (string Value, string HasValue)? RangeValue(int targetFid, IReadOnlyDictionary<long, AppField> fields) =>
+        ((string, string)?)typeof(RecordRepository).GetMethod("RangeValueExpr", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, [targetFid, null, fields]);
+
+    [Fact]
+    public void RangeValue_OfARangeField_ReadsBothEndsAsJson()
+    {
+        var fields = new Dictionary<long, AppField> { [30] = new() { Id = 1030, Fid = 30, Name = "Term", TypeCode = "DateRange" } };
+
+        RangeValue(30, fields).Should().Be((
+            "(SELECT c.f_30 AS [start], c.f_30_e AS [end] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)",
+            "(c.f_30 IS NOT NULL OR c.f_30_e IS NOT NULL)"));
+    }
+
+    [Fact]
+    public void RangeValue_OfALookupOfARange_ReadsBothEndsFromTheParent()
+    {
+        var fields = new Dictionary<long, AppField>
+        {
+            [31] = new() { Id = 1031, Fid = 31, Name = "Client - Term", TypeCode = "Lookup",
+                Settings = """{"referenceFid":10,"sourceTableId":5,"sourceFid":8,"sourceTypeCode":"NumericRange"}""" },
+        };
+
+        var (value, hasValue) = RangeValue(31, fields)!.Value;
+
+        value.Should().Contain("SELECT lk.f_8 AS [start], lk.f_8_e AS [end]").And.Contain("lk.Id = c.f_10").And.EndWith("FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)");
+        hasValue.Should().StartWith("EXISTS (SELECT 1 FROM").And.Contain("lk.f_8 IS NOT NULL OR lk.f_8_e IS NOT NULL");
+    }
+
+    [Fact]
+    public void RangeValue_OfAnyOtherField_IsNone() =>
+        RangeValue(20, Fields).Should().BeNull();
 }

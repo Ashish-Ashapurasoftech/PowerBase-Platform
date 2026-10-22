@@ -160,4 +160,58 @@ public class DisplayValueFormatterTests
         Fmt(1200m, "Currency", "{not json").Should().Be("$1,200.00");
         DisplayValueFormatter.ParseAppFormatting("{bad").Date.FormatString.Should().Be("MM-DD-YYYY");
     }
+
+    // ── Values with no text of their own, shown as the grid shows them (Combined Text over any field type) ──
+
+    private static readonly Dictionary<long, string> Names = new() { [7] = "Asha Patel", [9] = "Ravi Shah" };
+
+    [Theory]
+    [InlineData(7L, "User", "Asha Patel")]
+    [InlineData("7", "User", "Asha Patel")]
+    [InlineData(42L, "User", "42")]                        // no known name: its id
+    [InlineData("[\"7\",\"9\"]", "MultiUser", "Asha Patel, Ravi Shah")]
+    [InlineData("7, 9", "MultiUser", "Asha Patel, Ravi Shah")]   // older rows: comma-separated
+    [InlineData("[]", "MultiUser", null)]
+    public void Users_ShowTheirNames(object raw, string type, string? expected) =>
+        DisplayValueFormatter.Format(raw, type, null, Defaults, Today, Names).Should().Be(expected);
+
+    [Fact]
+    public void UserList_FromAFormula_ShowsNames_AndItsIdsCanBeLookedUp()
+    {
+        DisplayValueFormatter.Format(new List<string> { "9", "7" }, "MultiUser", null, Defaults, Today, Names).Should().Be("Ravi Shah, Asha Patel");
+        DisplayValueFormatter.UserIds("[\"7\",\"x\",\"9\"]", "MultiUser").Should().Equal(7, 9);
+        DisplayValueFormatter.UserIds(7L, "User").Should().Equal(7);
+        DisplayValueFormatter.UserIds("7", "Text").Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("""[{"name":"quote.pdf","path":"a/1"},{"name":"logo.png","path":"a/2"}]""", "quote.pdf, logo.png")]
+    [InlineData("""{"name":"quote.pdf"}""", "quote.pdf")]
+    [InlineData("""[{"path":"a/1"}]""", "attachment")]
+    [InlineData("a/1/legacy.bin", "attachment")]          // not JSON: one attachment
+    [InlineData("[]", null)]
+    public void File_ShowsItsFileNames(string raw, string? expected) =>
+        Fmt(raw, "File").Should().Be(expected);
+
+    [Theory]
+    [InlineData("<p>Call <b>Asha</b></p><p>Tue&nbsp;&amp; Wed</p>", "Call Asha Tue & Wed")]
+    [InlineData("Line one<br>Line two", "Line one Line two")]
+    [InlineData("<p> </p>", null)]
+    public void RichText_ShowsItsTextWithoutMarkup(string raw, string? expected) =>
+        Fmt(raw, "RichText").Should().Be(expected);
+
+    [Theory]
+    [InlineData("""{"start":"2026-01-05","end":"2026-03-31"}""", "DateRange", "01-05-2026 – 03-31-2026")]
+    [InlineData("""{"start":"2026-01-05T00:00:00"}""", "DateRange", "01-05-2026 – …")]
+    [InlineData("""{"start":10.0000,"end":25.5000}""", "NumericRange", "10 – 25.5")]
+    [InlineData("{}", "NumericRange", null)]
+    public void Range_ShowsBothEnds(string raw, string type, string? expected) =>
+        Fmt(raw, type).Should().Be(expected);
+
+    [Fact]
+    public void Reference_ShowsItsRecordId()
+    {
+        Fmt(12L, "Reference").Should().Be("12");
+        Fmt(12.0000m, "Reference").Should().Be("12");   // a Reference converted from a Number field is a DECIMAL column
+    }
 }

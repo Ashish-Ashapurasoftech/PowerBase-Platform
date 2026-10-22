@@ -95,7 +95,7 @@ public class AddSummaryFieldCommandHandlerTests
     [InlineData("Sum", 5)]     // Sum on Text
     [InlineData("Max", 5)]     // Max on Text
     [InlineData("Avg", 7)]     // Avg on Date
-    [InlineData("CombinedText", 8)]   // a function the formula's (numeric) result type does not support
+    [InlineData("Sum", 10)]    // Sum on a Reference (Record IDs)
     public async Task Handle_FunctionNotValidForField_ThrowsValidation_AndCreatesNothing(string function, int targetFid)
     {
         await FluentActions.Invoking(() => _handler.HandleAsync(Command(function, targetFid)))
@@ -276,7 +276,21 @@ public class AddSummaryFieldCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_CombinedTextOfAReferenceShowingRecordId_ThrowsValidation() =>
-        await FluentActions.Invoking(() => _handler.HandleAsync(Command("CombinedText", 10)))
-            .Should().ThrowAsync<ValidationException>();
+    public async Task Handle_CombinedTextOfAReferenceShowingRecordId_SavesItAsTheReference()
+    {
+        await _handler.HandleAsync(Command("CombinedText", 10));
+
+        var saved = SavedSettings();
+        saved.TargetTypeCode.Should().Be("Reference");
+        saved.ResultTypeCode.Should().Be("Text");
+    }
+
+    [Fact]
+    public async Task Handle_CombinedTextOfANumberFormula_IsSaved()
+    {
+        await _handler.HandleAsync(Command("CombinedText", 8));
+
+        SavedSettings().Function.Should().Be("CombinedText");
+        SavedSettings().ResultTypeCode.Should().Be("Text");
+    }
 }
