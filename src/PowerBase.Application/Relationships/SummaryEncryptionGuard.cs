@@ -46,12 +46,15 @@ public static class SummaryEncryptionGuard
             || EncryptedNames(app, parentFields ?? [], ParentConditionFieldIds(matchingCriteria)).Any();
     }
 
-    /// <summary>True when the matching criteria or the Combined Text sort read a Formula/Summary field of the child table:
-    /// it has no column, so the summary is computed in memory (the formula is evaluated on each child record).</summary>
-    public static bool ReadsComputed(IReadOnlyList<AppField> childFields, int? sortFid, FilterGroup? matchingCriteria) =>
+    /// <summary>True when the matching criteria or the Combined Text sort read a Formula/Summary field of the child table,
+    /// or a lookup of one (<paramref name="lookupSources"/>): it has no column, so the summary is computed in memory (the
+    /// value is worked out on each child record).</summary>
+    public static bool ReadsComputed(IReadOnlyList<AppField> childFields, int? sortFid, FilterGroup? matchingCriteria,
+        IReadOnlyDictionary<long, AppField>? lookupSources = null) =>
         ConditionFieldIds(matchingCriteria).Concat(sortFid.HasValue ? [sortFid.Value] : [])
             .Distinct()
-            .Any(fid => childFields.FirstOrDefault(f => f.Fid == fid) is { } f && SummaryComputedTargets.ResultKind(f) is not null);
+            .Any(fid => childFields.FirstOrDefault(f => f.Fid == fid) is { } f
+                && (SummaryComputedTargets.ResultKind(f) is not null || SummaryLookupSources.ComputedValueKind(f, lookupSources) is not null));
 
     /// <summary>Why a summary reading encrypted data can't be computed, or null when it can (or
     /// reads no encrypted data at all, which SQL handles).</summary>

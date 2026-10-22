@@ -47,9 +47,10 @@ public class AddSummaryFieldCommandHandler
         var parentFields = await _fieldRepo.ListByTableAsync(rel.ParentTableId, ct);
         var app = await _appRepo.GetByIdAsync(parent.AppId, ct);
         var lookupSources = await SummaryLookupSources.LoadAsync(childFields, _fieldRepo, ct);
+        var referenceKeys = await ReferenceKeys.LoadAsync(rel.ChildTableId, childFields, _relRepo, _tableRepo, _fieldRepo, ct);
 
         var settings = SummarySettingsBuilder.Build(rel, command.Function, command.TargetFid,
-            command.MatchingCriteria, command.CombinedText, childFields, parentFields, app, lookupSources);
+            command.MatchingCriteria, command.CombinedText, childFields, parentFields, app, lookupSources, referenceKeys: referenceKeys);
 
         var summary = await _fieldFactory.CreateAsync(parent, nameof(Domain.Enums.FieldTypeCode.Summary),
             command.Label.Trim(), false, settings, ct);

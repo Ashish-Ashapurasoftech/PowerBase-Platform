@@ -63,6 +63,7 @@ public sealed class RelationshipKeyCarryOverService
                         SourceTableId = parent.Id,
                         SourceFid = oldKeyFid,
                         SourceTypeCode = oldKeyField.TypeCode,
+                        ResultTypeCode = FieldValueTypes.Of(oldKeyField),
                     }, ct);
 
                 if (rel.ProxyFieldId is null)
