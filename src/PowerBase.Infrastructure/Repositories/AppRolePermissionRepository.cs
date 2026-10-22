@@ -69,6 +69,7 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
         // Delete + re-insert must be all-or-nothing: a failure halfway would leave the role without its rows,
         // and missing rows fall back to the defaults (View "All records", no Custom Rules) — wider access.
         await using var c = await ConnectionFactory.CreateAsync(ct);
+        await c.OpenAsync(ct); // the factory returns a closed connection; a transaction needs it open
         await using var tx = await c.BeginTransactionAsync(ct);
         await Exec(c, tx);
         await tx.CommitAsync(ct);
@@ -134,6 +135,7 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
         // Delete + re-insert must be all-or-nothing: a failure halfway would leave the role without its rows,
         // and missing rows fall back to the defaults (View "All records", no Custom Rules) — wider access.
         await using var c = await ConnectionFactory.CreateAsync(ct);
+        await c.OpenAsync(ct); // the factory returns a closed connection; a transaction needs it open
         await using var tx = await c.BeginTransactionAsync(ct);
         await Exec(c, tx);
         await tx.CommitAsync(ct);
@@ -224,6 +226,7 @@ public class AppRolePermissionRepository : TenantRepositoryBase, IAppRolePermiss
         // Delete + re-insert must be all-or-nothing: a failure halfway would leave the role without its rows,
         // and missing rows fall back to the defaults (View "All records", no Custom Rules) — wider access.
         await using var c = await ConnectionFactory.CreateAsync(ct);
+        await c.OpenAsync(ct); // the factory returns a closed connection; a transaction needs it open
         await using var tx = await c.BeginTransactionAsync(ct);
         await Exec(c, tx);
         await tx.CommitAsync(ct);
