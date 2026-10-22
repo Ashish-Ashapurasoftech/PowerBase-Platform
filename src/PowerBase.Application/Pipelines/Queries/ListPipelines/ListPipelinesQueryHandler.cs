@@ -41,8 +41,12 @@ public class ListPipelinesQueryHandler
         var sortBy = AllowedSortFields.Contains(query.SortBy) ? query.SortBy : "createdOn";
 
         var userId = _queryContext.UserId;
-        var totalCount = await _pipelineRepo.CountByUserAsync(userId, query.Search, query.IsActive, ct);
-        var pipelines = await _pipelineRepo.ListByUserPagedAsync(userId, page, pageSize, query.Search, sortBy, query.SortDesc, query.IsActive, ct);
+        // Independent queries on separate connections — run them concurrently.
+        var countTask = _pipelineRepo.CountByUserAsync(userId, query.Search, query.IsActive, ct);
+        var pipelinesTask = _pipelineRepo.ListByUserPagedAsync(userId, page, pageSize, query.Search, sortBy, query.SortDesc, query.IsActive, ct);
+        await Task.WhenAll(countTask, pipelinesTask);
+        var totalCount = countTask.Result;
+        var pipelines = pipelinesTask.Result;
 
         var items = pipelines.Select(p => new PipelineListItem(
             p.PublicId,
