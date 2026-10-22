@@ -61,6 +61,41 @@ public static class ExemptFieldEncryptionMigrator
         return plain;
     }
 
+    /// <summary>
+    /// An encrypted app keeps a whole Date / Numeric Range as one JSON value
+    /// ({"start":..,"end":..}) in the start column. Splits it into its two ends;
+    /// false when the value is not such JSON.
+    /// </summary>
+    private static bool TrySplitRangeJson(string plain, out string? start, out string? end)
+    {
+        start = end = null;
+        if (!plain.TrimStart().StartsWith('{')) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(plain);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            start = RangeEndText(doc.RootElement, "start");
+            end   = RangeEndText(doc.RootElement, "end");
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static string? RangeEndText(JsonElement range, string name)
+    {
+        if (!range.TryGetProperty(name, out var value)) return null;
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Null or JsonValueKind.Undefined => null,
+            _ => value.GetRawText(),
+        };
+        return string.IsNullOrWhiteSpace(text) ? null : text;
+    }
+
     private static readonly IReadOnlyDictionary<string, string> NativeSqlType =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -271,11 +306,26 @@ public static class ExemptFieldEncryptionMigrator
             var tableName     = PhysicalNaming.TableName(f.TableId);
             var physicalCol   = PhysicalNaming.ColumnName(f.Fid);
             var newCol        = $"{physicalCol}_new";
+            var isRange       = PhysicalNaming.IsRangeTypeCode(f.TypeCode);
+            var endCol        = PhysicalNaming.EndColumnName(f.Fid);
 
             Console.WriteLine($"\n  Migrating: {f.FieldName} (Table {tableName}, {f.TypeCode} -> {nativeType}, {f.NonNullRows} rows)...");
 
             var encCtx = await FieldEncryptionContext.ResolveAsync(
                 conn, f.AppId, tenantId, encService, null, CancellationToken.None);
+
+            // A range's end column: a JSON range read from the start column writes its end there.
+            // A VARCHAR end column is converted afterwards (CleanupRangeEndColumnAsync), so it takes text.
+            string? endColType = isRange
+                ? await conn.ExecuteScalarAsync<string?>($"""
+                    SELECT ty.name FROM sys.columns c
+                    JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+                    WHERE c.object_id = OBJECT_ID('{physicalTable}') AND c.name = '{endCol}'
+                    """)
+                : null;
+            var endValueExpr = endColType != null && endColType.Contains("char", StringComparison.OrdinalIgnoreCase)
+                ? "m.e"
+                : $"TRY_CONVERT({nativeType}, m.e)";
 
             // 1. Add new column with native type
             await conn.ExecuteAsync($"ALTER TABLE {physicalTable} DROP COLUMN IF EXISTS {newCol};");
@@ -296,7 +346,21 @@ public static class ExemptFieldEncryptionMigrator
                 if (batch.Count == 0) break;
                 lastId = batch.Max(r => r.Id);
 
-                var plainByRowId = new Dictionary<long, string>();
+                var plainByRowId = new Dictionary<long, string?>();
+                var endByRowId = new Dictionary<long, string?>();
+                void Add(long rowId, string value)
+                {
+                    if (isRange && TrySplitRangeJson(value, out var start, out var end))
+                    {
+                        plainByRowId[rowId] = start is null ? null : NormalizePlaintextForSql(start, f.TypeCode);
+                        endByRowId[rowId] = end is null ? null : NormalizePlaintextForSql(end, f.TypeCode);
+                    }
+                    else
+                    {
+                        plainByRowId[rowId] = NormalizePlaintextForSql(value, f.TypeCode);
+                    }
+                }
+
                 foreach (var (rowId, cipher) in batch)
                 {
                     if (string.IsNullOrEmpty(cipher)) continue;
@@ -308,15 +372,15 @@ public static class ExemptFieldEncryptionMigrator
                                 cipher, encCtx.WrappedDek, tenantId, f.AppId);
                             if (!string.IsNullOrEmpty(plain))
                             {
-                                plainByRowId[rowId] = NormalizePlaintextForSql(plain, f.TypeCode);
+                                Add(rowId, plain);
                                 continue;
                             }
                         }
-                        plainByRowId[rowId] = NormalizePlaintextForSql(cipher, f.TypeCode);
+                        Add(rowId, cipher);
                     }
                     catch
                     {
-                        plainByRowId[rowId] = NormalizePlaintextForSql(cipher, f.TypeCode);
+                        Add(rowId, cipher);
                     }
                 }
 
@@ -333,6 +397,21 @@ public static class ExemptFieldEncryptionMigrator
                           ON t.Id = m.id;
                         """,
                         new { json }, commandTimeout: 300);
+                }
+
+                if (endByRowId.Count > 0 && endColType != null)
+                {
+                    var endJson = JsonSerializer.Serialize(
+                        endByRowId.Select(p => new { id = p.Key, e = p.Value }));
+
+                    await conn.ExecuteAsync($"""
+                        UPDATE t
+                        SET {endCol} = {endValueExpr}
+                        FROM {physicalTable} t
+                        JOIN OPENJSON(@endJson) WITH (id BIGINT '$.id', e NVARCHAR(MAX) '$.e') m
+                          ON t.Id = m.id;
+                        """,
+                        new { endJson }, commandTimeout: 300);
                 }
 
                 totalProcessed += batch.Count;
@@ -419,7 +498,7 @@ public static class ExemptFieldEncryptionMigrator
             if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
             {
                 await CleanupRangeEndColumnAsync(
-                    conn, physicalTable, tableName, f.Fid, nativeType, encCtx, tenantId, f.AppId, encService);
+                    conn, physicalTable, tableName, f.Fid, f.TypeCode, nativeType, encCtx, tenantId, f.AppId, encService);
             }
 
             Console.ForegroundColor = ConsoleColor.Green;
@@ -434,6 +513,7 @@ public static class ExemptFieldEncryptionMigrator
         string physicalTable,
         string tableName,
         int fid,
+        string typeCode,
         string nativeType,
         FieldEncryptionContext encCtx,
         long tenantId,
@@ -482,15 +562,15 @@ public static class ExemptFieldEncryptionMigrator
                             cipher, encCtx.WrappedDek, tenantId, appId);
                         if (!string.IsNullOrEmpty(plain))
                         {
-                            plainByRowId[rowId] = NormalizePlaintextForSql(plain, "Date");
+                            plainByRowId[rowId] = NormalizePlaintextForSql(plain, typeCode);
                             continue;
                         }
                     }
-                    plainByRowId[rowId] = NormalizePlaintextForSql(cipher, "Date");
+                    plainByRowId[rowId] = NormalizePlaintextForSql(cipher, typeCode);
                 }
                 catch
                 {
-                    plainByRowId[rowId] = NormalizePlaintextForSql(cipher, "Date");
+                    plainByRowId[rowId] = NormalizePlaintextForSql(cipher, typeCode);
                 }
             }
 

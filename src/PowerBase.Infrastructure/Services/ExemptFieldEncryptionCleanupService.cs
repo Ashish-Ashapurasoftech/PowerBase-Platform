@@ -115,6 +115,41 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
         return plain;
     }
 
+    /// <summary>
+    /// An encrypted app keeps a whole Date / Numeric Range as one JSON value
+    /// ({"start":..,"end":..}) in the start column. Splits it into its two ends;
+    /// false when the value is not such JSON.
+    /// </summary>
+    private static bool TrySplitRangeJson(string plain, out string? start, out string? end)
+    {
+        start = end = null;
+        if (!plain.TrimStart().StartsWith('{')) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(plain);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            start = RangeEndText(doc.RootElement, "start");
+            end   = RangeEndText(doc.RootElement, "end");
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static string? RangeEndText(JsonElement range, string name)
+    {
+        if (!range.TryGetProperty(name, out var value)) return null;
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Null or JsonValueKind.Undefined => null,
+            _ => value.GetRawText(),
+        };
+        return string.IsNullOrWhiteSpace(text) ? null : text;
+    }
+
     public async Task<List<CleanupExemptFieldEncryptionResult>> CleanupAllTenantsAsync(CancellationToken ct = default)
     {
         var results = new List<CleanupExemptFieldEncryptionResult>();
@@ -267,10 +302,25 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
         var physicalCol   = PhysicalNaming.ColumnName(field.Fid!.Value);
         var newCol        = $"{physicalCol}_new";
         var nativeType    = NativeSqlType[field.TypeCode];
+        var isRange       = PhysicalNaming.IsRangeTypeCode(field.TypeCode);
+        var endCol        = PhysicalNaming.EndColumnName(field.Fid!.Value);
         int rowsDecrypted = 0;
 
         try
         {
+            // A range's end column: a JSON range read from the start column writes its end there.
+            // A VARCHAR end column is converted afterwards (CleanupRangeEndColumnAsync), so it takes text.
+            string? endColType = isRange
+                ? await conn.ExecuteScalarAsync<string?>($"""
+                    SELECT ty.name FROM sys.columns c
+                    JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+                    WHERE c.object_id = OBJECT_ID('{physicalTable}') AND c.name = '{endCol}'
+                    """)
+                : null;
+            var endValueExpr = endColType != null && endColType.Contains("char", StringComparison.OrdinalIgnoreCase)
+                ? "m.e"
+                : $"TRY_CONVERT({nativeType}, m.e)";
+
             // 1. Add new column with native type
             await conn.ExecuteAsync($"ALTER TABLE {physicalTable} DROP COLUMN IF EXISTS {newCol};");
             await conn.ExecuteAsync($"ALTER TABLE {physicalTable} ADD {newCol} {nativeType} NULL;");
@@ -289,7 +339,21 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
                 if (batch.Count == 0) break;
                 lastId = batch.Max(r => r.Id);
 
-                var plainByRowId = new Dictionary<long, string>();
+                var plainByRowId = new Dictionary<long, string?>();
+                var endByRowId = new Dictionary<long, string?>();
+                void Add(long rowId, string value)
+                {
+                    if (isRange && TrySplitRangeJson(value, out var start, out var end))
+                    {
+                        plainByRowId[rowId] = start is null ? null : NormalizePlaintextForSql(start, field.TypeCode);
+                        endByRowId[rowId] = end is null ? null : NormalizePlaintextForSql(end, field.TypeCode);
+                    }
+                    else
+                    {
+                        plainByRowId[rowId] = NormalizePlaintextForSql(value, field.TypeCode);
+                    }
+                }
+
                 foreach (var (rowId, cipher) in batch)
                 {
                     if (string.IsNullOrEmpty(cipher)) continue;
@@ -301,16 +365,16 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
                                 cipher, encCtx.WrappedDek, tenantId, appId, ct);
                             if (!string.IsNullOrEmpty(plain))
                             {
-                                plainByRowId[rowId] = NormalizePlaintextForSql(plain, field.TypeCode);
+                                Add(rowId, plain);
                                 rowsDecrypted++;
                                 continue;
                             }
                         }
-                        plainByRowId[rowId] = NormalizePlaintextForSql(cipher, field.TypeCode);
+                        Add(rowId, cipher);
                     }
                     catch
                     {
-                        plainByRowId[rowId] = NormalizePlaintextForSql(cipher, field.TypeCode);
+                        Add(rowId, cipher);
                     }
                 }
 
@@ -327,6 +391,21 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
                           ON t.Id = m.id;
                         """,
                         new { json }, commandTimeout: 300);
+                }
+
+                if (endByRowId.Count > 0 && endColType != null)
+                {
+                    var endJson = JsonSerializer.Serialize(
+                        endByRowId.Select(p => new { id = p.Key, e = p.Value }));
+
+                    await conn.ExecuteAsync($"""
+                        UPDATE t
+                        SET {endCol} = {endValueExpr}
+                        FROM {physicalTable} t
+                        JOIN OPENJSON(@endJson) WITH (id BIGINT '$.id', e NVARCHAR(MAX) '$.e') m
+                          ON t.Id = m.id;
+                        """,
+                        new { endJson }, commandTimeout: 300);
                 }
             }
 
@@ -468,15 +547,15 @@ public class ExemptFieldEncryptionCleanupService : IExemptFieldEncryptionCleanup
                             cipher, encCtx.WrappedDek, tenantId, appId, ct);
                         if (!string.IsNullOrEmpty(plain))
                         {
-                            plainByRowId[rowId] = NormalizePlaintextForSql(plain, "Date");
+                            plainByRowId[rowId] = NormalizePlaintextForSql(plain, field.TypeCode);
                             continue;
                         }
                     }
-                    plainByRowId[rowId] = NormalizePlaintextForSql(cipher, "Date");
+                    plainByRowId[rowId] = NormalizePlaintextForSql(cipher, field.TypeCode);
                 }
                 catch
                 {
-                    plainByRowId[rowId] = NormalizePlaintextForSql(cipher, "Date");
+                    plainByRowId[rowId] = NormalizePlaintextForSql(cipher, field.TypeCode);
                 }
             }
 
