@@ -176,6 +176,8 @@ public sealed class ImportDefinitionChecker(
     {
         if (m.SourceFid is not { } sourceFid || !sourceByFid.TryGetValue(sourceFid, out var src))
             return $"The source field for '{ImportTypeCompatibility.DisplayName(dest)}' was deleted.";
+        var formatProblem = ImportDateFormats.Problem(ImportTypeCompatibility.DisplayName(dest), dest, src, m.DateFormat, m.TimeFormat, m.TimeZone);
+        if (formatProblem is not null) return formatProblem;
         return anySourceType || ImportVirtual.IsVirtualFid(sourceFid) ? null : ImportTypeCompatibility.CheckMapping(src, dest);
     }
 

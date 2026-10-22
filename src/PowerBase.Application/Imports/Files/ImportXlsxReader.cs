@@ -14,7 +14,8 @@ public sealed class ImportXlsxReader : IImportRowReader
     private readonly SpreadsheetDocument _document;
     private readonly OpenXmlReader _reader;
     private readonly string[] _sharedStrings;
-    private readonly bool[] _dateStyles;
+    /// <summary>For each cell style: the number format code when it writes a date or a time (empty when it does and the code is not known), null when it does not.</summary>
+    private readonly string?[] _dateStyles;
     private long _rows;
 
     private ImportXlsxReader(SpreadsheetDocument document, WorksheetPart sheet)
@@ -152,11 +153,13 @@ public sealed class ImportXlsxReader : IImportRowReader
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
         if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)) return raw;
-        if (style < _dateStyles.Length && _dateStyles[style])
+        if (style < _dateStyles.Length && _dateStyles[style] is { } dateCode)
         {
             // Dates are counted in days since 1900; a value outside that range is not a date, so it stays a number.
             if (value is >= 0 and < 2_958_466)
             {
+                // What the sheet shows: a person sees 12-11-1985, so that is what is read, in the format they chose for the column (see ImportExcelDisplay).
+                if (dateCode.Length > 0 && ImportExcelDisplay.Render(value, dateCode) is { } shown) return shown;
                 var date = DateTime.FromOADate(value);
                 // A cell holding only a time of day (a fraction of a day) is a time: 09:00:00, not a date in 1899.
                 if (value < 1) return date.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
@@ -199,9 +202,9 @@ public sealed class ImportXlsxReader : IImportRowReader
         return strings.ToArray();
     }
 
-    /// <summary>For each cell style, whether its number format shows a date or time (built-in date formats, or a custom one with
-    /// day / month / year / hour / second codes outside quotes and brackets).</summary>
-    private static bool[] LoadDateStyles(SpreadsheetDocument document)
+    /// <summary>For each cell style, its number format code when that format shows a date or time (built-in date formats, or a custom one with day / month / year /
+    /// hour / second codes outside quotes and brackets); null for any other style. A built-in format whose code is not known here is an empty code.</summary>
+    private static string?[] LoadDateStyles(SpreadsheetDocument document)
     {
         var styles = document.WorkbookPart?.WorkbookStylesPart?.Stylesheet;
         var formats = styles?.CellFormats?.Elements<CellFormat>().ToList();
@@ -212,8 +215,9 @@ public sealed class ImportXlsxReader : IImportRowReader
         return formats.Select(f =>
         {
             var id = f.NumberFormatId?.Value ?? 0;
-            if (custom.TryGetValue(id, out var code)) return LooksLikeDate(code);
-            return id is (>= 14 and <= 22) or (>= 27 and <= 36) or (>= 45 and <= 47) or (>= 50 and <= 58);
+            if (custom.TryGetValue(id, out var code)) return LooksLikeDate(code) ? code : null;
+            var builtIn = id is (>= 14 and <= 22) or (>= 27 and <= 36) or (>= 45 and <= 47) or (>= 50 and <= 58);
+            return builtIn ? ImportExcelDisplay.BuiltInCode(id) ?? "" : null;
         }).ToArray();
     }
 

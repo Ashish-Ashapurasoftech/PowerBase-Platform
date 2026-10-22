@@ -792,7 +792,11 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 }
 
                 friendlyOutput["Records Found"] = recordsCount;
-                friendlyOutput["Records Preview"] = friendlyRecords;
+                // A chunked / streamed search (a large one, or AI Search) hands over only its count, so the preview was always
+                // "List of 0 items" next to thousands found. It is shown only when there are records to show.
+                // friendlyOutput["Records Preview"] = friendlyRecords;
+                if (friendlyRecords.Count > 0)
+                    friendlyOutput["Records Preview"] = friendlyRecords;
 
                 metadata["table"] = new Dictionary<string, object?> { { "name", tableName }, { "table_id", tableGuidStr } };
                 metadata["field_labels"] = BuildFieldLabelMap(fields);

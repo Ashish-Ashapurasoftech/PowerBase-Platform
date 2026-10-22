@@ -468,7 +468,7 @@ public sealed class ImportChunkWriter
                         source.TryGetValue(map.SourceColumn!, out raw);
                         break;
                 }
-                if (!ImportTypeCompatibility.TryConvert(raw, map.Destination, out var converted, out var error, _plan.DateFormat))
+                if (!ImportTypeCompatibility.TryConvert(raw, map.Destination, out var converted, out var error, _plan.DateFormat, map.DateFormat, map.TimeFormat, map.Zone))
                     failure = (fid, ImportReason.TypeMismatch, error!);
                 else if (_formats.TryGetValue(fid, out var format) && format.Check(converted) is { } formatError)
                     failure = (fid, ImportReason.FormatViolation, formatError);
@@ -489,7 +489,7 @@ public sealed class ImportChunkWriter
         error = null;
         try
         {
-            raw = FormulaRawValue.ToRaw(_engine.Evaluate(map.Formula!, _plan.File is not null ? new ImportFileFormulaContext(row.Source, _fidToColumn, _plan.DateFormat) : new RowRecordContext(row.Source, _fidToColumn), _plan.FormulaOptions));
+            raw = FormulaRawValue.ToRaw(_engine.Evaluate(map.Formula!, _plan.File is not null ? new ImportFileFormulaContext(row.Source, _fidToColumn, _plan.DateFormat, _plan.ColumnFormats) : new RowRecordContext(row.Source, _fidToColumn), _plan.FormulaOptions));
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

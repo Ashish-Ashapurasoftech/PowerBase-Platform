@@ -24,6 +24,7 @@ public class RecordFilterSqlTests
         [8] = new AppField { Id = 1008, Fid = 8, Name = "Experience", TypeCode = "Number", PhysicalColumnName = "f_8" },
         [9] = new AppField { Id = 1009, Fid = 9, Name = "Joining Date", TypeCode = "Date", PhysicalColumnName = "f_9" },
         [12] = new AppField { Id = 1012, Fid = 12, Name = "Meeting At", TypeCode = "DateTime", PhysicalColumnName = "f_12" },
+        [20] = new AppField { Id = 1020, Fid = 20, Name = "Title", TypeCode = "Text", PhysicalColumnName = "f_20" },
     };
 
     private static (string Sql, DynamicParameters Params) Where(long fieldId, string op, string? value)
@@ -309,5 +310,21 @@ public class RecordFilterSqlTests
 
         // Never dropped — that would count every child.
         sql.Should().Be(" AND (1 = 0)");
+    }
+
+    // ── Wildcard: a backslash before * or ? makes it the character itself ──
+
+    [Theory]
+    [InlineData("a*b", "a%b")]
+    [InlineData("a?b", "a_b")]
+    [InlineData(@"a\*b*", "a*b%")]
+    [InlineData(@"a\?b", "a?b")]
+    [InlineData("50%_[x]*", "50[%][_][[]x]%")]
+    [InlineData(@"C:\dir*", @"c:\dir%")]
+    public void Wildcard_TranslatesTheQuickbaseGrammarToLike(string pattern, string like)
+    {
+        var (sql, p) = Where(20, "wildcard", pattern);
+        sql.Should().Contain("LIKE @fv0");
+        p.Get<string>("fv0").Should().Be(like);
     }
 }
