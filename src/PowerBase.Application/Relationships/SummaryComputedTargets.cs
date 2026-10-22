@@ -58,19 +58,31 @@ public static class SummaryComputedTargets
 
     /// <summary>The summary functions this formula field supports, or null when its result type
     /// can't be summarized (or it isn't a formula).</summary>
-    public static IReadOnlySet<string>? AllowedFunctions(AppField field)
+    public static IReadOnlySet<string>? AllowedFunctions(AppField field) => FunctionsForKind(ResultKind(field));
+
+    /// <summary>The summary functions a value of this kind (<see cref="ResultKind"/>) supports, or null when none.</summary>
+    public static IReadOnlySet<string>? FunctionsForKind(string? kind) => kind switch
     {
-        var kind = ResultKind(field);
-        return kind switch
-        {
-            "Bool" => CheckboxFunctions,
-            "Date" or "DateTime" => DateFunctions,
-            "Duration" => DurationFunctions,
-            "Number" => NumericFunctions,
-            "Text" => TextFunctions,
-            _ => null,
-        };
-    }
+        "Bool" => CheckboxFunctions,
+        "Date" or "DateTime" => DateFunctions,
+        "Duration" => DurationFunctions,
+        "Number" => NumericFunctions,
+        "Text" => TextFunctions,
+        _ => null,
+    };
+
+    /// <summary>The kind (<see cref="ResultKind"/>) of a value of this field type code (<see cref="FieldValueTypes"/>:
+    /// "Currency" → Number), or null for a type a summary can't aggregate as a calculated value (time, user, URL …).</summary>
+    public static string? KindOfValueType(string? valueType) => valueType switch
+    {
+        "Number" or "Currency" or "Percent" or "Rating" => "Number",
+        "Duration" => "Duration",
+        "Date" => "Date",
+        "DateTime" => "DateTime",
+        "Boolean" => "Bool",
+        "Text" or "Email" or "Phone" => "Text",
+        _ => null,
+    };
 
     /// <summary>The formula's result type: Bool, Date, DateTime, Duration, Number, Text — or null
     /// (Time, User, RichText, Url, or not a formula).</summary>

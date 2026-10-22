@@ -19,6 +19,9 @@ public static class SummarySettingsBuilder
     /// <param name="lookupSources">The parent field each child lookup pulls down
     /// (<see cref="SummaryLookupSources.LoadAsync"/>) — lookups can be summarized, sorted and
     /// filtered on through it.</param>
+    /// <param name="summaryFid">The summary being edited (null while it's being created).</param>
+    /// <param name="referenceKeys">The key each child Reference shows (<see cref="ReferenceKeys.LoadAsync"/>) — such a
+    /// Reference is summarized as that key.</param>
     public static SummarySettings Build(
         Relationship rel,
         string? functionName,
@@ -28,7 +31,9 @@ public static class SummarySettingsBuilder
         IReadOnlyList<AppField> childFields,
         IReadOnlyList<AppField> parentFields,
         App app,
-        IReadOnlyDictionary<long, AppField>? lookupSources = null)
+        IReadOnlyDictionary<long, AppField>? lookupSources = null,
+        long? summaryFid = null,
+        IReadOnlyDictionary<long, AppField>? referenceKeys = null)
     {
         // Stored in canonical casing ("sum" → "Sum"): the aggregation code matches names exactly.
         var function = SummaryFunctions.Normalize(functionName)
@@ -37,9 +42,9 @@ public static class SummarySettingsBuilder
         var needsTarget = function is not (SummaryFunctions.Count or SummaryFunctions.Exists);
 
         var target = targetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == targetFid) : null;
-        SummaryTargetValidator.Validate(function, targetFid, target, targetSubField: null, lookupSources: lookupSources);
+        SummaryTargetValidator.Validate(function, targetFid, target, targetSubField: null, lookupSources: lookupSources, referenceKeys: referenceKeys);
         var combinedText = SummaryTargetValidator.ValidateCombinedTextOptions(function, combinedTextOptions, childFields, lookupSources);
-        SummaryCriteriaValidator.Validate(matchingCriteria, childFields, parentFields, lookupSources);
+        SummaryCriteriaValidator.Validate(matchingCriteria, childFields, parentFields, lookupSources, summaryFid);
 
         // Encrypted columns can't be summarized yet — refuse rather than create a summary that
         // would compute nothing (or expose ciphertext).
@@ -47,10 +52,14 @@ public static class SummarySettingsBuilder
                 needsTarget ? targetFid : null, combinedText?.SortFid, matchingCriteria, parentFields, lookupSources) is { } encryptionProblem)
             throw new ValidationException(new Dictionary<string, string[]> { ["targetFid"] = [encryptionProblem] });
 
-        // A lookup's values are its parent field's type (Min of a looked-up date is a date).
+        // A lookup's values are its parent field's type (Min of a looked-up date is a date) — for a lookup of a
+        // Summary / Formula, the type of value that produces (Max of a looked-up "Min of Salary" is a number).
+        // A Reference whose parent shows a key field is summarized as that key: the key's type.
+        var keyType = target is null ? null : ReferenceKeys.KeyTypeCode(target, referenceKeys);
+        var targetValueType = target is null ? null : keyType ?? FieldValueTypes.OfTarget(target, lookupSources);
         var targetTypeCode = target is not null && SummaryLookupSources.IsLookup(target)
-            ? SummaryLookupSources.ReadableSource(target, lookupSources)?.TypeCode
-            : target?.TypeCode;
+            ? SummaryLookupSources.ReadableSource(target, lookupSources)?.TypeCode ?? targetValueType
+            : target is null ? null : keyType ?? target.TypeCode;
 
         return new SummarySettings
         {
@@ -60,6 +69,7 @@ public static class SummarySettingsBuilder
             Function = function,
             TargetFid = needsTarget ? targetFid : null,
             TargetTypeCode = targetTypeCode,
+            ResultTypeCode = FieldValueTypes.ForSummary(function, needsTarget ? targetValueType : null, null),
             FilterTree = matchingCriteria is { Nodes.Count: > 0 }
                 ? JsonSerializer.Serialize(matchingCriteria, JsonOpts)
                 : null,

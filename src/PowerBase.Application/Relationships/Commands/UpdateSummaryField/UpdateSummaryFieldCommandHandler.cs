@@ -70,9 +70,10 @@ public class UpdateSummaryFieldCommandHandler
         var parentFields = await _fieldRepo.ListByTableAsync(rel.ParentTableId, ct);
         var app = await _appRepo.GetByIdAsync(parent.AppId, ct);
         var lookupSources = await SummaryLookupSources.LoadAsync(childFields, _fieldRepo, ct);
+        var referenceKeys = await ReferenceKeys.LoadAsync(rel.ChildTableId, childFields, _relRepo, _tableRepo, _fieldRepo, ct);
 
         var settings = RelationshipFieldFactory.Serialize(SummarySettingsBuilder.Build(rel, command.Function, command.TargetFid,
-            command.MatchingCriteria, command.CombinedText, childFields, parentFields, app, lookupSources));
+            command.MatchingCriteria, command.CombinedText, childFields, parentFields, app, lookupSources, field.Fid, referenceKeys));
 
         if (await _fieldRepo.LabelExistsInTableAsync(parent.Id, label, excludeFieldId: field.Id, ct: ct))
             throw new DuplicateException("Field", "label", label);
@@ -110,6 +111,10 @@ public class UpdateSummaryFieldCommandHandler
             await _uow.RollbackAsync(ct);
             throw;
         }
+
+        // Lookups that pull this summary down show what it now produces (Min of Salary → Min of Experience).
+        var updated = new AppField { Id = field.Id, Fid = field.Fid, AppTableId = field.AppTableId, TypeCode = field.TypeCode, Settings = settings };
+        await FieldValueTypes.RefreshLookupsOfAsync(updated, FieldValueTypes.Of(updated), _relRepo, _fieldRepo, ct);
 
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, rel.Id.ToString(),
