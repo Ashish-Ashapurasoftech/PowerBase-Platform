@@ -31,11 +31,48 @@ public static class PhysicalNaming
         typeCode is "Formula" or "Lookup" or "Summary" or "ReportLink"
         || IsActionButtonTypeCode(typeCode) || IsFormulaVariantTypeCode(typeCode);
 
-    /// <summary>True for field types that are never encrypted, even in an encrypted app. A Reference is
-    /// a plain BIGINT foreign key to another record's Id: it must stay filterable/joinable in SQL
-    /// (related records, lookups), which ciphertext would break.</summary>
+    /// <summary>
+    /// Field types that are NEVER encrypted, even in an encrypted app.
+    ///
+    /// Design intent: this list is the single source of truth for encryption exemptions.
+    /// To allow a type to be encrypted in the future, simply remove it from this list —
+    /// the change automatically propagates to all call sites:
+    ///   • SchemaEngineService  — uses native SQL column type instead of VARCHAR(MAX)
+    ///   • CreateFieldCommandHandler   — forces IsEncrypted = false on new fields
+    ///   • BulkCreateFieldsCommandHandler — same
+    ///   • UpdateFieldCommandHandler   — forces IsEncrypted = false and guards toggle
+    ///   • FieldEncryptionContext      — excludes from encrypt/decrypt on every read/write
+    ///
+    /// WHY these types are exempt:
+    ///   • Reference   — BIGINT FK; ciphertext breaks SQL JOINs and relationship queries.
+    ///   • Numeric types (Number, Currency, Percent, Rating, NumericRange)
+    ///                 — stored as DECIMAL(18,4) / INT; SUM, AVG, MIN, MAX, comparisons,
+    ///                   and formula arithmetic require the real numeric value in SQL.
+    ///   • Date/Time types (Date, DateTime, Time, Duration, DateRange)
+    ///                 — stored as DATE / DATETIME2 / TIME / INT; date arithmetic,
+    ///                   sorting, and range filters require the native SQL type.
+    ///   • Boolean     — stored as BIT; filtering true/false requires the native value.
+    ///   • User / MultiUser — store user references; must remain filterable/joinable.
+    ///   • Formula / Formula_* — computed at read time; no physical column is written.
+    /// </summary>
     public static bool IsEncryptionExemptTypeCode(string? typeCode) =>
-        typeCode == "Reference";
+        typeCode is
+            // Relationship / foreign-key
+            "Reference"
+            // Numeric — SQL aggregations (SUM, AVG, MIN, MAX) require native types
+            or "Number" or "Currency" or "Percent" or "Rating"
+            or "NumericRange"
+            // Date & Time — date arithmetic, sorting, and range filters require native types
+            or "Date" or "DateTime" or "Time" or "Duration"
+            or "DateRange"
+            // Boolean — BIT; must stay filterable as true/false
+            or "Boolean"
+            // User references — must remain filterable/joinable
+            or "User" or "MultiUser"
+            // Formula — computed at read time; no physical column is ever written
+            or "Formula"
+        // All Formula_* variants (Formula_Text, Formula_Number, …) are also computed
+        || (typeCode?.StartsWith("Formula_", StringComparison.Ordinal) ?? false);
 
     /// <summary>True for the generic 'Formula' TypeCode's per-variant codes (Formula_Text,
     /// Formula_Number, Formula_Time, …) — mirrors <see cref="IsActionButtonTypeCode"/>'s
