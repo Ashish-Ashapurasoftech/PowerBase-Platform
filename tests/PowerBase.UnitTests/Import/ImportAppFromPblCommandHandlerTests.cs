@@ -240,6 +240,34 @@ public class ImportAppFromPblCommandHandlerTests
         await _fieldRepo.Received(2).CreateAsync(Arg.Any<AppField>(), Arg.Any<CancellationToken>());
     }
 
+    private const string LabelClashPbl = """
+    {
+      "version": "1.0",
+      "app": { "logicalRef": "$App_Test", "name": "Imported App" },
+      "tables": [
+        {
+          "logicalRef": "$Table_Logs",
+          "name": "Logs",
+          "fields": [
+            { "logicalRef": "$Field_Logs_Created", "name": "Date Created", "typeCode": "DateTime" },
+            { "logicalRef": "$Field_Logs_Title", "name": "Title", "typeCode": "Text" }
+          ]
+        }
+      ]
+    }
+    """;
+
+    [Fact]
+    public async Task HandleAsync_FieldLabelClashingWithSystemField_IsNumberedNotRejected()
+    {
+        var sut = CreateSut();
+
+        var report = await sut.HandleAsync(new ImportAppFromPblCommand(LabelClashPbl));
+
+        report.FieldsCreated.Should().Be(2);
+        report.Skipped.Should().Contain(s => s.LogicalRef == "$Field_Logs_Created" && s.Reason.Contains("Date Created (2)"));
+    }
+
     [Fact]
     public async Task HandleAsync_MalformedJson_ThrowsValidationException()
     {

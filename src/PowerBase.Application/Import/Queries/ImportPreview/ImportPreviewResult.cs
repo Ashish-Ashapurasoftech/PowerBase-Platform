@@ -67,16 +67,31 @@ public sealed class ImportPreviewRoleItem
     public int TablePermissionCount { get; init; }
 }
 
-public sealed class ImportPreviewResult
+/// <summary>One application of the uploaded file.</summary>
+public sealed class ImportPreviewAppItem
 {
-    public bool IsValid { get; init; }
+    public string AppRef { get; init; } = string.Empty;
     public string AppName { get; init; } = string.Empty;
+    public bool IsValid { get; init; }
+    /// <summary>True when an app with this name already exists in the tenant; the user must rename it to import.</summary>
+    public bool NameExists { get; init; }
     public List<ImportPreviewTableItem> Tables { get; init; } = [];
     public List<ImportPreviewRelationshipItem> Relationships { get; init; } = [];
     public List<ImportPreviewFormItem> Forms { get; init; } = [];
     public List<ImportPreviewRoleItem> Roles { get; init; } = [];
     public List<string> Variables { get; init; } = [];
     public List<string> Pages { get; init; } = [];
+    public List<PblIssueDto> Errors { get; init; } = [];
+    public List<PblIssueDto> Warnings { get; init; } = [];
+}
+
+public sealed class ImportPreviewResult
+{
+    /// <summary>No file-level errors and at least one application can be imported.</summary>
+    public bool IsValid { get; init; }
+    public int AppCount { get; init; }
+    public List<ImportPreviewAppItem> Apps { get; init; } = [];
+    /// <summary>File-level problems (unreadable file, several applications in Update mode). Per-application problems are on the app.</summary>
     public List<PblIssueDto> Errors { get; init; } = [];
     public List<PblIssueDto> Warnings { get; init; } = [];
 }

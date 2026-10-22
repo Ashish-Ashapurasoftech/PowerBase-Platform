@@ -41,11 +41,12 @@ public class ImportTests : IntegrationTestBase
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         var preview = await ReadData<PreviewDto>(response);
         preview.IsValid.Should().BeTrue();
-        preview.AppName.Should().Be("Imported App");
-        preview.Tables.Should().ContainSingle();
-        preview.Tables[0].Fields.Should().HaveCount(3);
-        preview.Tables[0].Fields.Should().ContainSingle(f => !f.IsSupported && f.Name == "Legacy Score");
-        preview.Warnings.Should().Contain(w => w.Code == "UNSUPPORTED_FIELD_TYPE");
+        var app = preview.Apps.Should().ContainSingle().Subject;
+        app.AppName.Should().Be("Imported App");
+        app.Tables.Should().ContainSingle();
+        app.Tables[0].Fields.Should().HaveCount(3);
+        app.Tables[0].Fields.Should().ContainSingle(f => !f.IsSupported && f.Name == "Legacy Score");
+        app.Warnings.Should().Contain(w => w.Code == "UNSUPPORTED_FIELD_TYPE");
     }
 
     [Fact]
@@ -77,7 +78,7 @@ public class ImportTests : IntegrationTestBase
         var response = await PostFileAsync("/apps/import", ValidPbl, token: token);
 
         response.StatusCode.Should().Be(HttpStatusCode.Created);
-        var report = await ReadData<ImportReportDto>(response);
+        var report = await ReadReport(response);
         report.AppName.Should().Be("Imported App");
         report.TablesCreated.Should().Be(1);
         report.FieldsCreated.Should().Be(2); // Legacy Score is skipped
@@ -139,7 +140,7 @@ public class ImportTests : IntegrationTestBase
         var response = await PostFileAsync("/apps/import", PblWithFormulaAndReport, token: token);
 
         response.StatusCode.Should().Be(HttpStatusCode.Created);
-        var report = await ReadData<ImportReportDto>(response);
+        var report = await ReadReport(response);
         report.FieldsCreated.Should().Be(3); // Qty, Price, Total
         report.ReportsCreated.Should().Be(1);
         report.Skipped.Should().BeEmpty();
@@ -233,12 +234,13 @@ public class ImportTests : IntegrationTestBase
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         var preview = await ReadData<PreviewDto>(response);
         preview.IsValid.Should().BeTrue();
-        preview.AppName.Should().Be("Departments App");
-        preview.Relationships.Should().ContainSingle();
-        preview.Relationships[0].ReferenceFieldName.Should().Be("Related Department");
-        preview.Relationships[0].LookupCount.Should().Be(1);
-        preview.Relationships[0].SummaryCount.Should().Be(1);
-        preview.Errors.Should().BeEmpty();
+        var app = preview.Apps.Should().ContainSingle().Subject;
+        app.AppName.Should().Be("Departments App");
+        app.Relationships.Should().ContainSingle();
+        app.Relationships[0].ReferenceFieldName.Should().Be("Related Department");
+        app.Relationships[0].LookupCount.Should().Be(1);
+        app.Relationships[0].SummaryCount.Should().Be(1);
+        app.Errors.Should().BeEmpty();
     }
 
     [Fact]
@@ -249,7 +251,7 @@ public class ImportTests : IntegrationTestBase
         var response = await PostFileAsync("/apps/import", QblWithRelationship, token: token, fileName: "sample.qbl");
 
         response.StatusCode.Should().Be(HttpStatusCode.Created);
-        var report = await ReadData<ImportReportDto>(response);
+        var report = await ReadReport(response);
         report.RelationshipsCreated.Should().Be(1);
         report.Skipped.Should().BeEmpty();
 
@@ -269,15 +271,97 @@ public class ImportTests : IntegrationTestBase
         departmentFields.Should().Contain(f => f.Name == "Employee Count" && f.TypeCode == "Summary");
     }
 
+    private const string QblWithTwoApps = """
+    Version: '0.12'
+    Resources:
+      $App_Sales:
+        Type: QB::Application
+        Properties:
+          Name: Sales Multi
+        Tables:
+          $Table_Contacts:
+            Type: QB::Table
+            Properties:
+              Name: Contacts
+            Fields:
+              $Field_Name:
+                Type: QB::Field::Text
+                Properties:
+                  Label: Name
+      $App_Hr:
+        Type: QB::Application
+        Properties:
+          Name: HR Multi
+        Tables:
+          $Table_Contacts:
+            Type: QB::Table
+            Properties:
+              Name: Staff
+            Fields:
+              $Field_Name:
+                Type: QB::Field::Text
+                Properties:
+                  Label: Name
+    """;
+
+    [Fact]
+    public async Task Preview_QblWithTwoApps_ReturnsEachApp()
+    {
+        var (token, _) = await SignupAsync();
+
+        var response = await PostFileAsync("/apps/import/preview", QblWithTwoApps, token: token, fileName: "multi.qbl");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var preview = await ReadData<PreviewDto>(response);
+        preview.IsValid.Should().BeTrue();
+        preview.AppCount.Should().Be(2);
+        preview.Apps.Select(a => a.AppName).Should().Equal("Sales Multi", "HR Multi");
+        preview.Apps[1].Tables.Should().ContainSingle(t => t.Name == "Staff");
+    }
+
+    [Fact]
+    public async Task Preview_QblWithTwoApps_InUpdateMode_IsRejected()
+    {
+        var (token, _) = await SignupAsync();
+
+        var response = await PostFileAsync("/apps/import/preview?mode=UpdateExistingApp", QblWithTwoApps, token: token, fileName: "multi.qbl");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var preview = await ReadData<PreviewDto>(response);
+        preview.IsValid.Should().BeFalse();
+        preview.Apps.Should().BeEmpty();
+        preview.Errors.Should().ContainSingle(e => e.Code == "IMPORT_MULTIPLE_APPS_NOT_ALLOWED_FOR_UPDATE" && e.Message.Contains("Sales Multi") && e.Message.Contains("HR Multi"));
+    }
+
+    [Fact]
+    public async Task Import_QblWithTwoApps_RunsInBackground()
+    {
+        var (token, _) = await SignupAsync();
+
+        var response = await PostFileAsync("/apps/import", QblWithTwoApps, token: token, fileName: "multi.qbl");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Accepted);
+    }
+
     private record PblIssueDto(string Code, string Message, string? ElementRef);
     private record PreviewFieldDto(string LogicalRef, string Name, string TypeCode, bool IsSupported);
     private record PreviewTableDto(string LogicalRef, string Name, List<PreviewFieldDto> Fields, List<string> Reports);
     private record PreviewRelationshipDto(string LogicalRef, string ParentTableRef, string ChildTableRef, string ReferenceFieldName, int LookupCount, int SummaryCount);
-    private record PreviewDto(bool IsValid, string AppName, List<PreviewTableDto> Tables, List<PreviewRelationshipDto> Relationships, List<PblIssueDto> Errors, List<PblIssueDto> Warnings);
+    private record PreviewAppDto(string AppRef, string AppName, bool IsValid, List<PreviewTableDto> Tables, List<PreviewRelationshipDto> Relationships, List<PblIssueDto> Errors, List<PblIssueDto> Warnings);
+    private record PreviewDto(bool IsValid, int AppCount, List<PreviewAppDto> Apps, List<PblIssueDto> Errors, List<PblIssueDto> Warnings);
+    private record ImportBatchDto(List<ImportReportDto> Apps, List<ImportFailureDto> Failed);
+    private record ImportFailureDto(string AppRef, string AppName, string Code, string Message);
     private record SkippedDto(string LogicalRef, string Name, string Reason);
     private record FormulaTranslationDto(string LogicalRef, string Name, string Status, List<string> Diagnostics);
     private record ImportReportDto(Guid AppPublicId, string AppName, int TablesCreated, int FieldsCreated, int ReportsCreated, int RelationshipsCreated,
         List<SkippedDto> Skipped, List<FormulaTranslationDto> FormulaTranslations);
+    private async Task<ImportReportDto> ReadReport(HttpResponseMessage response)
+    {
+        var batch = await ReadData<ImportBatchDto>(response);
+        batch.Failed.Should().BeEmpty();
+        return batch.Apps.Should().ContainSingle().Subject;
+    }
+
     private record MinimalTableDto(Guid PublicId, string Name);
     private record MinimalFieldDto(string Name, string TypeCode);
     private record MinimalReportDto(Guid Id, string Name);

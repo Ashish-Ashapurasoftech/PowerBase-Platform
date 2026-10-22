@@ -6,6 +6,7 @@ namespace PowerBase.Application.Import.Qbl;
 
 public sealed class QblConversionResult
 {
+    public string AppRef { get; init; } = string.Empty;
     public PblDocument Document { get; init; } = new();
     public List<PblIssue> Issues { get; init; } = [];
 }
@@ -35,23 +36,43 @@ public sealed class QblConversionResult
 /// </summary>
 public static class QblToPblConverter
 {
-    public static QblConversionResult Convert(QblDocument qbl)
-    {
-        var issues = new List<PblIssue>();
+    /// <summary>Converts a document expected to hold exactly one application (first one wins when the caller has
+    /// already ruled out several). Multi-application files go through <see cref="ConvertAll"/>.</summary>
+    public static QblConversionResult Convert(QblDocument qbl) => ConvertAll(qbl)[0];
 
-        var appEntry = qbl.Resources.FirstOrDefault(kv => kv.Value.Type == "QB::Application");
-        if (appEntry.Value is null)
+    /// <summary>Converts every <c>QB::Application</c> in the file, in file order, each independently. A file with no
+    /// application yields a single result carrying <c>QBL_MISSING_APPLICATION</c>.</summary>
+    public static IReadOnlyList<QblConversionResult> ConvertAll(QblDocument qbl)
+    {
+        var apps = qbl.Resources.Where(kv => kv.Value.Type == "QB::Application").ToList();
+        if (apps.Count == 0)
         {
-            issues.Add(new PblIssue
+            return [new QblConversionResult
             {
-                Severity = PblIssueSeverity.Error,
-                Code = "QBL_MISSING_APPLICATION",
-                Message = "QBL document has no QB::Application resource.",
-            });
-            return new QblConversionResult { Document = new PblDocument(), Issues = issues };
+                Document = new PblDocument(),
+                Issues =
+                [
+                    new PblIssue
+                    {
+                        Severity = PblIssueSeverity.Error,
+                        Code = "QBL_MISSING_APPLICATION",
+                        Message = "QBL document has no QB::Application resource.",
+                    },
+                ],
+            }];
         }
 
-        var (appRef, appNode) = (appEntry.Key, appEntry.Value);
+        return apps.Select(a => ConvertApplication(a.Key, a.Value)).ToList();
+    }
+
+    /// <summary>The applications in a document as (ref, name), in file order.</summary>
+    public static IReadOnlyList<(string Ref, string Name)> ListApplications(QblDocument qbl) =>
+        qbl.Resources.Where(kv => kv.Value.Type == "QB::Application")
+            .Select(kv => (kv.Key, ResolveScalar(kv.Value, "Name") ?? kv.Key)).ToList();
+
+    private static QblConversionResult ConvertApplication(string appRef, QblResourceNode appNode)
+    {
+        var issues = new List<PblIssue>();
 
         var pblApp = new PblApp
         {
@@ -197,7 +218,10 @@ public static class QblToPblConverter
 
                 var skeleton = BuildRelationshipSkeleton(relRef, relNode, childTableRef, relFieldsPerTable, fieldNameByRefPerTable, issues);
                 if (skeleton is not null)
+                {
+                    EnsureUniqueReferenceName(skeleton, relRef, relFieldsPerTable[childTableRef].References[relRef].FieldRef, fieldNameByRefPerTable[childTableRef], seenFieldNamesByTableRef[childTableRef], tables, issues);
                     relationships.Add(skeleton);
+                }
             }
         }
 
@@ -363,7 +387,7 @@ public static class QblToPblConverter
         var pages = ConvertCodePages(appNode, issues);
 
         var document = new PblDocument { App = pblApp, Tables = tables, Relationships = relationships, Forms = forms, Roles = roles, Variables = variables, Pages = pages };
-        return new QblConversionResult { Document = document, Issues = issues };
+        return new QblConversionResult { AppRef = appRef, Document = document, Issues = issues };
     }
 
     /// <summary>Table settings that name fields — key field, record title, record picker, custom data rule. Resolved once every
@@ -920,6 +944,34 @@ public static class QblToPblConverter
         "CombinedText" => "CombinedText",
         _ => null,
     };
+
+    /// <summary>A Reference field can share its name with a PowerBase system field ("Last Modified By" is a common one, pointing
+    /// at a users table) or with another field on the child table. PowerBase needs names and labels unique per table, so the
+    /// reference field is renamed with a number — same treatment as a repeated field label — instead of blocking the import.</summary>
+    private static void EnsureUniqueReferenceName(
+        PblRelationship relationship, string relRef, string referenceFieldRef, Dictionary<string, string> fieldNameByRef, HashSet<string> seenFieldNames,
+        List<PblTable> tables, List<PblIssue> issues)
+    {
+        var systemNames = QblFieldTypeMap.SystemFieldNames.Values;
+        bool Taken(string name) => seenFieldNames.Contains(name) || systemNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+
+        var original = relationship.ReferenceFieldName;
+        var unique = original;
+        for (var n = 2; Taken(unique); n++)
+            unique = $"{original} ({n})";
+
+        seenFieldNames.Add(unique);
+        if (string.Equals(unique, original, StringComparison.Ordinal))
+            return;
+
+        var suffix = unique[original.Length..];
+        relationship.ReferenceFieldName = unique;
+        relationship.ReferenceFieldLabel = (relationship.ReferenceFieldLabel ?? original) + suffix;
+        fieldNameByRef[referenceFieldRef] = unique;
+
+        var tableName = tables.FirstOrDefault(t => t.LogicalRef == relationship.ChildTableRef)?.Name ?? relationship.ChildTableRef;
+        issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Reference field '{original}' clashes with another field on table '{tableName}'; imported as '{unique}'.", relRef));
+    }
 
     /// <summary>Builds a relationship's Reference-field identity only — this part never depends
     /// on another relationship, so it's always resolvable in one pass. Lookups/Summaries are

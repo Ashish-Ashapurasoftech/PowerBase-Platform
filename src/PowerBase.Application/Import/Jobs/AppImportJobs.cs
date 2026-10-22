@@ -11,11 +11,18 @@ using PowerBase.Domain.Exceptions;
 
 namespace PowerBase.Application.Import.Jobs;
 
-/// <summary>Files larger than this are imported in the background instead of while the user waits.</summary>
+/// <summary>Files larger than this, or holding several applications, are imported in the background instead of while the user waits.</summary>
 public static class AppImportJobPolicy
 {
     public const long BackgroundThresholdBytes = 3L * 1024 * 1024;
-    public static bool RunsInBackground(long fileSizeBytes) => fileSizeBytes > BackgroundThresholdBytes;
+    public static bool RunsInBackground(long fileSizeBytes, int appCount = 1) =>
+        fileSizeBytes > BackgroundThresholdBytes || appCount > 1;
+
+    private static readonly Regex ApplicationLine = new(@"^\s*Type:\s*QB::Application\s*$", RegexOptions.Multiline | RegexOptions.Compiled);
+
+    /// <summary>Cheap estimate of how many applications a QBL file holds (a line count, no parse). Only used to choose
+    /// foreground or background; the import itself parses the file properly.</summary>
+    public static int CountApplications(string content) => Math.Max(1, ApplicationLine.Matches(content).Count);
 }
 
 /// <summary>Lets the import report how far along it is without every handler needing to know whether anyone is listening:
@@ -24,6 +31,7 @@ public static class AppImportJobPolicy
 public static class ImportProgress
 {
     private static readonly AsyncLocal<Action<string, int>?> _current = new();
+    private static readonly AsyncLocal<(int Index, int Count, string Name)?> _app = new();
 
     public static Action<string, int>? Current
     {
@@ -31,7 +39,24 @@ public static class ImportProgress
         set => _current.Value = value;
     }
 
-    public static void Report(string stage, int percent) => _current.Value?.Invoke(stage, Math.Clamp(percent, 0, 99));
+    /// <summary>While importing application <paramref name="index"/> of <paramref name="count"/>, progress is squeezed into that
+    /// application's share of the bar and the stage says which application it is. The import code keeps reporting 0–99.</summary>
+    public static void BeginApp(int index, int count, string name) => _app.Value = count > 1 ? (index, count, name) : null;
+
+    public static void EndApp() => _app.Value = null;
+
+    public static void Report(string stage, int percent)
+    {
+        var report = _current.Value;
+        if (report is null) return;
+        percent = Math.Clamp(percent, 0, 99);
+        if (_app.Value is { } app)
+        {
+            percent = (app.Index * 100 + percent) / app.Count;
+            stage = $"App {app.Index + 1} of {app.Count} · {app.Name} — {stage}";
+        }
+        report(stage, Math.Clamp(percent, 0, 99));
+    }
 }
 
 /// <summary>Who started a background import and what they were allowed to do — restored on the worker so the import runs with
@@ -54,7 +79,8 @@ public sealed class AppImportJobQueue
 
 public sealed record AppImportJobDto(
     Guid Id, string FileName, long FileSizeBytes, string Status, string? Stage, int PercentComplete,
-    Guid? AppId, string? AppName, string? ErrorMessage, DateTime CreatedOn, DateTime? StartedOn, DateTime? CompletedOn, bool EmailSent);
+    Guid? AppId, string? AppName, string? ErrorMessage, DateTime CreatedOn, DateTime? StartedOn, DateTime? CompletedOn, bool EmailSent,
+    int AppCount = 1, int AppsCreated = 0);
 
 /// <summary>Starts, lists and dismisses the caller's background imports.</summary>
 public sealed class AppImportJobService(IAppImportJobRepository jobs, IQueryContext context, AppImportJobQueue queue)
@@ -109,7 +135,7 @@ public sealed class AppImportJobService(IAppImportJobRepository jobs, IQueryCont
 
     internal static AppImportJobDto ToDto(AppImportJob j) => new(
         j.PublicId, j.FileName, j.FileSizeBytes, j.Status, j.Stage, j.PercentComplete, j.AppPublicId, j.AppName, j.ErrorMessage,
-        j.CreatedOn, j.StartedOn, j.CompletedOn, j.EmailSentOn.HasValue);
+        j.CreatedOn, j.StartedOn, j.CompletedOn, j.EmailSentOn.HasValue, j.AppCount, j.AppsCreated);
 }
 
 /// <summary>Built-in email templates for finished background imports and the placeholders they accept. A tenant can override
@@ -123,7 +149,7 @@ public static class AppImportEmailTemplates
 
     public static readonly IReadOnlyList<string> Placeholders =
     [
-        "UserName", "FileName", "AppName", "Status", "Duration", "TablesCreated", "FieldsCreated", "RelationshipsCreated",
+        "UserName", "FileName", "AppName", "AppNames", "AppCount", "AppsCreated", "AppsFailed", "FailedApps", "Status", "Duration", "TablesCreated", "FieldsCreated", "RelationshipsCreated",
         "ReportsCreated", "FormsCreated", "RolesCreated", "SkippedCount", "ErrorMessage", "AppLink",
     ];
 
@@ -131,7 +157,8 @@ public static class AppImportEmailTemplates
     {
         Completed => ("Your app import finished: {{AppName}}",
             "<p>Hi {{UserName}},</p>" +
-            "<p>Your import of <strong>{{FileName}}</strong> has finished. The app <strong>{{AppName}}</strong> is ready.</p>" +
+            "<p>Your import of <strong>{{FileName}}</strong> has finished. Created: <strong>{{AppName}}</strong> ({{AppsCreated}} of {{AppCount}} applications).</p>" +
+            "<p>{{FailedApps}}</p>" +
             "<table cellpadding=\"4\" style=\"border-collapse:collapse\">" +
             "<tr><td>Tables</td><td><strong>{{TablesCreated}}</strong></td></tr>" +
             "<tr><td>Fields</td><td><strong>{{FieldsCreated}}</strong></td></tr>" +
@@ -186,13 +213,25 @@ public sealed class AppImportJobRunner(
             catch (Exception ex) { logger.LogDebug(ex, "Could not store import progress for job {Job}.", job.PublicId); }
         };
 
-        ImportReport? report = null;
+        ImportBatchReport? report = null;
         string? error = null;
         try
         {
             var text = System.Text.Encoding.UTF8.GetString(job.Content ?? []);
-            report = await importHandler.HandleAsync(new ImportAppFromPblCommand(text, ImportMode.CreateNewApp, ImportMapping.Parse(job.MappingJson)), ct);
-            await jobs.CompleteAsync(job.Id, report.AppPublicId, report.AppName, JsonSerializer.Serialize(report, Json), ct);
+            var batch = await importHandler.HandleBatchAsync(new ImportAppFromPblCommand(text, ImportMode.CreateNewApp, ImportMapping.Parse(job.MappingJson)), ct);
+            if (batch.Apps.Count == 0)
+            {
+                // Every application failed: the job as a whole did.
+                error = string.Join(" ", batch.Failed.Select(f => $"{f.AppName}: {f.Message}"));
+                await jobs.FailAsync(job.Id, error, CancellationToken.None);
+            }
+            else
+            {
+                report = batch;
+                var first = batch.Apps[0];
+                var name = batch.Apps.Count == 1 ? first.AppName : $"{first.AppName} +{batch.Apps.Count - 1} more";
+                await jobs.CompleteAsync(job.Id, first.AppPublicId, name, batch.Apps.Count + batch.Failed.Count, batch.Apps.Count, JsonSerializer.Serialize(batch, Json), ct);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -208,7 +247,7 @@ public sealed class AppImportJobRunner(
         await NotifyAsync(job, report, error, ct);
     }
 
-    private async Task NotifyAsync(AppImportJob job, ImportReport? report, string? error, CancellationToken ct)
+    private async Task NotifyAsync(AppImportJob job, ImportBatchReport? report, string? error, CancellationToken ct)
     {
         try
         {
@@ -229,14 +268,21 @@ public sealed class AppImportJobRunner(
             var (subject, body) = custom is null ? AppImportEmailTemplates.Default(key) : (custom.Subject, custom.Body);
 
             var took = job.StartedOn.HasValue ? DateTime.UtcNow - job.StartedOn.Value : TimeSpan.Zero;
+            // One app: straight to it. Several: the app list, where all of them are.
             var link = report is not null && !string.IsNullOrWhiteSpace(job.FrontendBaseUrl)
-                ? $"{job.FrontendBaseUrl!.TrimEnd('/')}/app/{report.AppPublicId}"
+                ? (report.Apps.Count == 1 ? $"{job.FrontendBaseUrl!.TrimEnd('/')}/app/{report.Apps[0].AppPublicId}" : job.FrontendBaseUrl!.TrimEnd('/'))
                 : "";
+            var appNames = report is null ? "" : string.Join(", ", report.Apps.Select(a => a.AppName));
             var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["UserName"] = string.IsNullOrWhiteSpace(user.Name) ? "there" : user.Name,
                 ["FileName"] = job.FileName,
-                ["AppName"] = report?.AppName ?? "",
+                ["AppName"] = appNames,
+                ["AppNames"] = appNames,
+                ["AppCount"] = (report is null ? 0 : report.Apps.Count + report.Failed.Count).ToString(),
+                ["AppsCreated"] = (report?.Apps.Count ?? 0).ToString(),
+                ["AppsFailed"] = (report?.Failed.Count ?? 0).ToString(),
+                ["FailedApps"] = report is null ? "" : string.Join("; ", report.Failed.Select(f => $"{f.AppName} ({f.Message})")),
                 ["Status"] = report is null ? "Failed" : "Completed",
                 ["Duration"] = took.TotalMinutes < 1 ? $"{Math.Max(1, (int)took.TotalSeconds)} s" : $"{(int)took.TotalMinutes} min {took.Seconds} s",
                 ["TablesCreated"] = (report?.TablesCreated ?? 0).ToString(),
@@ -245,7 +291,7 @@ public sealed class AppImportJobRunner(
                 ["ReportsCreated"] = (report?.ReportsCreated ?? 0).ToString(),
                 ["FormsCreated"] = (report?.FormsCreated ?? 0).ToString(),
                 ["RolesCreated"] = (report?.RolesCreated ?? 0).ToString(),
-                ["SkippedCount"] = (report?.Skipped.Count ?? 0).ToString(),
+                ["SkippedCount"] = (report?.SkippedCount ?? 0).ToString(),
                 ["ErrorMessage"] = error ?? "",
                 ["AppLink"] = link,
             };
@@ -266,6 +312,9 @@ public sealed class AppImportJobRunner(
     {
         ValidationException ve => string.Join(" ", ve.Errors.SelectMany(e => e.Value)),
         DomainException de => de.Message,
+        // Internal detail (SQL messages, constraint names) is only shown to the person importing when the server runs in Development.
+        _ when string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Development", StringComparison.OrdinalIgnoreCase)
+            => $"Unexpected error ({ex.GetType().Name}): {ex.Message}",
         _ => "The import could not be completed because of an unexpected error.",
     };
 }

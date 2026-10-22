@@ -13,6 +13,9 @@ public class AppImportJob
     public int PercentComplete { get; set; }
     public Guid? AppPublicId { get; set; }
     public string? AppName { get; set; }
+    /// <summary>Applications the import tried to create (a QBL file can hold several).</summary>
+    public int AppCount { get; set; } = 1;
+    public int AppsCreated { get; set; }
     public string? ResultJson { get; set; }
     public string? ErrorMessage { get; set; }
     public byte[]? Content { get; set; }

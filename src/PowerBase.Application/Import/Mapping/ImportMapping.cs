@@ -25,14 +25,30 @@ public sealed class ImportMappingElement
     public Guid? TargetElementPublicId { get; set; }
 }
 
+/// <summary>New-app import of a file with several applications: what to do with one of them. Table refs are
+/// only unique inside an application, so exclusions are scoped here.</summary>
+public sealed class ImportMappingApp
+{
+    public string AppRef { get; set; } = string.Empty;
+    public bool Include { get; set; } = true;
+    public string? NameOverride { get; set; }
+    public List<string> ExcludedTableRefs { get; set; } = [];
+}
+
 /// <summary>The user's decisions for an import. Built by the wizard; also accepted as a JSON file
 /// by the API (developer use).</summary>
 public sealed class ImportMapping
 {
     public List<ImportMappingElement> Elements { get; set; } = [];
 
-    /// <summary>Table logical refs the user chose not to import (applies to Create and Update).</summary>
+    /// <summary>Table logical refs the user chose not to import (applies to Create and Update). For a
+    /// multi-application file use <see cref="Apps"/>; this list then applies to the only application.</summary>
     public List<string> ExcludedTableRefs { get; set; } = [];
+
+    /// <summary>Per-application choices (New App only). An application not listed is imported as is.</summary>
+    public List<ImportMappingApp> Apps { get; set; } = [];
+
+    public ImportMappingApp? ForApp(string appRef) => Apps.FirstOrDefault(a => string.Equals(a.AppRef, appRef, StringComparison.Ordinal));
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

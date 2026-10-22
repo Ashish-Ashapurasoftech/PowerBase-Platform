@@ -8,6 +8,9 @@ namespace PowerBase.Application.Common.Services;
 
 public class AppSeeder : IAppSeeder
 {
+    /// <summary>The labels of the system fields every table is seeded with — no other field on a table may use one.</summary>
+    public static readonly IReadOnlyList<string> SystemFieldLabels = ["Record ID#", "Date Created", "Date Modified", "Record Owner", "Last Modified By"];
+
     private readonly IAppTableRepository _tableRepo;
     private readonly ISchemaEngineService _schemaEngine;
     private readonly IAppFieldRepository _fieldRepo;

@@ -59,21 +59,23 @@ public class ImportController : ControllerBase
     [ProducesResponseType(typeof(ApiResponse<ImportPreviewResult>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public async Task<IActionResult> Preview(IFormFile file, CancellationToken ct)
+    public async Task<IActionResult> Preview(IFormFile file, [FromQuery] ImportMode mode = ImportMode.CreateNewApp, CancellationToken ct = default)
     {
         var content = await ReadFileAsync(file, ct);
-        var result = await _previewHandler.HandleAsync(new ImportPreviewQuery(content), ct);
+        var result = await _previewHandler.HandleAsync(new ImportPreviewQuery(content, mode), ct);
         return Ok(new ApiResponse<ImportPreviewResult>(result));
     }
 
-    /// <summary>Import a QBL/PBL document as a brand-new app. Optional <c>mapping</c> (JSON) may
-    /// list <c>excludedTableRefs</c> — tables the user chose not to import.</summary>
+    /// <summary>Import a QBL/PBL document as brand-new apps — one app per application in the file. Optional
+    /// <c>mapping</c> (JSON) may list <c>excludedTableRefs</c> (single-application files) or per-application
+    /// <c>apps</c> entries (include, rename, excluded tables). Large files and files with several applications
+    /// run in the background (202).</summary>
     [HttpPost]
     [RequirePermission(PermissionCodes.AppsCreate)]
     [Consumes("multipart/form-data")]
     [RequestSizeLimit(UploadLimit)]
     [RequestFormLimits(MultipartBodyLengthLimit = UploadLimit)]
-    [ProducesResponseType(typeof(ApiResponse<ImportReport>), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ApiResponse<ImportBatchReport>), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ApiResponse<AppImportJobDto>), StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -83,18 +85,18 @@ public class ImportController : ControllerBase
         [FromQuery] ImportMode mode = ImportMode.CreateNewApp,
         CancellationToken ct = default)
     {
-        // Big files take minutes: accept the upload now, import in the background and email the result.
-        if (mode == ImportMode.CreateNewApp && file is not null && AppImportJobPolicy.RunsInBackground(file.Length))
+        var content = await ReadFileAsync(file, ct);
+
+        // Big files, and files with several applications, take minutes: accept the upload now, import in the
+        // background and email the result.
+        if (mode == ImportMode.CreateNewApp && AppImportJobPolicy.RunsInBackground(file.Length, AppImportJobPolicy.CountApplications(content)))
         {
-            using var buffer = new MemoryStream();
-            await file.CopyToAsync(buffer, ct);
-            var job = await _jobs.StartAsync(file.FileName, buffer.ToArray(), mapping, FrontendBaseUrl(), ct);
+            var job = await _jobs.StartAsync(file.FileName, System.Text.Encoding.UTF8.GetBytes(content), mapping, FrontendBaseUrl(), ct);
             return Accepted(new ApiResponse<AppImportJobDto>(job));
         }
 
-        var content = await ReadFileAsync(file, ct);
-        var result = await _importHandler.HandleAsync(new ImportAppFromPblCommand(content, mode, ImportMapping.Parse(mapping)), ct);
-        return StatusCode(StatusCodes.Status201Created, new ApiResponse<ImportReport>(result));
+        var result = await _importHandler.HandleBatchAsync(new ImportAppFromPblCommand(content, mode, ImportMapping.Parse(mapping)), ct);
+        return StatusCode(StatusCodes.Status201Created, new ApiResponse<ImportBatchReport>(result));
     }
 
     /// <summary>Dry run for updating an existing app: lists every element as New, Changed,

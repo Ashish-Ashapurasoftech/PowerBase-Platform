@@ -1,3 +1,4 @@
+using PowerBase.Application.Common.Services;
 using PowerBase.Application.Import.Jobs;
 using PowerBase.Application.Formulas;
 using System.Text.Json;
@@ -13,6 +14,7 @@ using PowerBase.Application.Forms.Commands.SaveFormLayout;
 using PowerBase.Application.Forms.Commands.SaveFormRule;
 using PowerBase.Application.Forms.Queries.GetFormLayout;
 using PowerBase.Application.Import.FormulaTranslation;
+using PowerBase.Application.Import.Mapping;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
 using PowerBase.Application.Import.Services;
@@ -152,19 +154,20 @@ public class ImportAppFromPblCommandHandler
         _permissionsApplier = permissionsApplier;
     }
 
-    public async Task<ImportReport> HandleAsync(ImportAppFromPblCommand command, CancellationToken ct = default)
+    private static void RequireCreateMode(ImportAppFromPblCommand command)
     {
         if (command.Mode != ImportMode.CreateNewApp)
             throw new BadRequestException("UNSUPPORTED_IMPORT_MODE", command.Mode == ImportMode.UpdateExistingApp
                 ? "Use POST /apps/import/update to update an existing app."
                 : $"Import mode '{command.Mode}' is not supported yet.");
+    }
 
-        PblDocument document;
-        List<PblIssue> conversionIssues;
+    private static IReadOnlyList<ParsedApp> ParseUploaded(string content)
+    {
         try
         {
             ImportProgress.Report("Reading the file", 3);
-            (document, conversionIssues) = ImportDocumentParser.Parse(command.PblJson);
+            return ImportDocumentParser.ParseAll(content);
         }
         catch (JsonException ex)
         {
@@ -180,6 +183,92 @@ public class ImportAppFromPblCommandHandler
                 ["Qbl"] = [$"Could not parse QBL document: {ex.Message}"],
             });
         }
+    }
+
+    /// <summary>Imports a file that holds exactly one application. A QBL file with several goes through <see cref="HandleBatchAsync"/>.</summary>
+    public async Task<ImportReport> HandleAsync(ImportAppFromPblCommand command, CancellationToken ct = default)
+    {
+        RequireCreateMode(command);
+        var apps = ParseUploaded(command.PblJson);
+        if (apps.Count > 1)
+            throw new BadRequestException("IMPORT_MULTIPLE_APPS", "This file contains several applications; import it with the multi-application import.");
+        return await ImportOneAsync(apps[0], command.Mapping?.ExcludedTableRefs, null, ct);
+    }
+
+    /// <summary>
+    /// Imports every application in the file (minus the ones the mapping excludes), each as its own app, in file order.
+    /// Applications are independent: one that fails is removed again (see <see cref="ImportOneAsync"/>) and reported,
+    /// and the rest still import. A file with a single included application behaves exactly like <see cref="HandleAsync"/>
+    /// — its failure is thrown, not reported.
+    /// </summary>
+    public async Task<ImportBatchReport> HandleBatchAsync(ImportAppFromPblCommand command, CancellationToken ct = default)
+    {
+        RequireCreateMode(command);
+        var mapping = command.Mapping ?? new ImportMapping();
+        var apps = ParseUploaded(command.PblJson);
+
+        foreach (var entry in mapping.Apps)
+            if (!apps.Any(a => string.Equals(a.AppRef, entry.AppRef, StringComparison.Ordinal)))
+                throw new BadRequestException("MAPPING_UNKNOWN_APP", $"The mapping refers to an application that is not in the file ('{entry.AppRef}').");
+
+        var included = apps.Where(a => mapping.ForApp(a.AppRef)?.Include != false).ToList();
+        if (included.Count == 0)
+            throw new BadRequestException("IMPORT_NO_APPS_SELECTED", "No application was selected for import.");
+
+        var overrides = included.Select(a => mapping.ForApp(a.AppRef)?.NameOverride?.Trim()).Where(n => !string.IsNullOrEmpty(n)).ToList();
+        if (overrides.Count != overrides.Distinct(StringComparer.OrdinalIgnoreCase).Count())
+            throw new BadRequestException("APP_NAME_DUPLICATED_IN_FILE", "Two applications were given the same name.");
+
+        var batch = new ImportBatchReport();
+        for (var i = 0; i < included.Count; i++)
+        {
+            var app = included[i];
+            var entry = mapping.ForApp(app.AppRef);
+            // A file with one application keeps the legacy flat exclusion list.
+            var excluded = entry?.ExcludedTableRefs.Count > 0 ? entry.ExcludedTableRefs : (apps.Count == 1 ? mapping.ExcludedTableRefs : []);
+            var nameOverride = string.IsNullOrWhiteSpace(entry?.NameOverride) ? null : entry!.NameOverride!.Trim();
+
+            ImportProgress.BeginApp(i, included.Count, nameOverride ?? app.Document.App?.Name ?? app.AppRef);
+            try
+            {
+                batch.Apps.Add(await ImportOneAsync(app, excluded, nameOverride, ct));
+            }
+            catch (Exception ex) when (included.Count > 1 && ex is not OperationCanceledException)
+            {
+                batch.Failed.Add(new ImportAppFailure
+                {
+                    AppRef = app.AppRef,
+                    AppName = nameOverride ?? app.Document.App?.Name ?? app.AppRef,
+                    Code = ex is DomainException de ? de.ErrorCode : "IMPORT_FAILED",
+                    Message = DescribeFailure(ex),
+                });
+            }
+            finally
+            {
+                ImportProgress.EndApp();
+            }
+        }
+
+        return batch;
+    }
+
+    /// <summary>Message a person importing may see. Internal detail only outside production-like settings.</summary>
+    private static string DescribeFailure(Exception ex) => ex switch
+    {
+        ValidationException ve => string.Join(" ", ve.Errors.SelectMany(e => e.Value)),
+        DomainException de => de.Message,
+        AggregateException ag when ag.InnerExceptions.Count > 0 && ag.Message.Contains("must be deleted manually") => ag.Message,
+        _ when string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Development", StringComparison.OrdinalIgnoreCase)
+            => $"Unexpected error ({ex.GetType().Name}): {ex.Message}",
+        _ => "The application could not be imported because of an unexpected error.",
+    };
+
+    private async Task<ImportReport> ImportOneAsync(ParsedApp parsed, IReadOnlyCollection<string>? excludedTableRefs, string? nameOverride, CancellationToken ct)
+    {
+        var document = parsed.Document;
+        var conversionIssues = parsed.Issues;
+        if (nameOverride is not null)
+            document.App.Name = nameOverride;
 
         var conversionErrors = conversionIssues.Where(i => i.Severity == PblIssueSeverity.Error).ToList();
         if (conversionErrors.Count > 0)
@@ -188,7 +277,7 @@ public class ImportAppFromPblCommandHandler
                 ["Qbl"] = conversionErrors.Select(e => e.Message).ToArray(),
             });
 
-        PblDocumentTools.ExcludeTables(document, command.Mapping?.ExcludedTableRefs);
+        PblDocumentTools.ExcludeTables(document, excludedTableRefs);
 
         var validation = _validator.Validate(document);
         if (!validation.IsValid)
@@ -209,6 +298,10 @@ public class ImportAppFromPblCommandHandler
         {
             var fieldSpecs = new List<AppFieldSpec>();
 
+            // Labels must be unique per table, and PowerBase's own system fields (Record ID#, Date Created, …) already
+            // hold theirs. A source field that reuses one of those labels, or repeats another field's, gets a numbered label.
+            var usedLabels = new HashSet<string>(AppSeeder.SystemFieldLabels, StringComparer.OrdinalIgnoreCase);
+
             foreach (var field in table.Fields ?? [])
             {
                 if (IsFormulaField(field))
@@ -228,8 +321,16 @@ public class ImportAppFromPblCommandHandler
                 // Preserve the imported file's exact Name (its stable third-party identifier) rather
                 // than regenerating one — see AppFieldSpec.Name.
                 var item = BuildScalarItem(field, skipped);
+                var uniqueLabel = UniqueLabel(item.Label.Trim(), usedLabels);
+                if (!string.Equals(uniqueLabel, item.Label.Trim(), StringComparison.Ordinal))
+                    skipped.Add(new ImportSkippedItem
+                    {
+                        LogicalRef = field.LogicalRef,
+                        Name = field.Name,
+                        Reason = $"Imported as '{uniqueLabel}': the label '{item.Label.Trim()}' is already used by another field on '{table.Name}'.",
+                    });
                 fieldSpecs.Add(new AppFieldSpec(
-                    item.Label, item.TypeCode, item.Settings, Name: item.Name, Description: item.Description, HelpText: item.HelpText,
+                    uniqueLabel, item.TypeCode, item.Settings, Name: item.Name, Description: item.Description, HelpText: item.HelpText,
                     IsRequired: item.IsRequired, DefaultValue: item.DefaultValue, IsAuditable: item.IsAuditable,
                     IsSearchable: item.IsSearchable, IsReportable: item.IsReportable));
             }
@@ -1067,20 +1168,20 @@ public class ImportAppFromPblCommandHandler
 
                         elementLayouts.Add(new FormElementLayout(
                             elementGuid, appFieldId, element.ElementType, elementContent,
-                            element.LabelMode, element.CustomLabel, element.ShowOnAdd, element.ShowOnEdit, element.ShowOnView,
+                            element.LabelMode, Fit(element.CustomLabel, FormTextMaxLength), element.ShowOnAdd, element.ShowOnEdit, element.ShowOnView,
                             element.WidthMode, element.WidthValue, element.HelpTextOverride, element.IsReadOnly, element.IsRequired, element.DisplayAs,
                             GroupId: groupId));
                     }
 
                     var blockGuid = Guid.NewGuid();
                     blockGuidByRef[block.LogicalRef] = blockGuid;
-                    blockLayouts.Add(new FormBlockLayout(blockGuid, block.Heading, block.BackgroundColor, block.Width, elementLayouts));
+                    blockLayouts.Add(new FormBlockLayout(blockGuid, Fit(block.Heading, FormTextMaxLength), block.BackgroundColor, block.Width, elementLayouts));
                 }
 
                 var sectionGuid = Guid.NewGuid();
                 sectionGuidByRef[section.LogicalRef] = sectionGuid;
                 sectionLayouts.Add(new FormSectionLayout(
-                    sectionGuid, section.Name, section.IsCollapsed, blockLayouts,
+                    sectionGuid, Fit(section.Name, FormTextMaxLength), section.IsCollapsed, blockLayouts,
                     PagePublicId: section.PageRef is not null && pageGuidByRef.TryGetValue(section.PageRef, out var pageGuid) ? pageGuid : null,
                     IsPinned: section.IsPinned ? true : null,
                     ShowDividers: section.ShowDividers));
@@ -1092,7 +1193,7 @@ public class ImportAppFromPblCommandHandler
                 continue;
             }
 
-            var createdForm = await _createFormHandler.HandleAsync(new CreateFormCommand(table.PublicId, form.Name), ct);
+            var createdForm = await _createFormHandler.HandleAsync(new CreateFormCommand(table.PublicId, Fit(form.Name, FormTextMaxLength)!), ct);
             await _saveFormLayoutHandler.HandleAsync(new SaveFormLayoutCommand(
                 createdForm.Id, sectionLayouts, pageLayouts, form.PageNavMode, form.AlwaysTabsOnView), ct);
 
@@ -1251,9 +1352,9 @@ public class ImportAppFromPblCommandHandler
 
                 try
                 {
-                    var createdRule = await _createFormRuleHandler.HandleAsync(new CreateFormRuleCommand(layout.FormPublicId, rule.Name), ct);
+                    var createdRule = await _createFormRuleHandler.HandleAsync(new CreateFormRuleCommand(layout.FormPublicId, Fit(rule.Name, FormTextMaxLength)!), ct);
                     await _saveFormRuleHandler.HandleAsync(new SaveFormRuleCommand(
-                        createdRule.Id, rule.Name, rule.Description, Tags: null, rule.IsActive, rule.RunTrigger, rule.ConditionLogic,
+                        createdRule.Id, Fit(rule.Name, FormTextMaxLength)!, rule.Description, Tags: null, rule.IsActive, rule.RunTrigger, rule.ConditionLogic,
                         rule.IsExpressionMode, rule.ExpressionText, conditionSpecs, actionSpecs, createdRule.RowVersion), ct);
 
                     created++;
@@ -1343,6 +1444,13 @@ public class ImportAppFromPblCommandHandler
 
         return created;
     }
+
+    /// <summary>Form names, section/block headings, element labels and rule names are stored in 200-character columns; a longer
+    /// source text (real exports have 200+ character labels) is cut to fit instead of failing the whole import.</summary>
+    private const int FormTextMaxLength = 200;
+
+    private static string? Fit(string? text, int max) =>
+        text is null || text.Length <= max ? text : text[..(max - 1)].TrimEnd() + "…";
 
     /// <summary>Returns <paramref name="label"/>, or "label (2)", "label (3)"… when it is already in
     /// <paramref name="used"/>; the returned label is added to the set.</summary>

@@ -2,12 +2,15 @@
 -- Existing tenants are seeded with ProvisioningState=Ready pointing at the current
 -- shared database so the resolver works without any code changes in Phase 0.
 
-ALTER TABLE meta.Tenant
-    ADD DatabaseName        NVARCHAR(128) NULL,
-        ServerRef           NVARCHAR(256) NULL,
-        ConnectionSecretRef NVARCHAR(256) NULL,
-        ProvisioningState   NVARCHAR(32)  NOT NULL CONSTRAINT DF_Tenant_ProvisioningState DEFAULT 'Ready',
-        SchemaVersion       INT           NULL;
+IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('meta.Tenant') AND name = 'DatabaseName')
+BEGIN
+    ALTER TABLE meta.Tenant
+        ADD DatabaseName        NVARCHAR(128) NULL,
+            ServerRef           NVARCHAR(256) NULL,
+            ConnectionSecretRef NVARCHAR(256) NULL,
+            ProvisioningState   NVARCHAR(32)  NOT NULL CONSTRAINT DF_Tenant_ProvisioningState DEFAULT 'Ready',
+            SchemaVersion       INT           NULL;
+END
 GO
 
 -- Backfill existing tenants to point at the current shared database.

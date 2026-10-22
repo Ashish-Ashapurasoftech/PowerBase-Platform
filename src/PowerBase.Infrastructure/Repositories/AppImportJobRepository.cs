@@ -7,7 +7,7 @@ namespace PowerBase.Infrastructure.Repositories;
 
 public class AppImportJobRepository : TenantRepositoryBase, IAppImportJobRepository
 {
-    private const string Columns = @"Id, PublicId, UserId, FileName, FileSizeBytes, Status, Stage, PercentComplete, AppPublicId, AppName,
+    private const string Columns = @"Id, PublicId, UserId, FileName, FileSizeBytes, Status, Stage, PercentComplete, AppPublicId, AppName, AppCount, AppsCreated,
         ResultJson, ErrorMessage, MappingJson, FrontendBaseUrl, EmailSentOn, EmailError, IsDismissed, CreatedOn, StartedOn, CompletedOn";
 
     private const string InsertSql = @"
@@ -59,10 +59,10 @@ public class AppImportJobRepository : TenantRepositoryBase, IAppImportJobReposit
     public Task UpdateProgressAsync(long id, string stage, int percent, CancellationToken ct = default) => ExecAsync(
         "UPDATE meta.AppImportJob SET Stage = @stage, PercentComplete = @percent WHERE Id = @id AND Status = 'Running'", new { id, stage, percent }, ct);
 
-    public Task CompleteAsync(long id, Guid appPublicId, string appName, string resultJson, CancellationToken ct = default) => ExecAsync(
+    public Task CompleteAsync(long id, Guid appPublicId, string appName, int appCount, int appsCreated, string resultJson, CancellationToken ct = default) => ExecAsync(
         @"UPDATE meta.AppImportJob SET Status = 'Completed', Stage = N'Done', PercentComplete = 100, AppPublicId = @appPublicId, AppName = @appName,
-          ResultJson = @resultJson, Content = NULL, CompletedOn = SYSUTCDATETIME() WHERE Id = @id", new { id, appPublicId, appName, resultJson }, ct);
-
+          AppCount = @appCount, AppsCreated = @appsCreated,
+          ResultJson = @resultJson, Content = NULL, CompletedOn = SYSUTCDATETIME() WHERE Id = @id", new { id, appPublicId, appName, appCount, appsCreated, resultJson }, ct);
     public Task FailAsync(long id, string error, CancellationToken ct = default) => ExecAsync(
         @"UPDATE meta.AppImportJob SET Status = 'Failed', Stage = N'Failed', ErrorMessage = @error, Content = NULL, CompletedOn = SYSUTCDATETIME() WHERE Id = @id",
         new { id, error = error.Length > 2000 ? error[..2000] : error }, ct);

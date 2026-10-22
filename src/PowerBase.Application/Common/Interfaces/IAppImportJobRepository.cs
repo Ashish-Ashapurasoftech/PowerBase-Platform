@@ -17,8 +17,9 @@ public interface IAppImportJobRepository
 
     Task MarkRunningAsync(long id, CancellationToken ct = default);
     Task UpdateProgressAsync(long id, string stage, int percent, CancellationToken ct = default);
-    Task CompleteAsync(long id, Guid appPublicId, string appName, string resultJson, CancellationToken ct = default);
-    Task FailAsync(long id, string error, CancellationToken ct = default);
+    /// <summary>Marks the job done. <paramref name="appPublicId"/>/<paramref name="appName"/> describe the first app created
+    /// (the name reads "X +2 more" when several were).</summary>
+    Task CompleteAsync(long id, Guid appPublicId, string appName, int appCount, int appsCreated, string resultJson, CancellationToken ct = default);    Task FailAsync(long id, string error, CancellationToken ct = default);
     Task SetEmailResultAsync(long id, bool sent, string? error, CancellationToken ct = default);
     Task DismissAsync(Guid publicId, long userId, CancellationToken ct = default);
 
