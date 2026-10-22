@@ -15,7 +15,9 @@ namespace PowerBase.Application.Relationships;
 ///                      or a Formula / child Summary, aggregated in memory with the functions its
 ///                      result type supports (see <see cref="SummaryComputedTargets"/>).
 ///   • DistinctCount  → any stored field type.
-///   • CombinedText   → any stored field type with a text form (see CombinedTextUnsupportedTypes).
+///   • CombinedText   → any field type that holds a value — stored or calculated — each value shown in its
+///                      field's display format (users by name, files by name, …); not a link (Report Link,
+///                      URL formula).
 ///   • Sum / Avg      → numeric fields only.
 ///   • Min / Max      → numeric and date fields only. Text is rejected — lexicographic ordering
 ///                      gives wrong results for numeric-looking strings ("10" &lt; "9").
@@ -26,14 +28,6 @@ namespace PowerBase.Application.Relationships;
 /// </summary>
 public static class SummaryTargetValidator
 {
-    /// <summary>Field types Combined Text can't render as text: their stored value is an id
-    /// (User/MultiUser → a user, Reference → a record), a file list, HTML, or a range whose end
-    /// lives in a second column the summary doesn't read. Mirrored by the add-summary dialog.</summary>
-    public static readonly IReadOnlySet<string> CombinedTextUnsupportedTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    {
-        "User", "MultiUser", "File", "RichText", "Reference", "DateRange", "NumericRange",
-    };
-
     /// <summary>Throws <see cref="ValidationException"/> (keyed by <paramref name="paramName"/>)
     /// when <paramref name="function"/> can't aggregate <paramref name="target"/>.</summary>
     public static void Validate(string function, int? targetFid, AppField? target, string? targetSubField, string paramName = "targetFid",
@@ -65,6 +59,11 @@ public static class SummaryTargetValidator
             return null;
 
         var fieldLabel = string.IsNullOrWhiteSpace(target.Label) ? target.Name : target.Label;
+
+        // Combined Text shows any calculated value as text — a Formula's, a child Summary's, or a lookup of one — in
+        // its display format, whatever type it returns; only a link (a URL formula) has none to show.
+        if (function == SummaryFunctions.CombinedText && SummaryComputedTargets.CombinedTextValueType(target, lookupSources) is not null)
+            return null;
 
         // A Lookup is summarized from the parent column it pulls down, so it's judged by that
         // field: it must still exist and have a column, and its type is the lookup's type.
@@ -111,13 +110,8 @@ public static class SummaryTargetValidator
     /// <summary>Whether <paramref name="function"/> can aggregate a value of this type.</summary>
     private static string? FindTypeProblem(string function, string fieldLabel, string typeCode, string? targetSubField)
     {
-        // Combined Text shows each value as text, so it needs a field whose value has a text form of
-        // its own — not a user id, file list, HTML, record id or a two-column range.
-        if (function == SummaryFunctions.CombinedText
-            && CombinedTextUnsupportedTypes.Contains(typeCode) && string.IsNullOrWhiteSpace(targetSubField))
-            return $"'Combined Text' can't show {WithArticle(typeCode)} field's values as text; '{fieldLabel}' can be summarized with Distinct Count instead.";
-
-        // Distinct Count and Combined Text work on any other stored field type.
+        // Distinct Count and Combined Text work on any stored field type — Combined Text shows each value in its display
+        // format (a user by name, a file by its name, a range as "start – end", …).
         if (function is SummaryFunctions.DistinctCount or SummaryFunctions.CombinedText)
             return null;
 
