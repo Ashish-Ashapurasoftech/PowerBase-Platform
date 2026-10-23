@@ -677,6 +677,9 @@ builder.Services.AddScoped<PowerBase.Application.Groups.Queries.GetSharedApps.Ge
 
 builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
 
+// Connected Tables: a standalone module (its own services, read-only write filter and workers).
+PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesModule(builder.Services, builder.Configuration);
+
 var app = builder.Build();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
