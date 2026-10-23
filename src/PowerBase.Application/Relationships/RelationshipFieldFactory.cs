@@ -55,6 +55,7 @@ public sealed class RelationshipFieldFactory
         bool isEncrypted = false, bool hidden = false)
     {
         var fieldType = await _fieldTypeRepo.GetByCodeAsync(typeCode, ct) ?? throw new NotFoundException("FieldType", typeCode);
+        var requestedLabel = label;
 
         if (typeCode == nameof(Domain.Enums.FieldTypeCode.Lookup)
             || typeCode == nameof(Domain.Enums.FieldTypeCode.Reference)
@@ -75,7 +76,9 @@ public sealed class RelationshipFieldFactory
         // searchable/sortable/filterable, so a quick search for "app" doesn't match every record's URL.
         var defaults = typeCode == FormulaUrlTypeCode ? FieldAdvancedSettingsCapability.Resolve(typeCode, null) : null;
 
-        var fid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
+        var fid = await PowerBase.Application.Fields.FieldFidPolicy.ResolveAsync(
+            _fieldRepo, table.Id, requestedLabel, null, ct,
+            useExpected: typeCode is nameof(Domain.Enums.FieldTypeCode.Lookup) or nameof(Domain.Enums.FieldTypeCode.Reference) or nameof(Domain.Enums.FieldTypeCode.Summary));
         var field = new AppField
         {
             AppTableId = table.Id,

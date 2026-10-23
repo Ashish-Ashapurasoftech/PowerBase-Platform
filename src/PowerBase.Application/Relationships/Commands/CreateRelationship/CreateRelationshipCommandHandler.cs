@@ -70,12 +70,14 @@ public class CreateRelationshipCommandHandler
         // are normalized to their canonical casing here, and that normalized list is what's stored.
         var summaries = new List<CreateSummarySpec>(command.Summaries.Count);
         App? app = command.Summaries.Count > 0 ? await _appRepo.GetByIdAsync(parent.AppId, ct) : null;
+        // A summary may read a child's lookup through its source field; without the map a lookup target is always refused.
+        var lookupSources = command.Summaries.Count > 0 ? await SummaryLookupSources.LoadAsync(childFields, _fieldRepo, ct) : null;
         foreach (var spec in command.Summaries)
         {
             var function = SummaryFunctions.Normalize(spec.Function)
                 ?? throw new ValidationException(new Dictionary<string, string[]> { ["summaries"] = [$"Unknown summary function '{spec.Function}'."] });
             var target = spec.TargetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == spec.TargetFid) : null;
-            SummaryTargetValidator.Validate(function, spec.TargetFid, target, spec.TargetSubField);
+            SummaryTargetValidator.Validate(function, spec.TargetFid, target, spec.TargetSubField, lookupSources: lookupSources);
 
             // An existing field reused as the reference keeps its own encryption flag; a brand-new
             // reference is encrypted exactly when the app is (covered by the app check).

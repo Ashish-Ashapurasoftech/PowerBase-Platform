@@ -180,7 +180,7 @@ public class BulkCreateFieldsCommandHandler
             var fieldType = await _fieldTypeRepo.GetByCodeAsync(item.TypeCode, ct)
                 ?? throw new NotFoundException("FieldType", item.TypeCode);
 
-            var nextFid = await _fieldRepo.GetNextFidAsync(table.Id, ct);
+            var nextFid = await PowerBase.Application.Fields.FieldFidPolicy.ResolveAsync(_fieldRepo, table.Id, label, item.Fid, ct);
 
             // Searchable/Sortable/Reportable/Filterable start from the field type's own defaults
             // (see FieldAdvancedSettingsCapability) rather than one fixed set for every type. Types

@@ -40,7 +40,8 @@ public class AppSeeder : IAppSeeder
         _fieldNameResolver = fieldNameResolver;
     }
 
-    public async Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, bool seedDefaultViews = true, CancellationToken ct = default)
+    public async Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, bool seedDefaultViews = true, CancellationToken ct = default,
+        bool seedDefaultReports = true, bool seedDefaultForm = true)
     {
         // Generated here rather than by each caller — this is the one place that actually inserts
         // an AppTable row (IAppTableRepository.CreateAsync has no other caller in the codebase), so
@@ -136,32 +137,35 @@ public class AppSeeder : IAppSeeder
         // Seed default reports — sort/filter use FIDs, not internal Ids
         var dateModifiedFid = seededFids["Date Modified"];
 
-        await _reportRepo.CreateAsync(new Report
+        if (seedDefaultReports)
         {
-            AppTableId = table.Id,
-            OwnerId = userId,
-            Name = "List All",
-            ReportType = "Table",
-            Visibility = "Shared",
-            Definition = JsonSerializer.Serialize(new ReportDefinition()),
-            IsDefault = true,
-            DisplayOrder = 1,
-        }, ct);
-
-        await _reportRepo.CreateAsync(new Report
-        {
-            AppTableId = table.Id,
-            OwnerId = userId,
-            Name = "List Changes",
-            ReportType = "Table",
-            Visibility = "Shared",
-            Definition = JsonSerializer.Serialize(new ReportDefinition
+            await _reportRepo.CreateAsync(new Report
             {
-                SortFields = [new SortSpec { FieldId = dateModifiedFid, Desc = true }],
-            }),
-            IsDefault = false,
-            DisplayOrder = 2,
-        }, ct);
+                AppTableId = table.Id,
+                OwnerId = userId,
+                Name = "List All",
+                ReportType = "Table",
+                Visibility = "Shared",
+                Definition = JsonSerializer.Serialize(new ReportDefinition()),
+                IsDefault = true,
+                DisplayOrder = 1,
+            }, ct);
+
+            await _reportRepo.CreateAsync(new Report
+            {
+                AppTableId = table.Id,
+                OwnerId = userId,
+                Name = "List Changes",
+                ReportType = "Table",
+                Visibility = "Shared",
+                Definition = JsonSerializer.Serialize(new ReportDefinition
+                {
+                    SortFields = [new SortSpec { FieldId = dateModifiedFid, Desc = true }],
+                }),
+                IsDefault = false,
+                DisplayOrder = 2,
+            }, ct);
+        }
 
         // The hidden row backing "Default Report Settings" (see Report.IsDefaultSettingsRecord) —
         // deliberately its own row, never "List All" above, so editing List All's own settings
@@ -179,6 +183,12 @@ public class AppSeeder : IAppSeeder
             IsDefaultSettingsRecord = true,
             DisplayOrder = 0,
         }, ct);
+
+        if (!seedDefaultForm)
+        {
+            await _permRepo.SeedDefaultsForTableAsync(table.Id, table.AppId, ct);
+            return table;
+        }
 
         // Auto-create "Main Form" with all seeded system fields in a default section
         var mainForm = new Form

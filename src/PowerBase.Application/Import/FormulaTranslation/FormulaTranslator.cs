@@ -44,6 +44,8 @@ public class FormulaTranslator
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
+    private const int MAX_REWRITE_PASSES = 4;
+
     private readonly FormulaEngine _engine;
 
     public FormulaTranslator(FormulaEngine engine)
@@ -52,8 +54,9 @@ public class FormulaTranslator
     }
 
     /// <param name="aliasSchema">Resolves <c>[_DBID_*]</c> table tokens (used by Quickbase "add record" URL formulas). Null = none resolve.</param>
-    public FormulaTranslationResult Translate(string? resultType, string? expression, IReadOnlyList<AppField> tableFields, ITableAliasSchema? aliasSchema = null)
+    public FormulaTranslationResult Translate(string? resultType, string? expression, IReadOnlyList<AppField> tableFields, ITableAliasSchema? aliasSchema = null, IVariableSchema? variableSchema = null)
     {
+        variableSchema ??= Jobs.ImportRuntime.Variables;
         if (string.IsNullOrWhiteSpace(expression))
             return new FormulaTranslationResult
             {
@@ -63,7 +66,17 @@ public class FormulaTranslator
 
         var schema = new AppFieldSchema(tableFields);
         var expectedType = FormulaTypeMap.ParseExpected(resultType);
-        var compiled = _engine.Compile(expression, schema, expectedType, aliasSchema);
+        var compiled = _engine.Compile(expression, schema, expectedType, aliasSchema, variableSchema);
+
+        // "var" declared inside an If branch (or any call argument) is Quickbase-only: move it to the top and compile again.
+        if (compiled.HasErrors && compiled.Diagnostics.Any(d => d.Message.StartsWith("Unexpected 'var'", StringComparison.Ordinal))
+            && QuickbaseDialectRewriter.HoistNestedVariables(expression) is { } hoisted)
+        {
+            expression = hoisted;
+            compiled = _engine.Compile(expression, schema, expectedType, aliasSchema, variableSchema);
+            if (!compiled.HasErrors)
+                return Success(FormulaTranslationStatus.Adjusted, compiled.ResultType.ToString(), expression);
+        }
 
         if (compiled.HasErrors)
         {
@@ -71,16 +84,26 @@ public class FormulaTranslator
             // dialect is looser than PowerBase's, and retry the rewritten form. The rewrite is
             // what gets persisted, so the stored formula stays valid under the same rules the
             // authoring UI applies.
-            var rewritten = QuickbaseDialectRewriter.TryRewrite(expression, compiled.Diagnostics);
-            if (rewritten is not null)
+            // One formula can need several fixes (a text/number concatenation AND a comparison AND a multi-branch If), and fixing one
+            // can expose the next, so rewrite and re-check a few times.
+            var current = expression;
+            var currentDiagnostics = compiled.Diagnostics;
+            for (var pass = 0; pass < MAX_REWRITE_PASSES; pass++)
             {
-                var recompiled = _engine.Compile(rewritten, schema, expectedType, aliasSchema);
+                var rewritten = QuickbaseDialectRewriter.TryRewrite(current, currentDiagnostics);
+                if (rewritten is null || rewritten == current)
+                    break;
+
+                var recompiled = _engine.Compile(rewritten, schema, expectedType, aliasSchema, variableSchema);
                 if (!recompiled.HasErrors)
                     return Success(FormulaTranslationStatus.Adjusted, recompiled.ResultType.ToString(), rewritten);
 
-                // The rewrite didn't get there — report against the original so the diagnostics
-                // point at what the author actually wrote.
+                current = rewritten;
+                currentDiagnostics = recompiled.Diagnostics;
             }
+
+            // The rewrite didn't get there — report against the original so the diagnostics
+            // point at what the author actually wrote.
 
             return new FormulaTranslationResult
             {

@@ -152,7 +152,9 @@ public static class QblCriteriaTranslator
                 throw new CriteriaException($"field id '{fidText}' is not numeric");
 
             var op = ReadUntilDot().Trim();
-            if (!Operators.TryGetValue(op, out var pbOperator))
+            var isRange = string.Equals(op, "IR", StringComparison.OrdinalIgnoreCase) || string.Equals(op, "XIR", StringComparison.OrdinalIgnoreCase);
+            string pbOperator = "";
+            if (!isRange && !Operators.TryGetValue(op, out pbOperator!))
                 throw new CriteriaException($"operator '{op}' has no PowerBase equivalent");
 
             var value = ReadValue();
@@ -161,6 +163,21 @@ public static class QblCriteriaTranslator
             _i++;
 
             var fieldName = _resolve(fid) ?? throw new CriteriaException($"field id {fid} does not resolve to a field");
+
+            // "In range" (IR) / "not in range" (XIR) with a relative period: PowerBase's during / notDuring operators.
+            if (isRange)
+            {
+                if (!_allowRelativeDates)
+                    throw new CriteriaException($"the relative period '{value}' has no PowerBase equivalent here");
+                var during = ParseRelativePeriod(value) ?? throw new CriteriaException($"the period '{value}' (operator {op.ToUpperInvariant()}) has no PowerBase equivalent");
+                return new Leaf(new PblFilterCondition
+                {
+                    FieldName = fieldName,
+                    Operator = string.Equals(op, "IR", StringComparison.OrdinalIgnoreCase) ? "during" : "notDuring",
+                    ValueMode = during.Mode,
+                    Value = during.Value,
+                });
+            }
 
             var condition = new PblFilterCondition { FieldName = fieldName, Operator = pbOperator, Value = value };
             // An empty comparison value means "is empty" / "is not empty".
@@ -188,16 +205,20 @@ public static class QblCriteriaTranslator
                 condition.Value = null;
             }
 
-            if (string.Equals(op, "TV", StringComparison.OrdinalIgnoreCase)) condition.Value = "true";
-            else if (string.Equals(op, "XTV", StringComparison.OrdinalIgnoreCase)) condition.Value = "false";
+            if (!string.Equals(value, CURRENT_USER, StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.Equals(op, "TV", StringComparison.OrdinalIgnoreCase)) condition.Value = "true";
+                else if (string.Equals(op, "XTV", StringComparison.OrdinalIgnoreCase)) condition.Value = "false";
+            }
 
             if (string.Equals(value, CURRENT_USER, StringComparison.OrdinalIgnoreCase))
             {
                 // PowerBase has "is / is not the current user" operators; no other comparison against the user can be expressed.
                 condition.Operator = op.ToUpperInvariant() switch
                 {
-                    "EX" => "isCurrentUser",
-                    "XEX" => "isNotCurrentUser",
+                    // "TV" (true value) against the current user: the user field holds / contains the current user.
+                    "EX" or "TV" => "isCurrentUser",
+                    "XEX" or "XTV" => "isNotCurrentUser",
                     _ => throw new CriteriaException($"operator '{op}' against the current user has no PowerBase equivalent"),
                 };
                 condition.UseCurrentUser = true;
@@ -205,6 +226,28 @@ public static class QblCriteriaTranslator
             }
 
             return new Leaf(condition);
+        }
+
+        /// <summary>"this wk", "last 5 wk", "last 60 d", "next 2 mon" → PowerBase's during modes (duringCurrent / duringPrevious / duringNext)
+        /// with a "count:unit" value. "this" is one period; the previous/next N periods exclude the period in progress, as in Quickbase.</summary>
+        private static (string Mode, string Value)? ParseRelativePeriod(string? text)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match((text ?? "").Trim(),
+                @"^(?<which>this|last|next)(?:\s+(?<n>\d+))?\s+(?<unit>d|day|days|wk|week|weeks|mon|month|months|qtr|quarter|quarters|yr|year|years)$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!m.Success) return null;
+
+            var unit = m.Groups["unit"].Value.ToLowerInvariant() switch
+            {
+                "d" or "day" or "days" => "day",
+                "wk" or "week" or "weeks" => "week",
+                "mon" or "month" or "months" => "month",
+                "qtr" or "quarter" or "quarters" => "quarter",
+                _ => "year",
+            };
+            var count = m.Groups["n"].Success ? int.Parse(m.Groups["n"].Value) : 1;
+            var mode = m.Groups["which"].Value.ToLowerInvariant() switch { "this" => "duringCurrent", "last" => "duringPrevious", _ => "duringNext" };
+            return (mode, $"{(mode == "duringCurrent" ? 1 : Math.Max(1, count))}:{unit}");
         }
 
         private string ReadUntilDot()

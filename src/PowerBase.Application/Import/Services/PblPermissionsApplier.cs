@@ -185,15 +185,27 @@ public class PblPermissionsApplier
         }
     }
 
+    /// <summary>The role's current table permissions with the given tables set to "no access" — every other table keeps what it had.</summary>
+    public static List<TablePermissionInput> MergeRestriction(IEnumerable<TablePermissionRow> existing, IEnumerable<AppTable> restrictedTables)
+    {
+        var restricted = restrictedTables.DistinctBy(t => t.Id).ToDictionary(t => t.PublicId);
+        return existing
+            .Where(r => !restricted.ContainsKey(r.TablePublicId))
+            .Select(r => new TablePermissionInput(r.TablePublicId, r.ViewScope, r.ModifyScope, r.CanAdd, r.CanDelete, r.CanSaveSharedReports, r.CanEditFieldProperties, r.FieldAccessLevel))
+            .Concat(restricted.Values.Select(t => new TablePermissionInput(t.PublicId, RecordScopes.None, RecordScopes.None, false, false, false, false, TableFieldAccessLevels.FullAccess)))
+            .ToList();
+    }
+
     /// <summary>A restriction that could not be stored leaves the role with no access to that table.</summary>
     private async Task RestrictInsteadAsync(PblRole role, AppRoleDetail created, List<(AppTable Table, string Reason)> failedTables, List<ImportSkippedItem> skipped, CancellationToken ct)
     {
         if (failedTables.Count == 0)
             return;
 
-        var inputs = failedTables.Select(f => f.Table).DistinctBy(t => t.Id)
-            .Select(t => new TablePermissionInput(t.PublicId, RecordScopes.None, RecordScopes.None, false, false, false, false, TableFieldAccessLevels.FullAccess))
-            .ToList();
+        // Saving table permissions replaces ALL of the role's rows, so the restriction has to be merged into what the role already has:
+        // sending only the failed tables would wipe the role's access to every other table.
+        var existing = await _permRepo.GetTablePermissionsAsync(created.Id, ct);
+        var inputs = MergeRestriction(existing, failedTables.Select(f => f.Table));
 
         try
         {
@@ -233,7 +245,7 @@ public class PblPermissionsApplier
                     value = value == "1" ? "true" : "false";
 
                 var condition = new FilterCondition { FieldId = fid, Operator = c.Operator, Value = value };
-                if (c.ValueMode is "ask" or "today" or "yesterday" or "tomorrow")
+                if (c.ValueMode is "ask" or "today" or "yesterday" or "tomorrow" or "duringCurrent" or "duringPrevious" or "duringNext")
                 {
                     condition.ValueMode = c.ValueMode;
                 }

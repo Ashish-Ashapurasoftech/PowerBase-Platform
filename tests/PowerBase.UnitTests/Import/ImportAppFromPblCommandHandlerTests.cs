@@ -131,7 +131,7 @@ public class ImportAppFromPblCommandHandlerTests
             new PblDeferredResolver(null!, null!, _fieldRepo),
             new ImportFieldSanitizer(new FieldSettingsValidatorRegistry(Array.Empty<IFieldSettingsValidator>())),
             // The settings applier drives other handlers (update app/table/field, set key); it has its own tests — here it is a no-op.
-            Substitute.For<PblSettingsApplier>(new object?[] { null, null, null, null, null, null, null, null }),
+            Substitute.For<PblSettingsApplier>(new object?[] { null, null, null, null, null, null, null, null, null, null }),
             Substitute.For<PblPermissionsApplier>(new object?[] { null, null, null, null, null, null, null }));
     }
 
@@ -152,7 +152,7 @@ public class ImportAppFromPblCommandHandlerTests
         _tableRepo.NameExistsInAppAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(false);
 
-        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<bool>(), Arg.Any<CancellationToken>(), Arg.Any<bool>(), Arg.Any<bool>())
             .Returns(ci =>
             {
                 var t = ci.Arg<AppTable>();
@@ -379,8 +379,8 @@ public class ImportAppFromPblCommandHandlerTests
 
         var report = await sut.HandleAsync(new ImportAppFromPblCommand(PblWithFormulaReferencingUnknownField));
 
-        report.FieldsCreated.Should().Be(1); // only Qty; Total was never created
-        report.Skipped.Should().ContainSingle(s => s.Name == "Total" && s.Reason.Contains("manual review"));
+        report.FieldsCreated.Should().Be(2); // Qty, plus a repairable Text placeholder for Total (no real formula field)
+        report.Skipped.Should().ContainSingle(s => s.Name == "Total" && s.Reason.Contains("manual review") && s.Reason.Contains("placeholder"));
         report.FormulaTranslations.Should().ContainSingle(f => f.Name == "Total" && f.Status == "NeedsManualReview");
 
         await _fieldRepo.DidNotReceive().CreateAsync(

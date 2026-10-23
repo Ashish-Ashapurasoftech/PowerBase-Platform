@@ -25,5 +25,9 @@ public interface IAppSeeder
     /// users actually open. System fields and role permissions are always seeded regardless,
     /// since those are structural rather than something an import supplies.
     /// </param>
-    Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, bool seedDefaultViews = true, CancellationToken ct = default);
+    /// <param name="seedDefaultReports">With <paramref name="seedDefaultViews"/>: false skips "List All"/"List Changes" (the caller brings reports).</param>
+    /// <param name="seedDefaultForm">With <paramref name="seedDefaultViews"/>: false skips "Main Form" (the caller brings forms). An import that brings
+    /// reports but no form for a table still wants the default form, so the two are separate.</param>
+    Task<AppTable> CreateTableWithDefaultsAsync(AppTable table, long userId, bool seedDefaultViews = true, CancellationToken ct = default,
+        bool seedDefaultReports = true, bool seedDefaultForm = true);
 }

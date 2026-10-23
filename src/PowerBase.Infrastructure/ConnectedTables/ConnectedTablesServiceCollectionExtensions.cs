@@ -34,6 +34,7 @@ public static class ConnectedTablesServiceCollectionExtensions
 
         services.AddScoped<ConnectionHandlers>();
         services.AddScoped<ConnectedTableHandlers>();
+        services.AddScoped<ConnectExistingTableHandler>();
         services.AddScoped<ConnectedRunHandlers>();
         services.AddScoped<DataSharingHandlers>();
         return services;

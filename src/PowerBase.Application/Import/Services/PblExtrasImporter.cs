@@ -37,6 +37,10 @@ public class PblExtrasImporter
         _variableRepo = variableRepo;
     }
 
+    /// <summary>The app's variables as a formula variable schema (what <c>[Name]</c> resolves against).</summary>
+    public async Task<PowerBase.Formula.Binding.IVariableSchema> BuildVariableSchemaAsync(long appId, CancellationToken ct) =>
+        new PowerBase.Application.Formulas.AppVariableSchema(await _variableRepo.ListAsync(appId, ct));
+
     public async Task<int> CreateVariablesAsync(IEnumerable<PblVariable> variables, Guid appPublicId, List<ImportSkippedItem> skipped, CancellationToken ct)
     {
         var created = 0;
@@ -102,6 +106,83 @@ public class PblExtrasImporter
             catch (DomainException ex)
             {
                 skipped.Add(new ImportSkippedItem { LogicalRef = page.LogicalRef, Name = page.Name, Reason = $"Code page not created: {Describe(ex)}" });
+            }
+        }
+        return created;
+    }
+
+    /// <summary>Creates each dashboard as a PowerBase dashboard page. A report widget needs its report to exist (<paramref name="reportIdByRef"/>
+    /// maps the converted report's ref to the report created for it); a widget whose report was not created is left out and reported.</summary>
+    public async Task<int> CreateDashboardsAsync(
+        IEnumerable<PblDashboard> dashboards, Guid appPublicId, IReadOnlyDictionary<string, Guid> reportIdByRef, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        var created = 0;
+        var order = 0;
+        foreach (var dashboard in dashboards)
+        {
+            var definition = new PowerBase.Application.Pages.DashboardDefinition { Version = 2 };
+            var tabNumber = 0;
+            foreach (var tab in dashboard.Tabs)
+            {
+                tabNumber++;
+                var widgets = new List<PowerBase.Application.Pages.DashboardWidget>();
+                foreach (var w in tab.Widgets)
+                {
+                    Guid? reportId = w.ReportRef is not null && reportIdByRef.TryGetValue(w.ReportRef, out var id) ? id : null;
+                    if (w.ReportRef is not null && reportId is null)
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = dashboard.LogicalRef, Name = dashboard.Name, Reason = $"Dashboard widget skipped: its report ('{w.ReportRef.Split("::").Last()}') was not created." });
+                        continue;
+                    }
+
+                    var widget = new PowerBase.Application.Pages.DashboardWidget
+                    {
+                        Id = $"w{widgets.Count + 1}",
+                        WidgetType = w.WidgetType,
+                        Title = w.Title,
+                        ShowTitle = w.ShowTitle,
+                        Layout = new PowerBase.Application.Pages.DashboardWidgetLayout { X = w.X, Y = w.Y, W = w.W, H = w.H },
+                    };
+                    switch (w.WidgetType)
+                    {
+                        case PowerBase.Application.Pages.DashboardWidgetTypes.Report:
+                            widget.ReportPublicId = reportId!.Value;
+                            break;
+                        case PowerBase.Application.Pages.DashboardWidgetTypes.Text:
+                            widget.Content = w.Content;
+                            break;
+                        case PowerBase.Application.Pages.DashboardWidgetTypes.WebPage:
+                            widget.WebPageUrl = w.Url;
+                            break;
+                        case PowerBase.Application.Pages.DashboardWidgetTypes.ButtonBar:
+                            widget.Buttons.Add(new PowerBase.Application.Pages.DashboardBarButton
+                            {
+                                Id = "b1",
+                                Label = w.ButtonLabel ?? "Open",
+                                ActionType = reportId is not null ? "NavigateToReport" : "OpenUrl",
+                                Url = reportId is null ? w.Url : null,
+                                TargetReportId = reportId,
+                                OpenInNewTab = w.OpenInNewTab,
+                                BackgroundColor = w.ButtonColor,
+                            });
+                            break;
+                    }
+                    widgets.Add(widget);
+                }
+                definition.Tabs.Add(new PowerBase.Application.Pages.DashboardTab { Id = $"tab-{tabNumber}", Name = tab.Name, Widgets = widgets });
+            }
+
+            try
+            {
+                await _createPageHandler.HandleAsync(new CreatePageCommand(
+                    appPublicId, PageTypes.Dashboard, dashboard.Name, null, "Shared", null,
+                    System.Text.Json.JsonSerializer.Serialize(definition, new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase }),
+                    null, null, null, null, ShowInNav: true, NavOrder: order++, NavIcon: null), ct);
+                created++;
+            }
+            catch (DomainException ex)
+            {
+                skipped.Add(new ImportSkippedItem { LogicalRef = dashboard.LogicalRef, Name = dashboard.Name, Reason = $"Dashboard not created: {Describe(ex)}" });
             }
         }
         return created;

@@ -263,7 +263,7 @@ public class QblToPblConverterTests
     }
 
     [Fact]
-    public void Convert_EmptyFormula_SkippedWithWarning()
+    public void Convert_EmptyFormula_ImportedWithABlankResultAndWarning()
     {
         var result = Convert(TableWithFields("""
               $Field_Test_Formula:
@@ -273,7 +273,7 @@ public class QblToPblConverterTests
                   Formula:
             """));
 
-        result.Document.Tables[0].Fields.Should().BeEmpty();
+        result.Document.Tables[0].Fields.Should().ContainSingle().Which.FormulaExpression.Should().Be("\"\"");
         result.Issues.Should().ContainSingle(i => i.Code == "QBL_EMPTY_FORMULA" && i.Severity == PblIssueSeverity.Warning);
     }
 
@@ -502,7 +502,7 @@ public class QblToPblConverterTests
     }
 
     [Fact]
-    public void Convert_TwoReportsShareSameNameOnSameTable_SkipsRepeatWithWarningNotError()
+    public void Convert_TwoReportsShareSameNameOnSameTable_KeepsBothNumberedWithWarningNotError()
     {
         // Confirmed real bug from an actual production QBL export: Quickbase can carry multiple
         // auto-generated "Embedded for X" reports with the identical name on the same table (one
@@ -535,7 +535,8 @@ public class QblToPblConverterTests
 
         var result = Convert(yaml);
 
-        result.Document.Tables[0].Reports.Should().ContainSingle();
+        // Both are kept: PowerBase needs unique names per table, so the repeat is numbered instead of dropped.
+        result.Document.Tables[0].Reports.Select(r => r.Name).Should().Equal("Embedded for Departments", "Embedded for Departments (2)");
         result.Issues.Should().ContainSingle(i => i.Code == "QBL_DUPLICATE_REPORT_NAME");
 
         var validation = new PblValidator().Validate(result.Document);

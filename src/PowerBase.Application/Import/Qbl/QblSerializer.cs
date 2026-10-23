@@ -61,11 +61,20 @@ public static class QblSerializer
             }
         }
 
+        var external = new Dictionary<string, QblResourceNode>(StringComparer.Ordinal);
+        if (raw.TryGetValue("ExternalResources", out var extRaw) && extRaw is IDictionary<object, object> extDict)
+        {
+            foreach (var kv in extDict)
+                if (WalkValue(kv.Value, parameterDefinitions) is QblResourceNode node)
+                    external[kv.Key?.ToString() ?? ""] = node;
+        }
+
         return new QblDocument
         {
             Version = version,
             ParameterDefinitions = parameterDefinitions,
             Resources = resources,
+            ExternalResources = external,
         };
     }
 

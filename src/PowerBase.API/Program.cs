@@ -350,6 +350,8 @@ builder.Services.AddScoped<IImportSourceRefRepository, ImportSourceRefRepository
 builder.Services.AddScoped<IAppImportJobRepository, AppImportJobRepository>();
 builder.Services.AddScoped<IEmailTemplateRepository, EmailTemplateRepository>();
 builder.Services.AddSingleton<PowerBase.Application.Import.Jobs.AppImportJobQueue>();
+PowerBase.Application.Import.Jobs.ImportRuntime.ConfiguredCommandTimeoutSeconds =
+    builder.Configuration.GetValue("Import:SqlCommandTimeoutSeconds", PowerBase.Application.Import.Jobs.ImportRuntime.DEFAULT_COMMAND_TIMEOUT_SECONDS);
 builder.Services.AddScoped<PowerBase.Application.Import.Jobs.AppImportJobService>();
 builder.Services.AddScoped<PowerBase.Application.Import.Jobs.EmailTemplateService>();
 builder.Services.AddScoped<PowerBase.Application.Import.Jobs.AppImportJobRunner>();
@@ -501,6 +503,7 @@ builder.Services.AddScoped<PowerBase.Application.Import.Services.PblDeferredReso
 builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportFieldSanitizer>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblSettingsApplier>();
 builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPermissionsApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblConnectedTablesApplier>();
 builder.Services.AddScoped<PowerBase.Application.Import.Diff.ImportDiffBuilder>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportDiff.ImportDiffQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Commands.UpdateAppFromPbl.UpdateAppFromPblCommandHandler>();

@@ -8,6 +8,7 @@ using PowerBase.Application.Fields.Commands.UpdateField;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.FormulaTranslation;
 using PowerBase.Application.Import.Pbl;
+using PowerBase.Application.Relationships.Commands.UpdateReferenceFilter;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.ValueObjects;
@@ -32,12 +33,17 @@ public class PblSettingsApplier
     private readonly SetKeyCommandHandler _setKeyHandler;
     private readonly UpdateFieldCommandHandler _updateFieldHandler;
     private readonly FormulaTranslator _formulaTranslator;
+    private readonly IRelationshipRepository _relationshipRepo;
+    private readonly UpdateReferenceFilterCommandHandler _updateReferenceFilterHandler;
 
     public PblSettingsApplier(
         IAppRepository appRepo, IAppTableRepository tableRepo, IAppFieldRepository fieldRepo,
         UpdateAppCommandHandler updateAppHandler, UpdateAppBrandingCommandHandler updateBrandingHandler,
-        SetKeyCommandHandler setKeyHandler, UpdateFieldCommandHandler updateFieldHandler, FormulaTranslator formulaTranslator)
+        SetKeyCommandHandler setKeyHandler, UpdateFieldCommandHandler updateFieldHandler, FormulaTranslator formulaTranslator,
+        IRelationshipRepository relationshipRepo, UpdateReferenceFilterCommandHandler updateReferenceFilterHandler)
     {
+        _relationshipRepo = relationshipRepo;
+        _updateReferenceFilterHandler = updateReferenceFilterHandler;
         _appRepo = appRepo;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -46,6 +52,104 @@ public class PblSettingsApplier
         _setKeyHandler = setKeyHandler;
         _updateFieldHandler = updateFieldHandler;
         _formulaTranslator = formulaTranslator;
+    }
+
+    // ---- descriptions of lookup / summary / reference fields ----
+
+    /// <summary>The source's comment on a lookup, summary or reference field becomes the field's description. These fields are made by the
+    /// relationship handlers, which have no description input, so it is set afterwards.</summary>
+    public virtual async Task ApplyRelationshipFieldDescriptionsAsync(PblDocument document, Guid appPublicId, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        var rels = document.Relationships ?? [];
+        if (!rels.Any(r => r.ReferenceFieldDescription is not null || r.Lookups.Any(l => l.Description is not null) || r.Summaries.Any(s => s.Description is not null)))
+            return;
+
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var tables = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+        var tableNameByRef = (document.Tables ?? []).ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
+        var fieldCache = new Dictionary<long, IReadOnlyList<AppField>>();
+
+        async Task SetAsync(string tableRef, int? sourceId, string? label, string name, string description)
+        {
+            if (!tableNameByRef.TryGetValue(tableRef, out var tableName) || !tables.TryGetValue(tableName, out var table)) return;
+            if (!fieldCache.TryGetValue(table.Id, out var fields))
+                fieldCache[table.Id] = fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+            var field = fields.FirstOrDefault(f => sourceId.HasValue && f.Fid == sourceId)
+                ?? fields.FirstOrDefault(f => string.Equals(f.Label ?? f.Name, label ?? name, StringComparison.OrdinalIgnoreCase));
+            if (field is null || !string.IsNullOrWhiteSpace(field.Description)) return;
+            try
+            {
+                await _updateFieldHandler.HandleAsync(new UpdateFieldCommand(
+                    table.PublicId, field.PublicId, field.Label ?? field.Name, description.Length > 500 ? description[..500] : description, field.IsRequired, field.DefaultValue,
+                    field.IsSearchable, field.IsSortable, field.IsFilterable, field.IsReportable, field.IsAuditable,
+                    field.IsUnique, field.IsEncrypted, field.IsAutoFill, field.Settings, UPDATE_COMMIT_MESSAGE), ct);
+                fieldCache.Remove(table.Id);
+            }
+            catch (DomainException ex)
+            {
+                skipped.Add(new ImportSkippedItem { LogicalRef = tableRef, Name = field.Label ?? field.Name, Reason = $"Description not applied: {ex.Message}" });
+            }
+        }
+
+        foreach (var rel in rels)
+        {
+            if (rel.ReferenceFieldDescription is { } refDescription)
+                await SetAsync(rel.ChildTableRef, rel.ReferenceFieldSourceId, rel.ReferenceFieldLabel, rel.ReferenceFieldName, refDescription);
+            foreach (var l in rel.Lookups.Where(l => l.Description is not null))
+                await SetAsync(rel.ChildTableRef, l.SourceId, l.Label, l.Name, l.Description!);
+            foreach (var s in rel.Summaries.Where(s => s.Description is not null))
+                await SetAsync(rel.ParentTableRef, s.SourceId, s.Label, s.Name, s.Description!);
+        }
+    }
+
+    // ---- dependent dropdowns ----
+
+    /// <summary>Sets up the "choices depend on another field" filter of every reference field the source had one on. Needs both
+    /// tables' fields to exist, so it runs after the fields, lookups and formulas are in.</summary>
+    public virtual async Task ApplyReferenceFiltersAsync(PblDocument document, Guid appPublicId, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        var wanted = (document.Relationships ?? []).Where(r => r.ReferenceFilterFormFieldName is not null && r.ReferenceFilterParentFieldName is not null).ToList();
+        if (wanted.Count == 0) return;
+
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var tables = (await _tableRepo.ListByAppAsync(appId, ct)).ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+        var tableNameByRef = (document.Tables ?? []).ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
+
+        foreach (var rel in wanted)
+        {
+            try
+            {
+                if (!tableNameByRef.TryGetValue(rel.ChildTableRef, out var childName) || !tables.TryGetValue(childName, out var child)
+                    || !tableNameByRef.TryGetValue(rel.ParentTableRef, out var parentName) || !tables.TryGetValue(parentName, out var parent))
+                    continue;
+
+                var childFields = await _fieldRepo.ListByTableAsync(child.Id, ct);
+                var parentFields = await _fieldRepo.ListByTableAsync(parent.Id, ct);
+                var childMap = FieldFids.ByNameOrLabel(childFields);
+                var parentMap = FieldFids.ByNameOrLabel(parentFields);
+                if (!childMap.TryGetValue(rel.ReferenceFilterFormFieldName!, out var formFid) || !parentMap.TryGetValue(rel.ReferenceFilterParentFieldName!, out var parentFid))
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = rel.LogicalRef, Name = rel.ReferenceFieldName, Reason = "Dependent dropdown not set up: one of its two fields was not created." });
+                    continue;
+                }
+
+                var referenceField = childFields.FirstOrDefault(f => rel.ReferenceFieldSourceId.HasValue && f.Fid == rel.ReferenceFieldSourceId)
+                    ?? childFields.FirstOrDefault(f => string.Equals(f.Name, rel.ReferenceFieldName, StringComparison.OrdinalIgnoreCase));
+                var relationship = referenceField is null ? null : (await _relationshipRepo.ListByTableAsync(child.Id, ct)).FirstOrDefault(r => r.ReferenceFieldId == referenceField.Id);
+                if (relationship is null)
+                {
+                    skipped.Add(new ImportSkippedItem { LogicalRef = rel.LogicalRef, Name = rel.ReferenceFieldName, Reason = "Dependent dropdown not set up: the relationship was not found." });
+                    continue;
+                }
+
+                await _updateReferenceFilterHandler.HandleAsync(new UpdateReferenceFilterCommand(
+                    relationship.PublicId, [new ReferenceFilterConditionInput((int)formFid, (int)parentFid, null, null, null)]), ct);
+            }
+            catch (DomainException ex)
+            {
+                skipped.Add(new ImportSkippedItem { LogicalRef = rel.LogicalRef, Name = rel.ReferenceFieldName, Reason = $"Dependent dropdown not set up: {(ex is ValidationException ve ? string.Join(" ", ve.Errors.SelectMany(e => e.Value)) : ex.Message)}" });
+            }
+        }
     }
 
     // ---- app ----

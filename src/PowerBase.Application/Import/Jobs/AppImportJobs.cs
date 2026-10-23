@@ -25,6 +25,89 @@ public static class AppImportJobPolicy
     public static int CountApplications(string content) => Math.Max(1, ApplicationLine.Matches(content).Count);
 }
 
+/// <summary>Settings that only apply while an import runs. An import builds hundreds of tables/columns in one go, so its SQL
+/// commands get a longer timeout than a normal request (the default 30 s is not enough for a 74-table app).</summary>
+public static class ImportRuntime
+{
+    public const int DEFAULT_COMMAND_TIMEOUT_SECONDS = 300;
+
+    /// <summary>Process-wide value (from configuration <c>Import:SqlCommandTimeoutSeconds</c>).</summary>
+    public static int ConfiguredCommandTimeoutSeconds { get; set; } = DEFAULT_COMMAND_TIMEOUT_SECONDS;
+
+    private static readonly AsyncLocal<int?> _commandTimeout = new();
+    private static readonly AsyncLocal<FidPlan?> _fids = new();
+    private static readonly AsyncLocal<PowerBase.Formula.Binding.IVariableSchema?> _variables = new();
+
+    /// <summary>The app variables of the app being imported, once they exist. Formulas that read a variable (<c>[1226]</c>, <c>[Tax]</c>)
+    /// only compile when the translator can see them, so the importer sets this right after creating the variables and before any
+    /// formula is translated. Set inside the importing method, so it never leaks to the caller or another app.</summary>
+    public static PowerBase.Formula.Binding.IVariableSchema? Variables
+    {
+        get => _variables.Value;
+        set => _variables.Value = value;
+    }
+
+    /// <summary>Field numbers (Fids) an import wants to keep. A Quickbase field's <c>Id</c> becomes the PowerBase Fid, so formulas,
+    /// record URLs (<c>_fid_10=</c>) and criteria written with Quickbase ids stay correct. Two parts: the number a field is
+    /// <i>expected</i> to get (by table and label — for fields created through relationship handlers), and a per-table <i>floor</i>
+    /// so fields PowerBase creates by itself never take a number a source field still needs.</summary>
+    public sealed class FidPlan
+    {
+        private readonly Dictionary<(long Table, string Label), int> _expected = new();
+        private readonly Dictionary<long, int> _floor = new();
+        private readonly List<string> _fallbacks = new();
+
+        public void Expect(long tableId, string label, int fid) => _expected[(tableId, label.Trim().ToLowerInvariant())] = fid;
+
+        public bool TryTake(long tableId, string label, out int fid)
+        {
+            var key = (tableId, label.Trim().ToLowerInvariant());
+            if (_expected.Remove(key, out fid)) return true;
+            fid = 0;
+            return false;
+        }
+
+        public void SetFloor(long tableId, int floor) => _floor[tableId] = Math.Max(_floor.GetValueOrDefault(tableId), floor);
+        public int FloorOf(long tableId) => _floor.GetValueOrDefault(tableId);
+
+        public void NoteFallback(string message) => _fallbacks.Add(message);
+        public IReadOnlyList<string> Fallbacks => _fallbacks;
+
+        /// <summary>Takes the notes collected so far (so each app's report only lists its own).</summary>
+        public List<string> DrainFallbacks()
+        {
+            var all = _fallbacks.ToList();
+            _fallbacks.Clear();
+            return all;
+        }
+    }
+
+    /// <summary>The plan of the import running on this logical thread, or null outside an import.</summary>
+    public static FidPlan? Fids => _fids.Value;
+
+    /// <summary>The command timeout (seconds) for the import running on this logical thread, or null outside an import.</summary>
+    public static int? CommandTimeoutSeconds => _commandTimeout.Value;
+
+    /// <summary>Starts an import scope; dispose to go back to the normal timeout.</summary>
+    public static IDisposable Begin()
+    {
+        var previous = _commandTimeout.Value;
+        var previousFids = _fids.Value;
+        _commandTimeout.Value = Math.Max(30, ConfiguredCommandTimeoutSeconds);
+        _fids.Value = new FidPlan();
+        return new Scope(previous, previousFids);
+    }
+
+    private sealed class Scope(int? previous, FidPlan? previousFids) : IDisposable
+    {
+        public void Dispose()
+        {
+            _commandTimeout.Value = previous;
+            _fids.Value = previousFids;
+        }
+    }
+}
+
 /// <summary>Lets the import report how far along it is without every handler needing to know whether anyone is listening:
 /// a background job sets <see cref="Current"/> for the duration of its run; synchronous imports leave it null and the
 /// calls do nothing.</summary>

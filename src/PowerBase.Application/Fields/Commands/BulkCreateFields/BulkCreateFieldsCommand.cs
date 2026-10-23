@@ -17,6 +17,8 @@ public record BulkCreateFieldItem(
     /// type's default off; null or true keeps the type's own default (a type that cannot be searched/reported is never forced on).</summary>
     string? HelpText = null,
     bool? IsSearchable = null,
-    bool? IsReportable = null);
+    bool? IsReportable = null,
+    /// <summary>Internal-only (QBL/PBL import): keep this Fid (the source field's Quickbase id). Falls back to the next free number when it cannot be kept.</summary>
+    int? Fid = null);
 
 public record BulkCreateFieldsCommand(Guid TablePublicId, IReadOnlyList<BulkCreateFieldItem> Fields);

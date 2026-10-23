@@ -90,6 +90,7 @@ public class PblDeferredResolver
         {
             var childFields = await _fieldRepo.ListByTableAsync(item.ChildTable.Id, ct);
             var map = FieldFids.ByNameOrLabel(childFields);
+            var lookupSources = await SummaryLookupSources.LoadAsync(childFields, _fieldRepo, ct);
 
             // Count / Exists have no target field. Anything else waits until its target exists.
             long? targetFid = null;
@@ -133,7 +134,7 @@ public class PblDeferredResolver
             try
             {
                 var target = targetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == targetFid) : null;
-                SummaryTargetValidator.Validate(function, (int?)targetFid, target, item.Summary.TargetSubField);
+                SummaryTargetValidator.Validate(function, (int?)targetFid, target, item.Summary.TargetSubField, lookupSources: lookupSources);
                 await _addSummaryHandler.HandleAsync(new AddSummaryFieldCommand(
                     item.RelationshipPublicId, item.Summary.Label ?? item.Summary.Name, function, (int?)targetFid, matching), ct);
                 added++;

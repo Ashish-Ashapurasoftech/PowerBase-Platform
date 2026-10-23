@@ -70,6 +70,7 @@ public class ImportAppFromPblCommandHandler
 {
     /// <summary>Upper bound on lookup/summary/formula dependency rounds; each round must make progress, so it usually ends sooner.</summary>
     private const int MAX_DEPENDENCY_ROUNDS = 8;
+    private const int PLACEHOLDER_DESCRIPTION_MAX = 500;
 
     private readonly PblValidator _validator;
     private readonly CreateAppCommandHandler _createAppHandler;
@@ -97,6 +98,7 @@ public class ImportAppFromPblCommandHandler
     private readonly ImportFieldSanitizer _fieldSanitizer;
     private readonly PblSettingsApplier _settingsApplier;
     private readonly PblPermissionsApplier _permissionsApplier;
+    private readonly PblConnectedTablesApplier? _connectedTablesApplier;
 
     public ImportAppFromPblCommandHandler(
         PblValidator validator,
@@ -124,8 +126,10 @@ public class ImportAppFromPblCommandHandler
         PblDeferredResolver deferredResolver,
         ImportFieldSanitizer fieldSanitizer,
         PblSettingsApplier settingsApplier,
-        PblPermissionsApplier permissionsApplier)
+        PblPermissionsApplier permissionsApplier,
+        PblConnectedTablesApplier? connectedTablesApplier = null)
     {
+        _connectedTablesApplier = connectedTablesApplier;
         _validator = validator;
         _createAppHandler = createAppHandler;
         _deleteAppHandler = deleteAppHandler;
@@ -189,10 +193,14 @@ public class ImportAppFromPblCommandHandler
     public async Task<ImportReport> HandleAsync(ImportAppFromPblCommand command, CancellationToken ct = default)
     {
         RequireCreateMode(command);
+        using var importScope = ImportRuntime.Begin();
         var apps = ParseUploaded(command.PblJson);
         if (apps.Count > 1)
             throw new BadRequestException("IMPORT_MULTIPLE_APPS", "This file contains several applications; import it with the multi-application import.");
-        return await ImportOneAsync(apps[0], command.Mapping?.ExcludedTableRefs, null, ct);
+        var single = await ImportOneAsync(apps[0], command.Mapping?.ExcludedTableRefs, null, ct);
+        if (_connectedTablesApplier is not null)
+            await _connectedTablesApplier.ApplyAsync([(apps[0].Document, single)], ct); // reports a connected table whose source app is not here
+        return single;
     }
 
     /// <summary>
@@ -204,6 +212,7 @@ public class ImportAppFromPblCommandHandler
     public async Task<ImportBatchReport> HandleBatchAsync(ImportAppFromPblCommand command, CancellationToken ct = default)
     {
         RequireCreateMode(command);
+        using var importScope = ImportRuntime.Begin();
         var mapping = command.Mapping ?? new ImportMapping();
         var apps = ParseUploaded(command.PblJson);
 
@@ -220,6 +229,7 @@ public class ImportAppFromPblCommandHandler
             throw new BadRequestException("APP_NAME_DUPLICATED_IN_FILE", "Two applications were given the same name.");
 
         var batch = new ImportBatchReport();
+        var importedDocuments = new List<(PblDocument Document, ImportReport Report)>();
         for (var i = 0; i < included.Count; i++)
         {
             var app = included[i];
@@ -231,7 +241,9 @@ public class ImportAppFromPblCommandHandler
             ImportProgress.BeginApp(i, included.Count, nameOverride ?? app.Document.App?.Name ?? app.AppRef);
             try
             {
-                batch.Apps.Add(await ImportOneAsync(app, excluded, nameOverride, ct));
+                var report = await ImportOneAsync(app, excluded, nameOverride, ct);
+                batch.Apps.Add(report);
+                importedDocuments.Add((app.Document, report));
             }
             catch (Exception ex) when (included.Count > 1 && ex is not OperationCanceledException)
             {
@@ -249,7 +261,179 @@ public class ImportAppFromPblCommandHandler
             }
         }
 
+        // Connected tables can only be set up once the application they read from exists.
+        if (_connectedTablesApplier is not null && importedDocuments.Count > 0)
+        {
+            ImportProgress.Report("Connecting tables", 97);
+            try { await _connectedTablesApplier.ApplyAsync(importedDocuments, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                foreach (var (_, report) in importedDocuments)
+                    report.Skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "Connected tables", Reason = $"Connected tables were not set up ({ex.Message})." });
+            }
+        }
+
         return batch;
+    }
+
+    /// <summary>Why a summary is still waiting after every round: the target field, or a field its filter uses, was never created.
+    /// (A Count/Exists summary has no target — saying "target '' was not created" hid the real blocker.)</summary>
+    private async Task<string> DescribeBlockedSummaryAsync(DeferredSummary item, CancellationToken ct)
+    {
+        var childFields = await _fieldRepo.ListByTableAsync(item.ChildTable.Id, ct);
+        var map = FieldFids.ByNameOrLabel(childFields);
+
+        if (item.Summary.TargetFieldName is { Length: > 0 } target && !map.ContainsKey(target))
+            return $"Summary target field '{target}' was not created on '{item.ChildTable.Name}'.";
+
+        var missing = new List<string>();
+        void Walk(PblFilterGroup? group)
+        {
+            if (group is null) return;
+            foreach (var c in group.Conditions)
+            {
+                if (!map.ContainsKey(c.FieldName)) missing.Add(c.FieldName);
+                if (c.ValueFieldName is { Length: > 0 } other && !map.ContainsKey(other)) missing.Add(other);
+            }
+            foreach (var g in group.Groups) Walk(g);
+        }
+        Walk(item.Summary.Filter);
+
+        return missing.Count > 0
+            ? $"Summary not created: its filter uses field(s) {string.Join(", ", missing.Distinct().Select(m => $"'{m}'"))} that were not created on '{item.ChildTable.Name}'."
+            : $"Summary could not be created on '{item.ChildTable.Name}' (waiting for a field that never appeared).";
+    }
+
+    /// <summary>A lookup, summary or formula that still could not be created after every retry gets a plain Text field with the same name
+    /// and Fid, so the field exists, forms/reports/rules that refer to it resolve, and it can be repaired by hand. The original definition
+    /// and the reason are kept in the field's description. New-app imports only (the update flow does not renumber).</summary>
+    private async Task<int> CreatePlaceholderFieldsAsync(
+        PblDocument document,
+        List<PblRelationship> relationships,
+        Dictionary<string, string> tableNameByRef,
+        Dictionary<string, AppTable> tableByName,
+        List<ImportSkippedItem> skipped,
+        List<FormulaTranslationReportItem> formulaTranslations,
+        CancellationToken ct)
+    {
+        if (ImportRuntime.Fids is null) return 0;
+
+        var reasonByRef = new Dictionary<string, ImportSkippedItem>(StringComparer.Ordinal);
+        foreach (var s in skipped.Where(s => !string.IsNullOrEmpty(s.LogicalRef)))
+            reasonByRef.TryAdd(s.LogicalRef, s);
+
+        var wanted = new List<(string TableName, string Ref, string Name, string? Label, int? Fid, string Original, string? Help)>();
+        foreach (var rel in relationships)
+        {
+            if (rel.Lookups.Count > 0 && tableNameByRef.TryGetValue(rel.ChildTableRef, out var childName))
+                foreach (var l in rel.Lookups.Where(l => reasonByRef.ContainsKey(l.LogicalRef)))
+                    wanted.Add((childName, l.LogicalRef, l.Name, l.Label, l.SourceId, $"Lookup of '{l.SourceFieldName}' from the related '{rel.ReferenceFieldName}' record", null));
+            if (rel.Summaries.Count > 0 && tableNameByRef.TryGetValue(rel.ParentTableRef, out var parentName))
+                foreach (var sm in rel.Summaries.Where(sm => reasonByRef.ContainsKey(sm.LogicalRef)))
+                    wanted.Add((parentName, sm.LogicalRef, sm.Name, sm.Label, sm.SourceId,
+                        $"Summary: {sm.Function}{(sm.TargetFieldName is { Length: > 0 } t ? $" of '{t}'" : "")}{(string.IsNullOrWhiteSpace(sm.QueryCriteria) ? "" : $" where {sm.QueryCriteria}")}", null));
+        }
+        foreach (var table in document.Tables ?? [])
+            foreach (var f in (table.Fields ?? []).Where(IsFormulaField).Where(f => reasonByRef.ContainsKey(f.LogicalRef)))
+                wanted.Add((table.Name, f.LogicalRef, f.Name, f.Label, KeptFid(f), $"Formula: {f.FormulaExpression}", f.HelpText));
+
+        var created = 0;
+        foreach (var group in wanted.GroupBy(w => w.TableName, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!tableByName.TryGetValue(group.Key, out var table)) continue;
+
+            var existing = await _fieldRepo.ListByTableAsync(table.Id, ct);
+            var usedLabels = existing.Select(f => (f.Label ?? "").Trim()).Where(l => l.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var usedNames = existing.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var items = new List<BulkCreateFieldItem>();
+            foreach (var w in group)
+            {
+                if (usedNames.Contains(w.Name)) continue; // something with this name exists already
+                var label = UniqueLabel((w.Label ?? w.Name).Trim(), usedLabels);
+                var reason = reasonByRef[w.Ref].Reason;
+                var description = $"Placeholder created by the import - repair or replace it. Original definition - {w.Original}. Why it could not be created - {reason}";
+                // A field description holds 500 characters at most; a longer one rejected the whole batch for the table.
+                if (description.Length > PLACEHOLDER_DESCRIPTION_MAX)
+                    description = description[..(PLACEHOLDER_DESCRIPTION_MAX - 1)] + "…";
+                items.Add(new BulkCreateFieldItem("Text", label,
+                    Description: description,
+                    Name: w.Name, HelpText: w.Help, Fid: w.Fid));
+            }
+            if (items.Count == 0) continue;
+
+            try
+            {
+                await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
+                created += items.Count;
+                foreach (var w in group)
+                {
+                    if (reasonByRef.TryGetValue(w.Ref, out var s) && skipped.IndexOf(s) is var at and >= 0)
+                        skipped[at] = new ImportSkippedItem { LogicalRef = s.LogicalRef, Name = s.Name, Reason = s.Reason + " A repairable placeholder text field was created in its place." };
+                    formulaTranslations.FirstOrDefault(t => t.LogicalRef == w.Ref)?.Diagnostics.Add("A placeholder text field was created in its place.");
+                }
+            }
+            catch (DomainException ex)
+            {
+                skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = $"Placeholder fields on '{group.Key}'", Reason = $"Placeholders could not be created: {Describe(ex)}" });
+            }
+        }
+        return created;
+    }
+
+    /// <summary>The app's variables, for the formula translator. The caller assigns <see cref="ImportRuntime.Variables"/> itself.</summary>
+    private async Task<PowerBase.Formula.Binding.IVariableSchema> LoadVariableSchemaAsync(Guid appPublicId, CancellationToken ct)
+    {
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        return await _extrasImporter.BuildVariableSchemaAsync(appId, ct);
+    }
+
+    /// <summary>The Quickbase id to keep as the Fid of a field created by this import. Only a new-app import keeps ids (the update
+    /// flow adds fields to an app that already has its own numbering).</summary>
+    private static int? KeptFid(PblField field) => ImportRuntime.Fids is null ? null : field.SourceId;
+
+    /// <summary>Tells the Fid policy what the source fields are numbered: for every table the highest source id (so fields PowerBase
+    /// creates by itself stay above it) and the numbers of the reference, lookup and summary fields the relationship handlers create.</summary>
+    private async Task RegisterSourceFidsAsync(PblDocument document, Guid appPublicId, CancellationToken ct)
+    {
+        var plan = ImportRuntime.Fids;
+        if (plan is null) return;
+
+        var appId = await _appRepo.GetIdByPublicIdAsync(appPublicId, ct);
+        var tables = await _tableRepo.ListByAppAsync(appId, ct);
+        var tableByName = tables.ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+        var nameByRef = (document.Tables ?? []).ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
+
+        void Floor(string tableRef, int? id)
+        {
+            if (id is { } fid && nameByRef.TryGetValue(tableRef, out var name) && tableByName.TryGetValue(name, out var t))
+                plan.SetFloor(t.Id, fid);
+        }
+        void Expect(string tableRef, string label, int? id)
+        {
+            if (id is { } fid && nameByRef.TryGetValue(tableRef, out var name) && tableByName.TryGetValue(name, out var t))
+                plan.Expect(t.Id, label, fid);
+        }
+
+        foreach (var table in document.Tables ?? [])
+            foreach (var f in table.Fields ?? [])
+                Floor(table.LogicalRef, f.SourceId);
+
+        foreach (var rel in document.Relationships ?? [])
+        {
+            Floor(rel.ChildTableRef, rel.ReferenceFieldSourceId);
+            Expect(rel.ChildTableRef, rel.ReferenceFieldLabel ?? rel.ReferenceFieldName, rel.ReferenceFieldSourceId);
+            foreach (var l in rel.Lookups)
+            {
+                Floor(rel.ChildTableRef, l.SourceId);
+                Expect(rel.ChildTableRef, l.Label ?? l.Name, l.SourceId);
+            }
+            foreach (var sm in rel.Summaries)
+            {
+                Floor(rel.ParentTableRef, sm.SourceId);
+                Expect(rel.ParentTableRef, sm.Label ?? sm.Name, sm.SourceId);
+            }
+        }
     }
 
     /// <summary>Message a person importing may see. Internal detail only outside production-like settings.</summary>
@@ -332,7 +516,7 @@ public class ImportAppFromPblCommandHandler
                 fieldSpecs.Add(new AppFieldSpec(
                     uniqueLabel, item.TypeCode, item.Settings, Name: item.Name, Description: item.Description, HelpText: item.HelpText,
                     IsRequired: item.IsRequired, DefaultValue: item.DefaultValue, IsAuditable: item.IsAuditable,
-                    IsSearchable: item.IsSearchable, IsReportable: item.IsReportable));
+                    IsSearchable: item.IsSearchable, IsReportable: item.IsReportable, Fid: KeptFid(field)));
             }
 
             // Only let the seeder add its stock "Main Form"/"List All"/"List Changes" when this
@@ -340,8 +524,10 @@ public class ImportAppFromPblCommandHandler
             // real Quickbase export carries both a "Main Form" and its own "List All"), and
             // seeding alongside them leaves two of each with the *empty* seeded copy marked
             // default, so that's the one users would open.
-            var suppliesOwnViews = (table.Reports ?? []).Count > 0
-                || (document.Forms ?? []).Any(f => f.TableRef == table.LogicalRef);
+            // The stock views are seeded per kind: a table that brings reports but no form (legacy-only Quickbase tables) still gets
+            // PowerBase's default "Main Form", and a table that brings forms but no report still gets "List All".
+            var suppliesReports = (table.Reports ?? []).Count > 0;
+            var suppliesForms = (document.Forms ?? []).Any(f => f.TableRef == table.LogicalRef);
 
             tableSpecs.Add(new TableSpec(
                 table.Name,
@@ -351,7 +537,9 @@ public class ImportAppFromPblCommandHandler
                 table.Description,
                 Config: null,
                 Fields: fieldSpecs,
-                SeedDefaultViews: !suppliesOwnViews,
+                SeedDefaultViews: true,
+                SeedDefaultReports: !suppliesReports,
+                SeedDefaultForm: !suppliesForms,
                 Alias: table.AliasHint));
         }
 
@@ -377,12 +565,16 @@ public class ImportAppFromPblCommandHandler
         // without blocking every other user of that tenant.
         try
         {
+            await RegisterSourceFidsAsync(document, createResult.PublicId, ct);
             await _settingsApplier.ApplyAppSettingsAsync(document.App, createResult.PublicId, skipped, ct);
             await _settingsApplier.ApplyTableKeysAsync(document, createResult.PublicId, skipped, ct);
             ImportProgress.Report("Creating roles, relationships and formulas", 30);
             applied = await ApplyDocumentAsync(document, createResult.PublicId, null, skipped, formulaTranslations, ct);
             ImportProgress.Report("Applying table settings", 92);
             await _settingsApplier.ApplyTableSettingsAsync(document, createResult.PublicId, skipped, ct);
+            await _settingsApplier.ApplyReferenceFiltersAsync(document, createResult.PublicId, skipped, ct);
+            await _settingsApplier.ApplyRelationshipFieldDescriptionsAsync(document, createResult.PublicId, skipped, ct);
+            ImportRuntime.Variables = await LoadVariableSchemaAsync(createResult.PublicId, ct); // the value set inside ApplyDocumentAsync does not reach this method
             await _settingsApplier.ApplyCustomDataRulesAsync(document, createResult.PublicId, skipped, ct);
         }
         catch (Exception ex)
@@ -413,6 +605,9 @@ public class ImportAppFromPblCommandHandler
         {
             skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "Source references", Reason = $"The app was imported, but its source references could not be saved ({ex.Message}); a later update will match by name instead." });
         }
+
+        foreach (var note in ImportRuntime.Fids?.DrainFallbacks() ?? [])
+            skipped.Add(new ImportSkippedItem { LogicalRef = "", Name = "Field number", Reason = note });
 
         return new ImportReport
         {
@@ -453,9 +648,16 @@ public class ImportAppFromPblCommandHandler
         var formsCreated = 0;
         var formRulesCreated = 0;
         var rolesCreated = 0;
+        var dashboardsCreated = 0;
         var relationships = document.Relationships ?? [];
         var forms = document.Forms ?? [];
         var roles = document.Roles ?? [];
+
+        // Variables first: a formula that reads one ([1226], [Tax]) only compiles when the translator can see it.
+        ImportProgress.Report("Creating variables", 33);
+        var variablesCreated = await _extrasImporter.CreateVariablesAsync(document.Variables ?? [], appPublicId, skipped, ct);
+        // Assigned here, not inside a helper: an AsyncLocal set in an awaited callee does not reach its caller.
+        ImportRuntime.Variables = await LoadVariableSchemaAsync(appPublicId, ct);
 
         var hasFormulasReportsRelationshipsFormsOrRoles = relationships.Count > 0 || forms.Count > 0 || roles.Count > 0 || (document.Tables ?? []).Any(t =>
             (t.Fields ?? []).Any(IsFormulaField) || (t.Reports ?? []).Count > 0);
@@ -513,12 +715,14 @@ public class ImportAppFromPblCommandHandler
             foreach (var l in deferredLookups)
                 skipped.Add(new ImportSkippedItem { LogicalRef = l.Lookup.LogicalRef, Name = l.Lookup.Name, Reason = $"Lookup source field '{l.Lookup.SourceFieldName}' was not created on '{l.ParentTable.Name}'." });
             foreach (var sm in deferredSummaries)
-                skipped.Add(new ImportSkippedItem { LogicalRef = sm.Summary.LogicalRef, Name = sm.Summary.Name, Reason = $"Summary target field '{sm.Summary.TargetFieldName}' was not created on '{sm.ChildTable.Name}'." });
+                skipped.Add(new ImportSkippedItem { LogicalRef = sm.Summary.LogicalRef, Name = sm.Summary.Name, Reason = await DescribeBlockedSummaryAsync(sm, ct) });
             foreach (var (_, field) in pendingFormulas)
             {
                 var diagnostics = formulaTranslations.FirstOrDefault(t => t.LogicalRef == field.LogicalRef)?.Diagnostics ?? [];
                 skipped.Add(new ImportSkippedItem { LogicalRef = field.LogicalRef, Name = field.Name, Reason = $"Formula needs manual review: {string.Join("; ", diagnostics)}" });
             }
+
+            fieldsCreated += await CreatePlaceholderFieldsAsync(document, relationships, tableNameByRef, tableByName, skipped, formulaTranslations, ct);
 
             ImportProgress.Report("Creating reports", 68);
             // Role refs → the roles this app has now, for report visibility.
@@ -600,6 +804,30 @@ public class ImportAppFromPblCommandHandler
                     reportsCreated++;
                     createdReports[report.LogicalRef] = new CreatedReport(createdReport.Id, report.Name, createdTable.PublicId);
                 }
+
+                // Every table needs a default report everyone can open. When all of this table's reports are restricted to some roles,
+                // none may become the default (see above), so PowerBase's own "List All" is added instead of leaving the table without one.
+                if (!tableHasDefaultReport)
+                {
+                    var taken = pblReports.Select(r => r.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var name = "List All";
+                    for (var n = 2; taken.Contains(name); n++)
+                        name = $"List All ({n})";
+                    await _reportRepo.CreateAsync(new Report
+                    {
+                        AppTableId = createdTable.Id,
+                        OwnerId = createdTable.CreatedBy,
+                        Name = name,
+                        ReportType = "Table",
+                        Visibility = "Shared",
+                        Definition = JsonSerializer.Serialize(new ReportDefinition()),
+                        IsDefault = true,
+                        DisplayOrder = 1,
+                    }, ct);
+                    tableHasDefaultReport = true;
+                    skipped.Add(new ImportSkippedItem { LogicalRef = table.LogicalRef, Name = table.Name,
+                        Reason = $"Every report of '{table.Name}' is limited to some roles, so a default report '{name}' (all fields, everyone) was added." });
+                }
             }
 
             if (forms.Count > 0)
@@ -607,9 +835,18 @@ public class ImportAppFromPblCommandHandler
                 ImportProgress.Report("Creating forms and rules", 80);
                 var createdFormLayouts = await CreateFormsAsync(forms, tableNameByRef, tableByName, tablesKeepingDefaults, createdReports, relationships, skipped, ct);
                 formsCreated = createdFormLayouts.Count;
+                await ApplyFormRoleDefaultsAsync(document, createdFormLayouts, tableNameByRef, tableByName, roleIdsByRef, skipped, ct);
 
                 if (forms.Any(f => f.Rules.Count > 0))
                     formRulesCreated = await CreateFormRulesAsync(forms, createdFormLayouts, tableNameByRef, tableByName, skipped, ct);
+            }
+
+            // Dashboards point at reports, so they come after the reports (and charts) exist.
+            if ((document.Dashboards ?? []).Count > 0)
+            {
+                ImportProgress.Report("Creating dashboards", 85);
+                dashboardsCreated = await _extrasImporter.CreateDashboardsAsync(
+                    document.Dashboards!, appPublicId, createdReports.ToDictionary(kv => kv.Key, kv => kv.Value.PublicId, StringComparer.Ordinal), skipped, ct);
             }
         }
 
@@ -618,9 +855,8 @@ public class ImportAppFromPblCommandHandler
         ImportProgress.Report("Applying permissions", 88);
         await _permissionsApplier.ApplyAsync(document, appPublicId, skipped, ct);
 
-        ImportProgress.Report("Creating variables and pages", 90);
-        var variablesCreated = await _extrasImporter.CreateVariablesAsync(document.Variables ?? [], appPublicId, skipped, ct);
-        var pagesCreated = await _extrasImporter.CreatePagesAsync(document.Pages ?? [], appPublicId, skipped, ct);
+        ImportProgress.Report("Creating pages", 90);
+        var pagesCreated = await _extrasImporter.CreatePagesAsync(document.Pages ?? [], appPublicId, skipped, ct) + dashboardsCreated;
 
         return new PblApplyResult(fieldsCreated, reportsCreated, relationshipsCreated, formsCreated, formRulesCreated, rolesCreated, variablesCreated, pagesCreated);
     }
@@ -725,6 +961,82 @@ public class ImportAppFromPblCommandHandler
             }
         }
 
+        // Summary reports: "Rows" group levels, summarize-data columns and the crosstab column. PowerBase needs at least one group, so a report
+        // with none that can be created is grouped by Record ID# (and says so) instead of being lost.
+        List<RowGroupLevelCommand>? rowGroupLevels = null;
+        List<RowGroupLevelCommand>? recordIdGroup = null;
+        var aggregations = new List<SummaryAggregationCommand>();
+        ChartConfigCommand? crosstab = null;
+        if (report.ReportType == "Summary")
+        {
+            RowGroupLevelCommand? Level(PblSummaryGroup g)
+            {
+                if (!byName.TryGetValue(g.FieldName, out var fid)) return null;
+                var type = fields.First(f => f.Fid == fid).TypeCode;
+                var mode = GroupByModeCategoryHelper.GetAllowedGroupByModes(type).Contains(g.GroupMode, StringComparer.OrdinalIgnoreCase) ? g.GroupMode : "EqualValues";
+                return new RowGroupLevelCommand(fid, mode);
+            }
+
+            var recordId = fields.FirstOrDefault(f => f.Fid == 3);
+            recordIdGroup = recordId?.Fid is { } rid ? [new RowGroupLevelCommand(rid, "EqualValues")] : null;
+
+            rowGroupLevels = report.SummaryRows.Select(Level).OfType<RowGroupLevelCommand>().ToList();
+            if (rowGroupLevels.Count == 0 && recordIdGroup is not null)
+            {
+                rowGroupLevels = recordIdGroup;
+                skipped.Add(new ImportSkippedItem { LogicalRef = report.LogicalRef, Name = report.Name,
+                    Reason = "Summary report has no group that could be created; it is grouped by Record ID# so it exists and can be repaired." });
+            }
+
+            foreach (var agg in report.Aggregations)
+                if (byName.TryGetValue(agg.FieldName, out var aggFid))
+                    aggregations.Add(new SummaryAggregationCommand(aggFid, agg.Function, agg.DisplayAs));
+
+            if (report.SummaryCrosstab is { } crosstabGroup && Level(crosstabGroup) is { } ctLevel)
+                crosstab = new ChartConfigCommand(
+                    "Bar", ctLevel.FieldId, ctLevel.GroupByMode, null, null, null, null, false, "Labels", "Asc", null, null, false, false, null);
+        }
+
+        // Chart reports: the category (what the chart is grouped by), an optional series, the measured values and the gauge field.
+        long? chartGroupBy = null;
+        var chartGroupMode = "EqualValues";
+        ChartConfigCommand? chartConfig = null;
+        if (report.ReportType == "Chart" && report.Chart is { } pc)
+        {
+            (long Fid, string Mode)? Resolve(PblSummaryGroup? g)
+            {
+                if (g is null || !byName.TryGetValue(g.FieldName, out var fid)) return null;
+                var type = fields.First(f => f.Fid == fid).TypeCode;
+                var mode = GroupByModeCategoryHelper.GetAllowedGroupByModes(type).Contains(g.GroupMode, StringComparer.OrdinalIgnoreCase) ? g.GroupMode : "EqualValues";
+                return (fid, mode);
+            }
+
+            long? gaugeFid = null;
+            if (pc.ChartType == "Gauge")
+            {
+                gaugeFid = pc.GaugeFieldName is { } gn && byName.TryGetValue(gn, out var gf) ? gf : null;
+                chartGroupBy = gaugeFid;
+            }
+            else if (Resolve(pc.Category) is { } cat)
+            {
+                chartGroupBy = cat.Fid;
+                chartGroupMode = cat.Mode;
+            }
+
+            var series = pc.ChartType == "Pie" || pc.ChartType == "Gauge" ? null : Resolve(pc.Series);
+            foreach (var agg in report.Aggregations)
+                if (byName.TryGetValue(agg.FieldName, out var aggFid))
+                    aggregations.Add(new SummaryAggregationCommand(aggFid, agg.Function, agg.DisplayAs));
+            // A chart with a series can only show one measured value.
+            if (series is not null && aggregations.Count > 1)
+                aggregations = aggregations.Take(1).ToList();
+
+            chartConfig = new ChartConfigCommand(
+                pc.ChartType, series?.Fid, series?.Mode ?? "EqualValues", null, null, null, null, false, pc.SortBy, pc.SortDirection,
+                pc.GoalValue, pc.GoalLabel, pc.DataLabelsVisible, false, null,
+                GaugeFieldId: gaugeFid, GaugeFunction: pc.ChartType == "Gauge" ? pc.GaugeFunction : null);
+        }
+
         // Visibility from the source's per-role "listed" switches.
         var visibility = "Shared";
         List<Guid>? visibleRoles = null;
@@ -759,22 +1071,24 @@ public class ImportAppFromPblCommandHandler
             Description: report.Description,
             Visibility: minimal ? (visibility == "Personal" ? "Personal" : "Shared") : visibility,
             ReportType: report.ReportType,
-            Columns: columns,
-            SortFields: sortFields,
+            Columns: report.ReportType is "Summary" or "Chart" ? [] : columns,
+            SortFields: report.ReportType is "Summary" or "Chart" ? [] : sortFields,
             FilterTree: minimal ? null : filter,
-            GroupByFieldId: null,
-            GroupByMode: "EqualValues",
+            GroupByFieldId: report.ReportType == "Chart" ? chartGroupBy : null,
+            GroupByMode: report.ReportType == "Chart" ? chartGroupMode : "EqualValues",
             HideTotals: !minimal && report.HideTotals == true,
             GroupDefaultCollapsed: minimal ? false : report.GroupDefaultCollapsed ?? false,
             GroupByDescending: false,
-            Aggregations: [],
+            Aggregations: minimal && report.ReportType != "Chart" ? [] : aggregations,
             DynamicFilterType: !minimal && report.DynamicFilterType == "Custom" && dynamicFields.Count > 0 ? "Custom" : !minimal && report.DynamicFilterType == "None" ? "None" : "Default",
             CustomDynamicFilterFields: minimal ? [] : dynamicFields,
             CustomDynamicFilterItems: null,
             AllowQuickSearch: minimal || report.AllowQuickSearch != false,
             VisibleToRoleIds: minimal ? null : visibleRoles,
-            Options: minimal ? null : options,
-            TableSortGroup: minimal ? null : tableSortGroup);
+            Chart: report.ReportType == "Chart" ? chartConfig : minimal ? null : crosstab,
+            Options: minimal || report.ReportType is "Summary" or "Chart" ? null : options,
+            TableSortGroup: minimal ? null : tableSortGroup,
+            RowGroupLevels: report.ReportType == "Summary" ? (minimal ? recordIdGroup ?? rowGroupLevels : rowGroupLevels) : null);
 
         try
         {
@@ -869,7 +1183,7 @@ public class ImportAppFromPblCommandHandler
                 formulaItems.Add(new BulkCreateFieldItem(
                     formulaTypeCode, label, field.Description, IsRequired: false, IsAuditable: field.IsAuditable == true,
                     Settings: formulaSettings, Name: field.Name, HelpText: field.HelpText,
-                    IsSearchable: field.IsSearchable, IsReportable: field.IsReportable));
+                    IsSearchable: field.IsSearchable, IsReportable: field.IsReportable, Fid: KeptFid(field)));
             }
 
             if (formulaItems.Count > 0)
@@ -947,6 +1261,8 @@ public class ImportAppFromPblCommandHandler
             }
 
             var summarySpecs = new List<CreateSummarySpec>();
+            // A summary over a lookup of the child is judged by that lookup's source field.
+            var lookupSources = rel.Summaries.Count > 0 ? await SummaryLookupSources.LoadAsync(childFields, _fieldRepo, ct) : null;
             foreach (var summary in rel.Summaries)
             {
                 if (summary.SkipReason is not null)
@@ -984,7 +1300,7 @@ public class ImportAppFromPblCommandHandler
                 try
                 {
                     var target = targetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == targetFid) : null;
-                    SummaryTargetValidator.Validate(function, targetFid, target, summary.TargetSubField);
+                    SummaryTargetValidator.Validate(function, targetFid, target, summary.TargetSubField, lookupSources: lookupSources);
                 }
                 catch (ValidationException ex)
                 {
@@ -1225,6 +1541,56 @@ public class ImportAppFromPblCommandHandler
         return result;
     }
 
+    /// <summary>Quickbase "role defaults": which form each role (or everyone) edits and adds with. Only matters where a table has more than one
+    /// form, so single-form tables are left alone. Everyone's edit form also becomes the table's default form.</summary>
+    private async Task ApplyFormRoleDefaultsAsync(
+        PblDocument document, Dictionary<string, CreatedFormLayout> createdFormLayouts, Dictionary<string, string> tableNameByRef,
+        Dictionary<string, AppTable> tableByName, Dictionary<string, Guid> roleIdsByRef, List<ImportSkippedItem> skipped, CancellationToken ct)
+    {
+        var defaults = document.FormRoleDefaults ?? [];
+        if (defaults.Count == 0) return;
+
+        var formsPerTable = (document.Forms ?? []).GroupBy(f => f.TableRef).ToDictionary(g => g.Key, g => g.Count());
+        foreach (var group in defaults.GroupBy(d => d.TableRef))
+        {
+            if (formsPerTable.GetValueOrDefault(group.Key) < 2) continue;
+            if (!tableNameByRef.TryGetValue(group.Key, out var tableName) || !tableByName.TryGetValue(tableName, out var table)) continue;
+
+            Guid? FormId(string? formRef) => formRef is not null && createdFormLayouts.TryGetValue(formRef, out var layout) ? layout.FormPublicId : null;
+
+            var overrides = new List<(Guid? RolePublicId, Guid? EditFormPublicId, Guid? AddFormPublicId)>();
+            foreach (var d in group)
+            {
+                Guid? roleId = null;
+                if (d.RoleRef is not null)
+                {
+                    if (!roleIdsByRef.TryGetValue(d.RoleRef, out var resolved))
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = d.TableRef, Name = tableName, Reason = $"Form choice for role '{d.RoleRef}' not applied: the role was not created." });
+                        continue;
+                    }
+                    roleId = resolved;
+                }
+                var edit = FormId(d.EditFormRef);
+                var add = FormId(d.AddFormRef);
+                if (edit is null && add is null) continue;
+                overrides.Add((roleId, edit, add));
+            }
+
+            try
+            {
+                if (overrides.Count > 0)
+                    await _formRepo.UpdateRoleFormOverridesAsync(table.PublicId, overrides, ct);
+                if (overrides.FirstOrDefault(o => o.RolePublicId is null && o.EditFormPublicId is not null).EditFormPublicId is { } everyoneForm)
+                    await _formRepo.SetDefaultAsync(table.PublicId, everyoneForm, ct);
+            }
+            catch (DomainException ex)
+            {
+                skipped.Add(new ImportSkippedItem { LogicalRef = group.Key, Name = tableName, Reason = $"Form choices per role not applied: {Describe(ex)}" });
+            }
+        }
+    }
+
     /// <summary>Re-fetches each form's persisted layout to resolve the real DbIds rule action
     /// targets need (<c>SaveFormLayoutCommandHandler</c> only takes ids, it doesn't hand them
     /// back — see <see cref="CreateFormsAsync"/>'s Guid bookkeeping), then creates each rule via
@@ -1350,12 +1716,29 @@ public class ImportAppFromPblCommandHandler
                     continue;
                 }
 
+                // A rule formula is Quickbase text: give it the same dialect bridging the field formulas get (ToText around a number in "&",
+                // a multi-branch If…) so what is saved is what PowerBase's own check accepts.
+                var expressionText = rule.ExpressionText;
+                if (rule.IsExpressionMode && !string.IsNullOrWhiteSpace(expressionText))
+                {
+                    var translation = _formulaTranslator.Translate("Bool", expressionText, tableFields);
+                    if (translation.Status == FormulaTranslationStatus.NeedsManualReview)
+                    {
+                        skipped.Add(new ImportSkippedItem { LogicalRef = rule.LogicalRef, Name = rule.Name, Reason = $"Form rule formula needs manual review: {string.Join("; ", translation.Diagnostics)}" });
+                        continue;
+                    }
+                    if (translation.SettingsJson is not null
+                        && JsonSerializer.Deserialize<Dictionary<string, string>>(translation.SettingsJson) is { } settings
+                        && settings.TryGetValue("expression", out var translated))
+                        expressionText = translated;
+                }
+
                 try
                 {
                     var createdRule = await _createFormRuleHandler.HandleAsync(new CreateFormRuleCommand(layout.FormPublicId, Fit(rule.Name, FormTextMaxLength)!), ct);
                     await _saveFormRuleHandler.HandleAsync(new SaveFormRuleCommand(
                         createdRule.Id, Fit(rule.Name, FormTextMaxLength)!, rule.Description, Tags: null, rule.IsActive, rule.RunTrigger, rule.ConditionLogic,
-                        rule.IsExpressionMode, rule.ExpressionText, conditionSpecs, actionSpecs, createdRule.RowVersion), ct);
+                        rule.IsExpressionMode, expressionText, conditionSpecs, actionSpecs, createdRule.RowVersion), ct);
 
                     created++;
                 }
