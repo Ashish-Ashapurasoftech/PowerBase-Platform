@@ -2351,6 +2351,7 @@ public partial class PipelineEngine : IPipelineEngine
 
             LoopBatchProfile.Phase("audit+references", ref phaseMark);
             Guid recordPublicId;
+            PowerBase.Application.Common.Models.SearchIndexMessage? searchIndexMessage = null;
             await uow.BeginAsync(ct);
             LoopBatchProfile.Phase("begin-transaction", ref phaseMark);
             try
@@ -2370,7 +2371,8 @@ public partial class PipelineEngine : IPipelineEngine
                 await PipelineCreateRecordRules.ValidateAsync(table, fields, values, recordRepo, tableRepo, fieldRepo, CurrentStepServices, uow.Transaction, ct);
 
                 LoopBatchProfile.Phase("validate", ref phaseMark);
-                recordPublicId = await recordRepo.CreateAsync(table, fields, values, uow.Transaction, ct);
+                var searchPub = CurrentStepServices.GetService<IMessagePublisher>();
+                recordPublicId = await recordRepo.CreateAsync(table, fields, values, uow.Transaction, ct, searchPub != null ? msg => searchIndexMessage = msg : null);
                 LoopBatchProfile.Phase("insert", ref phaseMark);
                 _logger.LogInformation("Create Record step {StepId} succeeded. Created record: {RecordPublicId}.", step.Id, recordPublicId);
                 var recordId = await recordRepo.GetActiveRecordIdByPublicIdAsync(table, recordPublicId, uow.Transaction, ct);
@@ -2425,6 +2427,15 @@ public partial class PipelineEngine : IPipelineEngine
                 LoopBatchProfile.Phase("receipt-insert", ref phaseMark);
                 await uow.CommitAsync(ct);
                 LoopBatchProfile.Phase("commit", ref phaseMark);
+
+                // D06: Publish search index update only after transaction commit
+                if (searchIndexMessage != null && CurrentStepServices.GetService<IMessagePublisher>() is { } searchPublisher)
+                {
+                    _ = searchPublisher.PublishAsync(searchIndexMessage, CancellationToken.None).ContinueWith(
+                        t => _logger.LogWarning("Create Record step {StepId}: could not queue search index update: {Error}", step.Id, t.Exception?.GetBaseException().Message),
+                        TaskContinuationOptions.OnlyOnFaulted);
+                }
+
                 return outputJson;
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
@@ -2494,6 +2505,7 @@ public partial class PipelineEngine : IPipelineEngine
             await EnforceRecordAccessAsync(recordRepo, table, fields, recordPublicId, PipelineRecordAccessKind.Modify,
                 values.Keys.Select(fid => fields.FirstOrDefault(f => f.Fid == (int)fid)).OfType<AppField>().ToList(), ct);
 
+            PowerBase.Application.Common.Models.SearchIndexMessage? searchIndexMessage = null;
             await uow.BeginAsync(ct);
             try
             {
@@ -2505,8 +2517,10 @@ public partial class PipelineEngine : IPipelineEngine
                 }
 
                 await PipelineReferenceTargets.EnsureAvailableAsync(fields, values, tableRepo, ct);
+                var searchPub = CurrentStepServices.GetService<IMessagePublisher>();
                 var persisted = await recordWriteService.ApplyAsync(
-                    table, fields, recordPublicId, values, AuditActions.Updated, "Record updated via PowerFlow action step", ct, uow.Transaction);
+                    table, fields, recordPublicId, values, AuditActions.Updated, "Record updated via PowerFlow action step", ct, uow.Transaction,
+                    onIndexMessageCreated: searchPub != null ? msg => searchIndexMessage = msg : null);
                 var output = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["UpdatedRecordPublicId"] = recordPublicId.ToString(),
@@ -2544,6 +2558,15 @@ public partial class PipelineEngine : IPipelineEngine
                 }, uow.Transaction, ct);
 
                 await uow.CommitAsync(ct);
+
+                // D06: Publish search index update only after transaction commit
+                if (searchIndexMessage != null && CurrentStepServices.GetService<IMessagePublisher>() is { } searchPublisher)
+                {
+                    _ = searchPublisher.PublishAsync(searchIndexMessage, CancellationToken.None).ContinueWith(
+                        t => _logger.LogWarning("Update Record step {StepId}: could not queue search index update: {Error}", step.Id, t.Exception?.GetBaseException().Message),
+                        TaskContinuationOptions.OnlyOnFaulted);
+                }
+
                 return outputJson;
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
@@ -2593,6 +2616,7 @@ public partial class PipelineEngine : IPipelineEngine
                 }
             }
 
+            PowerBase.Application.Common.Models.SearchIndexMessage? searchIndexMessage = null;
             await uow.BeginAsync(ct);
             try
             {
@@ -2604,7 +2628,8 @@ public partial class PipelineEngine : IPipelineEngine
                 }
 
                 await triggerInterceptor.InterceptAsync(table, fields, recordPublicId, oldValuesDict, "record-deleted", ct);
-                await recordRepo.DeleteAsync(table, recordPublicId, uow.Transaction, ct);
+                var searchPub = CurrentStepServices.GetService<IMessagePublisher>();
+                await recordRepo.DeleteAsync(table, recordPublicId, uow.Transaction, ct, searchPub != null ? msg => searchIndexMessage = msg : null);
 
                 var deletedValues = oldValuesDict.ToDictionary(kv => $"fid_{kv.Key}", kv => kv.Value);
                 long? deletedRecordId = oldValuesDict.TryGetValue(3, out var ridVal) && ridVal != null && long.TryParse(ridVal.ToString(), out var ridParsed)
@@ -2626,6 +2651,15 @@ public partial class PipelineEngine : IPipelineEngine
                 }, uow.Transaction, ct);
 
                 await uow.CommitAsync(ct);
+
+                // D06: Publish search index update only after transaction commit
+                if (searchIndexMessage != null && CurrentStepServices.GetService<IMessagePublisher>() is { } searchPublisher)
+                {
+                    _ = searchPublisher.PublishAsync(searchIndexMessage, CancellationToken.None).ContinueWith(
+                        t => _logger.LogWarning("Delete Record step {StepId}: could not queue search index update: {Error}", step.Id, t.Exception?.GetBaseException().Message),
+                        TaskContinuationOptions.OnlyOnFaulted);
+                }
+
                 return outputJson;
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
@@ -3566,6 +3600,8 @@ public partial class PipelineEngine : IPipelineEngine
                     .ToHashSet();
 
                 var addedRecords = new List<(Guid PublicId, Dictionary<long, object?> Row, Dictionary<long, object?> ChangeValues)>();
+                var searchPub = CurrentStepServices.GetService<IMessagePublisher>();
+                var bulkSearchIndexMessages = new List<PowerBase.Application.Common.Models.SearchIndexMessage>();
 
                 // Process each row according to Plan V2 Cases 1–6
                 for (int i = 0; i < session.Rows.Count; i++)
@@ -3763,7 +3799,8 @@ public partial class PipelineEngine : IPipelineEngine
                                 ct,
                                 uow.Transaction,
                                 suppressInterception: true,
-                                existingRecord: matchedExistingRow
+                                existingRecord: matchedExistingRow,
+                                onIndexMessageCreated: searchPub != null ? msg => bulkSearchIndexMessages.Add(msg) : null
                             );
 
                             modifiedChanges.Add(new PipelineRecordChange(
@@ -3795,7 +3832,7 @@ public partial class PipelineEngine : IPipelineEngine
                                 row[kvp.Key] = kvp.Value;
 
                             await ValidateNewBulkUpsertRowAsync(table, fields, row, recordRepo, tableRepo, fieldRepo, uow.Transaction, i + 1, ct);
-                            var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
+                            var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct, searchPub != null ? msg => bulkSearchIndexMessages.Add(msg) : null);
                             var changeValues = new Dictionary<long, object?>();
                             foreach (var f in fields)
                             {
@@ -3819,7 +3856,7 @@ public partial class PipelineEngine : IPipelineEngine
                             row[kvp.Key] = kvp.Value;
 
                         await ValidateNewBulkUpsertRowAsync(table, fields, row, recordRepo, tableRepo, fieldRepo, uow.Transaction, i + 1, ct);
-                        var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct);
+                        var createdPublicId = await recordRepo.CreateAsync(table, fields, row, uow.Transaction, ct, searchPub != null ? msg => bulkSearchIndexMessages.Add(msg) : null);
                         var changeValues = new Dictionary<long, object?>();
                         foreach (var f in fields)
                         {
@@ -3922,6 +3959,16 @@ public partial class PipelineEngine : IPipelineEngine
 
                 await uow.CommitAsync(ct);
                 sessions.Remove(sessionKey);
+
+                // D06: Publish search index updates only after transaction commit
+                if (bulkSearchIndexMessages.Count > 0 && CurrentStepServices.GetService<IMessagePublisher>() is { } searchPublisher)
+                {
+                    var count = bulkSearchIndexMessages.Count;
+                    _ = searchPublisher.PublishBatchAsync(bulkSearchIndexMessages, CancellationToken.None).ContinueWith(
+                        t => _logger.LogWarning("Commit Upsert step {StepId}: could not queue search index updates for {Count} records: {Error}", step.Id, count, t.Exception?.GetBaseException().Message),
+                        TaskContinuationOptions.OnlyOnFaulted);
+                }
+
                 return outputJson;
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))
@@ -4062,22 +4109,24 @@ public partial class PipelineEngine : IPipelineEngine
                 Fields = targetFields.Select(field => $"fid_{field!.Fid!.Value}").ToArray()
             });
 
+            PowerBase.Application.Common.Models.SearchIndexMessage? searchIndexMessage = null;
             await uow.BeginAsync(ct);
             try
             {
                 var fileValues = targetFields.ToDictionary(
                     field => (long)field!.Fid!.Value, _ => (object?)fileJson);
+                var searchPub = CurrentStepServices.GetService<IMessagePublisher>();
                 if (recordWriteService is IFileRecordWriteService fileRecordWriteService)
                 {
                     await fileRecordWriteService.ApplyFileWriteAsync(table, fields, recordPublicId,
                         fileValues, AuditActions.Updated, "File uploaded via PowerFlow action step",
-                        ct, uow.Transaction);
+                        ct, uow.Transaction, onIndexMessageCreated: searchPub != null ? msg => searchIndexMessage = msg : null);
                 }
                 else
                 {
                     await recordWriteService.ApplyAsync(table, fields, recordPublicId,
                         fileValues, AuditActions.Updated, "File uploaded via PowerFlow action step",
-                        ct, uow.Transaction);
+                        ct, uow.Transaction, onIndexMessageCreated: searchPub != null ? msg => searchIndexMessage = msg : null);
                 }
                 await idempotencyRepo.InsertAsync(new PipelineStepIdempotencyLog
                 {
@@ -4088,6 +4137,15 @@ public partial class PipelineEngine : IPipelineEngine
                     OutputJson = outputJson
                 }, uow.Transaction, ct);
                 await uow.CommitAsync(ct);
+
+                // D06: Publish search index update only after transaction commit
+                if (searchIndexMessage != null && CurrentStepServices.GetService<IMessagePublisher>() is { } searchPublisher)
+                {
+                    _ = searchPublisher.PublishAsync(searchIndexMessage, CancellationToken.None).ContinueWith(
+                        t => _logger.LogWarning("Upload file step {StepId}: could not queue search index update: {Error}", step.Id, t.Exception?.GetBaseException().Message),
+                        TaskContinuationOptions.OnlyOnFaulted);
+                }
+
                 return outputJson;
             }
             catch (Exception ex) when (IsUniqueConstraintViolation(ex))

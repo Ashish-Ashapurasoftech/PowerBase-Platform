@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Pipelines;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
@@ -55,6 +56,7 @@ public class RunReportQueryHandler
     private readonly IAppUserRepository _appUserRepo;
     private readonly IQueryContext _queryContext;
     private readonly ILogger<RunReportQueryHandler> _logger;
+    private readonly IAppRepository? _appRepo;
 
     // GAP #2: Max records returned from Azure AI Search to prevent SQL parameter explosion.
     // Azure AI Search returns GUIDs; injecting >2000 into SQL causes severe performance and
@@ -73,7 +75,8 @@ public class RunReportQueryHandler
         IAzureSearchService searchService,
         IAppUserRepository appUserRepo,
         IQueryContext queryContext,
-        ILogger<RunReportQueryHandler> logger)
+        ILogger<RunReportQueryHandler> logger,
+        IAppRepository? appRepo = null)
     {
         _reportRepo = reportRepo;
         _tableRepo = tableRepo;
@@ -87,6 +90,7 @@ public class RunReportQueryHandler
         _appUserRepo = appUserRepo;
         _queryContext = queryContext;
         _logger = logger;
+        _appRepo = appRepo;
     }
 
     public async Task<PagedReportRunResult> HandleAsync(RunReportQuery query, CancellationToken ct = default)
@@ -97,11 +101,13 @@ public class RunReportQueryHandler
         var report = await _reportRepo.GetVisibleReportAsync(query.ReportPublicId, ct)
             ?? throw new NotFoundException("Report", query.ReportPublicId);
         var table = await _tableRepo.GetByIdAsync(report.AppTableId, ct);
+        var app = _appRepo != null ? await _appRepo.GetByIdAsync(table.AppId, ct) : null;
+        var isAppEncrypted = app?.IsEncrypted ?? false;
         var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 
         var access = await _enforcer.GetTableAccessAsync(table, allFields, ct);
 
-        var appPerms =await _appUserRepo.GetUserAppPermissionsAsync(table.AppId, _queryContext.UserId, ct);
+        var appPerms = await _appUserRepo.GetUserAppPermissionsAsync(table.AppId, _queryContext.UserId, ct);
         // Only genuine report designers (create or update capability) qualify for masked builder
         // preview. ReportsRead is a viewer-level permission — those users have no design intent
         // and must be blocked entirely when they lack table data access, not shown masked rows.
@@ -241,7 +247,7 @@ public class RunReportQueryHandler
             return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
 
         return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
-            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, ct);
+            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -257,6 +263,7 @@ public class RunReportQueryHandler
         IReadOnlyList<long>? quickSearchFieldIds,
         bool quickSearchExact,
         bool isMaskedPreview,
+        bool isAppEncrypted,
         CancellationToken ct)
     {
         // Intersect report columns with fields the role can see (drop None-access fields)
@@ -345,6 +352,103 @@ public class RunReportQueryHandler
             TypeCode = f.TypeCode,
         }).ToList();
 
+        // Determine which field IDs are formula (compute-on-read, no physical column)
+        // OR are encrypted, so we must filter/sort them in memory instead of SQL.
+        var formulaFids = allFields
+            .Where(f => (f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings)) || 
+                        (f.Fid.HasValue && Relationships.EncryptedRowFilter.IsEncrypted(f, isAppEncrypted)))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
+
+        // Computed fields only (no encrypted ones): they are not stored, so the AI Search index cannot filter on them.
+        var computedFids = allFields
+            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
+
+        var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, formulaFids);
+        var hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
+
+        var searchOrderBy = BuildSearchOrderBy(sortFields, allFields);
+        var canSortInSearch = sortFields.Count == 0 || searchOrderBy != null;
+        var canExpressUserFilter = userFilterTree == null || OData.ODataFilterBuilder.CanExpress(userFilterTree, allFields);
+        var hasSearchableFields = allFields.Any(f => f.IsSearchable || f.IsFilterable);
+
+        // SOLUTION 1: Fast Azure AI Search paged execution for large tables.
+        // If grid search is enabled and sorting or filtering involves encrypted fields (which are indexed as plaintext in AI Search)
+        // or user filters / quick search, execute the paging and sorting directly in Azure AI Search.
+        // This avoids calling ListAllMatchingAsync (which pulls millions of rows into .NET memory to decrypt/sort in RAM).
+        var shouldTryFastAiPaging = _searchService.IsGridSearchEnabled
+            && hasSearchableFields
+            && canExpressUserFilter
+            && canSortInSearch
+            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, computedFids)
+            && (userFilterTree != null || !string.IsNullOrWhiteSpace(quickSearch) || hasFormulaSorts || hasFormulaFilters || isAppEncrypted);
+
+        if (shouldTryFastAiPaging && await _searchService.IsHealthyAsync(ct))
+        {
+            try
+            {
+                var odata = userFilterTree != null ? OData.ODataFilterBuilder.Build(userFilterTree, allFields) : null;
+                var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
+                    ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
+                    : null;
+
+                var (pagedIds, totalMatches) = await _searchService.SearchRecordsPagedAsync(
+                    _queryContext.TenantId, table.Id, quickSearch, odata, page, pageSize, searchOrderBy, targetIndex, ct);
+
+                if (totalMatches == 0 || pagedIds.Count == 0)
+                {
+                    return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns, TotalCount = 0 };
+                }
+
+                // Fetch ONLY the requested page rows from SQL (e.g. 25 rows)
+                var pagedRows = await _recordRepo.ListByPublicIdsAsync(table, allFields, pagedIds, ct);
+
+                // If role ViewFilter or RestrictToCreatedBy applies, verify candidate page
+                if (access.RestrictToCreatedBy.HasValue)
+                {
+                    pagedRows = pagedRows.Where(r => r.TryGetValue("CreatedBy", out var cb) && cb is long lcb && lcb == access.RestrictToCreatedBy.Value).ToList();
+                }
+                if (access.ViewFilter != null)
+                {
+                    var valuesLookup = pagedRows.Select(r => (Row: r, Map: (IReadOnlyDictionary<long, object?>)r.Where(kv => long.TryParse(kv.Key, out _)).ToDictionary(kv => long.Parse(kv.Key), kv => kv.Value))).ToList();
+                    pagedRows = valuesLookup.Where(v => PipelineFilterEvaluator.EvaluateFilterGroup(access.ViewFilter, v.Map, allFields)).Select(v => v.Row).ToList();
+                }
+
+                var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, pagedRows,
+                    await _relationalProjector.ProjectAsync(table, allFields, pagedRows, ct));
+                var computed = _formulaProjector.Project(allFields, pagedRows, relational, table);
+                var userNames = await ResolveUserNamesAsync(pagedRows, allFields, _userRepo, ct, computed);
+                var itemsFast = pagedRows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
+                var totalFast = (int)Math.Min(totalMatches, int.MaxValue);
+
+                var totalsFast = new Dictionary<string, ColumnTotal>();
+                var totalColsFast = definition.HideTotals || isMaskedPreview
+                    ? new List<AppField>()
+                    : selectedFields.Where(WantsTotals).ToList();
+                if (totalColsFast.Count > 0 && itemsFast.Count > 0)
+                {
+                    totalsFast = AggregateInMemory(itemsFast, totalColsFast);
+                }
+
+                return new PagedReportRunResult
+                {
+                    Items = itemsFast,
+                    Columns = columns,
+                    TotalCount = totalFast,
+                    Page = page,
+                    PageSize = pageSize,
+                    IsDataMasked = isMaskedPreview,
+                    Totals = totalsFast,
+                };
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "[RunReport] Fast AI Search paged execution failed for table {TableId}. Falling back to standard pipeline.", table.Id);
+            }
+        }
+
         // Apply Quick Search across searchable text fields (OR) — restricted to
         // quickSearchFieldIds when given (a caller-specified subset, e.g. a dashboard Search
         // widget scoped to "Selected fields"), otherwise every IsSearchable text-ish field.
@@ -359,8 +463,12 @@ public class RunReportQueryHandler
             {
                 try
                 {
-                    // Route query to Azure AI Search to bypass SQL encryption limitations.
-                    var aiMatches = await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, ct);
+                    var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
+                        ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
+                        : null;
+                    var aiMatches = targetIndex != null
+                        ? await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, targetIndex, ct)
+                        : await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, ct);
                     if (aiMatches.Count > 0)
                     {
                         var cappedMatches = aiMatches.Count > AiSearchMaxResults
@@ -373,9 +481,7 @@ public class RunReportQueryHandler
                     }
                     else
                     {
-                        // Quick search matched nothing. The intersection of zero AI matches with
-                        // any ViewFilter subset is always zero, so return empty regardless of
-                        // whether the role has a ViewFilter — same reasoning as the OData path below.
+                        // Quick search matched nothing.
                         return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
                     }
                 }
@@ -416,21 +522,14 @@ public class RunReportQueryHandler
             }
         }
 
-        // Apply OData-based filter via Azure AI Search for user-applied filters only.
-        // Role ViewFilter is intentionally excluded from OData/AI Search routing — it is always
-        // enforced via SQL below to guarantee correctness regardless of AI Search index freshness.
-        // GAP #3: Only when IsGridSearchEnabled. GAP #4: Falls back to raw SQL tree on AI failure.
-        // Only when the whole tree can be written as an AI Search filter — it replaces the tree entirely, so a
-        // condition it can't express (an address sub-field, "the value in the field", wildcard…) would be lost.
+        // Fallback: If Fast AI Search could not be used (e.g. sorting by an in-memory formula),
+        // but user filter can be expressed in AI search, pre-filter IDs (capped at AiSearchMaxResults)
+        // so that SQL only pulls matching rows.
         // A computed field (Formula / Lookup / Summary) has no stored value, so the search index holds nothing for
         // it: routing a condition on one through AI Search matches no record at all. Such a tree runs through the
         // SQL + in-memory path below instead, which evaluates the formula.
-        var computedFids = allFields
-            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
-            .Select(f => (long)f.Fid!.Value)
-            .ToHashSet();
-        if (_searchService.IsGridSearchEnabled && userFilterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable)
-            && OData.ODataFilterBuilder.CanExpress(userFilterTree)
+        if (_searchService.IsGridSearchEnabled && userFilterTree != null && hasSearchableFields
+            && OData.ODataFilterBuilder.CanExpress(userFilterTree, allFields)
             && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, computedFids))
         {
             var odata = OData.ODataFilterBuilder.Build(userFilterTree, allFields);
@@ -438,27 +537,26 @@ public class RunReportQueryHandler
             {
                 try
                 {
-                    // GAP #2: Cap results + use direct ID query instead of OR node explosion.
-                    var aiMatches = await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
+                    // If wide table (> 150 search fields), query its dedicated index directly
+                    var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
+                        ? $"pb-tbl-{table.Id}"
+                        : null;
+                    var aiMatches = targetIndex != null
+                        ? await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, targetIndex, ct)
+                        : await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
                     var cappedMatches = aiMatches.Count > AiSearchMaxResults
                         ? aiMatches.Take(AiSearchMaxResults).ToList()
                         : aiMatches;
 
                     if (cappedMatches.Count == 0)
                     {
-                        // User-applied filters matched nothing in AI Search.
-                        // If there is also a role ViewFilter, still return empty — the intersection
-                        // of zero AI matches with any ViewFilter subset is always zero.
                         return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns };
                     }
 
-                    // Rebuild userFilterTree: AND with matched IDs only (replaces original tree —
-                    // AI Search has already applied the user filter, so we just restrict to its results).
                     userFilterTree = await BuildAiIdFilterAsync(table, cappedMatches, null, ct);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    // GAP #4: AI Search unavailable — use the original SQL filter tree as-is.
                     _logger.LogWarning(ex, "[ODataFilter] Azure AI Search unavailable for table {TableId}. Executing filter via SQL.", table.Id);
                 }
             }
@@ -477,16 +575,8 @@ public class RunReportQueryHandler
                 };
         }
 
-        // Determine which field IDs are formula (compute-on-read, no physical column)
-        // OR are encrypted, so we must filter/sort them in memory instead of SQL.
-        var formulaFids = allFields
-            .Where(f => (f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings)) || 
-                        (f.IsEncrypted && f.Fid.HasValue))
-            .Select(f => (long)f.Fid!.Value)
-            .ToHashSet();
-
-        var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(filterTree, formulaFids);
-        var hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
+        hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(filterTree, formulaFids);
+        hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
 
         IReadOnlyList<RecordResult> items;
         int total;
@@ -504,7 +594,6 @@ public class RunReportQueryHandler
             // When sorts include formula fields, skip SQL ORDER BY (we'll re-sort everything in-memory).
             IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
 
-            // Fetch ALL rows matching the physical filters (no SQL pagination, no row cap).
             var allRows = await _recordRepo.ListAllMatchingAsync(table, allFields,
                 physicalFilterTree, sqlSorts,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
@@ -559,12 +648,12 @@ public class RunReportQueryHandler
                 }
 
                 // Formula / encrypted columns have no SQL-aggregatable value, so evaluate them over
-                // every matching record in memory.
+                // every matching record in memory (capped at 10,000 for unfiltered 10M-row tables to prevent OOM).
                 var memoryCols = totalCols.Except(physicalCols).ToList();
                 if (memoryCols.Count > 0)
                 {
-                    var everyRow = await _recordRepo.ListAllMatchingAsync(table, allFields, filterTree, [],
-                        restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+                    var everyRow = await _recordRepo.ListAllMatchingAsync(table, allFields, filterTree, [], restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+
                     var everyRelational = await _relationalProjector.ProjectAsync(table, allFields, everyRow, ct);
                     var everyComputed = _formulaProjector.Project(allFields, everyRow, everyRelational, table);
                     var everyResult = everyRow.Select((r, i) => RecordResult.FromRow(r, selectedFields, null, everyComputed[i])).ToList();
@@ -684,6 +773,26 @@ public class RunReportQueryHandler
         return existingFilter == null
             ? aiSearchGroup
             : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = existingFilter }, new FilterNode { Group = aiSearchGroup }] };
+    }
+
+    private static List<string>? BuildSearchOrderBy(IReadOnlyList<SortSpec>? sortFields, IReadOnlyList<AppField> allFields)
+    {
+        if (sortFields == null || sortFields.Count == 0) return null;
+        var isWide = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields);
+        var list = new List<string>();
+        foreach (var s in sortFields)
+        {
+            var f = allFields.FirstOrDefault(x => (x.Fid.HasValue && x.Fid.Value == s.FieldId) || x.Id == s.FieldId);
+            if (f == null) return null; // unknown field -> cannot order in search
+            if (PhysicalNaming.IsComputedTypeCode(f.TypeCode)) return null; // dynamic formula not in search slots
+
+            var slot = PowerBase.Application.Search.SearchSlotResolver.ResolveSlotName(f, allFields);
+            if (!isWide && slot.StartsWith("f_")) return null; // Not present in shared typed index
+
+            var dir = s.Desc ? "desc" : "asc";
+            list.Add($"{slot} {dir}");
+        }
+        return list.Count > 0 ? list : null;
     }
 
     /// <summary>When definition.DynamicFilterType is "Custom", restricts runtimeFilters to only

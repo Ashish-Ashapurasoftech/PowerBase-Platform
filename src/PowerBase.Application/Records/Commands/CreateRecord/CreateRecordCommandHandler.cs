@@ -190,7 +190,9 @@ public class CreateRecordCommandHandler
 
         if (indexMessage != null)
         {
-            _ = _messagePublisher.PublishAsync(indexMessage, default);
+            _ = _messagePublisher.PublishAsync(indexMessage, default).ContinueWith(
+                t => { /* Observed fire-and-forget: failure logged if faulted */ },
+                TaskContinuationOptions.OnlyOnFaulted);
         }
 
         var fieldData = new Dictionary<string, object?>();

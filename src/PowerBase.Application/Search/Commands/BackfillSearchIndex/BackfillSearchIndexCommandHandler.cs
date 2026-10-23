@@ -56,6 +56,11 @@ public class BackfillSearchIndexCommandHandler
                 var tables = await _tableRepo.ListByAppAsync(app.Id, cancellationToken);
                 foreach (var table in tables)
                 {
+                    if (request.TableId.HasValue && table.Id != request.TableId.Value)
+                    {
+                        continue;
+                    }
+
                     totalTables++;
                     _logger.LogInformation("Processing Table: {TableName} (ID: {TableId}, Physical: {PhysicalTable}) in App: {AppName} (ID: {AppId}).", 
                         table.Name, table.Id, table.PhysicalTableName, app.Name, app.Id);
@@ -78,41 +83,81 @@ public class BackfillSearchIndexCommandHandler
                                 break; // Break out of this table's record paging
                             }
 
-                            if (records.Count == 0) break;
+                            // D24: Terminate paging when table has no more records
+                            if (records == null || records.Count == 0)
+                            {
+                                break;
+                            }
+
+                            var isWide = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(fields);
+                            var targetIndex = isWide ? $"pb-tbl-{table.Id}" : null;
+                            var slotMap = PowerBase.Application.Search.SearchSlotResolver.BuildSlotMap(fields);
+                            var docsToBatch = new List<SearchIndexDocument>();
 
                             foreach (var record in records)
                             {
                                 var publicIdStr = record["PublicId"]?.ToString();
                                 if (Guid.TryParse(publicIdStr, out var publicId))
                                 {
-                                    try
+                                    var searchableValues = new Dictionary<long, object?>();
+                                    var slotValues = new Dictionary<string, object?>();
+
+                                    foreach (var field in fields)
                                     {
-                                        // The search service expects keys to be field IDs.
-                                        // We'll extract only the dynamic field columns (which have numeric keys in dictionary).
-                                        var searchableValues = new Dictionary<long, object?>();
-                                        foreach (var field in fields)
+                                        var colName = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(field);
+                                        if (field.Fid.HasValue && record.TryGetValue(colName, out var val))
                                         {
-                                            var colName = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(field);
-                                            if (field.Fid.HasValue && record.TryGetValue(colName, out var val))
+                                            searchableValues[field.Fid.Value] = val;
+                                            if (slotMap.TryGetValue(field.Fid.Value, out var slotName))
                                             {
-                                                searchableValues[field.Fid.Value] = val;
+                                                if (!isWide && slotName.StartsWith("f_"))
+                                                {
+                                                    continue;
+                                                }
+
+                                                if (PowerBase.Application.Search.SearchSlotResolver.IsNumeric(field.TypeCode))
+                                                    slotValues[slotName] = PowerBase.Application.Search.SearchSlotResolver.ParseDouble(val);
+                                                else if (PowerBase.Application.Search.SearchSlotResolver.IsDate(field.TypeCode))
+                                                    slotValues[slotName] = PowerBase.Application.Search.SearchSlotResolver.ParseDateTimeOffset(val);
+                                                else if (PowerBase.Application.Search.SearchSlotResolver.IsBoolean(field.TypeCode))
+                                                    slotValues[slotName] = PowerBase.Application.Search.SearchSlotResolver.ParseBoolean(val);
+                                                else
+                                                    slotValues[slotName] = PowerBase.Application.Search.SearchSlotResolver.ParseString(val);
                                             }
                                         }
+                                    }
 
-                                        await _searchService.IndexRecordAsync(request.TenantId, app.Id, table.Id, publicId, searchableValues, cancellationToken);
-                                        totalRecordsIndexed++;
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        failedRecordsCount++;
-                                        _logger.LogError(ex, "Failed to index record {RecordPublicId} for Table {TableName} (ID: {TableId}).", publicId, table.Name, table.Id);
-                                    }
+                                    docsToBatch.Add(new SearchIndexDocument(request.TenantId, app.Id, table.Id, publicId, searchableValues, slotValues, targetIndex));
                                 }
                                 else
                                 {
                                     _logger.LogWarning("Record missing or invalid PublicId in Table {TableName} (ID: {TableId}).", table.Name, table.Id);
                                 }
                             }
+
+                            string? batchError = null;
+                            if (docsToBatch.Count > 0)
+                            {
+                                try
+                                {
+                                    await _searchService.BulkIndexRecordsAsync(docsToBatch, cancellationToken);
+                                    totalRecordsIndexed += docsToBatch.Count;
+                                }
+                                catch (Exception ex)
+                                {
+                                    failedRecordsCount += docsToBatch.Count;
+                                    batchError = ex.Message;
+                                    _logger.LogError(ex, "Failed to bulk index {Count} records for Table {TableName} (ID: {TableId}).", docsToBatch.Count, table.Name, table.Id);
+                                }
+                            }
+
+                            request.OnProgress?.Invoke(totalApps, totalTables, totalRecordsIndexed, failedRecordsCount, batchError);
+
+                            if (records.Count < 500)
+                            {
+                                break;
+                            }
+
                             recordPage++;
                         }
                     }

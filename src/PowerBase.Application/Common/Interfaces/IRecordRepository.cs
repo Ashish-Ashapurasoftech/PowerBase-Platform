@@ -147,6 +147,13 @@ public interface IRecordRepository
         long? restrictToCreatedBy = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Fetches the live records matching the provided PublicIds, decrypted, preserving the exact order of <paramref name="publicIds"/>.
+    /// Used for high-scale report execution where Azure AI Search resolves the exact page of sorted IDs.
+    /// </summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListByPublicIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
+
     /// <summary>Every live row matching <paramref name="filterTree"/> in ONE query — no paging, no row cap and
     /// no command timeout (the request's cancellation token still aborts it). Rows are decrypted. For reports
     /// that must see every matching record to filter, sort or total computed (Formula) fields in memory.</summary>
@@ -188,6 +195,7 @@ public interface IRecordRepository
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
+    Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(long tableId, Guid recordPublicId, CancellationToken ct = default);
     Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default);
     Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
