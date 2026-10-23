@@ -101,7 +101,7 @@ public class RunReportQueryHandler
 
         var access = await _enforcer.GetTableAccessAsync(table, allFields, ct);
 
-        var appPerms = await _appUserRepo.GetUserAppPermissionsAsync(table.AppId, _queryContext.UserId, ct);
+        var appPerms =await _appUserRepo.GetUserAppPermissionsAsync(table.AppId, _queryContext.UserId, ct);
         // Only genuine report designers (create or update capability) qualify for masked builder
         // preview. ReportsRead is a viewer-level permission — those users have no design intent
         // and must be blocked entirely when they lack table data access, not shown masked rows.
@@ -164,7 +164,7 @@ public class RunReportQueryHandler
         // the plain long core.[User].Id the column actually stores before this tree reaches the
         // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
         var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
-        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId);
+        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId, _queryContext.UserEmail, _queryContext.UserName);
 
         // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
         // future) must resolve to an actual date freshly EVERY time the report runs, not once at
@@ -230,7 +230,7 @@ public class RunReportQueryHandler
         // against the same now-correct data — saved matches, ask doesn't, until this runs).
         if (query.RuntimeFilterTree is { Nodes.Count: > 0 })
         {
-            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId);
+            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId, _queryContext.UserEmail, _queryContext.UserName);
             resolvedRuntimeTree = ResolveDateValueModeConditions(resolvedRuntimeTree);
             filterTree = filterTree == null
                 ? resolvedRuntimeTree
@@ -422,8 +422,16 @@ public class RunReportQueryHandler
         // GAP #3: Only when IsGridSearchEnabled. GAP #4: Falls back to raw SQL tree on AI failure.
         // Only when the whole tree can be written as an AI Search filter — it replaces the tree entirely, so a
         // condition it can't express (an address sub-field, "the value in the field", wildcard…) would be lost.
+        // A computed field (Formula / Lookup / Summary) has no stored value, so the search index holds nothing for
+        // it: routing a condition on one through AI Search matches no record at all. Such a tree runs through the
+        // SQL + in-memory path below instead, which evaluates the formula.
+        var computedFids = allFields
+            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
         if (_searchService.IsGridSearchEnabled && userFilterTree != null && allFields.Any(f => f.IsSearchable || f.IsFilterable)
-            && OData.ODataFilterBuilder.CanExpress(userFilterTree))
+            && OData.ODataFilterBuilder.CanExpress(userFilterTree)
+            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, computedFids))
         {
             var odata = OData.ODataFilterBuilder.Build(userFilterTree, allFields);
             if (!string.IsNullOrWhiteSpace(odata))
@@ -919,7 +927,8 @@ public class RunReportQueryHandler
     public static async Task<FilterGroup?> ResolveUserFieldValuesAsync(
         FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
         Dictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct,
-        IAppUserRepository? appUserRepo = null, long appId = 0)
+        IAppUserRepository? appUserRepo = null, long appId = 0,
+        string? currentUserEmail = null, string? currentUserName = null)
     {
         if (group is null) return null;
         var nodes = new List<FilterNode>();
@@ -928,7 +937,31 @@ public class RunReportQueryHandler
             FilterCondition? newCondition = n.Condition;
             if (n.Condition is { } cond)
             {
-                if (string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase))
+                var hasIdentity = !string.IsNullOrWhiteSpace(currentUserEmail) || !string.IsNullOrWhiteSpace(currentUserName);
+                if (hasIdentity
+                    && string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase)
+                    && fieldLookup.TryGetValue(cond.FieldId, out var formulaUserField)
+                    && FormulaFilterSorter.EffectiveTypeCode(formulaUserField) is "Formula_User" or "Formula_ListUser")
+                {
+                    // A formula's user is whatever the formula builds: [Record Owner] gives the id, but ToUser([Name])
+                    // or ToUser([Email]) gives the text itself as the user's identity. Match the current user by id,
+                    // email or name so both kinds of formula work.
+                    var listOfUsers = FormulaFilterSorter.EffectiveTypeCode(formulaUserField) == "Formula_ListUser";
+                    var matchName = await IsNameUniqueInAppAsync(appUserRepo, appId, currentUserName, ct);
+                    nodes.Add(new FilterNode { Group = CurrentUserIdentityGroup(cond.FieldId, listOfUsers, false, currentUserId, currentUserEmail, matchName ? currentUserName : null) });
+                    continue;
+                }
+                else if (hasIdentity
+                    && string.Equals(cond.Operator, "isNotCurrentUser", StringComparison.OrdinalIgnoreCase)
+                    && fieldLookup.TryGetValue(cond.FieldId, out var formulaUserField2)
+                    && FormulaFilterSorter.EffectiveTypeCode(formulaUserField2) is "Formula_User" or "Formula_ListUser")
+                {
+                    var listOfUsers2 = FormulaFilterSorter.EffectiveTypeCode(formulaUserField2) == "Formula_ListUser";
+                    var matchName2 = await IsNameUniqueInAppAsync(appUserRepo, appId, currentUserName, ct);
+                    nodes.Add(new FilterNode { Group = CurrentUserIdentityGroup(cond.FieldId, listOfUsers2, true, currentUserId, currentUserEmail, matchName2 ? currentUserName : null) });
+                    continue;
+                }
+                else if (string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase))
                 {
                     // On a list of users (MultiUser, Formula_ListUser) "is the current user" means the list contains
                     // them — an exact match would only ever find lists holding nobody else.
@@ -981,10 +1014,57 @@ public class RunReportQueryHandler
             nodes.Add(new FilterNode
             {
                 Condition = newCondition,
-                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, userRepo, ct, appUserRepo, appId),
+                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, userRepo, ct, appUserRepo, appId, currentUserEmail, currentUserName),
             });
         }
         return new FilterGroup { Logic = group.Logic, Nodes = nodes };
+    }
+
+    /// <summary>A display name identifies a user only when nobody else in the app shares it - otherwise matching a
+    /// formula's text against it would hand one user the records of another with the same name. Without the app's
+    /// user list to check against, a name is never trusted.</summary>
+    private static async Task<bool> IsNameUniqueInAppAsync(IAppUserRepository? appUserRepo, long appId, string? name, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(name) || appUserRepo is null || appId <= 0) return false;
+        var users = await appUserRepo.ListByAppIdAsync(appId, ct);
+        return users
+            .Where(u => string.Equals(u.UserName?.Trim(), name.Trim(), StringComparison.OrdinalIgnoreCase))
+            .Select(u => u.UserPublicId)
+            .Distinct()
+            .Count() <= 1;
+    }
+
+    /// <summary>"is the current user" (or, negated, "is not the current user") for a formula that yields a user. Its
+    /// value may be the user's id, email or - when it is unique in the app - name, so the field matches when it equals
+    /// ANY of those (a list of users: when it includes any of them). Negated: blank, or none of them.</summary>
+    public static FilterGroup CurrentUserIdentityGroup(
+        long fieldId, bool isUserList, bool negate, long currentUserId, string? email, string? name)
+    {
+        var identities = new[] { currentUserId.ToString(), email, name }
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var matches = identities.Select(v => new FilterNode
+        {
+            Condition = new FilterCondition { FieldId = fieldId, Operator = isUserList ? "includes" : "eq", Value = v },
+        }).ToList();
+
+        if (!negate) return new FilterGroup { Logic = "or", Nodes = matches };
+
+        var none = identities.Select(v => new FilterNode
+        {
+            Condition = new FilterCondition { FieldId = fieldId, Operator = isUserList ? "notIncludes" : "ne", Value = v },
+        }).ToList();
+        return new FilterGroup
+        {
+            Logic = "or",
+            Nodes =
+            [
+                new FilterNode { Condition = new FilterCondition { FieldId = fieldId, Operator = "isEmpty" } },
+                new FilterNode { Group = new FilterGroup { Logic = "and", Nodes = none } },
+            ],
+        };
     }
 
     /// <summary>"is not the current user": the field is blank, or (for a list of users) holds nobody but others /

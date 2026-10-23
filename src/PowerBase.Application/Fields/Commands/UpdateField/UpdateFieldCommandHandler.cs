@@ -117,7 +117,9 @@ public class UpdateFieldCommandHandler
         var isAutoFill = existing.IsSystem ? false : command.IsAutoFill;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
-            : command.Settings;
+            // A request that sends no settings leaves them as they are: UpdateFieldSql writes Settings = @settings,
+            // so passing null on would silently erase a formula's expression (or any other saved setting).
+            : command.Settings ?? existing.Settings;
 
         if (!existing.IsSystem && PowerBase.Formula.Binding.FieldIdReference.IsReservedLabel(label))
             throw new ValidationException(new Dictionary<string, string[]> { ["Label"] = [CreateField.CreateFieldCommandValidator.ReservedLabelMessage(label)] });
