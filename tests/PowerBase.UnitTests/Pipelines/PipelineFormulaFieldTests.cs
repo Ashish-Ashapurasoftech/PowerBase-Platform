@@ -608,7 +608,7 @@ public class PipelineFormulaFieldTests
         var h = new EngineHarness("Formula_Number");
         var target = Guid.NewGuid();
         h.WriteService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), target, Arg.Any<IReadOnlyDictionary<long, object?>>(),
-                Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>())
+                Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(new Dictionary<long, object?> { [NameFid] = "changed" });
         h.RecordRepo.GetActiveRecordIdByPublicIdAsync(Arg.Any<AppTable>(), target, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(7L);
         h.RecordRepo.GetBulkUpsertRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(),

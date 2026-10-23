@@ -486,6 +486,45 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return rows.ToDictionary(r => r.PublicId, r => r.Id);
     }
 
+    public async Task<IReadOnlyList<(long Id, DateTime ChangedOn)>> ListRecordsChangedSinceAsync(
+        AppTable table, DateTime sinceUtc, long afterId, long maxRecordId, int take, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        // Two seeks instead of one scan: records modified since (IX_t_X_ModifiedOn), and records created since — the rows above the
+        // newest row created before it. CreatedOn is set by the database at insert, so it grows with Id: the backward scan for that row
+        // stops after the recent rows.
+        var sql = $"""
+            DECLARE @createdAbove BIGINT = ISNULL((SELECT TOP (1) Id FROM {physicalTable} WHERE CreatedOn < @sinceUtc ORDER BY Id DESC), 0);
+            SELECT TOP (@take) Id, ChangedOn FROM (
+                SELECT Id, ISNULL(ModifiedOn, CreatedOn) AS ChangedOn FROM {physicalTable}
+                WHERE IsDeleted = 0 AND ModifiedOn >= @sinceUtc AND Id > @afterId AND Id <= @maxRecordId
+                UNION
+                SELECT Id, ISNULL(ModifiedOn, CreatedOn) AS ChangedOn FROM {physicalTable}
+                WHERE IsDeleted = 0 AND Id > @createdAbove AND Id > @afterId AND Id <= @maxRecordId
+            ) changed
+            ORDER BY Id;
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<(long Id, DateTime ChangedOn)>(new CommandDefinition(sql,
+            new { sinceUtc, afterId, maxRecordId, take }, commandTimeout: 600, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<IReadOnlySet<long>> GetRecordIdsChangedSinceAsync(
+        AppTable table, IReadOnlyCollection<long> recordIds, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        var changed = new HashSet<long>();
+        if (recordIds.Count == 0) return changed;
+        var sql = $"""
+            SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE Id IN @ids AND IsDeleted = 0 AND ISNULL(ModifiedOn, CreatedOn) >= @sinceUtc
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        foreach (var ids in recordIds.Chunk(2000))
+            changed.UnionWith(await connection.QueryAsync<long>(new CommandDefinition(sql, new { ids, sinceUtc }, cancellationToken: ct)));
+        return changed;
+    }
+
     public async Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(referenceFid);
@@ -3578,7 +3617,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { tableId });
         if (tableInfo == null) return result;
 
-        var fieldSql = "SELECT Id, AppTableId, Name, PhysicalColumnName, Fid, IsSystem, IsSearchable, IsFilterable, IsEncrypted FROM meta.AppField WHERE Fid = @fieldId AND AppTableId = @tableId";
+        var fieldSql = """
+            SELECT af.Id, af.AppTableId, af.Name, ft.Code AS TypeCode, af.PhysicalColumnName, af.Fid, af.IsSystem, af.IsSearchable, af.IsFilterable, af.IsEncrypted
+            FROM meta.AppField af
+            JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+            WHERE af.Fid = @fieldId AND af.AppTableId = @tableId
+            """;
         var field = await connection.QueryFirstOrDefaultAsync<AppField>(fieldSql, new { fieldId, tableId });
         if (field == null || !field.Fid.HasValue) return result;
 
@@ -3614,7 +3658,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             {
                 if (rowDict.TryGetValue(colName, out var val))
                 {
-                    if (field.IsEncrypted && val is string cipherStr)
+                    // An encrypted App stores ciphertext in every field, not only the ones flagged IsEncrypted: the index needs the plain text.
+                    if (Services.FieldEncryptionContext.StoresCiphertext(field, enc.IsAppEncrypted) && val is string cipherStr)
                     {
                         try
                         {

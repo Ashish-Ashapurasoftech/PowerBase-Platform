@@ -30,6 +30,10 @@ public class PipelineExecutionOptions
     /// (paged, staged, checkpointed) instead of being held in memory; every other search simply returns all of its
     /// records, however many there are. It only chooses the strategy — nothing is ever refused for being too big.</summary>
     public int StreamSearchAboveRecords { get; set; } = 10000;
+    /// <summary>How far behind SQL the Azure AI Search index may be. A search answered by AI Search (Search Records, Copy Records)
+    /// also reads, from SQL, every record created or modified within this many seconds before it started, so a record the
+    /// index has not caught up with yet is still found. 0 turns that off. It does not cover an index update that was lost.</summary>
+    public int AiSearchIndexLagSeconds { get; set; } = 600;
     /// <summary>Optional cap on the size of a Search Records output. 0 (the default) means unlimited.</summary>
     public int MaxStepOutputBytes { get; set; }
     public bool EnableLoopBatches { get; set; }

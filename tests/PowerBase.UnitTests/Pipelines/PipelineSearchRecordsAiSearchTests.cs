@@ -560,4 +560,52 @@ public class PipelineSearchRecordsAiSearchTests
         Assert.Equal(2, nestedOr.Nodes[0].Group!.Nodes.Count);
         Assert.Single(nestedOr.Nodes[1].Group!.Nodes);
     }
+
+    // ── index lag ────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>A table of Active records 1..n, read by id like the SQL search: the index proposes some, SQL lists the recent ones.</summary>
+    private Dictionary<long, Guid> IndexLagTable(int count, long[] indexed, long[] recentlyChanged)
+    {
+        _azureSearchService.IsGridSearchEnabled.Returns(true);
+        _azureSearchService.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(true);
+        var publicIds = Enumerable.Range(1, count).ToDictionary(i => (long)i, _ => Guid.NewGuid());
+        AiPages(new AiSearchIdPage(indexed.Select(id => publicIds[id]).ToList(), "~"));
+        _recordRepo.GetIdsByPublicIdsAsync(_table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => publicIds.Where(p => ci.ArgAt<IReadOnlyCollection<Guid>>(1).Contains(p.Value)).Select(p => p.Key).ToList());
+        _recordRepo.ListRecordsChangedSinceAsync(_table, Arg.Any<DateTime>(), Arg.Any<long>(), Arg.Any<long>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult<IReadOnlyList<(long Id, DateTime ChangedOn)>>(
+                recentlyChanged.Where(id => id > ci.ArgAt<long>(2)).Select(id => (id, DateTime.UtcNow)).ToList()));
+        _searchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult((IReadOnlyList<IReadOnlyDictionary<string, object?>>)
+                JsonSerializer.Deserialize<long[]>(IdCondition(ci.ArgAt<FilterGroup?>(3)).Value!)!
+                    .Select(id => (IReadOnlyDictionary<string, object?>)Row(id, publicIds[id])).ToList()));
+        return publicIds;
+    }
+
+    private static List<string> RecordPublicIds(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.GetProperty("records").EnumerateArray()
+            .Select(r => r.GetProperty("RecordPublicId").GetString()!).ToList();
+    }
+
+    [Fact]
+    public async Task RecordTheIndexHasNotCaughtUpWith_IsReturnedFromTheIndexLagTail()
+    {
+        var publicIds = IndexLagTable(3, indexed: [1, 2], recentlyChanged: [3]);   // record 3 was created a moment ago
+
+        var json = await RunAsync(Provider());
+
+        Assert.Equal(new[] { 1L, 2, 3 }.Select(id => publicIds[id].ToString()), RecordPublicIds(json));
+    }
+
+    [Fact]
+    public async Task RecentRecordTheIndexAlsoFound_IsReturnedOnce()
+    {
+        var publicIds = IndexLagTable(2, indexed: [1, 2], recentlyChanged: [2]);
+
+        var json = await RunAsync(Provider());
+
+        Assert.Equal(new[] { 1L, 2 }.Select(id => publicIds[id].ToString()), RecordPublicIds(json));
+    }
 }

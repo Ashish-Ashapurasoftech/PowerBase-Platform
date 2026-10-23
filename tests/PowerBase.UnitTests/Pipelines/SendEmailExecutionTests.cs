@@ -55,7 +55,7 @@ public class SendEmailExecutionTests
         _emailService = Substitute.For<IEmailService>();
         _fileStorageService = Substitute.For<IFileStorageService>();
         _httpClientFactory = Substitute.For<IHttpClientFactory>();
-        _recordWriteService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<bool>())
+        _recordWriteService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(new Dictionary<long, object?>());
 
         _engine = new PipelineEngine(

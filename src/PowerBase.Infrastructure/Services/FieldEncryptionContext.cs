@@ -148,9 +148,14 @@ public sealed class FieldEncryptionContext
     /// Reference fields are never encrypted (see PhysicalNaming.IsEncryptionExemptTypeCode).
     /// </summary>
     private IEnumerable<AppField> FieldsToEncrypt(IEnumerable<AppField> fields)
-        => fields.Where(f => f.Fid.HasValue && !f.IsSystem
-            && !PhysicalNaming.IsEncryptionExemptTypeCode(f.TypeCode)
-            && (this.IsAppEncrypted || f.IsEncrypted));
+        => fields.Where(f => f.Fid.HasValue && StoresCiphertext(f, this.IsAppEncrypted));
+
+    /// <summary>Whether <paramref name="field"/>'s column holds ciphertext: every non-system, non-exempt field of an encrypted App,
+    /// otherwise only a field flagged IsEncrypted. Anything that reads the column raw (e.g. to index it) must decrypt exactly these.</summary>
+    public static bool StoresCiphertext(AppField field, bool appEncrypted) =>
+        !field.IsSystem
+        && !PhysicalNaming.IsEncryptionExemptTypeCode(field.TypeCode)
+        && (appEncrypted || field.IsEncrypted);
 
     // ------------------------------------------------------------------
     // Encrypt helpers

@@ -115,6 +115,7 @@ public class PipelineStreamedAiSearchTests
         public List<PipelineBulkEventRecord> Staged { get; } = new();
         public List<string> AiCursors { get; } = new();
         public List<long> SqlCheckpoints { get; } = new();
+        public List<long> LagReadsAfterIds { get; } = new();
         public int BeginAiCalls, UseSqlCalls, CompleteCalls;
         public SqlStub Sql { get; init; } = null!;
         public PipelineSearchWorkset Workset { get; init; } = null!;
@@ -126,9 +127,13 @@ public class PipelineStreamedAiSearchTests
 
     private static (string Cursor, Guid[] Ids) AiPage(string cursor, params DataRow[] rows) => (cursor, rows.Select(r => r.PublicId).ToArray());
 
+    /// <param name="recent">The records changed within the index-lag window (id, when they changed), as the database would list them.</param>
+    /// <param name="recentWhenPageRead">Which records count as recently changed when an index page is read; defaults to <paramref name="recent"/>.
+    /// A record missing here but in <paramref name="recent"/> changed after its page was read.</param>
     private static async Task<Outcome> RunAsync(
         List<DataRow> data, AiFake? ai, PipelineSearchWorkset? workset = null, bool searchable = true, bool filterable = true,
-        bool encrypted = false, int? maxResults = null, int? streamAbove = null, string op = "is", string value = "Active", long snapshotMax = 999)
+        bool encrypted = false, int? maxResults = null, int? streamAbove = null, string op = "is", string value = "Active", long snapshotMax = 999,
+        int? lagSeconds = null, IReadOnlyList<(long Id, DateTime ChangedOn)>? recent = null, IReadOnlyCollection<long>? recentWhenPageRead = null)
     {
         var pipelineRepo = Substitute.For<IPipelineRepository>();
         var tableRepo = Substitute.For<IAppTableRepository>();
@@ -148,6 +153,17 @@ public class PipelineStreamedAiSearchTests
         recordRepo.GetIdsByPublicIdsAsync(table, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
             .Returns(ci => Task.FromResult<IReadOnlyList<long>>(
                 data.Where(r => ci.ArgAt<IReadOnlyCollection<Guid>>(1).Contains(r.PublicId)).Select(r => r.Id).ToList()));
+        recent ??= [];
+        var recentAtPageRead = (recentWhenPageRead ?? recent.Select(r => r.Id).ToList()).ToHashSet();
+        recordRepo.ListRecordsChangedSinceAsync(table, Arg.Any<DateTime>(), Arg.Any<long>(), Arg.Any<long>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                outcome.LagReadsAfterIds.Add(ci.ArgAt<long>(2));
+                return Task.FromResult<IReadOnlyList<(long Id, DateTime ChangedOn)>>(recent
+                    .Where(r => r.Id > ci.ArgAt<long>(2) && r.Id <= ci.ArgAt<long>(3)).OrderBy(r => r.Id).Take(ci.ArgAt<int>(4)).ToList());
+            });
+        recordRepo.GetRecordIdsChangedSinceAsync(table, Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<DateTime>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult<IReadOnlySet<long>>(ci.ArgAt<IReadOnlyCollection<long>>(1).Where(recentAtPageRead.Contains).ToHashSet()));
 
         var serviceProvider = Substitute.For<IServiceProvider>();
         serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(sql);
@@ -158,6 +174,7 @@ public class PipelineStreamedAiSearchTests
         uow.Transaction.Returns(Substitute.For<IDbTransaction>());
         var options = new PipelineExecutionOptions();
         if (streamAbove.HasValue) options.StreamSearchAboveRecords = streamAbove.Value;
+        if (lagSeconds.HasValue) options.AiSearchIndexLagSeconds = lagSeconds.Value;
         var engine = new PipelineEngine(
             pipelineRepo, recordRepo, Substitute.For<IRecordWriteService>(), tableRepo, fieldRepo,
             Substitute.For<IRelationshipRepository>(), Substitute.For<IEmailService>(), Substitute.For<IHttpClientFactory>(),
@@ -206,6 +223,9 @@ public class PipelineStreamedAiSearchTests
                 outcome.SqlCheckpoints.Add(call.ArgAt<long>(2));
                 return Task.CompletedTask;
             });
+        pipelineRepo.GetStagedSearchWorksetRecordsAsync(Arg.Any<Guid>(), Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult<IReadOnlySet<Guid>>(outcome.Staged.Select(r => r.RecordPublicId)
+                .Where(ci.ArgAt<IReadOnlyCollection<Guid>>(1).Contains).ToHashSet()));
         pipelineRepo.CompleteSearchWorksetDiscoveryAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>())
             .Returns(_ => { outcome.CompleteCalls++; return Task.CompletedTask; });
         pipelineRepo.GetPendingSearchWorksetPageAsync(Arg.Any<Guid>(), Arg.Any<int>(), Arg.Any<CancellationToken>(), Arg.Any<long>())
@@ -234,7 +254,7 @@ public class PipelineStreamedAiSearchTests
 
         Assert.Null(o.Error);
         Assert.Equal(new long[] { 1, 2, 3, 4, 5 }, o.StagedIds);
-        Assert.Equal(new[] { "b", "~" }, o.AiCursors);
+        Assert.Equal(new[] { "b", "~", PipelineEngine.AiIndexLagEndCursor }, o.AiCursors);   // then the (empty) index-lag tail
         Assert.Equal(1, o.BeginAiCalls);
         Assert.Equal(0, o.UseSqlCalls);
         Assert.Equal(1, o.CompleteCalls);
@@ -265,7 +285,7 @@ public class PipelineStreamedAiSearchTests
         var o = await RunAsync(data, ai);
 
         Assert.Equal(new long[] { 1, 2 }, o.StagedIds);
-        Assert.Equal(new[] { "a", "~" }, o.AiCursors);
+        Assert.Equal(new[] { "a", "~", PipelineEngine.AiIndexLagEndCursor }, o.AiCursors);
     }
 
     [Fact]
@@ -277,7 +297,7 @@ public class PipelineStreamedAiSearchTests
         var o = await RunAsync(data, ai);
 
         Assert.Equal(new long[] { 2 }, o.StagedIds);
-        Assert.Equal(new[] { "a", "~" }, o.AiCursors);
+        Assert.Equal(new[] { "a", "~", PipelineEngine.AiIndexLagEndCursor }, o.AiCursors);
     }
 
     [Fact]
@@ -319,7 +339,7 @@ public class PipelineStreamedAiSearchTests
         Assert.Null(o.Error);
         Assert.Equal(pageCount * perPage, o.Staged.Count);
         Assert.Equal(pageCount * perPage, o.StagedIds.Distinct().Count());
-        Assert.Equal(pageCount, o.AiCursors.Count);
+        Assert.Equal(pageCount + 1, o.AiCursors.Count);   // and the index-lag tail
     }
 
     [Fact]
@@ -345,6 +365,152 @@ public class PipelineStreamedAiSearchTests
 
         Assert.Equal(new long[] { 1, 2, 3 }, o.StagedIds);
         Assert.Equal(2, ai.PagesServed);                      // the third page was never asked for
+    }
+
+    // ── index lag ────────────────────────────────────────────────────────────────────────────
+
+    private static DateTime BeforeTheSearch => DateTime.UtcNow.AddMinutes(-1);
+    private static DateTime DuringTheSearch => DateTime.UtcNow.AddMinutes(1);
+
+    [Fact]
+    public async Task RecordTheIndexHasNotCaughtUpWith_IsStagedFromTheIndexLagTail()
+    {
+        var data = Enumerable.Range(1, 3).Select(i => Data(i)).ToList();
+        var ai = new AiFake(AiPage("~", data[0], data[1]));     // record 3 was created a moment ago: not in the index yet
+
+        var o = await RunAsync(data, ai, recent: [(3, BeforeTheSearch)]);
+
+        Assert.Null(o.Error);
+        Assert.Equal(new long[] { 1, 2, 3 }, o.StagedIds);
+        Assert.Equal(new[] { "~", PipelineEngine.AiIndexLagEndCursor }, o.AiCursors);
+        Assert.Equal(new[] { 1, 2, 3 }, o.Staged.Select(r => r.Ordinal));
+        Assert.Equal(0, o.UseSqlCalls);
+    }
+
+    [Fact]
+    public async Task RecordChangedToMatch_ButStillIndexedWithItsOldValue_IsStagedFromTheIndexLagTail()
+    {
+        // Record 2 was Closed when indexed and was set Active a moment ago: the index does not propose it.
+        var data = new List<DataRow> { Data(1), Data(2) };
+        var ai = new AiFake(AiPage("~", data[0]));
+
+        var o = await RunAsync(data, ai, recent: [(2, BeforeTheSearch)]);
+
+        Assert.Equal(new long[] { 1, 2 }, o.StagedIds);
+    }
+
+    [Fact]
+    public async Task RecentRecordTheIndexAlsoFound_IsStagedOnce()
+    {
+        var data = Enumerable.Range(1, 3).Select(i => Data(i)).ToList();
+        var ai = new AiFake(AiPage("~", data.ToArray()));
+
+        var o = await RunAsync(data, ai, recent: [(2, BeforeTheSearch), (3, BeforeTheSearch)]);
+
+        Assert.Equal(new long[] { 1, 2, 3 }, o.StagedIds);   // 2 and 3 come from the tail, never from the index page too
+        Assert.Equal(3, o.Staged.Select(r => r.RecordPublicId).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task RecentRecordThatDoesNotMatch_IsNotStaged()
+    {
+        var data = new List<DataRow> { Data(1), Data(2, "Closed") };
+        var ai = new AiFake(AiPage("~", data[0]));
+
+        var o = await RunAsync(data, ai, recent: [(2, BeforeTheSearch)]);
+
+        Assert.Equal(new long[] { 1 }, o.StagedIds);         // the tail is read with the complete filter
+    }
+
+    [Fact]
+    public async Task RecordChangedAfterItsIndexPageWasStaged_IsNotStagedAgainFromTheTail()
+    {
+        var data = Enumerable.Range(1, 3).Select(i => Data(i)).ToList();
+        var ai = new AiFake(AiPage("~", data.ToArray()));
+
+        // Record 2 was not recent when its page was read, then changed while the search ran.
+        var o = await RunAsync(data, ai, recent: [(2, DuringTheSearch)], recentWhenPageRead: []);
+
+        Assert.Equal(new long[] { 1, 2, 3 }, o.StagedIds);
+    }
+
+    [Fact]
+    public async Task RecentRecordCreatedAfterTheSearchStarted_IsNotStaged()
+    {
+        var data = new List<DataRow> { Data(1), Data(1000) };   // above the snapshot (999)
+        var ai = new AiFake(AiPage("~", data[0]));
+
+        var o = await RunAsync(data, ai, recent: [(1000, DuringTheSearch)]);
+
+        Assert.Equal(new long[] { 1 }, o.StagedIds);
+    }
+
+    [Fact]
+    public async Task LongIndexLagTail_IsStagedPageByPage_SavingItsCursor()
+    {
+        var data = Enumerable.Range(1, PipelineEngine.AiCandidateRecordIdChunkSize + 2).Select(i => Data(i)).ToList();
+        var ai = new AiFake(AiPage("~", data[0]));
+        var recent = data.Skip(1).Select(r => (r.Id, BeforeTheSearch)).ToList();
+
+        var o = await RunAsync(data, ai, recent: recent, snapshotMax: data.Count);
+
+        Assert.Null(o.Error);
+        Assert.Equal(data.Select(r => r.Id), o.StagedIds);
+        var lastOfFirstTailPage = PipelineEngine.AiCandidateRecordIdChunkSize + 1;
+        Assert.Equal(new[] { "~", PipelineEngine.AiIndexLagCursorPrefix + lastOfFirstTailPage, PipelineEngine.AiIndexLagEndCursor }, o.AiCursors);
+    }
+
+    [Fact]
+    public async Task ResumedWorkset_ContinuesItsIndexLagTailFromItsCursor_WithoutTheIndex()
+    {
+        var data = Enumerable.Range(1, 5).Select(i => Data(i)).ToList();
+        var ai = new AiFake(AiPage("~", data[0], data[1]));
+        ai.Service.IsHealthyAsync(Arg.Any<CancellationToken>()).Returns(false);          // the index may even be down now
+        var workset = new PipelineSearchWorkset
+        {
+            DiscoverySource = "Ai", LastSearchCursor = PipelineEngine.AiIndexLagCursorPrefix + "3", DiscoveredCount = 3, SnapshotMaxRecordId = 999
+        };
+
+        var o = await RunAsync(data, ai, workset, recent: [(3, BeforeTheSearch), (4, BeforeTheSearch), (5, BeforeTheSearch)]);
+
+        Assert.Null(o.Error);
+        Assert.Empty(ai.CursorsAskedFor);
+        Assert.Equal(new long[] { 3 }, o.LagReadsAfterIds);   // carried on after record 3
+        Assert.Equal(new long[] { 4, 5 }, o.StagedIds);
+        Assert.Equal(new[] { 4, 5 }, o.Staged.Select(r => r.Ordinal));
+        Assert.Equal(1, o.CompleteCalls);
+    }
+
+    [Fact]
+    public async Task IndexLagTailAlreadyReadToTheEnd_IsCompletedOnRetry()
+    {
+        var data = Enumerable.Range(1, 3).Select(i => Data(i)).ToList();
+        var ai = new AiFake(AiPage("~", data.ToArray()));
+        var workset = new PipelineSearchWorkset
+        {
+            DiscoverySource = "Ai", LastSearchCursor = PipelineEngine.AiIndexLagEndCursor, DiscoveredCount = 3, SnapshotMaxRecordId = 999
+        };
+
+        var o = await RunAsync(data, ai, workset, recent: [(3, BeforeTheSearch)]);
+
+        Assert.Null(o.Error);
+        Assert.Empty(ai.CursorsAskedFor);
+        Assert.Empty(o.LagReadsAfterIds);
+        Assert.Empty(o.Staged);
+        Assert.Equal(1, o.CompleteCalls);
+    }
+
+    [Fact]
+    public async Task IndexLagTurnedOff_OnlyTheIndexIsRead()
+    {
+        var data = Enumerable.Range(1, 3).Select(i => Data(i)).ToList();
+        var ai = new AiFake(AiPage("~", data[0], data[1]));
+
+        var o = await RunAsync(data, ai, lagSeconds: 0, recent: [(3, BeforeTheSearch)]);
+
+        Assert.Equal(new long[] { 1, 2 }, o.StagedIds);
+        Assert.Equal(new[] { "~" }, o.AiCursors);
+        Assert.Empty(o.LagReadsAfterIds);
     }
 
     // ── resume ───────────────────────────────────────────────────────────────────────────────
