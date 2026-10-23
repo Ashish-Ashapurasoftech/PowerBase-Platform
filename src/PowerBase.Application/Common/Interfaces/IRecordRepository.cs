@@ -31,6 +31,16 @@ public interface IRecordRepository
     /// (used by mass update to validate every record before writing anything).</summary>
     Task<IReadOnlyDictionary<Guid, long>> GetIdsByPublicIdsMapAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default);
 
+    /// <summary>Live records created or modified at or after <paramref name="sinceUtc"/> (the time they last changed: Date Modified,
+    /// else Date Created), with Id in (<paramref name="afterId"/>, <paramref name="maxRecordId"/>], at most <paramref name="take"/>,
+    /// ordered by Id — a keyset page. These are the records the search index may not have caught up with yet.</summary>
+    Task<IReadOnlyList<(long Id, DateTime ChangedOn)>> ListRecordsChangedSinceAsync(
+        AppTable table, DateTime sinceUtc, long afterId, long maxRecordId, int take, CancellationToken ct = default);
+
+    /// <summary>Which of <paramref name="recordIds"/> are live records created or modified at or after <paramref name="sinceUtc"/>.</summary>
+    Task<IReadOnlySet<long>> GetRecordIdsChangedSinceAsync(
+        AppTable table, IReadOnlyCollection<long> recordIds, DateTime sinceUtc, CancellationToken ct = default);
+
     /// <summary>Count non-deleted child records whose reference column (f_{referenceFid}) points at the parent row.</summary>
     Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default);
 
@@ -41,7 +51,8 @@ public interface IRecordRepository
     Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
         AppField? primaryLabelField = null, CancellationToken ct = default,
-        IReadOnlyList<ReferenceFilterClause>? filters = null);
+        IReadOnlyList<ReferenceFilterClause>? filters = null,
+        IReadOnlyCollection<long>? onlyRowIds = null);
 
     /// <summary>True when the parent row satisfies every dependent-dropdown clause (used to reject a
     /// Reference value the picker would not have offered).</summary>
@@ -146,6 +157,13 @@ public interface IRecordRepository
         long? restrictToCreatedBy = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// Fetches the live records matching the provided PublicIds, decrypted, preserving the exact order of <paramref name="publicIds"/>.
+    /// Used for high-scale report execution where Azure AI Search resolves the exact page of sorted IDs.
+    /// </summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListByPublicIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
+
     /// <summary>Every live row matching <paramref name="filterTree"/> in ONE query — no paging, no row cap and
     /// no command timeout (the request's cancellation token still aborts it). Rows are decrypted. For reports
     /// that must see every matching record to filter, sort or total computed (Formula) fields in memory.</summary>
@@ -165,6 +183,22 @@ public interface IRecordRepository
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
         CancellationToken ct = default);
+
+    /// <summary>Like <see cref="ListBatchAfterIdAsync"/> but returns only (Id, PublicId) — no field columns, no
+    /// decryption — so a background delete can walk millions of matching records cheaply. The filter must be
+    /// expressible in SQL (no computed or encrypted fields).</summary>
+    Task<IReadOnlyList<(long Id, Guid PublicId)>> ListIdsAfterIdAsync(
+        AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default);
+
+    /// <summary>Soft-deletes the given rows by internal Id in a single statement (the ids travel as one JSON
+    /// parameter, so there is no 2,100-parameter limit) and reports one search-index delete per record.</summary>
+    Task BulkDeleteByIdsAsync(
+        AppTable table, IReadOnlyList<(long Id, Guid PublicId)> rows,
+        System.Data.IDbTransaction? transaction = null, CancellationToken ct = default,
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
 
     Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 
@@ -187,6 +221,7 @@ public interface IRecordRepository
     Task<IReadOnlyDictionary<string, object?>> GetByPublicIdAsync(
         AppTable table, IReadOnlyList<AppField> fields, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
+    Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(long tableId, Guid recordPublicId, CancellationToken ct = default);
     Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default);
     Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
@@ -276,8 +311,10 @@ public interface IRecordRepository
         IReadOnlyList<SummarizeSortSpec>? sort = null,
         CancellationToken ct = default);
 
+    /// <param name="onlyRowIds">When given, only these rows are read (the rows the user's role may view).</param>
     Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
-        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default);
+        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default,
+        IReadOnlyCollection<long>? onlyRowIds = null);
 
     Task<int> SanitizeTableEncryptedDataAsync(AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
     Task<IReadOnlyList<SearchIndexDocument>> GetFieldBackfillBatchAsync(long tenantId, long appId, long tableId, long fieldId, bool isNullify, int page, int pageSize, CancellationToken ct = default);

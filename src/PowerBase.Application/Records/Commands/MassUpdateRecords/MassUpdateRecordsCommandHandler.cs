@@ -28,6 +28,7 @@ public class MassUpdateRecordsCommandHandler
     private readonly IUserRepository _userRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IReferenceRelinkService? _relink;
+    private readonly RecordModifyGuard? _modifyGuard;
 
     public MassUpdateRecordsCommandHandler(
         IAppTableRepository tableRepo,
@@ -46,7 +47,8 @@ public class MassUpdateRecordsCommandHandler
         IFormRepository formRepo,
         IUserRepository userRepo,
         IAppUserRepository appUserRepo,
-        IReferenceRelinkService? relink = null)
+        IReferenceRelinkService? relink = null,
+        RecordModifyGuard? modifyGuard = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -65,6 +67,7 @@ public class MassUpdateRecordsCommandHandler
         _userRepo = userRepo;
         _appUserRepo = appUserRepo;
         _relink = relink;
+        _modifyGuard = modifyGuard;
     }
 
     public async Task<int> HandleAsync(MassUpdateRecordsCommand command, CancellationToken ct = default)
@@ -117,6 +120,8 @@ public class MassUpdateRecordsCommandHandler
             if (access.ViewScope == RecordScopes.OwnRecords || access.ModifyScope == RecordScopes.OwnRecords)
                 foreach (var recordId in command.RecordPublicIds)
                     await _enforcer.EnsureRecordOwnedAsync(table, recordId, ct);
+            if (_modifyGuard is not null)
+                await _modifyGuard.EnsureAsync(access, table, fields, command.RecordPublicIds, ct);
         }
 
         // Resolve every requested record up front — a missing/deleted record is itself a validation
@@ -212,7 +217,9 @@ public class MassUpdateRecordsCommandHandler
                         var oldVal = oldRecord.TryGetValue(colKey, out var ov) ? ov : null;
                         // Keyed by FID only. Also writing each value under the field's internal id put two number spaces in one
                         // dictionary: an internal id equal to ANOTHER field's FID overwrote that field's value (e.g. Record ID# showing a date).
-                        beforeValues[f.Fid.Value] = oldVal;
+                        // A trigger reads a Date / Numeric Range as its two columns, one { start, end } value.
+                        var triggerOldVal = PowerBase.Application.Pipelines.PipelineEngine.StoredFieldValue(oldRecord, f, oldVal);
+                        beforeValues[f.Fid.Value] = triggerOldVal;
                         oldValuesByFid[f.Fid.Value] = oldVal;
 
                         if (triggerValues.TryGetValue(f.Fid.Value, out var newVal))
@@ -222,7 +229,7 @@ public class MassUpdateRecordsCommandHandler
                         }
                         else
                         {
-                            afterValues[f.Fid.Value] = oldVal;
+                            afterValues[f.Fid.Value] = triggerOldVal;
                         }
                     }
                 }

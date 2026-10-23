@@ -206,11 +206,11 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
         var ids = new HashSet<long>();
         foreach (var rule in detailRules)
         {
-            if (!PowerBase.Application.Pipelines.PipelineUserFieldFilter.TryResolve(rule.Field, fields, out var field, out var detail) || detail == "id") continue;
+            if (!PowerBase.Application.Pipelines.PipelineUserFieldFilter.TryResolveRule(rule, fields, out var field, out var detail) || detail == "id") continue;
             object? value = null;
             if (field.Fid.HasValue && valuesSource.TryGetValue(field.Fid.Value, out var byFid)) value = byFid;
             else if (valuesSource.TryGetValue(field.Id, out var byId)) value = byId;
-            foreach (var id in PowerBase.Application.Pipelines.PipelineUserFieldFilter.ParseUserIds(value?.ToString())) ids.Add(id);
+            foreach (var id in PowerBase.Application.Pipelines.PipelineUserFieldFilter.ParseUserIds(PowerBase.Application.Pipelines.PipelineFilterEvaluator.ValueText(value))) ids.Add(id);
         }
         var users = new Dictionary<long, PowerBase.Application.Pipelines.PipelineUserDetails>();
         await PowerBase.Application.Pipelines.PipelineUserFieldFilter.LoadAsync(_userRepo, ids, users, _logger, ct);
@@ -624,7 +624,8 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                             {
                                 try
                                 {
-                                    var parsedTree = PowerBase.Application.Pipelines.CopyRecordsDefinition.ParseQuery(sub.AdvancedQuery, fields);
+                                    var parsedTree = PowerBase.Application.Pipelines.PipelineAdvancedQuery.ForTrigger(
+                                        PowerBase.Application.Pipelines.CopyRecordsDefinition.ParseQuery(sub.AdvancedQuery, fields)!);
                                     filtersMatch = PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateFilterGroup(parsedTree, valuesSource, fields, _logger);
                                 }
                                 catch (Exception ex)
@@ -653,12 +654,12 @@ public class PipelineTriggerInterceptor : IPipelineTriggerInterceptor
                                 var filterUsers = await LoadFilterUsersAsync(nonBlankGroups, nonBlankRules, valuesSource, fields, ct);
                                 if (nonBlankGroups != null && nonBlankGroups.Any())
                                 {
-                                    filtersMatch = nonBlankGroups.Any(g => PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(g, valuesSource, fields, _logger, filterUsers));
+                                    filtersMatch = nonBlankGroups.Any(g => PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(g, valuesSource, fields, _logger, filterUsers, actorUserId));
                                 }
                                 else if (nonBlankRules != null && nonBlankRules.Any())
                                 {
                                     var mockGroup = new PowerBase.Application.Pipelines.TriggerFilterGroup { LogicalOp = "AND", Rules = nonBlankRules };
-                                    filtersMatch = PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(mockGroup, valuesSource, fields, _logger, filterUsers);
+                                    filtersMatch = PowerBase.Application.Pipelines.PipelineFilterEvaluator.EvaluateGroup(mockGroup, valuesSource, fields, _logger, filterUsers, actorUserId);
                                 }
                             }
 

@@ -446,7 +446,7 @@ public class PipelineEngineTests
         _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
         _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 10 });
         _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Is<System.Data.IDbTransaction?>(x => true), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Is<System.Data.IDbTransaction?>(x => true), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(Guid.NewGuid());
 
         // Act
@@ -513,7 +513,7 @@ public class PipelineEngineTests
         _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
         _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 10 });
         _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Is<System.Data.IDbTransaction?>(x => true), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Is<System.Data.IDbTransaction?>(x => true), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(Guid.NewGuid());
 
         // Act
@@ -574,7 +574,7 @@ public class PipelineEngineTests
         _pipelineRepo.GetStepsByPipelineIdAsync(1, Arg.Any<CancellationToken>()).Returns(steps);
         _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 10 });
         _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Is<System.Data.IDbTransaction?>(x => true), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Is<System.Data.IDbTransaction?>(x => true), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(Guid.NewGuid());
 
         // Act
@@ -1113,7 +1113,7 @@ public class PipelineEngineTests
         _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
             .Returns(recordIds.Select(id => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?> { ["PublicId"] = id }).ToList());
         _recordWriteService.ApplyAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(),
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>()).Returns(new Dictionary<long, object?> { [6] = "Updated" });
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(new Dictionary<long, object?> { [6] = "Updated" });
 
         await _engine.ExecuteAsync(task, CancellationToken.None);
 
@@ -1121,7 +1121,7 @@ public class PipelineEngineTests
         {
             await _recordWriteService.Received(1).ApplyAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordId,
                 Arg.Is<IReadOnlyDictionary<long, object?>>(values => (string)values[6]! == "Updated"),
-                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>());
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
         }
         await _pipelineRepo.Received().UpdateRunAsync(Arg.Is<PipelineRun>(r => r.Status == "Success"), Arg.Any<CancellationToken>());
     }
@@ -1195,11 +1195,11 @@ public class PipelineEngineTests
             Arg.Any<IReadOnlyList<AppField>>(),
             Arg.Any<IReadOnlyDictionary<long, object?>>(),
             Arg.Any<System.Data.IDbTransaction?>(),
-            Arg.Any<CancellationToken>()
-        );
-        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value1"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
-        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value2"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
-        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value3"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+            Arg.Any<CancellationToken>(),
+            Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value1"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value2"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value3"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Theory]
@@ -1335,9 +1335,9 @@ public class PipelineEngineTests
         await _engine.ExecuteAsync(task, CancellationToken.None);
 
         // Assert: Legacy fallback maps steps.ref_search.fid_1 to steps.ref_loop.item.fid_1
-        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value1"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
-        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value2"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
-        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value3"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value1"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value2"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value3"), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -1391,7 +1391,7 @@ public class PipelineEngineTests
         await _engine.ExecuteAsync(task, CancellationToken.None);
 
         // Assert: Outside a loop, steps.ref_search.fid_1 remains unresolved (blank/null)
-        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => !d.ContainsKey(2) || d[2] == null || d[2] as string == ""), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await _recordRepo.Received(1).CreateAsync(table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Is<IReadOnlyDictionary<long, object?>>(d => !d.ContainsKey(2) || d[2] == null || d[2] as string == ""), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -1461,8 +1461,8 @@ public class PipelineEngineTests
             Arg.Any<IReadOnlyList<AppField>>(),
             Arg.Is<IReadOnlyDictionary<long, object?>>(d => d.ContainsKey(2) && d[2] as string == "Value1"),
             Arg.Any<System.Data.IDbTransaction?>(),
-            Arg.Any<CancellationToken>()
-        );
+            Arg.Any<CancellationToken>(),
+            Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -1627,7 +1627,10 @@ public class PipelineEngineTests
 
         var result = (FilterGroup)method!.Invoke(_engine, [group, fields, "{}", "path", new List<PipelineStep>(), null])!;
 
-        result.Nodes.Should().ContainSingle().Which.Condition!.Operator.Should().Be(expectedDbOperator);
+        var node = result.Nodes.Should().ContainSingle().Subject;
+        SearchFilterNodes.WithoutBlank(node).Condition!.Operator.Should().Be(expectedDbOperator);
+        // "is not" lets a blank record through, as the trigger filters do.
+        SearchFilterNodes.IsOrBlank(node).Should().Be(expectedDbOperator == "date_ne");
     }
 
     [Fact]
@@ -1808,7 +1811,7 @@ public class PipelineEngineTests
         _tableRepo.GetByPublicIdAsync(Arg.Any<Guid>(), Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 10 });
         _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(new List<AppField>());
         
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(recordPublicId);
 
         _recordRepo.GetActiveRecordIdByPublicIdAsync(Arg.Any<AppTable>(), recordPublicId, Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
@@ -1873,7 +1876,7 @@ public class PipelineEngineTests
         _fieldRepo.ListByTableAsync(10, Arg.Any<CancellationToken>()).Returns(fields);
 
         var recordPublicId = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(recordPublicId);
 
         var expectedDict = new Dictionary<Guid, long> { [recordPublicId] = 42L };
@@ -2218,7 +2221,7 @@ public class PipelineEngineTests
 
         // Assert: Verify isolation. Step 1 used Tenant 8 search service. Step 2 did NOT. Step 2 created on Tenant 9 repository.
         await searchService8.Received(1).SearchAsync(table8, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>());
-        await recordRepo9.Received(1).CreateAsync(table9, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>());
+        await recordRepo9.Received(1).CreateAsync(table9, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -2479,7 +2482,8 @@ public class PipelineEngineTests
         var rule = new TriggerFilterGroup { Rules = new List<TriggerFilterRule> { new() { Field = "fid_1", Operator = op, Value = "@relative-date|today|0|Asia/Kolkata" } } };
         var method = typeof(PipelineEngine).GetMethod("MapTriggerFilterGroupToDbFilterGroup", BindingFlags.NonPublic | BindingFlags.Instance);
         var result = (FilterGroup)method!.Invoke(_engine, new object?[] { rule, fields, "{}", "path", new List<PipelineStep>(), null })!;
-        var window = result.Nodes.Single().Group!;
+        SearchFilterNodes.IsOrBlank(result.Nodes.Single()).Should().Be(op == "is-not");
+        var window = SearchFilterNodes.WithoutBlank(result.Nodes.Single()).Group!;
         window.Logic.Should().Be(logic);
         window.Nodes[0].Condition!.Operator.Should().Be(startOp);
         window.Nodes[1].Condition!.Operator.Should().Be(endOp);
@@ -2536,7 +2540,7 @@ public class PipelineEngineTests
         var uow = Substitute.For<ITenantUnitOfWork>();
         var transaction = Substitute.For<System.Data.IDbTransaction>();
         uow.Transaction.Returns(transaction);
-        _recordRepo.CreateAsync(table, fields, Arg.Any<IReadOnlyDictionary<long, object?>>(), transaction, Arg.Any<CancellationToken>()).Returns(publicId);
+        _recordRepo.CreateAsync(table, fields, Arg.Any<IReadOnlyDictionary<long, object?>>(), transaction, Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(publicId);
         _recordRepo.GetActiveRecordIdByPublicIdAsync(table, publicId, transaction, Arg.Any<CancellationToken>()).Returns(19L);
         _recordRepo.GetBulkUpsertRowsByIdsAsync(table, fields, Arg.Any<IReadOnlyCollection<long>>(), transaction, Arg.Any<CancellationToken>())
             .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>> {
@@ -2589,7 +2593,7 @@ public class PipelineEngineTests
         };
 
         IReadOnlyDictionary<long, object?>? capturedValues = null;
-        _recordRepo.CreateAsync(table, fields, Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(table, fields, Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(x =>
             {
                 capturedValues = new Dictionary<long, object?>(x.ArgAt<IReadOnlyDictionary<long, object?>>(2));
@@ -2982,7 +2986,7 @@ public class PipelineEngineTests
         var request = new PipelineStep { RefId = "ref_request", Type = "action", Subtype = "make-request" };
         var payload = "{\"steps\":{\"ref_request\":{\"number\":42.5,\"optional\":\"\"}}}";
         IReadOnlyDictionary<long, object?>? written = null;
-        _recordRepo.CreateAsync(table, fields, Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(table, fields, Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(call => { written = call.ArgAt<IReadOnlyDictionary<long, object?>>(2); return Task.FromResult(recordId); });
         _recordWriteService.ApplyAsync(table, fields, recordId, Arg.Any<IReadOnlyDictionary<long, object?>>(),
                 Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>(),
@@ -3229,7 +3233,7 @@ public class PipelineEngineTests
         _pipelineRecordSearchService.SearchAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int?>(), Arg.Any<FilterGroup?>(), Arg.Any<CancellationToken>())
             .Returns(searchResultRecords);
 
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(Guid.NewGuid());
 
         // Act
@@ -3242,8 +3246,8 @@ public class PipelineEngineTests
             Arg.Any<IReadOnlyList<AppField>>(),
             Arg.Any<IReadOnlyDictionary<long, object?>>(),
             Arg.Any<System.Data.IDbTransaction?>(),
-            Arg.Any<CancellationToken>()
-        );
+            Arg.Any<CancellationToken>(),
+            Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -3382,7 +3386,7 @@ public class PipelineEngineTests
         _recordWriteService.ApplyAsync(
             table, Arg.Any<IReadOnlyList<AppField>>(), targetRecordGuid,
             Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>())
+            Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(new Dictionary<long, object?> { [6] = "updated" });
 
         // Act
@@ -3401,8 +3405,8 @@ public class PipelineEngineTests
             Arg.Any<string>(),
             Arg.Any<string>(),
             Arg.Any<CancellationToken>(),
-            Arg.Any<System.Data.IDbTransaction?>()
-        );
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -3496,7 +3500,7 @@ public class PipelineEngineTests
         _recordWriteService.ApplyAsync(
             table, Arg.Any<IReadOnlyList<AppField>>(), targetRecordGuid,
             Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>())
+            Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction?>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(new Dictionary<long, object?> { [6] = "updated" });
 
         // Act
@@ -3515,8 +3519,8 @@ public class PipelineEngineTests
             Arg.Any<string>(),
             Arg.Any<string>(),
             Arg.Any<CancellationToken>(),
-            Arg.Any<System.Data.IDbTransaction?>()
-        );
+            Arg.Any<System.Data.IDbTransaction?>(),
+            Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 }
 

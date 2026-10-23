@@ -95,7 +95,7 @@ public class AddSummaryFieldCommandHandlerTests
     [InlineData("Sum", 5)]     // Sum on Text
     [InlineData("Max", 5)]     // Max on Text
     [InlineData("Avg", 7)]     // Avg on Date
-    [InlineData("CombinedText", 8)]   // a function the formula's (numeric) result type does not support
+    [InlineData("Sum", 10)]    // Sum on a Reference (Record IDs)
     public async Task Handle_FunctionNotValidForField_ThrowsValidation_AndCreatesNothing(string function, int targetFid)
     {
         await FluentActions.Invoking(() => _handler.HandleAsync(Command(function, targetFid)))
@@ -244,5 +244,53 @@ public class AddSummaryFieldCommandHandlerTests
         var group = saved.Nodes.Single().Group!;
         group.Logic.Should().Be("or");
         group.Nodes[1].Condition!.ValueMode.Should().Be("duringCurrent");
+    }
+
+    // ── A Reference target: summarized as the key its parent shows ──
+
+    private void ClientsShowClientNameAsTheirKey()
+    {
+        _relRepo.ListByChildTableAsync(TaskTableId, Arg.Any<CancellationToken>()).Returns(new List<Relationship>
+        {
+            new() { Id = 1, ParentTableId = ClientTableId, ChildTableId = TaskTableId, ReferenceFid = 10 },
+        });
+        _tableRepo.GetByIdAsync(ClientTableId, Arg.Any<CancellationToken>())
+            .Returns(new AppTable { Id = ClientTableId, PublicId = Guid.NewGuid(), Name = "Client", KeyFieldId = 500 });
+        _fieldRepo.ListByTableAsync(ClientTableId, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            new() { Id = 500, Fid = 6, AppTableId = ClientTableId, Name = "Client Name", TypeCode = "Text" },
+        });
+    }
+
+    [Fact]
+    public async Task Handle_CombinedTextOfAReferenceWhoseParentShowsATextKey_SavesItAsText()
+    {
+        ClientsShowClientNameAsTheirKey();
+
+        await _handler.HandleAsync(Command("CombinedText", 10));
+
+        var saved = SavedSettings();
+        saved.TargetFid.Should().Be(10);
+        saved.TargetTypeCode.Should().Be("Text");
+        saved.ResultTypeCode.Should().Be("Text");
+    }
+
+    [Fact]
+    public async Task Handle_CombinedTextOfAReferenceShowingRecordId_SavesItAsTheReference()
+    {
+        await _handler.HandleAsync(Command("CombinedText", 10));
+
+        var saved = SavedSettings();
+        saved.TargetTypeCode.Should().Be("Reference");
+        saved.ResultTypeCode.Should().Be("Text");
+    }
+
+    [Fact]
+    public async Task Handle_CombinedTextOfANumberFormula_IsSaved()
+    {
+        await _handler.HandleAsync(Command("CombinedText", 8));
+
+        SavedSettings().Function.Should().Be("CombinedText");
+        SavedSettings().ResultTypeCode.Should().Be("Text");
     }
 }

@@ -260,6 +260,7 @@ public class AppRolesController : ControllerBase
                     TablePublicId = r.TablePublicId,
                     Conjunction = r.Conjunction,
                     Group = group,
+                    Kind = r.Kind,
                     Conditions = conditions.Select(c => new RecordFilterConditionDto
                     {
                         FieldPublicId = c.FieldPublicId,
@@ -286,7 +287,8 @@ public class AppRolesController : ControllerBase
             f.Conjunction,
             (f.Conditions ?? Array.Empty<RecordFilterConditionDto>())
                 .Select(c => new RoleRecordFilterCondition(c.FieldPublicId, c.Operator, c.Value, c.UseCurrentUser)).ToList(),
-            f.Group
+            f.Group,
+            f.Kind
         )).ToList();
         await _updateRecordFiltersHandler.HandleAsync(new UpdateRecordFiltersCommand(rolePublicId, inputs), ct);
         return NoContent();

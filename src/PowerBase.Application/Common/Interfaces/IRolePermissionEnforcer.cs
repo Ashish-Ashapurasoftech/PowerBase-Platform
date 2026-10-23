@@ -24,6 +24,9 @@ public class TableAccessContext
 
     /// <summary>Role-defined record filter (null when none).</summary>
     public FilterGroup? ViewFilter { get; init; }
+    /// <summary>Modify-scope Custom Rules: only records matching this may be edited or deleted
+    /// (null when ModifyScope is not "AllRecords with rules"). Resolved to literals like <see cref="ViewFilter"/>.</summary>
+    public FilterGroup? ModifyFilter { get; init; }
     /// <summary>When set, restrict rows to CreatedBy = this user id (OwnRecords scope).</summary>
     public long? RestrictToCreatedBy { get; init; }
 

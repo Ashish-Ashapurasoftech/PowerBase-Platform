@@ -144,6 +144,7 @@ builder.Services.AddCors(options =>
     });
 });
 
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
@@ -269,7 +270,6 @@ builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineTriggerInterceptor, PowerBase.Infrastructure.Pipelines.PipelineTriggerInterceptor>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector, PowerBase.Infrastructure.Pipelines.PipelineWriteTimeRelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineAuditFormatter, PowerBase.Application.Pipelines.PipelineAuditFormatter>();
-builder.Services.AddScoped<IAzureSearchService, AzureSearchService>();
 builder.Services.AddSingleton<IEncryptionService, AesEncryptionService>();
 builder.Services.AddSingleton<IMessagePublisher, ServiceBusPublisher>();
 builder.Services.AddScoped<IFieldNameResolver, PowerBase.Application.Common.Services.FieldNameResolver>();
@@ -421,6 +421,8 @@ builder.Services.AddScoped<PowerBase.Application.FieldReferences.IFieldReference
 builder.Services.AddScoped<PowerBase.Application.FieldReferences.RebuildFieldReferencesCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IExemptFieldEncryptionCleanupService, PowerBase.Infrastructure.Services.ExemptFieldEncryptionCleanupService>();
+builder.Services.AddScoped<PowerBase.Application.Fields.Commands.CleanupExemptFieldEncryption.CleanupExemptFieldEncryptionCommandHandler>();
 builder.Services.AddScoped<IPermissionRepository, PermissionRepository>();
 builder.Services.AddScoped<IUserPermissionRepository, UserPermissionRepository>();
 builder.Services.AddScoped<IFormRepository, FormRepository>();
@@ -569,6 +571,8 @@ builder.Services.AddScoped<UpdateRecordCommandHandler>();
 builder.Services.AddScoped<DeleteRecordCommandHandler>();
 builder.Services.AddScoped<BulkDeleteRecordsCommandHandler>();
 builder.Services.AddScoped<MassUpdateRecordsCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Records.RecordModifyGuard>();
+builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler>();
 builder.Services.AddScoped<ListRecordsQueryHandler>();
 builder.Services.AddScoped<GetRecordQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.SearchGlobalRecords.SearchGlobalRecordsQueryHandler>();
@@ -678,7 +682,10 @@ builder.Services.AddScoped<PowerBase.Application.Groups.Commands.ShareGroupWithA
 builder.Services.AddScoped<PowerBase.Application.Groups.Commands.UnshareGroupFromApp.UnshareGroupFromAppCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Groups.Queries.GetSharedApps.GetSharedAppsQueryHandler>();
 
-builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
+if (builder.Configuration.GetValue<bool>("Search:Indexer:Enabled", true))
+{
+    builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
+}
 
 // Connected Tables: a standalone module (its own services, read-only write filter and workers).
 PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesModule(builder.Services, builder.Configuration);

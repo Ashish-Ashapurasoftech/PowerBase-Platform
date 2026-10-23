@@ -28,6 +28,7 @@ public sealed class InvokeButtonActionCommandHandler
     private readonly IQueryContext _queryContext;
     private readonly ITenantUnitOfWork _uow;
     private readonly IMessagePublisher _messagePublisher;
+    private readonly RecordModifyGuard? _modifyGuard;
 
     public InvokeButtonActionCommandHandler(
         IAppTableRepository tableRepo,
@@ -38,7 +39,8 @@ public sealed class InvokeButtonActionCommandHandler
         IActionButtonValueResolver valueResolver,
         IQueryContext queryContext,
         ITenantUnitOfWork uow,
-        IMessagePublisher messagePublisher)
+        IMessagePublisher messagePublisher,
+        RecordModifyGuard? modifyGuard = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -49,6 +51,7 @@ public sealed class InvokeButtonActionCommandHandler
         _queryContext = queryContext;
         _uow = uow;
         _messagePublisher = messagePublisher;
+        _modifyGuard = modifyGuard;
     }
 
     /// <summary>Pre-flight for a click: runs only the gates that need no captured input (Bool
@@ -103,6 +106,10 @@ public sealed class InvokeButtonActionCommandHandler
         // Rule 1 — privileged-write exception: record visibility/ownership still enforced,
         // but field-edit permission is bypassed for exactly the button's configured targets.
         await _enforcer.EnsureButtonWriteAllowedAsync(table, fields, command.RecordPublicId, writes.Keys.ToHashSet(), ct);
+        // ...including the role's View Custom Rules: a record the user cannot see cannot be acted on.
+        if (_modifyGuard is not null)
+            await _modifyGuard.EnsureVisibleAsync(
+                await _enforcer.GetTableAccessAsync(table, fields, ct), table, fields, command.RecordPublicId, ct);
 
         var label = buttonField.Label ?? buttonField.Name;
         IReadOnlyDictionary<long, object?> effective;

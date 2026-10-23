@@ -19,6 +19,7 @@ public class GetParentOptionsQueryHandler
     private readonly IRelationalProjector _relationalProjector;
     private readonly IFormulaProjector _formulaProjector;
     private readonly IQueryContext _queryContext;
+    private readonly IRolePermissionEnforcer? _enforcer;
 
     public GetParentOptionsQueryHandler(
         IAppTableRepository tableRepo,
@@ -27,9 +28,11 @@ public class GetParentOptionsQueryHandler
         IRecordRepository recordRepo,
         IRelationalProjector relationalProjector,
         IFormulaProjector formulaProjector,
-        IQueryContext queryContext)
+        IQueryContext queryContext,
+        IRolePermissionEnforcer? enforcer = null)
     {
         _queryContext = queryContext;
+        _enforcer = enforcer;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _relRepo = relRepo;
@@ -104,11 +107,23 @@ public class GetParentOptionsQueryHandler
         var filters = await ReferenceFilterResolver.BuildAsync(
             FormulaTypeMap.ParseReferenceSettings(referenceField?.Settings), childFields, parentFields,
             filterValues ?? new Dictionary<int, string?>(), _tableRepo, _fieldRepo, ct, _queryContext.UserId);
+
+        // Offer only the parent records the user's role may view: the picker must not reveal records hidden by
+        // the parent table's Custom Rules / Own records scope (or any record of a table the role cannot view).
+        IReadOnlyCollection<long>? onlyRowIds = null;
+        if (_enforcer is not null)
+        {
+            var access = await _enforcer.GetTableAccessAsync(parent, parentFields, ct);
+            onlyRowIds = await Records.ViewableRowIds.ResolveAsync(
+                access, parent, parentFields, _recordRepo, _relationalProjector, _formulaProjector, ct);
+            if (onlyRowIds is { Count: 0 }) return new GetParentOptionsResult(headers, []);
+        }
+
         var hasComputed = labelFields.Any(IsComputedLabel) || (primaryLabelField is not null && IsComputedLabel(primaryLabelField));
         if (!hasComputed)
         {
             var plain = await _recordRepo.SearchForReferenceAsync(
-                parent, labelFields, search, effectiveTake, primaryLabelField, ct, filters);
+                parent, labelFields, search, effectiveTake, primaryLabelField, ct, filters, onlyRowIds);
             return new GetParentOptionsResult(headers, plain);
         }
 
@@ -116,7 +131,7 @@ public class GetParentOptionsQueryHandler
         // SQL: fetch the (capped) page unfiltered, compute the labels, then filter in memory.
         var hasSearch = !string.IsNullOrWhiteSpace(search);
         var options = await _recordRepo.SearchForReferenceAsync(
-            parent, labelFields, null, hasSearch ? 200 : effectiveTake, primaryLabelField, ct, filters);
+            parent, labelFields, null, hasSearch ? 200 : effectiveTake, primaryLabelField, ct, filters, onlyRowIds);
         await FillComputedLabelsAsync(parent, parentFields, labelFields, primaryLabelField, options, ct);
 
         if (hasSearch)

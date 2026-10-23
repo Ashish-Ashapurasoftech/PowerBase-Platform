@@ -6,7 +6,9 @@ public interface IAzureSearchService
     Task BulkIndexRecordsAsync(IEnumerable<SearchIndexDocument> documents, CancellationToken ct = default);
     Task BulkDeleteRecordsAsync(long tenantId, long tableId, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
     Task<IReadOnlyList<Guid>> SearchRecordsAsync(long tenantId, long tableId, string searchText, CancellationToken ct = default);
+    Task<IReadOnlyList<Guid>> SearchRecordsAsync(long tenantId, long tableId, string searchText, string? indexName, CancellationToken ct = default);
     Task<IReadOnlyList<Guid>> SearchRecordsByFilterAsync(long tenantId, long tableId, string odataFilter, CancellationToken ct = default);
+    Task<IReadOnlyList<Guid>> SearchRecordsByFilterAsync(long tenantId, long tableId, string odataFilter, string? indexName, CancellationToken ct = default);
 
     /// <summary>
     /// Every record id matching <paramref name="odataFilter"/>, with no ceiling on how many, as pages of at most 1,000 ids
@@ -17,8 +19,22 @@ public interface IAzureSearchService
     /// </summary>
     IAsyncEnumerable<AiSearchIdPage> SearchRecordIdsByFilterPagedAsync(
         long tenantId, long tableId, string odataFilter, string? afterCursor = null, CancellationToken ct = default);
+    IAsyncEnumerable<AiSearchIdPage> SearchRecordIdsByFilterPagedAsync(
+        long tenantId, long tableId, string odataFilter, string? afterCursor, string? indexName, CancellationToken ct = default);
+    Task<(IReadOnlyList<Guid> Ids, long TotalCount)> SearchRecordsByFilterPagedAsync(
+        long tenantId, long tableId, string odataFilter, int page, int pageSize, CancellationToken ct = default);
+    Task<(IReadOnlyList<Guid> Ids, long TotalCount)> SearchRecordsByFilterPagedAsync(
+        long tenantId, long tableId, string odataFilter, int page, int pageSize, string? indexName, CancellationToken ct = default);
+    Task<(IReadOnlyList<Guid> Ids, long TotalCount)> SearchRecordsPagedAsync(
+        long tenantId, long tableId, string? searchText, string? odataFilter, int page, int pageSize,
+        IReadOnlyList<string>? orderBy = null, string? indexName = null, CancellationToken ct = default);
     Task<(IReadOnlyList<GlobalSearchResult> Items, long? TotalCount)> SearchGlobalAsync(long tenantId, string searchText, long? appId = null, int page = 1, int pageSize = 50, CancellationToken ct = default);
     Task EnsureTableSchemaAsync(long tenantId, long tableId, IEnumerable<(int Fid, bool IsSearchable, bool IsFilterable)> fields, CancellationToken ct = default);
+    Task PurgeTableRecordsAsync(long tenantId, long tableId, CancellationToken ct = default);
+    Task PurgeAppRecordsAsync(long tenantId, long appId, CancellationToken ct = default);
+    Task ResetIndexAsync(string? indexName = null, CancellationToken ct = default);
+    Task<bool> CreateIndexAsync(string? indexName = null, bool force = false, CancellationToken ct = default);
+    bool IsEnabled { get; }
     bool IsGridSearchEnabled { get; }
     Task<bool> IsHealthyAsync(CancellationToken ct = default);
 }
@@ -32,4 +48,11 @@ public record AiSearchIdPage(IReadOnlyList<Guid> Ids, string NextCursor)
 
 public record GlobalSearchResult(Guid PublicId, long AppId, long TableId, IReadOnlyDictionary<string, string> Fields);
 
-public record SearchIndexDocument(long TenantId, long AppId, long TableId, Guid PublicId, IReadOnlyDictionary<long, object?> Values);
+public record SearchIndexDocument(
+    long TenantId,
+    long AppId,
+    long TableId,
+    Guid PublicId,
+    IReadOnlyDictionary<long, object?> Values,
+    IReadOnlyDictionary<string, object?>? SlotValues = null,
+    string? CustomIndexName = null);

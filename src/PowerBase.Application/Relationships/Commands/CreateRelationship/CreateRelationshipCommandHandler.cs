@@ -72,12 +72,16 @@ public class CreateRelationshipCommandHandler
         App? app = command.Summaries.Count > 0 ? await _appRepo.GetByIdAsync(parent.AppId, ct) : null;
         // A summary may read a child's lookup through its source field; without the map a lookup target is always refused.
         var lookupSources = command.Summaries.Count > 0 ? await SummaryLookupSources.LoadAsync(childFields, _fieldRepo, ct) : null;
+        // A child Reference summarized is read as the key its parent shows (ReferenceKeys).
+        var referenceKeys = command.Summaries.Count > 0
+            ? await ReferenceKeys.LoadAsync(child.Id, childFields, _relRepo, _tableRepo, _fieldRepo, ct)
+            : null;
         foreach (var spec in command.Summaries)
         {
             var function = SummaryFunctions.Normalize(spec.Function)
                 ?? throw new ValidationException(new Dictionary<string, string[]> { ["summaries"] = [$"Unknown summary function '{spec.Function}'."] });
             var target = spec.TargetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == spec.TargetFid) : null;
-            SummaryTargetValidator.Validate(function, spec.TargetFid, target, spec.TargetSubField, lookupSources: lookupSources);
+            SummaryTargetValidator.Validate(function, spec.TargetFid, target, spec.TargetSubField, lookupSources: lookupSources, referenceKeys: referenceKeys);
 
             // An existing field reused as the reference keeps its own encryption flag; a brand-new
             // reference is encrypted exactly when the app is (covered by the app check).
@@ -212,7 +216,7 @@ public class CreateRelationshipCommandHandler
             var src = parentFields.FirstOrDefault(f => f.Fid == spec.SourceFid)
                 ?? throw new NotFoundException("Field", spec.SourceFid);
             ValidateSubField(spec.SourceSubField, src.TypeCode, "sourceSubField");
-            var sourceTypeCode = await LookupChain.ResolveForNewLookupAsync(src, _fieldRepo, ct);
+            var (sourceTypeCode, resultTypeCode) = await LookupChain.ResolveForNewLookupAsync(src, spec.SourceSubField, _fieldRepo, ct);
             var lookup =await _fieldFactory.CreateAsync(child, FieldTypeCodeNames.Lookup, spec.Label.Trim(), false,
                 new LookupSettings
                 {
@@ -221,6 +225,7 @@ public class CreateRelationshipCommandHandler
                     SourceTableId = parent.Id,
                     SourceFid = spec.SourceFid,
                     SourceTypeCode = sourceTypeCode,
+                    ResultTypeCode = resultTypeCode,
                     SourceSubField = spec.SourceSubField,
                 }, ct);
             firstLookup ??= lookup;
@@ -250,7 +255,9 @@ public class CreateRelationshipCommandHandler
                     ReferenceFid = refField.Fid!.Value,
                     Function = spec.Function,
                     TargetFid = spec.TargetFid,
-                    TargetTypeCode = target?.TypeCode,
+                    TargetTypeCode = target is null ? null : ReferenceKeys.KeyTypeCode(target, referenceKeys) ?? target.TypeCode,
+                    ResultTypeCode = FieldValueTypes.ForSummary(spec.Function,
+                        target is null ? null : ReferenceKeys.KeyTypeCode(target, referenceKeys) ?? FieldValueTypes.Of(target), spec.TargetSubField),
                     TargetSubField = spec.TargetSubField,
                 }, ct);
             createdFields.Add(new(summary.PublicId, summary.Fid!.Value, summary.Name, "summary"));

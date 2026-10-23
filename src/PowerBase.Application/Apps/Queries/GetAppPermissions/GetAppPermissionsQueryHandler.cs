@@ -9,7 +9,10 @@ namespace PowerBase.Application.Apps.Queries.GetAppPermissions;
 public record AppGranularTablePermission(
     Guid TablePublicId, string ViewScope, string ModifyScope,
     bool CanAdd, bool CanDelete, bool CanSaveSharedReports, bool CanEditFieldProperties,
-    string FieldAccessLevel);
+    string FieldAccessLevel,
+    // True when Modify Custom Rules narrow which records of the table the user may edit / delete, so the
+    // client asks the server per page (POST .../records/can-modify) instead of assuming "All records".
+    bool HasModifyRules = false);
 
 public record AppGranularFieldPermission(Guid TablePublicId, Guid FieldPublicId, string Access);
 
@@ -84,12 +87,19 @@ public class GetAppPermissionsQueryHandler
         var roleTablePerms = new Dictionary<long, IReadOnlyList<TablePermissionRow>>();
         var roleFieldPerms = new Dictionary<long, IReadOnlyList<FieldPermissionScopedRow>>();
         var roleFilters = new Dictionary<long, IReadOnlyList<RecordFilterRow>>();
+        var roleModifyRuleTables = new Dictionary<long, HashSet<Guid>>();
 
         foreach (var rId in roleIds)
         {
             roleTablePerms[rId] = await _permRepo.GetTablePermissionsAsync(rId, ct);
             roleFieldPerms[rId] = await _permRepo.GetAllFieldPermissionsAsync(rId, ct);
-            roleFilters[rId] = await _permRepo.GetRecordFiltersAsync(rId, ct);
+            var filterRows = await _permRepo.GetRecordFiltersAsync(rId, ct);
+            roleFilters[rId] = filterRows.Where(r => r.Kind == RoleRecordFilterJson.ViewKind).ToList();
+            roleModifyRuleTables[rId] = filterRows
+                .Where(r => r.Kind == RoleRecordFilterJson.ModifyKind
+                            && RoleRecordFilterJson.CountConditions(RoleRecordFilterJson.ParseGroup(r.FilterJson)) > 0)
+                .Select(r => r.TablePublicId)
+                .ToHashSet();
         }
 
         // 1. Merge Table Permissions
@@ -110,15 +120,32 @@ public class GetAppPermissionsQueryHandler
             var canDelete = list.Any(r => r.CanDelete);
             var canSaveSharedReports = list.Any(r => r.CanSaveSharedReports);
             var canEditFieldProperties = list.Any(r => r.CanEditFieldProperties);
-            var viewScope = ResolveScope(list.Select(r => r.ViewScope));
-            var modifyScope = ResolveScope(list.Select(r => r.ModifyScope));
+            // Same policy as RolePermissionEnforcer: a role with no row here has the defaults (View All records,
+            // Modify None); View "None" on any role is an explicit deny of the table (nothing to view, edit or
+            // delete); otherwise the roles' grants add up.
+            var hasDefaultRole = list.Count < roleIds.Count;
+            var viewDenied = list.Any(r => r.ViewScope == RecordScopes.None);
+            var viewScope = viewDenied
+                ? RecordScopes.None
+                : ResolveScope(list.Select(r => r.ViewScope).Concat(hasDefaultRole ? [RecordScopes.AllRecords] : []));
+            var modifyScope = viewDenied ? RecordScopes.None : ResolveScope(list.Select(r => r.ModifyScope));
+            if (viewDenied) canDelete = false;
 
             var hasFullAccess = list.Count < roleIds.Count || list.Any(r => r.FieldAccessLevel == TableFieldAccessLevels.FullAccess);
             var fieldAccessLevel = hasFullAccess ? TableFieldAccessLevels.FullAccess : TableFieldAccessLevels.CustomAccess;
 
+            // Modify rules narrow the table only when every role granting "All records" modify has rules
+            // (a role without rules may modify everything, and permissions of several roles add up).
+            var modifyRoleIds = roleTablePerms
+                .Where(kv => kv.Value.Any(r => r.TablePublicId == tablePublicId && r.ModifyScope == RecordScopes.AllRecords))
+                .Select(kv => kv.Key)
+                .ToList();
+            var hasModifyRules = modifyScope == RecordScopes.AllRecords && modifyRoleIds.Count > 0
+                && modifyRoleIds.All(rId => roleModifyRuleTables[rId].Contains(tablePublicId));
+
             mergedTablePerms.Add(new AppGranularTablePermission(
                 tablePublicId, viewScope, modifyScope, canAdd, canDelete,
-                canSaveSharedReports, canEditFieldProperties, fieldAccessLevel));
+                canSaveSharedReports, canEditFieldProperties, fieldAccessLevel, hasModifyRules));
         }
 
         // 2. Merge Field Permissions

@@ -22,6 +22,14 @@ public static class LookupChain
     public static async Task<(string TypeCode, int Length)> ResolveAsync(
         AppField source, IAppFieldRepository fieldRepo, CancellationToken ct)
     {
+        var (typeCode, length, _) = await ResolveFieldAsync(source, fieldRepo, ct);
+        return (typeCode, length);
+    }
+
+    /// <summary>As <see cref="ResolveAsync"/>, plus the field the chain ends in (null when the chain is broken).</summary>
+    private static async Task<(string TypeCode, int Length, AppField? Field)> ResolveFieldAsync(
+        AppField source, IAppFieldRepository fieldRepo, CancellationToken ct)
+    {
         var length = 0;
         var current = source;
         var visited = new HashSet<long>();
@@ -32,28 +40,33 @@ public static class LookupChain
             var stored = string.IsNullOrWhiteSpace(settings?.SourceTypeCode) ? "Text" : settings!.SourceTypeCode!;
             if (length > MaxLength || !visited.Add(current.Id)
                 || settings is not { SourceTableId: not null, SourceFid: not null })
-                return (Underlying(stored), length);
+                return (Underlying(stored), length, null);
 
             var next = (await fieldRepo.ListByTableAsync(settings.SourceTableId.Value, ct))
                 .FirstOrDefault(f => f.Fid == settings.SourceFid);
-            if (next is null) return (Underlying(stored), length);
+            if (next is null) return (Underlying(stored), length, null);
             current = next;
         }
-        return (current.TypeCode, length);
+        return (current.TypeCode, length, current);
     }
 
-    /// <summary>Resolves the source's underlying type and refuses a lookup that would make the
-    /// chain longer than <see cref="MaxLength"/>.</summary>
-    public static async Task<string> ResolveForNewLookupAsync(
-        AppField source, IAppFieldRepository fieldRepo, CancellationToken ct)
+    /// <summary>Resolves the source's underlying type (the new lookup's SourceTypeCode) and the type of value the
+    /// lookup will show (its ResultTypeCode — see <see cref="FieldValueTypes"/>: a lookup of "Min of Salary" shows a
+    /// number, one part of an address text), and refuses a lookup that would make the chain longer than
+    /// <see cref="MaxLength"/>.</summary>
+    public static async Task<(string SourceTypeCode, string? ResultTypeCode)> ResolveForNewLookupAsync(
+        AppField source, string? sourceSubField, IAppFieldRepository fieldRepo, CancellationToken ct)
     {
-        var (typeCode, length) = await ResolveAsync(source, fieldRepo, ct);
+        var (typeCode, length, underlying) = await ResolveFieldAsync(source, fieldRepo, ct);
         if (length + 1 > MaxLength)
             throw new ValidationException(new Dictionary<string, string[]>
             {
                 ["sourceFid"] = [$"A lookup can be chained through at most {MaxLength} lookups; \"{source.Label ?? source.Name}\" is already {length} deep."],
             });
-        return typeCode;
+        var resultTypeCode = !string.IsNullOrWhiteSpace(sourceSubField)
+            ? "Text"
+            : FieldValueTypes.Of(source) ?? (underlying is null ? null : FieldValueTypes.Of(underlying));
+        return (typeCode, resultTypeCode);
     }
 
     // A stored type is never "Lookup" for lookups made after this change; older data might be.

@@ -104,6 +104,18 @@ public static class EncryptedSummaryAggregator
         return string.IsNullOrWhiteSpace(subField) ? v : RelationalProjector.ExtractJsonSubField(v, subField);
     }
 
+    /// <summary>The value Combined Text shows: <see cref="ReadValue"/>'s — for a range, both its ends as the summary
+    /// query reads them ({"start","end"}), its end being a second column.</summary>
+    private static object? ReadShownValue(IReadOnlyDictionary<string, object?> row, AppField field, string? subField)
+    {
+        if (!string.IsNullOrWhiteSpace(subField) || !PhysicalNaming.IsRangeTypeCode(field.TypeCode) || field.Fid is not int fid)
+            return ReadValue(row, field, subField);
+        var start = ReadValue(row, field, null);
+        row.TryGetValue(PhysicalNaming.EndColumnName(fid), out var end);
+        if (end is DBNull) end = null;
+        return start is null && end is null ? null : JsonSerializer.Serialize(new { start, end });
+    }
+
     private static string ResultKind(AppField f) => f.TypeCode switch
     {
         "Date" or "Formula_Date" => "Date",
@@ -152,7 +164,7 @@ public static class EncryptedSummaryAggregator
         else if (o.SortDescending) ordered = children.AsEnumerable().Reverse();
 
         var texts = ordered
-            .Select(r => format(ReadValue(r, target, subField)))
+            .Select(r => format(ReadShownValue(r, target, subField)))
             .Where(t => !string.IsNullOrWhiteSpace(t))
             .Select(t => t!);
         if (o.DistinctValues) texts = texts.Distinct(StringComparer.Ordinal);

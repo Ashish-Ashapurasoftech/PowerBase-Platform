@@ -24,6 +24,7 @@ public class RecordFilterSqlTests
         [8] = new AppField { Id = 1008, Fid = 8, Name = "Experience", TypeCode = "Number", PhysicalColumnName = "f_8" },
         [9] = new AppField { Id = 1009, Fid = 9, Name = "Joining Date", TypeCode = "Date", PhysicalColumnName = "f_9" },
         [12] = new AppField { Id = 1012, Fid = 12, Name = "Meeting At", TypeCode = "DateTime", PhysicalColumnName = "f_12" },
+        [20] = new AppField { Id = 1020, Fid = 20, Name = "Title", TypeCode = "Text", PhysicalColumnName = "f_20" },
     };
 
     private static (string Sql, DynamicParameters Params) Where(long fieldId, string op, string? value)
@@ -211,13 +212,154 @@ public class RecordFilterSqlTests
         sql.Should().BeEmpty();
     }
 
-    [Theory]
-    [InlineData(8L)]    // calculated — no column
-    [InlineData(99L)]   // not on the parent table
-    public void ParentField_WithoutAColumnToRead_IsANoOp(long parentFid)
+    [Fact]
+    public void ParentField_NotOnTheParentTable_IsANoOp()
     {
-        var (sql, _) = WhereWithParent(Parent, ParentCond(9, "gte", parentFid));
+        var (sql, _) = WhereWithParent(Parent, ParentCond(9, "gte", 99));
 
         sql.Should().BeEmpty();
     }
+
+    // ── … a parent Lookup / Summary / Formula: no column, its values worked out per parent ──
+
+    [Fact]
+    public void ParentField_Calculated_ComparesEachChildToItsOwnParentsValue()
+    {
+        var scope = Parent with
+        {
+            ComputedValues = new Dictionary<long, IReadOnlyDictionary<long, object?>>
+            {
+                [8] = new Dictionary<long, object?> { [1] = 50000m, [2] = null, [3] = 72000m },
+            },
+        };
+
+        var (sql, p) = WhereWithParent(scope, ParentCond(7, "gt", 8));
+
+        // Parent 2 has no value: left out, so its children match nothing (like a blank stored value).
+        sql.Should().Be(" AND (f_7 > (SELECT pv.v FROM (VALUES (1, @fv0), (3, @fv1)) pv(k, v) WHERE pv.k = c.f_10))");
+        p.Get<decimal>("fv0").Should().Be(50000m);
+        p.Get<decimal>("fv1").Should().Be(72000m);
+    }
+
+    [Fact]
+    public void ParentField_Calculated_KeepsParameterNumberingForTheConditionsAfterIt()
+    {
+        var scope = Parent with
+        {
+            ComputedValues = new Dictionary<long, IReadOnlyDictionary<long, object?>> { [8] = new Dictionary<long, object?> { [1] = 5m } },
+        };
+
+        var (sql, p) = WhereWithParent(scope, ParentCond(7, "gt", 8), new FilterNode { Condition = new FilterCondition { FieldId = 8, Operator = "gt", Value = "10" } });
+
+        sql.Should().EndWith("f_8 > @fv1)");
+        p.Get<decimal>("fv0").Should().Be(5m);
+        p.Get<long>("fv1").Should().Be(10L);
+    }
+
+    [Fact]
+    public void ParentField_ReferenceComparedAsItsKey_ComparesEachChildToItsParentsKeyValue()
+    {
+        // The parent's "Related Region" (fid 9, a Reference converted from a Text field) holds a Record ID#; the
+        // projector hands over the key it shows instead.
+        var scope = new ParentFieldScope(5, 10, new Dictionary<long, AppField>
+        {
+            [9] = new AppField { Id = 2009, Fid = 9, Name = "Related Region", TypeCode = "Reference", PhysicalColumnName = "f_9" },
+        })
+        {
+            ComputedValues = new Dictionary<long, IReadOnlyDictionary<long, object?>> { [9] = new Dictionary<long, object?> { [1] = "West" } },
+        };
+        var fields = new Dictionary<long, AppField>(Fields) { [20] = new AppField { Id = 1020, Fid = 20, Name = "Region", TypeCode = "Text", PhysicalColumnName = "f_20" } };
+        var group = new FilterGroup { Logic = "and", Nodes = [ParentCond(20, "eq", 9)] };
+        var p = new DynamicParameters();
+
+        var sql = (string)BuildWhere.Invoke(null, [group, p, fields, scope])!;
+
+        sql.Should().Be(" AND (f_20 = (SELECT pv.v FROM (VALUES (1, @fv0)) pv(k, v) WHERE pv.k = c.f_10))");
+        p.Get<string>("fv0").Should().Be("West");
+    }
+
+    [Fact]
+    public void ReferenceComparedAsItsKey_ReadsThatKeyThroughTheReference()
+    {
+        // "Related D" (fid 12) stands in as a lookup (fid -1000012) of its parent's Department Name (table 9, fid 6).
+        var standIn = new AppField
+        {
+            Id = -1000012, Fid = -1000012, Name = "Related D", TypeCode = "Lookup",
+            Settings = """{"referenceFid":12,"sourceTableId":9,"sourceFid":6,"sourceTypeCode":"Text"}""",
+        };
+        var fields = new Dictionary<long, AppField>(Fields) { [-1000012] = standIn };
+        var group = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = -1000012, Operator = "eq", Value = "Sales" } }] };
+        var p = new DynamicParameters();
+
+        var sql = (string)BuildWhere.Invoke(null, [group, p, fields, Parent])!;
+
+        sql.Should().Be(" AND ((SELECT lk.f_6 FROM data.t_9 lk WHERE lk.Id = c.f_12 AND lk.IsDeleted = 0) = @fv0)");
+        p.Get<string>("fv0").Should().Be("Sales");
+    }
+
+    [Theory]
+    [InlineData(false)]   // values never worked out
+    [InlineData(true)]    // every parent's value is blank
+    public void ParentField_Calculated_WithNoValueToCompareTo_MatchesNothing(bool allBlank)
+    {
+        var scope = allBlank
+            ? Parent with { ComputedValues = new Dictionary<long, IReadOnlyDictionary<long, object?>> { [8] = new Dictionary<long, object?> { [1] = null, [2] = " " } } }
+            : Parent;
+
+        var (sql, _) = WhereWithParent(scope, ParentCond(7, "gt", 8));
+
+        // Never dropped — that would count every child.
+        sql.Should().Be(" AND (1 = 0)");
+    }
+
+    // ── Wildcard: a backslash before * or ? makes it the character itself ──
+
+    [Theory]
+    [InlineData("a*b", "a%b")]
+    [InlineData("a?b", "a_b")]
+    [InlineData(@"a\*b*", "a*b%")]
+    [InlineData(@"a\?b", "a?b")]
+    [InlineData("50%_[x]*", "50[%][_][[]x]%")]
+    [InlineData(@"C:\dir*", @"c:\dir%")]
+    public void Wildcard_TranslatesTheQuickbaseGrammarToLike(string pattern, string like)
+    {
+        var (sql, p) = Where(20, "wildcard", pattern);
+        sql.Should().Contain("LIKE @fv0");
+        p.Get<string>("fv0").Should().Be(like);
+    }
+
+    // ── Combined Text of a range: both ends, the end being a second column ──
+
+    private static (string Value, string HasValue)? RangeValue(int targetFid, IReadOnlyDictionary<long, AppField> fields) =>
+        ((string, string)?)typeof(RecordRepository).GetMethod("RangeValueExpr", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, [targetFid, null, fields]);
+
+    [Fact]
+    public void RangeValue_OfARangeField_ReadsBothEndsAsJson()
+    {
+        var fields = new Dictionary<long, AppField> { [30] = new() { Id = 1030, Fid = 30, Name = "Term", TypeCode = "DateRange" } };
+
+        RangeValue(30, fields).Should().Be((
+            "(SELECT c.f_30 AS [start], c.f_30_e AS [end] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)",
+            "(c.f_30 IS NOT NULL OR c.f_30_e IS NOT NULL)"));
+    }
+
+    [Fact]
+    public void RangeValue_OfALookupOfARange_ReadsBothEndsFromTheParent()
+    {
+        var fields = new Dictionary<long, AppField>
+        {
+            [31] = new() { Id = 1031, Fid = 31, Name = "Client - Term", TypeCode = "Lookup",
+                Settings = """{"referenceFid":10,"sourceTableId":5,"sourceFid":8,"sourceTypeCode":"NumericRange"}""" },
+        };
+
+        var (value, hasValue) = RangeValue(31, fields)!.Value;
+
+        value.Should().Contain("SELECT lk.f_8 AS [start], lk.f_8_e AS [end]").And.Contain("lk.Id = c.f_10").And.EndWith("FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)");
+        hasValue.Should().StartWith("EXISTS (SELECT 1 FROM").And.Contain("lk.f_8 IS NOT NULL OR lk.f_8_e IS NOT NULL");
+    }
+
+    [Fact]
+    public void RangeValue_OfAnyOtherField_IsNone() =>
+        RangeValue(20, Fields).Should().BeNull();
 }

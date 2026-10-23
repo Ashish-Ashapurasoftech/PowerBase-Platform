@@ -50,14 +50,31 @@ public static class PipelineUserFieldFilter
         ["not-starts-with"] = "starts-with", ["not_starts_with"] = "starts-with",
         ["not-ends-with"] = "ends-with", ["not_ends_with"] = "ends-with",
         ["is-empty"] = "is-not-empty", ["is_empty"] = "is-not-empty", ["is-blank"] = "is-not-empty", ["is_blank"] = "is-not-empty",
-        ["is-null"] = "is-not-empty"
+        ["is-null"] = "is-not-empty",
+        ["not-wildcard"] = "wildcard", ["not_wildcard"] = "wildcard"
     };
+
+    /// <summary>A rule on the User / User List field itself with one of these operators matches its person by name or email, as the
+    /// report filter's "wildcard match" on a user field does — the field itself stores only the user id.</summary>
+    public const string PersonDetail = "person";
+    private static readonly HashSet<string> PersonOperators = new(StringComparer.OrdinalIgnoreCase) { "wildcard", "not-wildcard", "not_wildcard" };
 
     /// <summary>A User or User List field with a physical column (Record Owner and Last Modified By are User fields).</summary>
     public static bool IsUserField(AppField? field) =>
         field != null && (field.TypeCode.Equals("User", StringComparison.OrdinalIgnoreCase) || IsUserList(field));
 
     public static bool IsUserList(AppField? field) => field != null && field.TypeCode.Equals("MultiUser", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A computed field holding a user (a bare user id) or a list of users (their ids): a formula returning one, or a Lookup of a
+    /// parent's user field. No column of its own: its value is worked out when read.</summary>
+    public static bool IsComputedUser(AppField? field) =>
+        field != null && (field.TypeCode is "Formula_User" or "Formula_ListUser"
+            || (field.TypeCode == "Lookup" && PowerBase.Application.Records.RecordResult.UserLookupSourceType(field) != null));
+
+    /// <summary>Of those, the ones holding a list of users.</summary>
+    public static bool IsComputedUserList(AppField? field) =>
+        field != null && (field.TypeCode == "Formula_ListUser"
+            || (field.TypeCode == "Lookup" && PowerBase.Application.Records.RecordResult.UserLookupSourceType(field) is "MultiUser" or "Formula_ListUser"));
 
     /// <summary>A rule field like <c>fid_4.email</c> (or <c>Record Owner.email</c>) → the User / User List field and the detail.</summary>
     public static bool TryResolve(string? fieldRef, IReadOnlyList<AppField> fields, out AppField field, out string detail)
@@ -76,6 +93,24 @@ public static class PipelineUserFieldFilter
         if (!IsUserField(resolved)) return false;
         field = resolved!;
         detail = candidate;
+        return true;
+    }
+
+    /// <summary>The User / User List field and detail a rule is checked on: a named detail (<c>fid_4.email</c>), or the field itself
+    /// with a person operator ("wildcard match": its person's name or email, <see cref="PersonDetail"/>).</summary>
+    public static bool TryResolveRule(TriggerFilterRule? rule, IReadOnlyList<AppField> fields, out AppField field, out string detail)
+    {
+        if (TryResolve(rule?.Field, fields, out field, out detail)) return true;
+        if (rule?.Field is not { } fieldRef || string.IsNullOrWhiteSpace(fieldRef) || rule.Operator is not { } op || !PersonOperators.Contains(op.Trim()))
+            return false;
+        var name = fieldRef.Trim();
+        var resolved = fields.FirstOrDefault(f => f.Fid.HasValue && $"fid_{f.Fid}".Equals(name, StringComparison.OrdinalIgnoreCase))
+            ?? fields.FirstOrDefault(f => !string.IsNullOrEmpty(f.Label) && f.Label.Equals(name, StringComparison.OrdinalIgnoreCase))
+            ?? fields.FirstOrDefault(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        // A formula or lookup user field holds user ids too, so its person is matched the same way.
+        if (!IsUserField(resolved) && !IsComputedUser(resolved)) return false;
+        field = resolved!;
+        detail = PersonDetail;
         return true;
     }
 
@@ -111,6 +146,12 @@ public static class PipelineUserFieldFilter
     private static bool Holds(string left, string op, string value) =>
         PipelineFilterEvaluator.EvaluateConditionOperator(left, op, value, "TEXT");
 
+    /// <summary>Whether one person passes: their detail, or for <see cref="PersonDetail"/> any of their screen name, name or email.</summary>
+    private static bool PersonHolds(long id, PipelineUserDetails? user, string detail, string op, string value) =>
+        detail == PersonDetail
+            ? user != null && new[] { user.ScreenName, user.Name, user.Email }.Any(text => Holds(text, op, value))
+            : Holds(DetailOf(id, user, detail), op, value);
+
     /// <summary>Whether a record whose field holds <paramref name="ids"/> passes the rule (trigger filters, evaluated in memory).</summary>
     public static bool Matches(IReadOnlyList<long> ids, IReadOnlyDictionary<long, PipelineUserDetails>? users, string detail, string? op, string? value)
     {
@@ -118,7 +159,7 @@ public static class PipelineUserFieldFilter
         var right = value ?? string.Empty;
         var any = ids.Count == 0
             ? Holds(string.Empty, positive, right)
-            : ids.Any(id => Holds(DetailOf(id, users?.GetValueOrDefault(id), detail), positive, right));
+            : ids.Any(id => PersonHolds(id, users?.GetValueOrDefault(id), detail, positive, right));
         return negated ? !any : any;
     }
 
@@ -139,7 +180,7 @@ public static class PipelineUserFieldFilter
         var fid = field.Fid!.Value;
         var (positive, negated) = Split(op);
         var right = value ?? string.Empty;
-        var matched = candidateIds.Where(id => Holds(DetailOf(id, users.GetValueOrDefault(id), detail), positive, right)).ToList();
+        var matched = candidateIds.Where(id => PersonHolds(id, users.GetValueOrDefault(id), detail, positive, right)).ToList();
         var emptyHolds = Holds(string.Empty, positive, right);
         var withoutUserPasses = negated ? !emptyHolds : emptyHolds;
 
@@ -203,7 +244,7 @@ public static class PipelineUserFieldFilter
             {
                 foreach (var nested in DetailRules(rule.Groups, fields)) yield return nested;
             }
-            else if (TryResolve(rule.Field, fields, out _, out _))
+            else if (TryResolveRule(rule, fields, out _, out _))
             {
                 yield return rule;
             }

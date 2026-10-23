@@ -80,15 +80,27 @@ public static class EncryptedRowFilter
         var sourceCol = Column(source);
         var refCol = PhysicalNaming.ColumnName(settings.ReferenceFid!.Value);
         var lookupCol = PhysicalNaming.ColumnName(lookup.Fid!.Value);
+        // A looked-up range brings its end along too (Combined Text shows "start – end").
+        var withEnd = string.IsNullOrWhiteSpace(settings.SourceSubField) && PhysicalNaming.IsRangeTypeCode(source.TypeCode)
+            && source.Fid.HasValue;
+        var sourceEndCol = withEnd ? PhysicalNaming.EndColumnName(source.Fid!.Value) : null;
+        var lookupEndCol = withEnd ? PhysicalNaming.EndColumnName(lookup.Fid!.Value) : null;
         var copies = new List<IReadOnlyDictionary<string, object?>>(rows.Count);
         foreach (var row in rows)
         {
             var copy = new Dictionary<string, object?>(row);
             object? value = null;
+            object? end = null;
             if (row.TryGetValue(refCol, out var rawRef) && EncryptedSummaryAggregator.NormalizeKey(rawRef) is { } key
-                && sourceById.TryGetValue(key, out var sourceRow) && sourceRow.TryGetValue(sourceCol, out var v) && v is not DBNull)
-                value = string.IsNullOrWhiteSpace(settings.SourceSubField) ? v : RelationalProjector.ExtractJsonSubField(v, settings.SourceSubField);
+                && sourceById.TryGetValue(key, out var sourceRow))
+            {
+                if (sourceRow.TryGetValue(sourceCol, out var v) && v is not DBNull)
+                    value = string.IsNullOrWhiteSpace(settings.SourceSubField) ? v : RelationalProjector.ExtractJsonSubField(v, settings.SourceSubField);
+                if (sourceEndCol is not null && sourceRow.TryGetValue(sourceEndCol, out var e) && e is not DBNull)
+                    end = e;
+            }
             copy[lookupCol] = value;
+            if (lookupEndCol is not null) copy[lookupEndCol] = end;
             copies.Add(copy);
         }
 
@@ -104,16 +116,19 @@ public static class EncryptedRowFilter
         return (copies, withLookup);
     }
 
-    /// <summary>Formula and Summary fields have no column: for those the criteria or the sort read, each row gets the
-    /// computed value (<paramref name="computed"/>, per row, by Fid) under the field's own column, and the field is
-    /// replaced in the returned list by one of the type it returns — so it is compared and sorted like a stored field.</summary>
+    /// <summary>Formula and Summary fields — and lookups of them (<paramref name="lookupSources"/>) — have no column: for
+    /// those the criteria or the sort read, each row gets the computed value (<paramref name="computed"/>, per row, by
+    /// Fid) under the field's own column, and the field is replaced in the returned list by one of the type it returns —
+    /// so it is compared and sorted like a stored field.</summary>
     public static (IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows, IReadOnlyList<AppField> Fields) WithComputedValues(
         IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, IReadOnlyList<AppField> fields,
-        IReadOnlyList<IReadOnlyDictionary<long, object?>> computed, IEnumerable<long> readFids)
+        IReadOnlyList<IReadOnlyDictionary<long, object?>> computed, IEnumerable<long> readFids,
+        IReadOnlyDictionary<long, AppField>? lookupSources = null)
     {
+        string? KindOf(AppField f) => SummaryComputedTargets.ResultKind(f) ?? SummaryLookupSources.ComputedValueKind(f, lookupSources);
         var computedFields = readFids.Distinct()
             .Select(fid => fields.FirstOrDefault(f => f.Fid == fid))
-            .Where(f => f is not null && SummaryComputedTargets.ResultKind(f) is not null)
+            .Where(f => f is not null && KindOf(f) is not null)
             .Select(f => f!).ToList();
         if (computedFields.Count == 0) return (rows, fields);
 
@@ -130,7 +145,7 @@ public static class EncryptedRowFilter
             ? new AppField
             {
                 Id = f.Id, Fid = f.Fid, Name = f.Name, Label = f.Label,
-                TypeCode = SummaryComputedTargets.ResultKind(f) is { } kind ? (kind == "Bool" ? "Checkbox" : kind) : f.TypeCode,
+                TypeCode = KindOf(f) is { } kind ? (kind == "Bool" ? "Checkbox" : kind) : f.TypeCode,
             }
             : f).ToList();
         return (copies, typed);

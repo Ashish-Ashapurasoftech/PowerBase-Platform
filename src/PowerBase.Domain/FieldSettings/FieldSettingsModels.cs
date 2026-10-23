@@ -619,6 +619,11 @@ public sealed class LookupSettings
     /// <summary>The source field's TypeCode, captured at creation so the value can be rendered/typed
     /// without a cross-table lookup (e.g. for formula type-mapping).</summary>
     public string? SourceTypeCode { get; set; }
+    /// <summary>The type of value the lookup shows, as a field type code (Text, Number, Currency, Date, Boolean, …):
+    /// a stored source's own type, or — for a Summary / Formula source — the type of value it produces ("Number" for
+    /// a lookup of "Min of Salary"). Saved when the lookup is created, and refreshed when a summary it pulls is edited,
+    /// so a client can type the lookup without reading the source table. Null for lookups saved before it existed.</summary>
+    public string? ResultTypeCode { get; set; }
     /// <summary>When the source field is a composite Address field, the JSON sub-key to pull out
     /// of its value (one of <see cref="AddressSubFields.All"/>) instead of the whole address —
     /// e.g. just the city. Null for an ordinary (non-Address, or whole-Address) lookup.</summary>
@@ -642,6 +647,11 @@ public sealed class SummarySettings
     public int? TargetFid { get; set; }
     /// <summary>The target field's TypeCode (for Min/Max result typing/rendering); null for Count.</summary>
     public string? TargetTypeCode { get; set; }
+    /// <summary>The type of value the summary produces, as a field type code: Number for Count / Distinct Count,
+    /// Boolean for True / False, Text for Combined Text, the target's value type for Sum / Avg / Min / Max (Currency
+    /// for "Sum of Salary"). Saved when the summary is created or edited, so a client can type it — and a lookup of
+    /// it — without working it out. Null for summaries saved before it existed.</summary>
+    public string? ResultTypeCode { get; set; }
     /// <summary>When the target field is a composite Address field, the JSON sub-key to aggregate
     /// (one of <see cref="AddressSubFields.All"/>) instead of the whole address. Only meaningful
     /// with Count/Exists — an address sub-value is always text, so Sum/Avg/Min/Max over it are

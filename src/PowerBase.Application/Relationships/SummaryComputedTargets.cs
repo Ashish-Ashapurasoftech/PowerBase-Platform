@@ -14,16 +14,27 @@ namespace PowerBase.Application.Relationships;
 /// Count → Number, True/False → Checkbox, Combined Text → Text, Min/Max → the summarized type):
 ///   Checkbox → Distinct Count · Date / DateTime → Min, Max, Distinct Count ·
 ///   Duration → Sum, Avg, Min, Max · Number → Sum, Avg, Min, Max, Distinct Count ·
-///   Text / Email / Phone → Combined Text, Distinct Count.
-/// Other formula results (Time, User, Rich Text, URL) can't be summarized.
+///   Text / Email / Phone → Distinct Count — and Combined Text for every one of them.
+/// Other formula results (Time, User, Rich Text, Multi-select) take Combined Text only
+/// (<see cref="CombinedTextValueType"/>); a URL formula is a link, not a value, and takes none.
 /// </summary>
 public static class SummaryComputedTargets
 {
-    private static readonly IReadOnlySet<string> CheckboxFunctions = new HashSet<string> { SummaryFunctions.DistinctCount };
-    private static readonly IReadOnlySet<string> DateFunctions = new HashSet<string> { SummaryFunctions.Min, SummaryFunctions.Max, SummaryFunctions.DistinctCount };
-    private static readonly IReadOnlySet<string> DurationFunctions = new HashSet<string> { SummaryFunctions.Sum, SummaryFunctions.Avg, SummaryFunctions.Min, SummaryFunctions.Max };
-    private static readonly IReadOnlySet<string> NumericFunctions = new HashSet<string> { SummaryFunctions.Sum, SummaryFunctions.Avg, SummaryFunctions.Min, SummaryFunctions.Max, SummaryFunctions.DistinctCount };
+    private static readonly IReadOnlySet<string> CheckboxFunctions = new HashSet<string> { SummaryFunctions.DistinctCount, SummaryFunctions.CombinedText };
+    private static readonly IReadOnlySet<string> DateFunctions = new HashSet<string> { SummaryFunctions.Min, SummaryFunctions.Max, SummaryFunctions.DistinctCount, SummaryFunctions.CombinedText };
+    private static readonly IReadOnlySet<string> DurationFunctions = new HashSet<string> { SummaryFunctions.Sum, SummaryFunctions.Avg, SummaryFunctions.Min, SummaryFunctions.Max, SummaryFunctions.CombinedText };
+    private static readonly IReadOnlySet<string> NumericFunctions = new HashSet<string> { SummaryFunctions.Sum, SummaryFunctions.Avg, SummaryFunctions.Min, SummaryFunctions.Max, SummaryFunctions.DistinctCount, SummaryFunctions.CombinedText };
     private static readonly IReadOnlySet<string> TextFunctions = new HashSet<string> { SummaryFunctions.CombinedText, SummaryFunctions.DistinctCount };
+
+    /// <summary>The type of value (a field type code, <see cref="FieldValueTypes"/>) Combined Text shows for a calculated
+    /// target — a Formula, a child Summary, or a lookup of one (<paramref name="lookupSources"/>) — in its display format:
+    /// "Currency" for a lookup of "Min of Salary". Null for a stored target (or a lookup of one), a link (a URL formula)
+    /// or a value whose type can't be told.</summary>
+    public static string? CombinedTextValueType(AppField target, IReadOnlyDictionary<long, AppField>? lookupSources)
+    {
+        if (!IsComputedTarget(target) && !SummaryLookupSources.ReadsComputedSource(target, lookupSources)) return null;
+        return FieldValueTypes.OfTarget(target, lookupSources) is { } valueType && valueType != "Url" ? valueType : null;
+    }
 
     /// <summary>True for a generic "Formula" field or any Formula_{X} variant.</summary>
     public static bool IsFormula(AppField field) =>
@@ -58,19 +69,31 @@ public static class SummaryComputedTargets
 
     /// <summary>The summary functions this formula field supports, or null when its result type
     /// can't be summarized (or it isn't a formula).</summary>
-    public static IReadOnlySet<string>? AllowedFunctions(AppField field)
+    public static IReadOnlySet<string>? AllowedFunctions(AppField field) => FunctionsForKind(ResultKind(field));
+
+    /// <summary>The summary functions a value of this kind (<see cref="ResultKind"/>) supports, or null when none.</summary>
+    public static IReadOnlySet<string>? FunctionsForKind(string? kind) => kind switch
     {
-        var kind = ResultKind(field);
-        return kind switch
-        {
-            "Bool" => CheckboxFunctions,
-            "Date" or "DateTime" => DateFunctions,
-            "Duration" => DurationFunctions,
-            "Number" => NumericFunctions,
-            "Text" => TextFunctions,
-            _ => null,
-        };
-    }
+        "Bool" => CheckboxFunctions,
+        "Date" or "DateTime" => DateFunctions,
+        "Duration" => DurationFunctions,
+        "Number" => NumericFunctions,
+        "Text" => TextFunctions,
+        _ => null,
+    };
+
+    /// <summary>The kind (<see cref="ResultKind"/>) of a value of this field type code (<see cref="FieldValueTypes"/>:
+    /// "Currency" → Number), or null for a type a summary can't aggregate as a calculated value (time, user, URL …).</summary>
+    public static string? KindOfValueType(string? valueType) => valueType switch
+    {
+        "Number" or "Currency" or "Percent" or "Rating" => "Number",
+        "Duration" => "Duration",
+        "Date" => "Date",
+        "DateTime" => "DateTime",
+        "Boolean" => "Bool",
+        "Text" or "Email" or "Phone" => "Text",
+        _ => null,
+    };
 
     /// <summary>The formula's result type: Bool, Date, DateTime, Duration, Number, Text — or null
     /// (Time, User, RichText, Url, or not a formula).</summary>
@@ -100,7 +123,9 @@ public static class SummaryComputedTargets
     /// <summary>Aggregates one parent's computed formula values (nulls included, in child Id order
     /// or the requested sort order). Returns null when there is nothing to show; Distinct Count
     /// returns 0.</summary>
-    public static object? Aggregate(string function, string resultKind, IReadOnlyList<object?> values, CombinedTextOptions? options)
+    /// <param name="toText">How Combined Text shows a value — its display format; as plain text when not given.</param>
+    public static object? Aggregate(string function, string resultKind, IReadOnlyList<object?> values, CombinedTextOptions? options,
+        Func<object?, string?>? toText = null)
     {
         var present = values.Where(v => v is not null && !(v is string s && string.IsNullOrWhiteSpace(s))).Select(v => v!).ToList();
 
@@ -112,7 +137,10 @@ public static class SummaryComputedTargets
             case SummaryFunctions.CombinedText:
             {
                 var o = options ?? CombinedTextOptions.Default;
-                IEnumerable<string> texts = present.Select(v => Convert.ToString(v, CultureInfo.InvariantCulture)!);
+                IEnumerable<string> texts = present
+                    .Select(v => toText is null ? Convert.ToString(v, CultureInfo.InvariantCulture) : toText(v))
+                    .Where(t => !string.IsNullOrWhiteSpace(t))
+                    .Select(t => t!);
                 if (o.DistinctValues) texts = texts.Distinct(StringComparer.Ordinal);
                 var joined = string.Join(o.Delimiter, texts);
                 return joined.Length > 0 ? joined : null;

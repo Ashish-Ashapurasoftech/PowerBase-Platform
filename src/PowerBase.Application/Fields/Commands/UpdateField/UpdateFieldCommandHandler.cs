@@ -117,7 +117,9 @@ public class UpdateFieldCommandHandler
         var isAutoFill = existing.IsSystem ? false : command.IsAutoFill;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
-            : command.Settings;
+            // A request that sends no settings leaves them as they are: UpdateFieldSql writes Settings = @settings,
+            // so passing null on would silently erase a formula's expression (or any other saved setting).
+            : command.Settings ?? existing.Settings;
 
         if (!existing.IsSystem && PowerBase.Formula.Binding.FieldIdReference.IsReservedLabel(label))
             throw new ValidationException(new Dictionary<string, string[]> { ["Label"] = [CreateField.CreateFieldCommandValidator.ReservedLabelMessage(label)] });
@@ -220,14 +222,23 @@ public class UpdateFieldCommandHandler
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, isUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, isEncrypted, ct);
 
+        // Ciphertext needs a text column (see SchemaEngineService.AddColumnAsync); a field created
+        // unencrypted has its type's native column (DATE, DECIMAL, …), so re-type it to match the new
+        // flag. Runs before SetUniqueAsync below, which re-creates the unique index it drops.
+        if (isEncrypted != existing.IsEncrypted)
+            await _schemaEngine.SetColumnEncryptionAsync(table, existing, isEncrypted, ct);
+
         // Build the physical constraint before persisting IsUnique. A failed index build must
         // not leave metadata claiming that uniqueness is enforced. Also repair fields whose
         // metadata was saved by an earlier failed attempt but whose index is missing.
         if (isUnique || existing.IsUnique)
             await _schemaEngine.SetUniqueAsync(table, existing, isUnique, ct);
 
-        // Save old IsSearchable state before UpdateAsync modifies metadata
+        // Save old search eligibility before UpdateAsync modifies metadata
         bool wasSearchable = existing.IsSearchable;
+        bool wasFilterable = existing.IsFilterable;
+        bool wasEligible = wasSearchable || wasFilterable;
+        bool isEligible = command.IsSearchable || isFilterable;
 
         var after = new FieldSnapshot(
             label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
@@ -271,12 +282,12 @@ public class UpdateFieldCommandHandler
             await _recordRepo.BackfillDefaultAsync(table, existing, defaultValue!, ct);
         }
 
-        // Search Index Sync: when IsSearchable changes, trigger a backfill or nullify
-        if (command.IsSearchable != wasSearchable && existing.Fid.HasValue)
+        // Search Index Sync: when search eligibility (IsSearchable || IsFilterable) changes, trigger a backfill or nullify
+        if (isEligible != wasEligible && existing.Fid.HasValue)
         {
-            await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: !command.IsSearchable, ct);
+            await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: !isEligible, ct);
         }
-        else if (percentRescaled && command.IsSearchable && existing.Fid.HasValue)
+        else if (percentRescaled && isEligible && existing.Fid.HasValue)
         {
             // The stored values changed (x100 or /100), so the already-indexed copies are stale.
             await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: false, ct);
@@ -295,11 +306,26 @@ public class UpdateFieldCommandHandler
 
     private async Task SyncSearchIndexAsync(AppTable table, int fid, bool isNullify, CancellationToken ct)
     {
+        var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+        var isWide = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields);
+        var targetIndex = isWide ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id) : null;
+        var slotMap = PowerBase.Application.Search.SearchSlotResolver.BuildSlotMap(allFields);
+
         var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, fid, isNullify, page: 1, pageSize: 500, ct);
 
         if (docs.Count > 0)
         {
-            await _searchService.BulkIndexRecordsAsync(docs, ct);
+            var slottedDocs = docs.Select(d =>
+            {
+                var slotVals = new Dictionary<string, object?>();
+                if (slotMap.TryGetValue(fid, out var slotName) && d.Values.TryGetValue(fid, out var val))
+                {
+                    slotVals[slotName] = isNullify ? null : val;
+                }
+                return new SearchIndexDocument(d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, slotVals, targetIndex);
+            }).ToList();
+
+            await _searchService.BulkIndexRecordsAsync(slottedDocs, ct);
         }
 
         var msg = new PowerBase.Application.Common.Models.SearchIndexMessage

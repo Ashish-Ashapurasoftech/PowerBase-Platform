@@ -15,7 +15,9 @@ namespace PowerBase.Application.Relationships;
 ///                      or a Formula / child Summary, aggregated in memory with the functions its
 ///                      result type supports (see <see cref="SummaryComputedTargets"/>).
 ///   • DistinctCount  → any stored field type.
-///   • CombinedText   → any stored field type with a text form (see CombinedTextUnsupportedTypes).
+///   • CombinedText   → any field type that holds a value — stored or calculated — each value shown in its
+///                      field's display format (users by name, files by name, …); not a link (Report Link,
+///                      URL formula).
 ///   • Sum / Avg      → numeric fields only.
 ///   • Min / Max      → numeric and date fields only. Text is rejected — lexicographic ordering
 ///                      gives wrong results for numeric-looking strings ("10" &lt; "9").
@@ -26,18 +28,10 @@ namespace PowerBase.Application.Relationships;
 /// </summary>
 public static class SummaryTargetValidator
 {
-    /// <summary>Field types Combined Text can't render as text: their stored value is an id
-    /// (User/MultiUser → a user, Reference → a record), a file list, HTML, or a range whose end
-    /// lives in a second column the summary doesn't read. Mirrored by the add-summary dialog.</summary>
-    public static readonly IReadOnlySet<string> CombinedTextUnsupportedTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    {
-        "User", "MultiUser", "File", "RichText", "Reference", "DateRange", "NumericRange",
-    };
-
     /// <summary>Throws <see cref="ValidationException"/> (keyed by <paramref name="paramName"/>)
     /// when <paramref name="function"/> can't aggregate <paramref name="target"/>.</summary>
     public static void Validate(string function, int? targetFid, AppField? target, string? targetSubField, string paramName = "targetFid",
-        IReadOnlyDictionary<long, AppField>? lookupSources = null)
+        IReadOnlyDictionary<long, AppField>? lookupSources = null, IReadOnlyDictionary<long, AppField>? referenceKeys = null)
     {
         if (function is SummaryFunctions.Count or SummaryFunctions.Exists)
             return;
@@ -47,7 +41,7 @@ public static class SummaryTargetValidator
         if (target is null)
             throw new NotFoundException("Field", targetFid.Value);
 
-        if (FindProblem(function, target, targetSubField, lookupSources) is { } problem)
+        if (FindProblem(function, target, targetSubField, lookupSources, referenceKeys) is { } problem)
             throw Error(paramName, problem);
     }
 
@@ -56,18 +50,28 @@ public static class SummaryTargetValidator
     /// (e.g. every summary a field type change would affect) and report them together.</summary>
     /// <param name="lookupSources">The parent field each child lookup pulls down
     /// (<see cref="SummaryLookupSources.LoadAsync"/>); without it a Lookup target is refused.</param>
+    /// <param name="referenceKeys">The key each child Reference shows (<see cref="ReferenceKeys.LoadAsync"/>); without
+    /// it a Reference is judged as the Record ID# it holds.</param>
     public static string? FindProblem(string function, AppField target, string? targetSubField,
-        IReadOnlyDictionary<long, AppField>? lookupSources = null)
+        IReadOnlyDictionary<long, AppField>? lookupSources = null, IReadOnlyDictionary<long, AppField>? referenceKeys = null)
     {
         if (function is SummaryFunctions.Count or SummaryFunctions.Exists)
             return null;
 
         var fieldLabel = string.IsNullOrWhiteSpace(target.Label) ? target.Name : target.Label;
 
+        // Combined Text shows any calculated value as text — a Formula's, a child Summary's, or a lookup of one — in
+        // its display format, whatever type it returns; only a link (a URL formula) has none to show.
+        if (function == SummaryFunctions.CombinedText && SummaryComputedTargets.CombinedTextValueType(target, lookupSources) is not null)
+            return null;
+
         // A Lookup is summarized from the parent column it pulls down, so it's judged by that
         // field: it must still exist and have a column, and its type is the lookup's type.
         if (SummaryLookupSources.IsLookup(target))
         {
+            // A lookup of a Formula / Summary is worked out per child row like that field, so it's judged as one.
+            if (SummaryLookupSources.ComputedValueKind(target, lookupSources) is { } kind)
+                return FindComputedProblem(function, fieldLabel, target.TypeCode, SummaryComputedTargets.FunctionsForKind(kind));
             if (SummaryLookupSources.ReadableSource(target, lookupSources) is not { } source)
                 return $"'{fieldLabel}' looks up a field that is missing or calculated, so it can't be summarized; choose another field.";
             return FindTypeProblem(function, fieldLabel, source.TypeCode, SummaryLookupSources.SourceSubField(target));
@@ -76,13 +80,12 @@ public static class SummaryTargetValidator
         // A Formula is computed per child row and aggregated in memory (RelationalProjector), with
         // the functions its result type supports (SummaryComputedTargets).
         if (SummaryComputedTargets.IsComputedTarget(target))
-        {
-            if (SummaryComputedTargets.AllowedFunctions(target) is not { } allowed)
-                return $"'{fieldLabel}' is a calculated ({target.TypeCode}) field whose result can't be summarized; choose another field.";
-            return allowed.Contains(function)
-                ? null
-                : $"'{function}' can't summarize the calculated field '{fieldLabel}' ({target.TypeCode}); it supports {string.Join(", ", allowed)}.";
-        }
+            return FindComputedProblem(function, fieldLabel, target.TypeCode, SummaryComputedTargets.AllowedFunctions(target));
+
+        // A Reference whose parent shows a key field is summarized as that key (Combined Text of client names, not
+        // Record IDs), so it's judged by the key's type (ReferenceKeys).
+        if (ReferenceKeys.KeyTypeCode(target, referenceKeys) is { } keyType)
+            return FindTypeProblem(function, fieldLabel, keyType, targetSubField);
 
         // Summary values are computed at read time and have no physical column to
         // aggregate in SQL — summarizing one would fail with "Invalid column name" on every read.
@@ -93,16 +96,22 @@ public static class SummaryTargetValidator
         return FindTypeProblem(function, fieldLabel, target.TypeCode, targetSubField);
     }
 
+    /// <summary>Why <paramref name="function"/> can't summarize a Formula / child Summary, or a lookup of one — by the
+    /// functions its result type supports (<paramref name="allowed"/>; null when none).</summary>
+    private static string? FindComputedProblem(string function, string fieldLabel, string typeCode, IReadOnlySet<string>? allowed)
+    {
+        if (allowed is null)
+            return $"'{fieldLabel}' is a calculated ({typeCode}) field whose result can't be summarized; choose another field.";
+        return allowed.Contains(function)
+            ? null
+            : $"'{function}' can't summarize the calculated field '{fieldLabel}' ({typeCode}); it supports {string.Join(", ", allowed)}.";
+    }
+
     /// <summary>Whether <paramref name="function"/> can aggregate a value of this type.</summary>
     private static string? FindTypeProblem(string function, string fieldLabel, string typeCode, string? targetSubField)
     {
-        // Combined Text shows each value as text, so it needs a field whose value has a text form of
-        // its own — not a user id, file list, HTML, record id or a two-column range.
-        if (function == SummaryFunctions.CombinedText
-            && CombinedTextUnsupportedTypes.Contains(typeCode) && string.IsNullOrWhiteSpace(targetSubField))
-            return $"'Combined Text' can't show {WithArticle(typeCode)} field's values as text; '{fieldLabel}' can be summarized with Distinct Count instead.";
-
-        // Distinct Count and Combined Text work on any other stored field type.
+        // Distinct Count and Combined Text work on any stored field type — Combined Text shows each value in its display
+        // format (a user by name, a file by its name, a range as "start – end", …).
         if (function is SummaryFunctions.DistinctCount or SummaryFunctions.CombinedText)
             return null;
 

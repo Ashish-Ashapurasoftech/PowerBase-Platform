@@ -44,22 +44,31 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         WHERE PublicId = @publicId AND IsDeleted = 0
         """;
 
+    // Pages meta.Pipeline first, then reads first steps only for that page's pipelines — the old
+    // form ranked every step in the tenant (full PipelineStep scan) on each list call.
     private const string ListByUserPagedSqlTemplate = $$"""
-        SELECT p.Id, p.PublicId, p.AppId, p.Name, p.Description, p.VariablesJson, p.IsActive, p.IsDeleted, p.CreatedOn, p.CreatedBy, p.ModifiedOn, p.ModifiedBy, p.DeletedOn, p.DeletedBy, p.RowVersion,
+        WITH paged AS (
+            SELECT p.Id, p.PublicId, p.Name, p.Description, p.IsActive, p.CreatedOn,
+                   ROW_NUMBER() OVER (ORDER BY {0}) AS Seq
+            FROM meta.Pipeline p
+            WHERE p.CreatedBy = @userId AND p.IsDeleted = 0
+              AND (@search IS NULL OR p.Name LIKE @search OR p.Description LIKE @search)
+              AND (@isActive IS NULL OR p.IsActive = @isActive)
+            ORDER BY {0}
+            OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+        )
+        SELECT pg.PublicId, pg.Name, pg.Description, pg.IsActive, pg.CreatedOn,
                s.Type AS FirstStepType,
                s.Subtype AS FirstStepSubtype
-        FROM meta.Pipeline p
+        FROM paged pg
         LEFT JOIN (
             SELECT PipelineId, Type, Subtype,
                    ROW_NUMBER() OVER (PARTITION BY PipelineId ORDER BY DisplayOrder ASC) as RowNum
             FROM meta.PipelineStep
             WHERE IsDeleted = 0 AND ParentStepId IS NULL
-        ) s ON p.Id = s.PipelineId AND s.RowNum = 1
-        WHERE p.CreatedBy = @userId AND p.IsDeleted = 0
-          AND (@search IS NULL OR p.Name LIKE @search OR p.Description LIKE @search)
-          AND (@isActive IS NULL OR p.IsActive = @isActive)
-        ORDER BY {0}
-        OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+              AND PipelineId IN (SELECT Id FROM paged)
+        ) s ON pg.Id = s.PipelineId AND s.RowNum = 1
+        ORDER BY pg.Seq
         """;
 
     private const string CountByUserSql = """
@@ -2307,6 +2316,21 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
             await transaction.RollbackAsync(ct);
             throw;
         }
+    }
+
+    public async Task<IReadOnlySet<Guid>> GetStagedSearchWorksetRecordsAsync(
+        Guid worksetId, IReadOnlyCollection<Guid> recordPublicIds, CancellationToken ct = default)
+    {
+        var staged = new HashSet<Guid>();
+        if (recordPublicIds.Count == 0) return staged;
+        const string sql = """
+            SELECT RecordPublicId FROM meta.PipelineBulkEventRecord
+            WHERE SearchWorksetId = @worksetId AND RecordPublicId IN @ids;
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        foreach (var ids in recordPublicIds.Chunk(2000))
+            staged.UnionWith(await connection.QueryAsync<Guid>(new CommandDefinition(sql, new { worksetId, ids }, cancellationToken: ct)));
+        return staged;
     }
 
     public async Task CompleteSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default)

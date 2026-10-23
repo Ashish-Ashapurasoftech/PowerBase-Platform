@@ -179,7 +179,7 @@ public class PipelineBulkUpsertTests
             .Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>> { ["bob@example.com"] = existingBobRecord });
 
         var newAliceGuid = Guid.NewGuid();
-        _recordRepo.CreateAsync(_testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(_testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(newAliceGuid);
 
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(_testTable, Arg.Any<IReadOnlyCollection<Guid>>(), _dbTx, Arg.Any<CancellationToken>())
@@ -209,13 +209,13 @@ public class PipelineBulkUpsertTests
 
         // Assert: CreateAsync called on _dbTx
         await _recordRepo.Received(1).CreateAsync(
-            _testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>());
+            _testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
 
         // Assert: ApplyAsync called for update on _dbTx with suppressInterception: true
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, existingBobGuid, Arg.Any<IReadOnlyDictionary<long, object?>>(),
             AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
-            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
+            onIndexMessageCreated: Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>(), existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         // Assert: InterceptBulkAsync called for inserted and modified changes
         await _triggerInterceptor.Received(1).InterceptBulkAsync(
@@ -458,7 +458,7 @@ public class PipelineBulkUpsertTests
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, existingGuid, Arg.Any<IReadOnlyDictionary<long, object?>>(),
             AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
-            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
+            onIndexMessageCreated: Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>(), existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
         result.GetProperty("updated_count").GetInt32().Should().Be(1);
@@ -567,7 +567,7 @@ public class PipelineBulkUpsertTests
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, existingGuid, Arg.Any<IReadOnlyDictionary<long, object?>>(),
             AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
-            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
+            onIndexMessageCreated: Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>(), existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
         result.GetProperty("updated_count").GetInt32().Should().Be(1);
@@ -609,7 +609,7 @@ public class PipelineBulkUpsertTests
             .Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>()); // No match
 
         var newGuid = Guid.NewGuid();
-        _recordRepo.CreateAsync(_testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(_testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(newGuid);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(_testTable, Arg.Any<IReadOnlyCollection<Guid>>(), _dbTx, Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, long> { [newGuid] = 88L });
@@ -625,7 +625,7 @@ public class PipelineBulkUpsertTests
         var resultJson = await RunStepAsync(commitStep, contextDict);
 
         await _recordRepo.Received(1).CreateAsync(
-            _testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>());
+            _testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
 
         var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
         result.GetProperty("inserted_count").GetInt32().Should().Be(1);
@@ -648,7 +648,7 @@ public class PipelineBulkUpsertTests
         _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>())
             .Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
         var newGuid = Guid.NewGuid();
-        _recordRepo.CreateAsync(_testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(newGuid);
+        _recordRepo.CreateAsync(_testTable, _testFields, Arg.Any<IReadOnlyDictionary<long, object?>>(), _dbTx, Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(newGuid);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(_testTable, Arg.Any<IReadOnlyCollection<Guid>>(), _dbTx, Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, long> { [newGuid] = 1L });
         return await RunStepAsync(new PipelineStep { RefId = "commit_rules", Type = "action", Subtype = "commit-upsert",
@@ -754,7 +754,7 @@ public class PipelineBulkUpsertTests
             _testTable, _testFields, existingGuid,
             Arg.Any<IReadOnlyDictionary<long, object?>>(),
             AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
-            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
+            onIndexMessageCreated: Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>(), existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
         result.GetProperty("updated_count").GetInt32().Should().Be(1);
@@ -971,7 +971,7 @@ public class PipelineBulkUpsertTests
             _testTable, _testFields, recordGuid,
             Arg.Is<IReadOnlyDictionary<long, object?>>(d => (string)d[6]! == "brandnew@example.com"),
             AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
-            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
+            onIndexMessageCreated: Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>(), existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
 
         var result = JsonSerializer.Deserialize<JsonElement>(resultJson);
         result.GetProperty("updated_count").GetInt32().Should().Be(1);
@@ -1140,7 +1140,7 @@ public class PipelineBulkUpsertTests
                 d[10] == null
             ),
             AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
-            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
+            onIndexMessageCreated: Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>(), existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
     }
 
     #endregion
@@ -1273,13 +1273,13 @@ public class PipelineBulkUpsertTests
         await _recordRepo.Received(1).CreateAsync(
             _testTable, _testFields,
             Arg.Is<Dictionary<long, object?>>(d => (string)d[6]! == "newhotel@example.com" && (string)d[7]! == "New Hotel"),
-            _dbTx, Arg.Any<CancellationToken>());
+            _dbTx, Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
 
         await _recordWriteService.Received(1).ApplyAsync(
             _testTable, _testFields, existingGuid,
             Arg.Is<IReadOnlyDictionary<long, object?>>(d => (string)d[6]! == "existing@example.com" && (string)d[7]! == "Updated Hotel"),
             AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), _dbTx, suppressInterception: true,
-            onIndexMessageCreated: null, existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
+            onIndexMessageCreated: Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>(), existingRecord: Arg.Any<IReadOnlyDictionary<string, object?>>());
     }
 
     [Theory]
@@ -1361,7 +1361,7 @@ public class PipelineBulkUpsertTests
 
         var contextDict = new Dictionary<string, object>();
         var newRecordGuid = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(newRecordGuid);
 
         var idMap = new Dictionary<Guid, long> { [newRecordGuid] = 42L };
@@ -1385,8 +1385,8 @@ public class PipelineBulkUpsertTests
             _testFields,
             Arg.Any<IReadOnlyDictionary<long, object?>>(),
             _dbTx,
-            Arg.Any<CancellationToken>()
-        );
+            Arg.Any<CancellationToken>(),
+            Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -1449,8 +1449,8 @@ public class PipelineBulkUpsertTests
             Arg.Any<IReadOnlyList<AppField>>(),
             Arg.Any<IReadOnlyDictionary<long, object?>>(),
             Arg.Any<IDbTransaction>(),
-            Arg.Any<CancellationToken>()
-        );
+            Arg.Any<CancellationToken>(),
+            Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
         await _recordWriteService.DidNotReceive().ApplyAsync(
             Arg.Any<AppTable>(),
             Arg.Any<IReadOnlyList<AppField>>(),
@@ -1460,8 +1460,8 @@ public class PipelineBulkUpsertTests
             Arg.Any<string>(),
             Arg.Any<CancellationToken>(),
             Arg.Any<IDbTransaction>(),
-            Arg.Any<bool>()
-        );
+            Arg.Any<bool>(),
+            Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -1496,7 +1496,7 @@ public class PipelineBulkUpsertTests
 
         var context1 = new Dictionary<string, object>();
         var guidA = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(guidA);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, long> { [guidA] = 101L });
@@ -1541,7 +1541,7 @@ public class PipelineBulkUpsertTests
 
         var context2 = new Dictionary<string, object>();
         var guidB = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(guidB);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>())
             .Returns(new Dictionary<Guid, long> { [guidB] = 102L });
@@ -1589,7 +1589,7 @@ public class PipelineBulkUpsertTests
         var ctx = new Dictionary<string, object>();
 
         var guid1 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(guid1);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(guid1);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [guid1] = 101L });
         _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
@@ -1622,7 +1622,7 @@ public class PipelineBulkUpsertTests
 
         var guid1 = Guid.NewGuid();
         var guid2 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(guid1, guid2);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(guid1, guid2);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [guid1] = 101L, [guid2] = 102L });
         _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
@@ -1661,7 +1661,7 @@ public class PipelineBulkUpsertTests
         // Test Commit aa -> T1
         var ctx1 = new Dictionary<string, object>();
         var g1 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g1);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g1);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g1] = 101L });
         _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
@@ -1676,7 +1676,7 @@ public class PipelineBulkUpsertTests
         // Test Commit ab -> T2 + T3 (2 rows)
         var ctx2 = new Dictionary<string, object>();
         var g2 = Guid.NewGuid(); var g3 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g2, g3);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g2, g3);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g2] = 102L, [g3] = 103L });
 
         await RunStepAsync(prep, ctx2, allSteps);
@@ -1727,7 +1727,7 @@ public class PipelineBulkUpsertTests
         // Test Commit aa -> T1
         var ctx1 = new Dictionary<string, object>();
         var g1 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g1);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g1);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g1] = 101L });
         _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
@@ -1742,7 +1742,7 @@ public class PipelineBulkUpsertTests
         // Test Commit ab, ac, ad -> each resolves T2 + T3
         var ctx2 = new Dictionary<string, object>();
         var g2 = Guid.NewGuid(); var g3 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g2, g3);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g2, g3);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g2] = 102L, [g3] = 103L });
 
         await RunStepAsync(prep, ctx2, allSteps);
@@ -1786,7 +1786,7 @@ public class PipelineBulkUpsertTests
         var ctx = new Dictionary<string, object>();
 
         var g2 = Guid.NewGuid(); var g3 = Guid.NewGuid(); var g4 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g2, g3, g4);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g2, g3, g4);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g2] = 102L, [g3] = 103L, [g4] = 104L });
         _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
@@ -1821,7 +1821,7 @@ public class PipelineBulkUpsertTests
         // Test Commit aa -> T1 + T3 (2 rows)
         var ctx1 = new Dictionary<string, object>();
         var g1 = Guid.NewGuid(); var g3 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g1, g3);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g1, g3);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g1] = 101L, [g3] = 103L });
         _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
@@ -1837,7 +1837,7 @@ public class PipelineBulkUpsertTests
         // Test Commit ab -> T2 only (1 row)
         var ctx2 = new Dictionary<string, object>();
         var g2 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g2);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g2);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g2] = 102L });
 
         await RunStepAsync(prep, ctx2, allSteps);
@@ -1852,7 +1852,7 @@ public class PipelineBulkUpsertTests
         // Test Commit ad -> T4 only (1 row)
         var ctx3 = new Dictionary<string, object>();
         var g4 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g4);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g4);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g4] = 104L });
 
         await RunStepAsync(prep, ctx3, allSteps);
@@ -1885,7 +1885,7 @@ public class PipelineBulkUpsertTests
         // Test Commit aa -> T1 + T4 (2 rows)
         var ctx1 = new Dictionary<string, object>();
         var g1 = Guid.NewGuid(); var g4 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g1, g4);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g1, g4);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g1] = 101L, [g4] = 104L });
         _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
@@ -1901,7 +1901,7 @@ public class PipelineBulkUpsertTests
         // Test Commit ab -> T2 + T3 (2 rows)
         var ctx2 = new Dictionary<string, object>();
         var g2 = Guid.NewGuid(); var g3 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g2, g3);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g2, g3);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g2] = 102L, [g3] = 103L });
 
         await RunStepAsync(prep, ctx2, allSteps);
@@ -1932,7 +1932,7 @@ public class PipelineBulkUpsertTests
         var ctx = new Dictionary<string, object>();
 
         var g2 = Guid.NewGuid(); var g3 = Guid.NewGuid();
-        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(g2, g3);
+        _recordRepo.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()).Returns(g2, g3);
         _recordRepo.GetActiveRecordIdsByPublicIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<Guid>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(new Dictionary<Guid, long> { [g2] = 102L, [g3] = 103L });
         _recordRepo.GetBulkUpsertRowsByColumnValuesAsync(_testTable, _testFields, "f_6", Arg.Any<IReadOnlyCollection<object>>(), _dbTx, Arg.Any<CancellationToken>()).Returns(new Dictionary<object, IReadOnlyDictionary<string, object?>>());
 
@@ -1971,7 +1971,7 @@ public class PipelineBulkUpsertTests
             RefId = "add", Type = "action", Subtype = "add-bulk-upsert-row",
             ConfigJson = JsonSerializer.Serialize(new { bulkRecordSetStepId = "prepare", rowValues = new Dictionary<string, object?> { ["fid_6"] = "new@example.com" } })
         }, context);
-        await _recordRepo.DidNotReceive().CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+        await _recordRepo.DidNotReceive().CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
         await RunStepAsync(new PipelineStep
         {
             RefId = "commit", Type = "action", Subtype = "commit-upsert",
@@ -1979,7 +1979,7 @@ public class PipelineBulkUpsertTests
         }, context);
         await _recordRepo.Received(1).CreateAsync(_testTable, _testFields,
             Arg.Is<IReadOnlyDictionary<long, object?>>(values => values.ContainsKey(7) && (string?)values[7] == "" && !values.ContainsKey(8)),
-            _dbTx, Arg.Any<CancellationToken>());
+            _dbTx, Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Theory]
@@ -2038,7 +2038,7 @@ public class PipelineBulkUpsertTests
         output.RootElement.GetProperty("updated_count").GetInt32().Should().Be(1);
         output.RootElement.GetProperty("inserted_count").GetInt32().Should().Be(0);
         await _recordRepo.DidNotReceive().CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>());
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Theory]

@@ -8,8 +8,9 @@ namespace PowerBase.Application.Relationships;
 /// match or sort it (and in an encrypted app the reference column is ciphertext too). A summary
 /// that reads any encrypted column is therefore computed in memory instead
 /// (<see cref="EncryptedSummaryAggregator"/>): the child rows are decrypted and filtered, grouped
-/// and aggregated here. That path covers the child table's own stored fields; what it can't do is
-/// refused at creation (and shown blank when read) by FindProblem.
+/// and aggregated here. That path covers the child table's own stored fields, its lookups and its
+/// calculated fields (and lookups of them, worked out per record); what it can't do is refused at
+/// creation (and shown blank when read) by FindProblem.
 ///
 /// "Encrypted" follows the encryption context's own rule (FieldEncryptionContext): every
 /// non-system field of an encrypted app, plus any non-system field marked IsEncrypted.
@@ -46,12 +47,15 @@ public static class SummaryEncryptionGuard
             || EncryptedNames(app, parentFields ?? [], ParentConditionFieldIds(matchingCriteria)).Any();
     }
 
-    /// <summary>True when the matching criteria or the Combined Text sort read a Formula/Summary field of the child table:
-    /// it has no column, so the summary is computed in memory (the formula is evaluated on each child record).</summary>
-    public static bool ReadsComputed(IReadOnlyList<AppField> childFields, int? sortFid, FilterGroup? matchingCriteria) =>
+    /// <summary>True when the matching criteria or the Combined Text sort read a Formula/Summary field of the child table,
+    /// or a lookup of one (<paramref name="lookupSources"/>): it has no column, so the summary is computed in memory (the
+    /// value is worked out on each child record).</summary>
+    public static bool ReadsComputed(IReadOnlyList<AppField> childFields, int? sortFid, FilterGroup? matchingCriteria,
+        IReadOnlyDictionary<long, AppField>? lookupSources = null) =>
         ConditionFieldIds(matchingCriteria).Concat(sortFid.HasValue ? [sortFid.Value] : [])
             .Distinct()
-            .Any(fid => childFields.FirstOrDefault(f => f.Fid == fid) is { } f && SummaryComputedTargets.ResultKind(f) is not null);
+            .Any(fid => childFields.FirstOrDefault(f => f.Fid == fid) is { } f
+                && (SummaryComputedTargets.ResultKind(f) is not null || SummaryLookupSources.ComputedValueKind(f, lookupSources) is not null));
 
     /// <summary>Why a summary reading encrypted data can't be computed, or null when it can (or
     /// reads no encrypted data at all, which SQL handles).</summary>
@@ -94,14 +98,16 @@ public static class SummaryEncryptionGuard
             .GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
         string Label(AppField f) => string.IsNullOrWhiteSpace(f.Label) ? f.Name : f.Label;
 
-        // A lookup is read through its source field on the parent table (decrypted in memory too); it
-        // can't be when that source is gone or calculated. Without the sources there is nothing to judge.
+        // A lookup is read through its source field on the parent table (decrypted in memory too) — or, when that source
+        // is calculated (a Summary / Formula, "Dept - Min of Salary"), worked out per child record like a record read
+        // does. It can't be when the source is gone. Without the sources there is nothing to judge.
         var lookups = lookupSources is null ? [] : readFids.Distinct()
             .Select(fid => byFid.GetValueOrDefault(fid))
-            .Where(f => f is not null && SummaryLookupSources.IsLookup(f!) && !SummaryLookupSources.IsReadable(f!, lookupSources))
+            .Where(f => f is not null && SummaryLookupSources.IsLookup(f!) && !SummaryLookupSources.IsReadable(f!, lookupSources)
+                && !SummaryLookupSources.ReadsComputedSource(f!, lookupSources))
             .Select(f => $"'{Label(f!)}'").ToList();
         if (lookups.Count > 0)
-            return $"Summaries of encrypted data can't use lookup fields whose source field is missing or calculated: {string.Join(", ", lookups)}.";
+            return $"Summaries of encrypted data can't use lookup fields whose source field is missing: {string.Join(", ", lookups)}.";
 
         var badOperator = Operators(matchingCriteria).FirstOrDefault(o => !InMemoryOperators.Contains(o));
         if (badOperator is not null)

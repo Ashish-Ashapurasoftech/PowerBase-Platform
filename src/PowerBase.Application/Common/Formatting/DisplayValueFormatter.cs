@@ -13,14 +13,22 @@ namespace PowerBase.Application.Common.Formatting;
 /// formatting rule changed on one side should change on the other.
 ///
 /// Field-level Behavior Settings override the app-level Formatting defaults, same precedence as
-/// the frontend. Plain-text types (Text, SingleSelect, …) pass through. Types with no text form
-/// of their own (User, File, RichText, Reference, ranges) are never formatted here — Combined Text
-/// refuses them up front (SummaryTargetValidator.CombinedTextUnsupportedTypes).
+/// the frontend. Plain-text types (Text, SingleSelect, …) pass through. Types whose stored value
+/// is an id or a structure read as the grid shows them: users by name, files by file name, Rich
+/// Text without its markup, a range as "start – end", a Reference as its Record ID#.
 /// </summary>
 public static class DisplayValueFormatter
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
+    /// <summary>The user ids a User / MultiUser value holds (numeric core.[User].Id) — to look their names up
+    /// (<see cref="Format"/>'s userNames) before formatting. Nothing for any other type.</summary>
+    public static IEnumerable<long> UserIds(object? raw, string typeCode) =>
+        typeCode is "User" or "MultiUser"
+            ? UserIdTexts(raw).Select(t => long.TryParse(t, NumberStyles.Integer, Inv, out var id) ? id : (long?)null)
+                .Where(id => id.HasValue).Select(id => id!.Value)
+            : [];
 
     /// <summary>Parses an App's raw Formatting JSON; defaults on null/blank/malformed — display
     /// formatting must never throw.</summary>
@@ -35,13 +43,29 @@ public static class DisplayValueFormatter
     /// <param name="typeCode">The source field's TypeCode.</param>
     /// <param name="fieldSettingsJson">The source field's Settings JSON (its Behavior Settings).</param>
     /// <param name="today">"Now" for Hide-year-if-current; injectable for tests.</param>
-    public static string? Format(object? raw, string typeCode, string? fieldSettingsJson, AppFormattingSettings app, DateTime? today = null)
+    /// <param name="userNames">Display names by user id (see <see cref="UserIds"/>), for User / MultiUser; an id
+    /// with no name shows as itself.</param>
+    public static string? Format(object? raw, string typeCode, string? fieldSettingsJson, AppFormattingSettings app, DateTime? today = null,
+        IReadOnlyDictionary<long, string>? userNames = null)
     {
         if (raw is null || raw is DBNull) return null;
         if (raw is string s && s.Length == 0) return null;
 
         switch (typeCode)
         {
+            case "User":
+            case "MultiUser":
+                return Blank(string.Join(", ", UserIdTexts(raw).Select(t => UserName(t, userNames))));
+            case "File":
+                return Blank(FormatFiles(raw));
+            case "RichText":
+                return Blank(StripMarkup(Convert.ToString(raw, Inv)!));
+            case "DateRange":
+            case "NumericRange":
+                return FormatRange(raw, typeCode == "DateRange", Parse<DateSettings>(fieldSettingsJson), app, today ?? DateTime.Today);
+            case "Reference":
+                // The parent's Record ID# — whole, though a Reference converted from a Number field is a DECIMAL column.
+                return TryDecimal(raw, out var recordId) ? recordId.ToString("0.############", Inv) : raw.ToString();
             case "Number":
                 return TryDecimal(raw, out var n) ? FormatNumber(n, Parse<NumericSettings>(fieldSettingsJson), app) : raw.ToString();
             case "Currency":
@@ -66,7 +90,10 @@ public static class DisplayValueFormatter
             case "Phone":
                 return FormatPhone(Convert.ToString(raw, Inv)!);
             case "MultiSelect":
-                return FormatMultiSelect(Convert.ToString(raw, Inv)!);
+                // A Multi-select formula gives its choices as a list; a stored field as JSON / comma-separated text.
+                return raw is System.Collections.IEnumerable choices and not string
+                    ? Blank(string.Join(", ", choices.Cast<object?>().Select(c => Convert.ToString(c, Inv)).Where(c => !string.IsNullOrWhiteSpace(c))))
+                    : FormatMultiSelect(Convert.ToString(raw, Inv)!);
             case "Email":
                 return FormatEmail(Convert.ToString(raw, Inv)!, Parse<EmailSettings>(fieldSettingsJson));
             case "Url":
@@ -145,6 +172,99 @@ public static class DisplayValueFormatter
         var hours12 = hours % 12 == 0 ? 12 : hours % 12;
         return $"{hours12}:{minutes}{suffix} {period}";
     }
+
+    // ── Values the grid shows by resolving or unwrapping them (table-report-view displayFieldValue) ──
+
+    /// <summary>The user ids a User / MultiUser value holds, as text: one id, a JSON array or a comma-separated list
+    /// (older rows) — or, from a User List formula, a list of ids.</summary>
+    private static IEnumerable<string> UserIdTexts(object? raw)
+    {
+        switch (raw)
+        {
+            case null or DBNull:
+                return [];
+            case string s:
+                var trimmed = s.Trim();
+                if (trimmed.StartsWith('['))
+                {
+                    try
+                    {
+                        var items = JsonSerializer.Deserialize<List<JsonElement>>(trimmed) ?? [];
+                        return items.Select(i => i.ValueKind == JsonValueKind.String ? i.GetString() ?? "" : i.GetRawText())
+                            .Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+                    }
+                    catch (JsonException) { /* not an array after all — fall through */ }
+                }
+                return trimmed.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            case System.Collections.IEnumerable list:
+                return list.Cast<object?>().Select(v => Convert.ToString(v, Inv)?.Trim() ?? "").Where(t => t.Length > 0).ToList();
+            default:
+                return TryDecimal(raw, out var id) ? [id.ToString("0", Inv)] : [Convert.ToString(raw, Inv)!];
+        }
+    }
+
+    /// <summary>A user's display name; an id with no known name (or a non-numeric one) shows as itself.</summary>
+    private static string UserName(string idText, IReadOnlyDictionary<long, string>? userNames) =>
+        long.TryParse(idText, NumberStyles.Integer, Inv, out var id) && userNames?.GetValueOrDefault(id) is { Length: > 0 } name
+            ? name
+            : idText;
+
+    /// <summary>A File value is a JSON list of attachments (or one); shown as their names, "attachment" for one with none.
+    /// A value that isn't JSON is one attachment.</summary>
+    public static string FormatFiles(object raw)
+    {
+        var text = Convert.ToString(raw, Inv)!.Trim();
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            var items = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? doc.RootElement.EnumerateArray().ToList()
+                : [doc.RootElement];
+            return string.Join(", ", items.Select(i =>
+                i.ValueKind == JsonValueKind.Object && i.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(n.GetString())
+                    ? n.GetString()
+                    : "attachment"));
+        }
+        catch (JsonException)
+        {
+            return "attachment";
+        }
+    }
+
+    /// <summary>Rich Text without its markup: tags dropped (a line break or block end as a space), entities decoded,
+    /// whitespace collapsed.</summary>
+    public static string StripMarkup(string html)
+    {
+        var text = System.Text.RegularExpressions.Regex.Replace(html, @"<\s*(br|/p|/div|/li|/h[1-6])\b[^>]*>", " ",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, "<[^>]*>", "");
+        text = System.Net.WebUtility.HtmlDecode(text);
+        return System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+    }
+
+    /// <summary>A range read as {"start","end"} (the summary query's JSON, or a record read's value): "start – end",
+    /// "…" for an open end; null when both are blank. Dates in the field's date format; numbers as they read
+    /// ("10", "2.5").</summary>
+    private static string? FormatRange(object raw, bool isDate, DateSettings? field, AppFormattingSettings app, DateTime today)
+    {
+        if (!TryParseObject(Convert.ToString(raw, Inv)!, out var root)) return Convert.ToString(raw, Inv);
+        string? Part(string name)
+        {
+            if (!root.TryGetProperty(name, out var p) || p.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+            var text = p.ValueKind == JsonValueKind.String ? p.GetString() : p.GetRawText();
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            if (isDate)
+                return TryDate(text, out var d) ? FormatDate(d, false, field, app, today) : text;
+            return decimal.TryParse(text, NumberStyles.Number, Inv, out var n) ? n.ToString("0.############", Inv) : text;
+        }
+        var start = Part("start");
+        var end = Part("end");
+        if (start is null && end is null) return null;
+        return $"{start ?? "…"} – {end ?? "…"}";
+    }
+
+    private static string? Blank(string text) => string.IsNullOrWhiteSpace(text) ? null : text;
 
     private static bool TryParseObject(string json, out JsonElement root)
     {

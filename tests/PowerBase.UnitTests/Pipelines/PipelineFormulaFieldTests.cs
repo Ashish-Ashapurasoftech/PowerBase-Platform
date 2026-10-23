@@ -58,7 +58,8 @@ public class PipelineFormulaFieldTests
     [InlineData("Formula_Duration", "NUMBER")]
     [InlineData("Formula_Date", "DATE")]
     [InlineData("Formula_DateTime", "DATE")]
-    [InlineData("Formula_Time", "DATE")]
+    // A time of day has its own category: it compares times, not the day a time falls on.
+    [InlineData("Formula_Time", "TIME")]
     [InlineData("Formula_Bool", "BOOLEAN")]
     public void TypeCategory_FormulaVariants_UseTheirResultType(string typeCode, string expected)
     {
@@ -531,7 +532,7 @@ public class PipelineFormulaFieldTests
 
         await h.RunStepAsync(SearchStep("fid_6", uiOperator, "50%_off[1]"));
 
-        var condition = h.CapturedFilter!.Nodes.Select(n => n.Condition).Single(c => c != null && c.FieldId == NameFid)!;
+        var condition = h.CapturedFilter!.Nodes.Select(n => SearchFilterNodes.WithoutBlank(n).Condition).Single(c => c != null && c.FieldId == NameFid)!;
         Assert.Equal(dbOperator, condition.Operator);
         Assert.Equal("50[%][_]off[[]1]", condition.Value);
     }
@@ -607,7 +608,7 @@ public class PipelineFormulaFieldTests
         var h = new EngineHarness("Formula_Number");
         var target = Guid.NewGuid();
         h.WriteService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), target, Arg.Any<IReadOnlyDictionary<long, object?>>(),
-                Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>())
+                Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction?>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(new Dictionary<long, object?> { [NameFid] = "changed" });
         h.RecordRepo.GetActiveRecordIdByPublicIdAsync(Arg.Any<AppTable>(), target, Arg.Any<IDbTransaction>(), Arg.Any<CancellationToken>()).Returns(7L);
         h.RecordRepo.GetBulkUpsertRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(),

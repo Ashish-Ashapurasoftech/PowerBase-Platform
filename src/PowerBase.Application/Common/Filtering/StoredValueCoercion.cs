@@ -29,10 +29,14 @@ public static class StoredValueCoercion
                     return number;
                 return value;
             case "DATE":
-                if (DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) ||
-                    DateTime.TryParse(text, CultureInfo.CurrentCulture, DateTimeStyles.None, out date))
+                // As UTC, like the columns: "…Z" must not move into the server's time zone.
+                const DateTimeStyles utc = DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal;
+                if (DateTime.TryParse(text, CultureInfo.InvariantCulture, utc, out var date) ||
+                    DateTime.TryParse(text, CultureInfo.CurrentCulture, utc, out date))
                     return date;
                 return value;
+            case "TIME":
+                return PipelineFilterEvaluator.TryParseTimeOfDay(text, out var time) ? time : value;
             case "BOOLEAN":
                 if (bool.TryParse(text, out var flag)) return flag;
                 if (text == "1") return true;

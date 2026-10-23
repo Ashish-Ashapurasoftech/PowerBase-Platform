@@ -113,6 +113,18 @@ public partial class PipelineEngine
                 !await recordRepo.ExistsWithViewFilterAsync(table, fields, recordPublicId, access.ViewFilter, access.RestrictToCreatedBy, ct))
                 throw new UnauthorizedActionException($"The record is not accessible to this user in table '{table.Name}'.");
 
+            // Modify Custom Rules: a flow may only edit / delete records the role's modify rules allow.
+            if (kind is PipelineRecordAccessKind.Modify or PipelineRecordAccessKind.Delete && access.ModifyFilter != null)
+            {
+                var computedFids = fields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))
+                    .Select(f => (long)f.Fid!.Value).ToHashSet();
+                if (computedFids.Count > 0 && Formulas.FormulaFilterSorter.TreeContainsFormulaField(access.ModifyFilter, computedFids))
+                    throw new UnauthorizedActionException(
+                        "The role's modify rules use calculated fields, which a PowerFlow step cannot apply. Ask an administrator to adjust the role.");
+                if (!await recordRepo.ExistsWithViewFilterAsync(table, fields, recordPublicId, access.ModifyFilter, null, ct))
+                    throw new UnauthorizedActionException($"The record cannot be modified by this user in table '{table.Name}'.");
+            }
+
             if (writtenFields != null)
                 foreach (var field in writtenFields)
                     if (field.Fid != null && !access.EditableFieldIds.Contains(field.Fid.Value))

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -61,9 +62,12 @@ public static class PipelineFilterEvaluator
     public static readonly Dictionary<string, string[]> AllowedOperatorsByTypeCategory = new()
     {
         ["NUMBER"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "greater_than", "greater-than", ">", "is-after", "after", "greater_than_or_equals", "greater-than-or-equal", "greater-than-or-equals", ">=", "is-on-or-after", "on-or-after", "on_or_after", "less_than", "less-than", "<", "is-before", "before", "less_than_or_equals", "less-than-or-equal", "less-than-or-equals", "<=", "is-on-or-before", "on-or-before", "on_or_before", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty" },
-        ["DATE"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "greater_than", "greater-than", ">", "is-after", "after", "greater_than_or_equals", "greater-than-or-equal", "greater-than-or-equals", ">=", "is-on-or-after", "on-or-after", "on_or_after", "less_than", "less-than", "<", "is-before", "before", "less_than_or_equals", "less-than-or-equal", "less-than-or-equals", "<=", "is-on-or-before", "on-or-before", "on_or_before", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty" },
+        ["DATE"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "greater_than", "greater-than", ">", "is-after", "after", "greater_than_or_equals", "greater-than-or-equal", "greater-than-or-equals", ">=", "is-on-or-after", "on-or-after", "on_or_after", "less_than", "less-than", "<", "is-before", "before", "less_than_or_equals", "less-than-or-equal", "less-than-or-equals", "<=", "is-on-or-before", "on-or-before", "on_or_before", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty", "during", "not-during", "not_during" },
+        // A time of day (Time, Formula_Time, a Lookup of a Time): equal / before / after — no "is during", a time is in no period.
+        ["TIME"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "greater_than", "greater-than", ">", "is-after", "after", "greater_than_or_equals", "greater-than-or-equal", "greater-than-or-equals", ">=", "is-on-or-after", "on-or-after", "on_or_after", "less_than", "less-than", "<", "is-before", "before", "less_than_or_equals", "less-than-or-equal", "less-than-or-equals", "<=", "is-on-or-before", "on-or-before", "on_or_before", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty" },
         ["BOOLEAN"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "is_true", "is-true", "is_false", "is-false", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty" },
-        ["TEXT"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "contains", "not_contains", "not-contains", "starts_with", "starts-with", "not_starts_with", "not-starts-with", "ends_with", "ends-with", "not_ends_with", "not-ends-with", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty", "is_true", "is-true", "is_false", "is-false" }
+        ["TEXT"] = new[] { "equals", "=", "is", "not_equals", "not-equals", "<>", "!=", "is_not", "is-not", "contains", "not_contains", "not-contains", "starts_with", "starts-with", "not_starts_with", "not-starts-with", "ends_with", "ends-with", "not_ends_with", "not-ends-with", "is_blank", "is-blank", "is-null", "is-empty", "is_empty", "is_not_blank", "is-not-blank", "is-not-null", "is-not-empty", "is_not_empty", "is_true", "is-true", "is_false", "is-false",
+            "wildcard", "not-wildcard", "not_wildcard", "includes", "not-includes", "not_includes", "is-current-user", "is_current_user", "is-not-current-user", "is_not_current_user" }
     };
 
     /// <summary>Type category of a field. Formula fields store no type of their own: the result type
@@ -80,7 +84,8 @@ public static class PipelineFilterEvaluator
             return PowerBase.Application.Formulas.FormulaTypeMap.FieldType(field.TypeCode, field.Settings) switch
             {
                 PowerBase.Formula.Types.FormulaType.Number or PowerBase.Formula.Types.FormulaType.Duration => "NUMBER",
-                PowerBase.Formula.Types.FormulaType.Date or PowerBase.Formula.Types.FormulaType.DateTime or PowerBase.Formula.Types.FormulaType.Time => "DATE",
+                PowerBase.Formula.Types.FormulaType.Date or PowerBase.Formula.Types.FormulaType.DateTime => "DATE",
+                PowerBase.Formula.Types.FormulaType.Time => "TIME",
                 PowerBase.Formula.Types.FormulaType.Bool => "BOOLEAN",
                 _ => "TEXT"
             };
@@ -93,11 +98,15 @@ public static class PipelineFilterEvaluator
         var code = typeCode?.ToUpperInvariant();
         // Formula_{X} variants carry their result type in the suffix (settings-free fallback).
         if (code == "FORMULA_NUMBER" || code == "FORMULA_DURATION") return "NUMBER";
-        if (code == "FORMULA_DATE" || code == "FORMULA_DATETIME" || code == "FORMULA_TIME") return "DATE";
+        if (code == "FORMULA_DATE" || code == "FORMULA_DATETIME") return "DATE";
+        if (code == "FORMULA_TIME") return "TIME";
         if (code == "FORMULA_BOOL") return "BOOLEAN";
         if (code == "NUMBER" || code == "CURRENCY" || code == "PERCENT" || code == "RATING" || code == "NUMERIC" || code == "INTEGER" || code == "FLOAT" || code == "NUMERICRANGE" || code == "RECORDID" || code == "DURATION")
             return "NUMBER";
-        if (code == "DATE" || code == "DATE_TIME" || code == "DATETIME" || code == "TIMESTAMP" || code == "TIME" || code == "TIME_OF_DAY" || code == "DATERANGE")
+        // A time of day is not a date: "is 10:30" compares times, not the day 10:30 falls on.
+        if (code == "TIME" || code == "TIME_OF_DAY")
+            return "TIME";
+        if (code == "DATE" || code == "DATE_TIME" || code == "DATETIME" || code == "TIMESTAMP" || code == "DATERANGE")
             return "DATE";
         if (code == "BOOLEAN" || code == "CHECKBOX")
             return "BOOLEAN";
@@ -116,6 +125,22 @@ public static class PipelineFilterEvaluator
             right = window.Start.ToString("O");
             relativeDayEnd = window.End;
             typeCategory = "DATE";
+        }
+        // "is during" / "is not during": the value is a whole period, so the record's date is checked against its window.
+        if (normalizedOp is "during" or "not_during")
+        {
+            if (!RelativeFilterDate.IsPeriod(right) || !TryParseDateTime(left, out var dated)) return false; // a blank date is in no period
+            var period = RelativeFilterDate.PeriodWindow(right);
+            var inside = dated >= period.Start && dated < period.End;
+            return normalizedOp == "during" ? inside : !inside;
+        }
+        // Operators every value type handles alike: a Quickbase wildcard pattern, and a list holding any of the given values.
+        switch (normalizedOp)
+        {
+            case "wildcard": return IsWildcardMatch(left, right);
+            case "not_wildcard": return !IsWildcardMatch(left, right);
+            case "includes": return ListIncludesAny(left, right);
+            case "not_includes": return !ListIncludesAny(left, right);
         }
 
 
@@ -265,14 +290,14 @@ public static class PipelineFilterEvaluator
             }
         }
 
-        // 2. Handle null/blank checks first as they apply to all types
+        // 2. Handle null/blank checks first as they apply to all types. A Date / Numeric Range with neither end is blank too.
         if (normalizedOp == "is_blank" || normalizedOp == "is-empty" || normalizedOp == "is_empty")
         {
-            return string.IsNullOrWhiteSpace(left);
+            return string.IsNullOrWhiteSpace(left) || IsBlankRange(left);
         }
         if (normalizedOp == "is_not_blank" || normalizedOp == "is-not-empty" || normalizedOp == "is_not_empty")
         {
-            return !string.IsNullOrWhiteSpace(left);
+            return !string.IsNullOrWhiteSpace(left) && !IsBlankRange(left);
         }
 
         // 3. Enforce the specified field type category
@@ -280,6 +305,8 @@ public static class PipelineFilterEvaluator
         {
             case "NUMBER":
                 {
+                    if (TryReadRange(left, out var rangeStart, out var rangeEnd))
+                        return EvaluateNumberRange(rangeStart, rangeEnd, normalizedOp, right);
                     if (!decimal.TryParse(left, out var lNum) || !decimal.TryParse(right, out var rNum))
                     {
                         if (normalizedOp == "equals" || normalizedOp == "=" || normalizedOp == "is")
@@ -328,6 +355,8 @@ public static class PipelineFilterEvaluator
 
             case "DATE":
                 {
+                    if (TryReadRange(left, out var rangeStart, out var rangeEnd))
+                        return EvaluateDateRange(rangeStart, rangeEnd, normalizedOp, right, relativeDayEnd);
                     if (!TryParseDateTime(left, out var lDate) || !TryParseDateTime(right, out var rDate))
                     {
                         if (normalizedOp == "equals" || normalizedOp == "=" || normalizedOp == "is")
@@ -381,6 +410,46 @@ public static class PipelineFilterEvaluator
                         case "is-on-or-before":
                         case "on-or-before":
                             return lDate < dayEnd;
+                        default:
+                            return false;
+                    }
+                }
+
+            case "TIME":
+                {
+                    // Times of day: "10:30" is 10:30:00, and 23:59 is after 00:15 — never the day either falls on.
+                    if (!TryParseTimeOfDay(left, out var lTime) || !TryParseTimeOfDay(right, out var rTime))
+                    {
+                        if (normalizedOp == "equals" || normalizedOp == "=" || normalizedOp == "is")
+                            return left.Equals(right, StringComparison.OrdinalIgnoreCase);
+                        if (normalizedOp == "not_equals" || normalizedOp == "<>" || normalizedOp == "!=" || normalizedOp == "is_not")
+                            return !left.Equals(right, StringComparison.OrdinalIgnoreCase);
+                        return false;
+                    }
+
+                    switch (normalizedOp)
+                    {
+                        case "equals":
+                        case "=":
+                        case "is":
+                            return lTime == rTime;
+                        case "not_equals":
+                        case "<>":
+                        case "!=":
+                        case "is_not":
+                            return lTime != rTime;
+                        case "greater_than":
+                        case ">":
+                            return lTime > rTime;
+                        case "greater_than_or_equals":
+                        case ">=":
+                            return lTime >= rTime;
+                        case "less_than":
+                        case "<":
+                            return lTime < rTime;
+                        case "less_than_or_equals":
+                        case "<=":
+                            return lTime <= rTime;
                         default:
                             return false;
                     }
@@ -514,6 +583,242 @@ public static class PipelineFilterEvaluator
         return DateTime.TryParse(input, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out date);
     }
 
+    /// <summary>A time of day: "10:30", "10:30:00", "10:30:00.5" (how a Time column and a time formula read), or the time a date &amp; time
+    /// value holds ("10:30 AM", "2026-10-19T10:30:00"). A number of days ("10", "1.10:30") is not a time of day.</summary>
+    public static bool TryParseTimeOfDay(string? input, out TimeSpan time)
+    {
+        time = default;
+        var text = input?.Trim();
+        if (string.IsNullOrEmpty(text)) return false;
+        if (text.Contains(':') && TimeSpan.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, out time))
+            return time >= TimeSpan.Zero && time < TimeSpan.FromDays(1);
+        if (DateTime.TryParse(text, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind | System.Globalization.DateTimeStyles.NoCurrentDateDefault, out var dated))
+        {
+            time = dated.TimeOfDay;
+            return true;
+        }
+        return false;
+    }
+
+    // ── Date / Numeric Range ───────────────────────────────────────────────────────────────────────────────────
+    // A range holds a start and an end ({"start":…,"end":…}); one with a single end is that one value. A rule compares the whole range
+    // with the value asked for — a number, a day ("today"), or another range:
+    //   is / is not          the range includes (does not include) the value   start ≤ value and end ≥ value
+    //   after / greater than the range starts after it                         start > value
+    //   on or after / ≥      the range starts on or after it                   start ≥ value
+    //   before / less than   the range ends before it                          end < value
+    //   on or before / ≤     the range ends on or before it                    end ≤ value
+    // A day is the whole day: "is 14 Oct" holds for a range from 1 Oct to 31 Oct, "is before 14 Oct" for one that ended by 13 Oct.
+    // Search Records runs the same checks on the range's two columns (PipelineEngine.MapRangeRule), so both give the same answer.
+
+    /// <summary>The two ends of a Date / Numeric Range value — a <c>{"start":…,"end":…}</c> object (any letter case) — as text; a missing or
+    /// blank end is null. False for any other value.</summary>
+    public static bool TryReadRange(string? value, out string? start, out string? end)
+    {
+        start = end = null;
+        var text = value?.Trim();
+        if (string.IsNullOrEmpty(text) || text[0] != '{') return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            var found = false;
+            foreach (var property in doc.RootElement.EnumerateObject())
+            {
+                var isStart = property.Name.Equals("start", StringComparison.OrdinalIgnoreCase);
+                if (!isStart && !property.Name.Equals("end", StringComparison.OrdinalIgnoreCase)) continue;
+                found = true;
+                var part = property.Value.ValueKind switch
+                {
+                    JsonValueKind.String => property.Value.GetString(),
+                    JsonValueKind.Number => property.Value.GetRawText(),
+                    _ => null
+                };
+                if (string.IsNullOrWhiteSpace(part)) part = null;
+                if (isStart) start = part; else end = part;
+            }
+            return found;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>A range value with neither a start nor an end.</summary>
+    private static bool IsBlankRange(string value) => TryReadRange(value, out var start, out var end) && start is null && end is null;
+
+    private static bool EvaluateNumberRange(string? startText, string? endText, string normalizedOp, string right)
+    {
+        var hasStart = decimal.TryParse(startText, System.Globalization.NumberStyles.Number | System.Globalization.NumberStyles.AllowExponent, System.Globalization.CultureInfo.InvariantCulture, out var start);
+        var hasEnd = decimal.TryParse(endText, System.Globalization.NumberStyles.Number | System.Globalization.NumberStyles.AllowExponent, System.Globalization.CultureInfo.InvariantCulture, out var end);
+        if (!hasStart) start = end;
+        if (!hasEnd) end = start;
+
+        decimal low, high;
+        if (TryReadRange(right, out var rightStart, out var rightEnd))
+        {
+            var hasLow = decimal.TryParse(rightStart, System.Globalization.NumberStyles.Number | System.Globalization.NumberStyles.AllowExponent, System.Globalization.CultureInfo.InvariantCulture, out low);
+            var hasHigh = decimal.TryParse(rightEnd, System.Globalization.NumberStyles.Number | System.Globalization.NumberStyles.AllowExponent, System.Globalization.CultureInfo.InvariantCulture, out high);
+            if (!hasLow && !hasHigh) return IsNegatedEquality(normalizedOp);
+            if (!hasLow) low = high;
+            if (!hasHigh) high = low;
+        }
+        else if (decimal.TryParse(right, out low)) high = low;
+        else return IsNegatedEquality(normalizedOp);
+
+        // A range without a number is in no order and includes nothing.
+        if (!hasStart && !hasEnd) return IsNegatedEquality(normalizedOp);
+        return normalizedOp switch
+        {
+            "equals" or "=" or "is" => start <= low && end >= high,
+            "not_equals" or "<>" or "!=" or "is_not" => !(start <= low && end >= high),
+            "greater_than" or ">" => start > high,
+            "greater_than_or_equals" or ">=" => start >= low,
+            "less_than" or "<" => end < low,
+            "less_than_or_equals" or "<=" => end <= high,
+            _ => false
+        };
+    }
+
+    private static bool EvaluateDateRange(string? startText, string? endText, string normalizedOp, string right, DateTime? relativeDayEnd)
+    {
+        var hasStart = TryParseDateTime(startText ?? string.Empty, out var start);
+        var hasEnd = TryParseDateTime(endText ?? string.Empty, out var end);
+        if (!hasStart) start = end;
+        if (!hasEnd) end = start;
+        if (!TryDayWindows(right, relativeDayEnd, out var low, out var high) || (!hasStart && !hasEnd))
+            return IsNegatedEquality(normalizedOp);
+        return normalizedOp switch
+        {
+            "equals" or "=" or "is" => start < low.End && end >= high.Start,
+            "not_equals" or "<>" or "!=" or "is_not" => !(start < low.End && end >= high.Start),
+            "greater_than" or ">" => start >= high.End,
+            "greater_than_or_equals" or ">=" => start >= low.Start,
+            "less_than" or "<" => end < low.Start,
+            "less_than_or_equals" or "<=" => end < high.End,
+            _ => false
+        };
+    }
+
+    /// <summary>The days a Date Range rule's value covers, as UTC instants (start included, end not): a picked day (the instant of its
+    /// local midnight) or "today" is one day; another range is its first and its last day.</summary>
+    public static bool TryDayWindows(string? value, DateTime? relativeDayEnd, out (DateTime Start, DateTime End) low, out (DateTime Start, DateTime End) high)
+    {
+        low = high = default;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        if (RelativeFilterDate.IsRelative(value))
+        {
+            low = high = RelativeFilterDate.Window(value);
+            return true;
+        }
+        if (TryReadRange(value, out var first, out var last))
+        {
+            var hasFirst = TryParseDateTime(first ?? string.Empty, out var firstDay);
+            var hasLast = TryParseDateTime(last ?? string.Empty, out var lastDay);
+            if (!hasFirst && !hasLast) return false;
+            if (!hasFirst) firstDay = lastDay;
+            if (!hasLast) lastDay = firstDay;
+            low = (firstDay, firstDay.AddDays(1));
+            high = (lastDay, lastDay.AddDays(1));
+            return true;
+        }
+        if (!TryParseDateTime(value, out var day)) return false;
+        low = high = (day, relativeDayEnd ?? day.AddDays(1));
+        return true;
+    }
+
+    /// <summary>What a rule that cannot be worked out gives: only "is not" holds (as for a date or number that does not parse).</summary>
+    private static bool IsNegatedEquality(string normalizedOp) => normalizedOp is "not_equals" or "<>" or "!=" or "is_not";
+
+    // ── File ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>A File field, or a Lookup of one: its value is the files' JSON (<c>[{"name":"a.pdf","path":…}]</c>).</summary>
+    /// <summary>A Rich Text (a formula returning one, a Lookup of one): its value is HTML from the editor ("&lt;p&gt;hello&lt;/p&gt;").</summary>
+    public static bool IsRichTextField(AppField? field) =>
+        field != null && (field.TypeCode is "RichText" or "Formula_RichText"
+            || (field.TypeCode == "Lookup" && PowerBase.Application.Relationships.SummaryLookupSources.Settings(field)?.SourceTypeCode is "RichText" or "Formula_RichText"));
+
+    private static readonly Regex HtmlTag = new("<[^>]*>", RegexOptions.Compiled);
+    private static readonly Regex Spaces = new(@"\s+", RegexOptions.Compiled);
+
+    /// <summary>The text a Rich Text value shows: its tags taken out, its entities decoded and its spacing collapsed — so "is hello",
+    /// "starts with hello" and "is empty" read what the user sees, not the editor's "&lt;p&gt;hello&lt;/p&gt;" (or "&lt;p&gt;&lt;br&gt;&lt;/p&gt;").</summary>
+    public static string RichTextPlain(string? html)
+    {
+        if (string.IsNullOrEmpty(html)) return string.Empty;
+        if (html.IndexOf('<') < 0 && html.IndexOf('&') < 0) return html.Trim();
+        var text = HtmlTag.Replace(html, " ");
+        return Spaces.Replace(System.Net.WebUtility.HtmlDecode(text), " ").Trim();
+    }
+
+    public static bool IsFileField(AppField? field) =>
+        field != null && (field.TypeCode == "File"
+            || (field.TypeCode == "Lookup" && PowerBase.Application.Relationships.SummaryLookupSources.Settings(field)?.SourceTypeCode == "File"));
+
+    /// <summary>The names of the files a File value holds: each file's "name" in its JSON (a list of files, or one file); text that is
+    /// not JSON (an old value holding a link) is its own name. Read the way the SQL filter reads them (OPENJSON … '$.name').</summary>
+    public static List<string> FileNames(string? value)
+    {
+        var text = value?.Trim();
+        if (string.IsNullOrEmpty(text)) return [];
+        if (text[0] is '[' or '{')
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(text);
+                var files = doc.RootElement.ValueKind == JsonValueKind.Array ? doc.RootElement.EnumerateArray().ToList() : [doc.RootElement];
+                return files
+                    .Select(file => file.ValueKind == JsonValueKind.Object && file.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String
+                        ? name.GetString() ?? string.Empty : string.Empty)
+                    .Where(name => name.Length > 0).ToList();
+            }
+            catch (JsonException) { /* not JSON: the text itself */ }
+        }
+        return [text];
+    }
+
+    /// <summary>A rule on a File field compares the files' names, as the report filter's "filename is / contains / starts with…" does —
+    /// not the stored JSON, which "starts with" and "ends with" could never match. A positive operator holds when any file's name passes
+    /// it, a negated one when none does; a record without files has no name. "is blank" and the rest look at the value itself.</summary>
+    public static bool EvaluateFileOperator(string fileValue, string op, string right, ILogger? logger = null)
+    {
+        var (nameOp, negated) = NormalizeOperator(op) switch
+        {
+            "equals" or "=" or "is" => ("equals", false),
+            "not_equals" or "<>" or "!=" or "is_not" => ("equals", true),
+            "contains" => ("contains", false),
+            "not_contains" => ("contains", true),
+            "starts_with" => ("starts_with", false),
+            "not_starts_with" => ("starts_with", true),
+            "ends_with" => ("ends_with", false),
+            "not_ends_with" => ("ends_with", true),
+            "wildcard" => ("wildcard", false),
+            "not_wildcard" => ("wildcard", true),
+            _ => ((string?)null, false)
+        };
+        if (nameOp is null) return EvaluateConditionOperator(fileValue, op, right, "TEXT", logger);
+        var any = FileNames(fileValue).Any(name => EvaluateConditionOperator(name, nameOp, right, "TEXT", logger));
+        return negated ? !any : any;
+    }
+
+    /// <summary>The filter-editor operator for an advanced query's, for the operators a File rule compares names with.</summary>
+    private static string? FileRuleOperator(string advancedOperator) => advancedOperator switch
+    {
+        "eq" => "equals",
+        "ne" => "not_equals",
+        "contains" => "contains",
+        "notContains" => "not_contains",
+        "startsWith" => "starts_with",
+        "notStartsWith" => "not_starts_with",
+        "endsWith" => "ends_with",
+        "notEndsWith" => "not_ends_with",
+        "wildcard" => "wildcard",
+        "notWildcard" => "not_wildcard",
+        _ => null
+    };
+
     /// <summary>
     /// In-memory evaluator for the Quickbase advanced-query grammar's parsed tree
     /// (<see cref="FilterGroup"/>/<see cref="FilterNode"/>/<see cref="FilterCondition"/>, produced by
@@ -550,6 +855,8 @@ public static class PipelineFilterEvaluator
         }
 
         var leftVal = ReadFieldValue(field, valuesSource);
+        // A Rich Text is compared by the text it shows, not the editor's HTML.
+        if (IsRichTextField(field)) leftVal = RichTextPlain(leftVal);
 
         string rightVal;
         if (string.Equals(condition.ValueMode, "field", StringComparison.OrdinalIgnoreCase))
@@ -563,6 +870,15 @@ public static class PipelineFilterEvaluator
         }
 
         var typeCategory = GetTypeCategory(field);
+
+        // A File is matched by its files' names.
+        if (IsFileField(field) && FileRuleOperator(condition.Operator) is { } fileOperator)
+            return EvaluateFileOperator(leftVal, fileOperator, rightVal, logger);
+
+        // "is" / "is not" on a list (Multi-select, User list) compares the items in any order — as the filter editor's rules do and as
+        // Search Records' SQL does — not the stored JSON text, which never equalled "Red" for ["Red"].
+        if (condition.Operator is "eq" or "ne" && !string.Equals(condition.ValueMode, "field", StringComparison.OrdinalIgnoreCase) && IsListField(field))
+            return SameItems(leftVal, rightVal) == (condition.Operator == "eq");
 
         // A Reference is matched by its display text; exact-match operators also accept the stored Record ID#.
         if (condition.Operator is "eq" or "ne" or "in" or "notIn" && TryReferenceIdSource(field, valuesSource, out var byIdSource))
@@ -590,6 +906,21 @@ public static class PipelineFilterEvaluator
 
     private static bool EvaluateFilterConditionCore(FilterCondition condition, string leftVal, string rightVal, string typeCategory, ILogger? logger)
     {
+        // Contains / starts with / ends with read the value as shown, whatever its type — "5.5" contains "5" — as SQL does.
+        if (condition.Operator is "contains" or "notContains" or "startsWith" or "notStartsWith" or "endsWith" or "notEndsWith")
+            typeCategory = "TEXT";
+        // A blank value is in no order (as in SQL): "is before x" never holds for it, nor anything "before nothing".
+        if (condition.Operator is "gt" or "gte" or "lt" or "lte" && (string.IsNullOrWhiteSpace(leftVal) || string.IsNullOrEmpty(rightVal)))
+            return false;
+        // HAS / XHAS: the list holds any of the values (it was missing here, so an Advanced Query's HAS never matched in a trigger).
+        if (condition.Operator is "includes") return ListIncludesAny(leftVal, rightVal);
+        if (condition.Operator is "notIncludes") return !ListIncludesAny(leftVal, rightVal);
+        // Text in order: case-insensitive and culture-aware, close to SQL Server's collation ("a_b" comes before "apple").
+        if (typeCategory == "TEXT" && condition.Operator is "gt" or "gte" or "lt" or "lte")
+        {
+            var order = string.Compare(leftVal, rightVal, CultureInfo.InvariantCulture, CompareOptions.IgnoreCase);
+            return condition.Operator switch { "gt" => order > 0, "gte" => order >= 0, "lt" => order < 0, _ => order <= 0 };
+        }
         switch (condition.Operator)
         {
             case "eq": return EvaluateConditionOperator(leftVal, "equals", rightVal, typeCategory, logger);
@@ -626,6 +957,48 @@ public static class PipelineFilterEvaluator
         }
     }
 
+    /// <summary>A field whose value is a list of items: a Multi-select, a User list, or a formula / lookup returning one.</summary>
+    internal static bool IsListField(AppField field) =>
+        field.TypeCode is "MultiSelect" or "MultiUser" or "Formula_MultiSelect" or "Formula_ListUser"
+        || (field.TypeCode == "Lookup" && PowerBase.Application.Relationships.SummaryLookupSources.Settings(field)?.SourceTypeCode is "MultiSelect" or "MultiUser" or "Formula_MultiSelect" or "Formula_ListUser");
+
+    /// <summary>"is empty" / "is not empty" on a list value: a list with no items (an empty JSON array, as a formula returning nothing
+    /// reads) is empty, as in Search Records. Null when the operator is not a blank check.</summary>
+    public static bool? EvaluateListBlank(string value, string op) => NormalizeOperator(op) switch
+    {
+        "is_blank" => ListItems(value).Count == 0,
+        "is_not_blank" => ListItems(value).Count > 0,
+        _ => null
+    };
+
+    /// <summary>The items of a list value: a JSON array, or text separated by semicolons or commas.</summary>
+    private static HashSet<string> ListItems(string value)
+    {
+        var trimmed = (value ?? string.Empty).Trim();
+        var items = trimmed.StartsWith('[') ? ParseValueList(trimmed)
+            : trimmed.Split(trimmed.Contains(';') ? ';' : ',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return items.Select(v => v.Trim().Trim('"')).Where(v => v.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Whether two list values hold the same items, in any order.</summary>
+    internal static bool SameItems(string left, string right) => ListItems(left).SetEquals(ListItems(right));
+
+    /// <summary>"includes": a list value (a Multi-select's choices, a User List's user ids — a JSON array, or text separated by
+    /// semicolons or commas) holds at least one of the comma-separated values asked for.</summary>
+    private static bool ListIncludesAny(string listValue, string wanted)
+    {
+        var asked = wanted.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(v => v.Trim('"')).Where(v => v.Length > 0).ToList();
+        if (asked.Count == 0 || string.IsNullOrWhiteSpace(listValue)) return false;
+        var trimmed = listValue.Trim();
+        var held = trimmed.StartsWith('[')
+            ? ParseValueList(trimmed)
+            : trimmed.Split(trimmed.Contains(';') ? ';' : ',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var heldSet = held.Select(v => v.Trim().Trim('"')).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // The whole value first: a single choice may itself hold a comma.
+        return heldSet.Contains(wanted.Trim()) || asked.Any(heldSet.Contains);
+    }
+
     /// <summary>An "in" operand: a JSON array (how the UI stores it) or, failing that, comma-separated text.</summary>
     private static IEnumerable<string> ParseValueList(string raw)
     {
@@ -657,8 +1030,22 @@ public static class PipelineFilterEvaluator
         // FID first: a change is keyed by FID, or by FID and internal id alike; an internal id can coincide with ANOTHER field's FID.
         if (field.Fid.HasValue && valuesSource.TryGetValue(field.Fid.Value, out var fidVal)) valObj = fidVal;
         else if (valuesSource.TryGetValue(field.Id, out var directVal)) valObj = directVal;
-        return valObj?.ToString() ?? string.Empty;
+        return ValueText(valObj);
     }
+
+    /// <summary>A record value as the filters read it. A list (a formula returning a list of users or of choices) reads as a JSON array of
+    /// its items — "includes", the user checks and the person details read that — rather than as the list's type name.</summary>
+    public static string ValueText(object? value) => value switch
+    {
+        null => string.Empty,
+        string text => text,
+        DateTime dt => dt.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+        DateOnly d => d.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+        System.Collections.IDictionary map => JsonSerializer.Serialize(map),
+        System.Collections.IEnumerable list => JsonSerializer.Serialize(list.Cast<object?>().Select(item => item?.ToString() ?? string.Empty)),
+        IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+        _ => value.ToString() ?? string.Empty
+    };
 
     /// <summary>Quickbase's WC/XWC wildcard grammar: '*' = any run of characters, '?' = any single
     /// character, '\*'/'\?' = the literal character (see CopyRecordsDefinition's query parser, which
@@ -701,22 +1088,55 @@ public static class PipelineFilterEvaluator
         return group.Rules.All(r => IsRuleCompletelyBlank(r));
     }
 
+    /// <summary>"is the current user" / "is not the current user" (either spelling); <paramref name="negated"/> for the second.</summary>
+    public static bool IsCurrentUserOperator(string? op, out bool negated)
+    {
+        var normalized = (op ?? string.Empty).Trim().ToLowerInvariant().Replace('-', '_');
+        negated = normalized == "is_not_current_user";
+        return negated || normalized == "is_current_user";
+    }
+
+    /// <summary>Whether a User / User List value (its user ids) holds <paramref name="currentUserId"/>. Unknown → nobody is current. A
+    /// blank field is never the current user, so "is not the current user" keeps the records nobody is assigned to (as the report does).</summary>
+    public static bool MatchesCurrentUser(string? userValue, bool negated, long? currentUserId)
+    {
+        var holds = currentUserId is > 0 && PipelineUserFieldFilter.ParseUserIds(userValue).Contains(currentUserId.Value);
+        return negated ? !holds : holds;
+    }
+
     /// <param name="users">The people the record's User / User List fields hold, for rules on a person's detail
     /// ("Record Owner → Email"); see <see cref="PipelineUserFieldFilter"/>. Without it only the Id detail is known.</param>
+    /// <param name="currentUserId">Who "the current user" is — for a trigger, the person whose change fired it. Without it no record is
+    /// "the current user's".</param>
     public static bool EvaluateRule(TriggerFilterRule rule, IReadOnlyDictionary<long, object?> valuesSource, IReadOnlyList<AppField> fields, ILogger? logger = null,
-        IReadOnlyDictionary<long, PipelineUserDetails>? users = null)
+        IReadOnlyDictionary<long, PipelineUserDetails>? users = null, long? currentUserId = null)
     {
         if (IsRuleCompletelyBlank(rule)) return true;
 
         if (rule.Type == "nested")
         {
             if (rule.Groups == null || !rule.Groups.Any()) return true;
-            return rule.Groups.Any(g => EvaluateGroup(g, valuesSource, fields, logger, users));
+            return rule.Groups.Any(g => EvaluateGroup(g, valuesSource, fields, logger, users, currentUserId));
         }
 
         if (string.IsNullOrEmpty(rule.Field)) return true;
 
-        if (PipelineUserFieldFilter.TryResolve(rule.Field, fields, out var userField, out var detail))
+        if (IsCurrentUserOperator(rule.Operator, out var notCurrent))
+        {
+            var currentField = ResolveRuleField(fields, rule.Field);
+            return currentField != null && MatchesCurrentUser(ReadFieldValue(currentField, valuesSource), notCurrent, currentUserId);
+        }
+
+        // One part of an Address ("Address: City") compares as text.
+        if (PipelineAddressFieldFilter.TryResolve(rule.Field, fields, out var addressField, out var addressPart))
+        {
+            object? address = null;
+            if (addressField.Fid.HasValue && valuesSource.TryGetValue(addressField.Fid.Value, out var byFid)) address = byFid;
+            else if (valuesSource.TryGetValue(addressField.Id, out var byId)) address = byId;
+            return EvaluateConditionOperator(PipelineAddressFieldFilter.ReadPart(address, addressPart), rule.Operator ?? "is", rule.Value ?? string.Empty, "TEXT", logger);
+        }
+
+        if (PipelineUserFieldFilter.TryResolveRule(rule, fields, out var userField, out var detail))
         {
             var ids = PipelineUserFieldFilter.ParseUserIds(ReadFieldValue(userField, valuesSource));
             return PipelineUserFieldFilter.Matches(ids, users, detail, rule.Operator, rule.Value);
@@ -741,11 +1161,26 @@ public static class PipelineFilterEvaluator
             valObj = directVal;
         }
 
-        var leftVal = valObj?.ToString() ?? string.Empty;
+        var leftVal = ValueText(valObj);
+        // A Rich Text is compared by the text it shows, not the editor's HTML.
+        if (IsRichTextField(field)) leftVal = RichTextPlain(leftVal);
         var rightVal = rule.Value ?? string.Empty;
         var op = rule.Operator ?? "is";
 
         var typeCategory = GetTypeCategory(field);
+        // A File (or a Lookup of one) is matched by its files' names, not the stored JSON.
+        if (IsFileField(field)) return EvaluateFileOperator(leftVal, op, rightVal, logger);
+        // "is" / "is not" on a list (Multi-select, User list, a formula or lookup returning one) compares the items, in any order —
+        // as Search Records and the report filter do — not the stored JSON text.
+        var normalizedEquality = NormalizeOperator(op);
+        if (IsListField(field) && normalizedEquality is "equals" or "=" or "is" or "not_equals" or "<>" or "!=" or "is_not")
+        {
+            var same = SameItems(leftVal, rightVal);
+            return normalizedEquality is "equals" or "=" or "is" ? same : !same;
+        }
+        // "is empty" / "is not empty" on a list: a list with no items ("[]") is empty, as in Search Records.
+        if (IsListField(field) && EvaluateListBlank(leftVal, op) is { } listBlank) return listBlank;
+
         var matched = EvaluateConditionOperator(leftVal, op, rightVal, typeCategory, logger);
 
         // A Reference is matched by its display text; an exact-match operator also accepts the stored
@@ -762,7 +1197,7 @@ public static class PipelineFilterEvaluator
     }
 
     public static bool EvaluateGroup(TriggerFilterGroup group, IReadOnlyDictionary<long, object?> valuesSource, IReadOnlyList<AppField> fields, ILogger? logger = null,
-        IReadOnlyDictionary<long, PipelineUserDetails>? users = null)
+        IReadOnlyDictionary<long, PipelineUserDetails>? users = null, long? currentUserId = null)
     {
         if (group.Rules == null || !group.Rules.Any()) return true;
 
@@ -771,7 +1206,7 @@ public static class PipelineFilterEvaluator
 
         foreach (var rule in activeRules)
         {
-            bool ruleResult = EvaluateRule(rule, valuesSource, fields, logger, users);
+            bool ruleResult = EvaluateRule(rule, valuesSource, fields, logger, users, currentUserId);
 
             if (!ruleResult) return false;
         }
@@ -802,13 +1237,24 @@ public static class PipelineFilterEvaluator
         }
 
         // A person's detail of a User / User List field ("Record Owner → Email") compares as text.
-        if (PipelineUserFieldFilter.TryResolve(rule.Field, fields, out var userField, out _))
+        if (PipelineUserFieldFilter.TryResolveRule(rule, fields, out var userField, out _))
         {
             var userFieldLabel = !string.IsNullOrWhiteSpace(userField.Label) ? userField.Label : userField.Name;
             if (string.IsNullOrEmpty(rule.Operator))
                 AddValidatorError(errors, path, $"On New Event filter field '{userFieldLabel}' requires an operator.");
             else if (!AllowedOperatorsByTypeCategory["TEXT"].Contains(rule.Operator.ToLowerInvariant().Trim()))
                 AddValidatorError(errors, path, $"On New Event filter field '{userFieldLabel}' does not support operator '{rule.Operator}'. Allowed operators for TEXT type are: [{string.Join(", ", AllowedOperatorsByTypeCategory["TEXT"])}].");
+            return;
+        }
+
+        // One part of an Address ("Address: City") compares as text.
+        if (PipelineAddressFieldFilter.TryResolve(rule.Field, fields, out var addressField, out _))
+        {
+            var addressLabel = !string.IsNullOrWhiteSpace(addressField.Label) ? addressField.Label : addressField.Name;
+            if (string.IsNullOrEmpty(rule.Operator))
+                AddValidatorError(errors, path, $"On New Event filter field '{addressLabel}' requires an operator.");
+            else if (!AllowedOperatorsByTypeCategory["TEXT"].Contains(rule.Operator.ToLowerInvariant().Trim()))
+                AddValidatorError(errors, path, $"On New Event filter field '{addressLabel}' does not support operator '{rule.Operator}'. Allowed operators for TEXT type are: [{string.Join(", ", AllowedOperatorsByTypeCategory["TEXT"])}].");
             return;
         }
 

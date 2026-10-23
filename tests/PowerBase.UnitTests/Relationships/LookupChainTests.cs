@@ -60,7 +60,7 @@ public class LookupChainTests
     {
         var source = BuildChain(LookupChain.MaxLength - 1);   // the new lookup makes it MaxLength
 
-        var type = await LookupChain.ResolveForNewLookupAsync(source, _fieldRepo, default);
+        var (type, _) = await LookupChain.ResolveForNewLookupAsync(source, null, _fieldRepo, default);
 
         type.Should().Be("Text");
     }
@@ -70,7 +70,7 @@ public class LookupChainTests
     {
         var source = BuildChain(LookupChain.MaxLength);
 
-        var act = () => LookupChain.ResolveForNewLookupAsync(source, _fieldRepo, default);
+        var act = () => LookupChain.ResolveForNewLookupAsync(source, null, _fieldRepo, default);
 
         await act.Should().ThrowAsync<ValidationException>();
     }
@@ -78,8 +78,29 @@ public class LookupChainTests
     [Fact]
     public async Task ResolveForNewLookup_of_a_plain_field_returns_its_type()
     {
-        var type = await LookupChain.ResolveForNewLookupAsync(Field(5, "Number"), _fieldRepo, default);
+        var (type, resultType) = await LookupChain.ResolveForNewLookupAsync(Field(5, "Number"), null, _fieldRepo, default);
 
         type.Should().Be("Number");
+        resultType.Should().Be("Number");
+    }
+
+    [Fact]
+    public async Task ResolveForNewLookup_of_a_summary_shows_what_the_summary_produces()
+    {
+        var summary = new AppField { Id = 5, Fid = 5, AppTableId = 1, Name = "Min of Salary", TypeCode = "Summary",
+            Settings = """{"function":"Min","targetTypeCode":"Currency"}""" };
+
+        var (type, resultType) = await LookupChain.ResolveForNewLookupAsync(summary, null, _fieldRepo, default);
+
+        type.Should().Be("Summary");
+        resultType.Should().Be("Currency");
+    }
+
+    [Fact]
+    public async Task ResolveForNewLookup_of_an_address_part_shows_text()
+    {
+        var (_, resultType) = await LookupChain.ResolveForNewLookupAsync(Field(5, "Address"), "city", _fieldRepo, default);
+
+        resultType.Should().Be("Text");
     }
 }
