@@ -492,16 +492,13 @@ public class AzureSearchService : IAzureSearchService
             }
             else
             {
-                var hasSlots = groupDocs.Any(d => d.SlotValues != null && d.SlotValues.Count > 0);
-                if (hasSlots)
-                {
-                    await EnsureIndexAndFieldsExistAsync(indexName, Enumerable.Empty<string>(), ct);
-                }
-                else
-                {
-                    var allFields = groupDocs.SelectMany(d => d.Values.Keys).Select(k => $"f_{k}");
-                    await EnsureIndexAndFieldsExistAsync(indexName, allFields, ct);
-                }
+                var dynamicFields = groupDocs
+                    .Where(d => d.SlotValues != null)
+                    .SelectMany(d => d.SlotValues!.Keys)
+                    .Concat(groupDocs.SelectMany(d => d.Values.Keys.Select(k => $"f_{k}")))
+                    .Where(f => f.StartsWith("f_"))
+                    .Distinct();
+                await EnsureIndexAndFieldsExistAsync(indexName, dynamicFields, ct);
             }
 
             var searchDocs = groupDocs.Select(doc => 
@@ -524,6 +521,14 @@ public class AzureSearchService : IAzureSearchService
                     {
                         if (kvp.Value != null)
                         {
+                            // In standard shard, guard against phantom fields not in index
+                            if (!indexName.StartsWith("pb-tbl-", StringComparison.OrdinalIgnoreCase) && 
+                                kvp.Key.StartsWith("f_") && 
+                                (!_knownFieldsPerIndex.TryGetValue(indexName, out var known) || !known.Contains(kvp.Key)))
+                            {
+                                continue;
+                            }
+
                             searchDoc[kvp.Key] = kvp.Value;
                             if (kvp.Key.StartsWith("str_") || kvp.Key.StartsWith("f_"))
                             {

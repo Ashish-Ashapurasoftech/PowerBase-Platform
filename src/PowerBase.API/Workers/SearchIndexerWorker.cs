@@ -371,7 +371,7 @@ public class SearchIndexerWorker : BackgroundService
             var targetIndex = isWide ? $"pb-tbl-{tableId}" : null;
             var slotMap = PowerBase.Application.Search.SearchSlotResolver.BuildSlotMap(fields);
             var result = fields
-                .Where(f => f.Fid.HasValue && slotMap.ContainsKey((long)f.Fid.Value))
+                .Where(f => f.Fid.HasValue && slotMap.ContainsKey((long)f.Fid.Value) && (isWide || !slotMap[(long)f.Fid.Value].StartsWith("f_")))
                 .ToDictionary(f => (long)f.Fid!.Value, f => (slotMap[(long)f.Fid!.Value], f.TypeCode));
             var info = new TableSlotInfo(result, isWide, targetIndex);
             _tableSlotCache[tableId] = info;

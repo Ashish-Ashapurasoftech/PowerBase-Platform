@@ -143,21 +143,27 @@ public static class SearchSlotResolver
     public static double? ParseDouble(object? val)
     {
         if (val == null || val is DBNull) return null;
-        if (val is double d) return d;
-        if (val is float f) return f;
-        if (val is decimal dec) return (double)dec;
-        if (val is int i) return i;
-        if (val is long l) return l;
-        if (val is JsonElement je)
+        double? d = null;
+        if (val is double dVal) d = dVal;
+        else if (val is float f) d = f;
+        else if (val is decimal dec) d = (double)dec;
+        else if (val is int i) d = i;
+        else if (val is long l) d = l;
+        else if (val is JsonElement je)
         {
-            if (je.ValueKind == JsonValueKind.Number && je.TryGetDouble(out var jd)) return jd;
-            if (je.ValueKind == JsonValueKind.String && double.TryParse(je.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var jsDouble)) return jsDouble;
-            return null;
+            if (je.ValueKind == JsonValueKind.Number && je.TryGetDouble(out var jd)) d = jd;
+            else if (je.ValueKind == JsonValueKind.String && double.TryParse(je.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var jsDouble)) d = jsDouble;
+        }
+        else
+        {
+            var s = val.ToString()?.Trim();
+            if (!string.IsNullOrWhiteSpace(s) && double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed)) d = parsed;
         }
 
-        var s = val.ToString()?.Trim();
-        if (string.IsNullOrWhiteSpace(s)) return null;
-        return double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
+        if (d.HasValue && (double.IsNaN(d.Value) || double.IsInfinity(d.Value)))
+            return null;
+
+        return d;
     }
 
     public static DateTimeOffset? ParseDateTimeOffset(object? val)

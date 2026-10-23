@@ -110,6 +110,11 @@ public class BackfillSearchIndexCommandHandler
                                             searchableValues[field.Fid.Value] = val;
                                             if (slotMap.TryGetValue(field.Fid.Value, out var slotName))
                                             {
+                                                if (!isWide && slotName.StartsWith("f_"))
+                                                {
+                                                    continue;
+                                                }
+
                                                 if (PowerBase.Application.Search.SearchSlotResolver.IsNumeric(field.TypeCode))
                                                     slotValues[slotName] = PowerBase.Application.Search.SearchSlotResolver.ParseDouble(val);
                                                 else if (PowerBase.Application.Search.SearchSlotResolver.IsDate(field.TypeCode))
@@ -130,6 +135,7 @@ public class BackfillSearchIndexCommandHandler
                                 }
                             }
 
+                            string? batchError = null;
                             if (docsToBatch.Count > 0)
                             {
                                 try
@@ -140,11 +146,12 @@ public class BackfillSearchIndexCommandHandler
                                 catch (Exception ex)
                                 {
                                     failedRecordsCount += docsToBatch.Count;
+                                    batchError = ex.Message;
                                     _logger.LogError(ex, "Failed to bulk index {Count} records for Table {TableName} (ID: {TableId}).", docsToBatch.Count, table.Name, table.Id);
                                 }
                             }
 
-                            request.OnProgress?.Invoke(totalApps, totalTables, totalRecordsIndexed, failedRecordsCount);
+                            request.OnProgress?.Invoke(totalApps, totalTables, totalRecordsIndexed, failedRecordsCount, batchError);
 
                             if (records.Count < 500)
                             {

@@ -21,14 +21,14 @@ public class AdminSearchController : ControllerBase
     [RequireSuperAdmin] // Requires SuperAdmin
     [ProducesResponseType(StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-    public IActionResult BackfillSearchIndex([FromQuery] long? tableId = null)
+    public IActionResult BackfillSearchIndex([FromQuery] long? tableId = null, [FromQuery] long? tenantId = null)
     {
         var queryContext = HttpContext.RequestServices.GetRequiredService<PowerBase.Application.Common.Interfaces.IQueryContext>();
-        var tenantId = queryContext.TenantId;
+        var effectiveTenantId = tenantId.HasValue && tenantId.Value > 0 ? tenantId.Value : queryContext.TenantId;
 
         var job = new SearchBackfillStatus
         {
-            TenantId = tenantId,
+            TenantId = effectiveTenantId,
             TableId = tableId,
             StartedAtUtc = DateTime.UtcNow,
             Status = "Running"
@@ -42,13 +42,14 @@ public class AdminSearchController : ControllerBase
                 using var scope = _scopeFactory.CreateScope();
                 var handler = scope.ServiceProvider.GetRequiredService<Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
                 var request = new Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommand(
-                    tenantId,
-                    (apps, tables, indexed, failed) =>
+                    effectiveTenantId,
+                    (apps, tables, indexed, failed, err) =>
                     {
                         job.TotalApps = apps;
                         job.TotalTables = tables;
                         job.TotalRecordsIndexed = indexed;
                         job.FailedRecordsCount = failed;
+                        if (!string.IsNullOrEmpty(err)) job.ErrorMessage = err;
                     },
                     tableId);
 
