@@ -174,6 +174,22 @@ public interface IRecordRepository
         long? restrictToCreatedBy = null,
         CancellationToken ct = default);
 
+    /// <summary>Like <see cref="ListBatchAfterIdAsync"/> but returns only (Id, PublicId) — no field columns, no
+    /// decryption — so a background delete can walk millions of matching records cheaply. The filter must be
+    /// expressible in SQL (no computed or encrypted fields).</summary>
+    Task<IReadOnlyList<(long Id, Guid PublicId)>> ListIdsAfterIdAsync(
+        AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default);
+
+    /// <summary>Soft-deletes the given rows by internal Id in a single statement (the ids travel as one JSON
+    /// parameter, so there is no 2,100-parameter limit) and reports one search-index delete per record.</summary>
+    Task BulkDeleteByIdsAsync(
+        AppTable table, IReadOnlyList<(long Id, Guid PublicId)> rows,
+        System.Data.IDbTransaction? transaction = null, CancellationToken ct = default,
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+
     Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 
     /// <summary>

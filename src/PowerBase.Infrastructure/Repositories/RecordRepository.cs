@@ -268,6 +268,31 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
     }
 
+    public async Task<IReadOnlyList<(long Id, Guid PublicId)>> ListIdsAfterIdAsync(
+        AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default)
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("afterId", afterId);
+        parameters.Add("batchSize", batchSize);
+        var fieldLookup = BuildFieldLookup(fields);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+
+        var sql = $"""
+            SELECT TOP (@batchSize) Id, PublicId
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND Id > @afterId{filterWhere}
+            ORDER BY Id
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<(long Id, Guid PublicId)>(
+            new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
+        return rows.AsList();
+    }
+
     public async Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
     {
         var parameters = new DynamicParameters();
@@ -1855,6 +1880,52 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             {
                 onIndexMessageCreated(msg);
             }
+        }
+        else
+        {
+            _ = _messagePublisher.PublishBatchAsync(deleteMessages, default);
+        }
+    }
+
+    public async Task BulkDeleteByIdsAsync(AppTable table, IReadOnlyList<(long Id, Guid PublicId)> rows, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+    {
+        if (rows.Count == 0) return;
+
+        // The ids go in as ONE JSON parameter and the UPDATE joins on the clustered Id, so a chunk of thousands of
+        // records is a single statement (an IN @list would be capped at 2,100 parameters and be re-planned each time).
+        var sql = $"""
+            UPDATE t
+            SET t.IsDeleted = 1, t.ModifiedOn = SYSUTCDATETIME(), t.ModifiedBy = @modifiedBy
+            FROM {PhysicalNaming.FullTableName(table.Id)} t
+            JOIN OPENJSON(@idsJson) WITH (Id bigint '$') j ON j.Id = t.Id
+            WHERE t.IsDeleted = 0
+            """;
+        var idsJson = System.Text.Json.JsonSerializer.Serialize(rows.Select(r => r.Id));
+        var args = new { idsJson, modifiedBy = QueryContext.UserId };
+
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(sql, args, transaction, commandTimeout: 0, cancellationToken: ct));
+        }
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            await connection.ExecuteAsync(new CommandDefinition(sql, args, commandTimeout: 0, cancellationToken: ct));
+        }
+
+        // Remove from Azure AI Search
+        var deleteMessages = rows.Select(r => new PowerBase.Application.Common.Models.SearchIndexMessage
+        {
+            Action = PowerBase.Application.Common.Models.IndexAction.Delete,
+            TenantId = QueryContext.TenantId,
+            AppId = table.AppId,
+            TableId = table.Id,
+            RecordPublicId = r.PublicId
+        }).ToList();
+        if (onIndexMessageCreated != null)
+        {
+            foreach (var msg in deleteMessages) onIndexMessageCreated(msg);
         }
         else
         {

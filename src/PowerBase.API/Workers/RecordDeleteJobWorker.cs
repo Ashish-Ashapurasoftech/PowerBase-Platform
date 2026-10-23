@@ -58,6 +58,9 @@ public sealed class RecordDeleteJobWorker(IServiceProvider services, ILogger<Rec
         try
         {
             Guid? previousFirstId = null;
+            RecordDeleteFastPlan? fastPlan = null;
+            var planResolved = false;
+            long lastId = 0;
             var cancelRequested = job.CancelRequested;
             while (!stopping.IsCancellationRequested)
             {
@@ -74,14 +77,32 @@ public sealed class RecordDeleteJobWorker(IServiceProvider services, ILogger<Rec
                     break;
                 }
 
-                var chunk = await sp.GetRequiredService<RecordDeleteJobProcessor>()
-                    .DeleteNextChunkAsync(job, job.ExpectedCount - deleted, stopping);
-                if (chunk.Deleted == 0) break; // nothing matches any more → completed
+                var processor = sp.GetRequiredService<RecordDeleteJobProcessor>();
+                if (!planResolved)
+                {
+                    // Once per job: a report answerable by plain SQL is walked by Id in big chunks; anything else
+                    // (computed/encrypted filters, quick search) keeps the page-by-page report run.
+                    fastPlan = await processor.PrepareFastPlanAsync(job, stopping);
+                    planResolved = true;
+                }
 
-                if (chunk.FirstId is not null && chunk.FirstId == previousFirstId)
-                    throw new InvalidOperationException("Deleting made no progress (the same records matched again). Stopped to avoid looping.");
-                previousFirstId = chunk.FirstId;
-                deleted += chunk.Deleted;
+                if (fastPlan is not null)
+                {
+                    var fast = await processor.DeleteNextFastChunkAsync(fastPlan, lastId, job.ExpectedCount - deleted, stopping);
+                    if (fast.Deleted == 0) break; // nothing matches any more → completed
+                    lastId = fast.LastId;
+                    deleted += fast.Deleted;
+                }
+                else
+                {
+                    var chunk = await processor.DeleteNextChunkAsync(job, job.ExpectedCount - deleted, stopping);
+                    if (chunk.Deleted == 0) break; // nothing matches any more → completed
+
+                    if (chunk.FirstId is not null && chunk.FirstId == previousFirstId)
+                        throw new InvalidOperationException("Deleting made no progress (the same records matched again). Stopped to avoid looping.");
+                    previousFirstId = chunk.FirstId;
+                    deleted += chunk.Deleted;
+                }
 
                 var progress = await sp.GetRequiredService<IRecordDeleteJobRepository>()
                     .ReportProgressAsync(job.Id, _workerId, claimToken, deleted, LeaseSeconds, stopping);

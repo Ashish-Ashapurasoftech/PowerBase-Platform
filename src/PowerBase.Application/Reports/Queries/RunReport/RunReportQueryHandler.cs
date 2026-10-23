@@ -42,6 +42,10 @@ public class PagedReportRunResult
     public IReadOnlyDictionary<string, ColumnTotal> Totals { get; init; } = new Dictionary<string, ColumnTotal>();
 }
 
+/// <summary>See <see cref="RunReportQueryHandler.ResolveDeleteScopeAsync"/>.</summary>
+public sealed record ReportDeleteScope(
+    AppTable Table, IReadOnlyList<AppField> Fields, TableAccessContext Access, FilterGroup? FilterTree, long? RestrictToCreatedBy);
+
 public class RunReportQueryHandler
 {
     private readonly IReportRepository _reportRepo;
@@ -145,38 +149,9 @@ public class RunReportQueryHandler
         // was narrowed after the client loaded it.
         var effectiveRuntimeFilters = FilterRuntimeFiltersByDynamicFilterConfig(definition, query.RuntimeFilters);
 
-        // Resolve filter tree — support legacy flat Filters list
-        var filterTree = definition.FilterTree;
-        if (filterTree == null && definition.Filters.Count > 0)
-        {
-            filterTree = new FilterGroup
-            {
-                Logic = "and",
-                Nodes = definition.Filters.Select(f => new FilterNode
-                {
-                    Condition = new FilterCondition { FieldId = f.FieldId, Operator = f.Operator, Value = f.Value }
-                }).ToList()
-            };
-        }
-
-        // "<ask the user>" answers are substituted directly into the saved tree's own leaf
-        // positions FIRST — before the User/Date resolvers below, so an answer that's itself a
-        // picked user's Guid or a relative date tier gets picked up by them exactly like any other
-        // literal value. Preserves the saved tree's exact AND/OR structure (see
-        // ResolveAskAnswers's doc comment for why this can't be a separate AND'd-on-top group).
-        filterTree = ResolveAskAnswers(filterTree, query.AskAnswers, []);
-
-        // "is the current user" AND literal User/MultiUser picker values both need resolving to
-        // the plain long core.[User].Id the column actually stores before this tree reaches the
-        // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
-        var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
-        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId, _queryContext.UserEmail, _queryContext.UserName);
-
-        // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
-        // future) must resolve to an actual date freshly EVERY time the report runs, not once at
-        // save time — so this can't be done client-side when the filter is saved. See
-        // ResolveDateValueModeConditions's doc comment for the "today" anchor caveat.
-        filterTree = ResolveDateValueModeConditions(filterTree);
+        // The report's saved filter tree with the runtime (Advanced builder / per-column) filter tree AND'd on top,
+        // every "ask the user" answer, User-field and relative-date value already resolved.
+        var filterTree = await BuildFilterTreeAsync(definition, query, table, allFields, ct);
 
         // Table reports: TableSortGroup (Phase 1's unified Sort+Group list) supersedes the legacy
         // single-field GroupByFieldId + SortFields when non-empty — derive both the sort order
@@ -220,6 +195,52 @@ public class RunReportQueryHandler
             }
         }
 
+        if (report.ReportType is "Summary" or "Chart")
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
+
+        return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
+            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
+    }
+
+    /// <summary>Saved filter tree (legacy flat Filters list supported) with the runtime filter tree AND'd on top; the
+    /// "ask the user" answers, User-field and relative-date values are resolved. Role ViewFilter, dynamic and quick-search
+    /// filters are merged in by the caller.</summary>
+    private async Task<FilterGroup?> BuildFilterTreeAsync(
+        ReportDefinition definition, RunReportQuery query, AppTable table, IReadOnlyList<AppField> allFields, CancellationToken ct)
+    {
+        // Resolve filter tree — support legacy flat Filters list
+        var filterTree = definition.FilterTree;
+        if (filterTree == null && definition.Filters.Count > 0)
+        {
+            filterTree = new FilterGroup
+            {
+                Logic = "and",
+                Nodes = definition.Filters.Select(f => new FilterNode
+                {
+                    Condition = new FilterCondition { FieldId = f.FieldId, Operator = f.Operator, Value = f.Value }
+                }).ToList()
+            };
+        }
+
+        // "<ask the user>" answers are substituted directly into the saved tree's own leaf
+        // positions FIRST — before the User/Date resolvers below, so an answer that's itself a
+        // picked user's Guid or a relative date tier gets picked up by them exactly like any other
+        // literal value. Preserves the saved tree's exact AND/OR structure (see
+        // ResolveAskAnswers's doc comment for why this can't be a separate AND'd-on-top group).
+        filterTree = ResolveAskAnswers(filterTree, query.AskAnswers, []);
+
+        // "is the current user" AND literal User/MultiUser picker values both need resolving to
+        // the plain long core.[User].Id the column actually stores before this tree reaches the
+        // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
+        var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
+        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId, _queryContext.UserEmail, _queryContext.UserName);
+
+        // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
+        // future) must resolve to an actual date freshly EVERY time the report runs, not once at
+        // save time — so this can't be done client-side when the filter is saved. See
+        // ResolveDateValueModeConditions's doc comment for the "today" anchor caveat.
+        filterTree = ResolveDateValueModeConditions(filterTree);
+
         // Runtime filter tree (Advanced builder / per-column filters / the "ask the user"
         // prompt's answers — see table-report-view.component.ts's buildRuntimeFilterTree()),
         // AND'd on top of the saved tree — role ViewFilter and dynamic/quick-search filters are
@@ -243,11 +264,50 @@ public class RunReportQueryHandler
                 : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = resolvedRuntimeTree }] };
         }
 
-        if (report.ReportType is "Summary" or "Chart")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
+        return filterTree;
+    }
 
-        return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
-            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
+    /// <summary>What a background "Delete these records" job needs to walk the report's matches by Id with plain SQL:
+    /// the report's filters plus the role's View and Modify rules as ONE SQL filter tree. Null when the report can't
+    /// be answered that way (not a Table report, quick search, a filter on a computed/encrypted field, a role rule on a
+    /// computed field) — the caller then falls back to running the report page by page.</summary>
+    public async Task<ReportDeleteScope?> ResolveDeleteScopeAsync(RunReportQuery query, CancellationToken ct = default)
+    {
+        var report = await _reportRepo.GetVisibleReportAsync(query.ReportPublicId, ct)
+            ?? throw new NotFoundException("Report", query.ReportPublicId);
+        if (report.ReportType != "Table" || !string.IsNullOrWhiteSpace(query.QuickSearch)) return null;
+
+        var table = await _tableRepo.GetByIdAsync(report.AppTableId, ct);
+        var app = _appRepo != null ? await _appRepo.GetByIdAsync(table.AppId, ct) : null;
+        var isAppEncrypted = app?.IsEncrypted ?? false;
+        var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+        var access = await _enforcer.GetTableAccessAsync(table, allFields, ct);
+        if (!access.CanView) return null;
+
+        var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+        var runtimeFilters = FilterRuntimeFiltersByDynamicFilterConfig(definition, query.RuntimeFilters);
+        var tree = await BuildFilterTreeAsync(definition, query, table, allFields, ct);
+        tree = MergeRuntimeFilters(tree, allFields, runtimeFilters);
+
+        FilterGroup? And(FilterGroup? left, FilterGroup? right) =>
+            left == null ? right
+            : right == null ? left
+            : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = left }, new FilterNode { Group = right }] };
+
+        // Same rules RecordModifyGuard enforces on a delete: View rules AND Modify rules.
+        tree = And(tree, access.ViewFilter);
+        if (!access.Unrestricted) tree = And(tree, access.ModifyFilter);
+
+        var formulaFids = allFields
+            .Where(f => (f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings)) ||
+                        (f.Fid.HasValue && Relationships.EncryptedRowFilter.IsEncrypted(f, isAppEncrypted)))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
+        if (FormulaFilterSorter.TreeContainsFormulaField(tree, formulaFids)) return null;
+
+        var restrictToCreatedBy = access.RestrictToCreatedBy
+            ?? (!access.Unrestricted && access.ModifyScope == Domain.Constants.RecordScopes.OwnRecords ? _queryContext.UserId : null);
+        return new ReportDeleteScope(table, allFields, access, tree, restrictToCreatedBy);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
