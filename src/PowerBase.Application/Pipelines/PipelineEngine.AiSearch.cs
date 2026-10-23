@@ -173,7 +173,13 @@ public partial class PipelineEngine
         IPipelineRecordSearchService recordSearchService, IRecordRepository recordRepo, int pageSize, CancellationToken ct)
     {
         var rows = new List<IReadOnlyDictionary<string, object?>>();
-        await foreach (var page in StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, null, ct))
+        var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(fields)
+            ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
+            : null;
+        var searchPages = targetIndex != null
+            ? StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, null, targetIndex, ct)
+            : StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, null, ct);
+        await foreach (var page in searchPages)
         {
             rows.AddRange(await VerifyAiCandidatesAsync(table, fields, tree, page.Ids, null,
                 inMemoryFilterFids, computedFieldFids, recordSearchService, recordRepo, pageSize, ct));
@@ -196,10 +202,15 @@ public partial class PipelineEngine
     {
         var ordinal = workset.DiscoveredCount;
         var outputFields = readableFids == null ? fields : fields.Where(f => f.Fid.HasValue && readableFids.Contains(f.Fid.Value)).ToList();
+        var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(fields)
+            ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
+            : null;
         try
         {
-            await foreach (var page in StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(
-                StepTenantId(), table.Id, odataFilter, workset.LastSearchCursor, ct))
+            var searchPages = targetIndex != null
+                ? StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, workset.LastSearchCursor, targetIndex, ct)
+                : StepAzureSearch()!.SearchRecordIdsByFilterPagedAsync(StepTenantId(), table.Id, odataFilter, workset.LastSearchCursor, ct);
+            await foreach (var page in searchPages)
             {
                 var remaining = limit.HasValue ? limit.Value - ordinal : int.MaxValue;
                 if (remaining <= 0) break;

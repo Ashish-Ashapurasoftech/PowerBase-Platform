@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Pipelines;
 using PowerBase.Application.Records;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
@@ -359,8 +360,12 @@ public class RunReportQueryHandler
             {
                 try
                 {
-                    // Route query to Azure AI Search to bypass SQL encryption limitations.
-                    var aiMatches = await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, ct);
+                    var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
+                        ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
+                        : null;
+                    var aiMatches = targetIndex != null
+                        ? await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, targetIndex, ct)
+                        : await _searchService.SearchRecordsAsync(_queryContext.TenantId, table.Id, quickSearch, ct);
                     if (aiMatches.Count > 0)
                     {
                         var cappedMatches = aiMatches.Count > AiSearchMaxResults
@@ -430,8 +435,13 @@ public class RunReportQueryHandler
             {
                 try
                 {
-                    // GAP #2: Cap results + use direct ID query instead of OR node explosion.
-                    var aiMatches = await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
+                    // If wide table (> 150 search fields), query its dedicated index directly
+                    var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
+                        ? $"pb-tbl-{table.Id}"
+                        : null;
+                    var aiMatches = targetIndex != null
+                        ? await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, targetIndex, ct)
+                        : await _searchService.SearchRecordsByFilterAsync(_queryContext.TenantId, table.Id, odata, ct);
                     var cappedMatches = aiMatches.Count > AiSearchMaxResults
                         ? aiMatches.Take(AiSearchMaxResults).ToList()
                         : aiMatches;
@@ -488,6 +498,78 @@ public class RunReportQueryHandler
             ? new List<AppField>()
             : selectedFields.Where(WantsTotals).ToList();
 
+        // SOLUTION 1: Fast Azure AI Search paged execution for large tables.
+        // If grid search is enabled and sorting or filtering involves encrypted fields (which are indexed as plaintext in AI Search)
+        // or user filters / quick search, execute the paging and sorting directly in Azure AI Search.
+        // This avoids calling ListAllMatchingAsync (which pulls millions of rows into .NET memory to decrypt/sort in RAM).
+        if (_searchService.IsGridSearchEnabled && (hasFormulaSorts || hasFormulaFilters || !string.IsNullOrWhiteSpace(quickSearch))
+            && allFields.Any(f => f.IsSearchable || f.IsFilterable))
+        {
+            var canExpressUserFilter = userFilterTree == null || OData.ODataFilterBuilder.CanExpress(userFilterTree);
+            var searchOrderBy = BuildSearchOrderBy(sortFields, allFields);
+            var canSortInSearch = sortFields.Count == 0 || searchOrderBy != null;
+
+            if (canExpressUserFilter && canSortInSearch && await _searchService.IsHealthyAsync(ct))
+            {
+                try
+                {
+                    var odata = userFilterTree != null ? OData.ODataFilterBuilder.Build(userFilterTree, allFields) : null;
+                    var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
+                        ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
+                        : null;
+
+                    var (pagedIds, totalMatches) = await _searchService.SearchRecordsPagedAsync(
+                        _queryContext.TenantId, table.Id, quickSearch, odata, page, pageSize, searchOrderBy, targetIndex, ct);
+
+                    if (totalMatches == 0 || pagedIds.Count == 0)
+                    {
+                        return new PagedReportRunResult { Page = page, PageSize = pageSize, Columns = columns, TotalCount = 0 };
+                    }
+
+                    // Fetch ONLY the requested page rows from SQL (e.g. 25 rows)
+                    var pagedRows = await _recordRepo.ListByPublicIdsAsync(table, allFields, pagedIds, ct);
+
+                    // If role ViewFilter or RestrictToCreatedBy applies, verify candidate page
+                    if (access.RestrictToCreatedBy.HasValue)
+                    {
+                        pagedRows = pagedRows.Where(r => r.TryGetValue("CreatedBy", out var cb) && cb is long lcb && lcb == access.RestrictToCreatedBy.Value).ToList();
+                    }
+                    if (access.ViewFilter != null)
+                    {
+                        var valuesLookup = pagedRows.Select(r => (Row: r, Map: (IReadOnlyDictionary<long, object?>)r.Where(kv => long.TryParse(kv.Key, out _)).ToDictionary(kv => long.Parse(kv.Key), kv => kv.Value))).ToList();
+                        pagedRows = valuesLookup.Where(v => PipelineFilterEvaluator.EvaluateFilterGroup(access.ViewFilter, v.Map, allFields)).Select(v => v.Row).ToList();
+                    }
+
+                    var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, pagedRows,
+                        await _relationalProjector.ProjectAsync(table, allFields, pagedRows, ct));
+                    var computed = _formulaProjector.Project(allFields, pagedRows, relational, table);
+                    var userNames = await ResolveUserNamesAsync(pagedRows, allFields, _userRepo, ct, computed);
+                    items = pagedRows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
+                    total = (int)Math.Min(totalMatches, int.MaxValue);
+
+                    if (totalCols.Count > 0 && items.Count > 0)
+                    {
+                        totals = AggregateInMemory(items, totalCols);
+                    }
+
+                    return new PagedReportRunResult
+                    {
+                        Items = items,
+                        Columns = columns,
+                        TotalCount = total,
+                        Page = page,
+                        PageSize = pageSize,
+                        IsDataMasked = isMaskedPreview,
+                        Totals = totals,
+                    };
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "[RunReport] Fast AI Search paged execution failed for table {TableId}. Falling back to standard pipeline.", table.Id);
+                }
+            }
+        }
+
         if (hasFormulaFilters || hasFormulaSorts)
         {
             // Strip formula conditions from the SQL filter tree; keep them for in-memory pass.
@@ -496,7 +578,6 @@ public class RunReportQueryHandler
             // When sorts include formula fields, skip SQL ORDER BY (we'll re-sort everything in-memory).
             IReadOnlyList<SortSpec> sqlSorts = hasFormulaSorts ? [] : sortFields;
 
-            // Fetch ALL rows matching the physical filters (no SQL pagination, no row cap).
             var allRows = await _recordRepo.ListAllMatchingAsync(table, allFields,
                 physicalFilterTree, sqlSorts,
                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
@@ -551,12 +632,12 @@ public class RunReportQueryHandler
                 }
 
                 // Formula / encrypted columns have no SQL-aggregatable value, so evaluate them over
-                // every matching record in memory.
+                // every matching record in memory (capped at 10,000 for unfiltered 10M-row tables to prevent OOM).
                 var memoryCols = totalCols.Except(physicalCols).ToList();
                 if (memoryCols.Count > 0)
                 {
-                    var everyRow = await _recordRepo.ListAllMatchingAsync(table, allFields, filterTree, [],
-                        restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+                    var everyRow = await _recordRepo.ListAllMatchingAsync(table, allFields, filterTree, [], restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+
                     var everyRelational = await _relationalProjector.ProjectAsync(table, allFields, everyRow, ct);
                     var everyComputed = _formulaProjector.Project(allFields, everyRow, everyRelational, table);
                     var everyResult = everyRow.Select((r, i) => RecordResult.FromRow(r, selectedFields, null, everyComputed[i])).ToList();
@@ -676,6 +757,23 @@ public class RunReportQueryHandler
         return existingFilter == null
             ? aiSearchGroup
             : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = existingFilter }, new FilterNode { Group = aiSearchGroup }] };
+    }
+
+    private static List<string>? BuildSearchOrderBy(IReadOnlyList<SortSpec>? sortFields, IReadOnlyList<AppField> allFields)
+    {
+        if (sortFields == null || sortFields.Count == 0) return null;
+        var list = new List<string>();
+        foreach (var s in sortFields)
+        {
+            var f = allFields.FirstOrDefault(x => (x.Fid.HasValue && x.Fid.Value == s.FieldId) || x.Id == s.FieldId);
+            if (f == null) return null; // unknown field -> cannot order in search
+            if (PhysicalNaming.IsComputedTypeCode(f.TypeCode)) return null; // dynamic formula not in search slots
+
+            var slot = PowerBase.Application.Search.SearchSlotResolver.ResolveSlotName(f, allFields);
+            var dir = s.Desc ? "desc" : "asc";
+            list.Add($"{slot} {dir}");
+        }
+        return list.Count > 0 ? list : null;
     }
 
     /// <summary>When definition.DynamicFilterType is "Custom", restricts runtimeFilters to only

@@ -42,16 +42,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         System.Data.IDbConnection connection, long appId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
         => Services.FieldEncryptionContext.ResolveAsync(connection, appId, QueryContext.TenantId, _encryptionService, transaction, ct);
 
-    public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default)
+    public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(long tableId, Guid recordPublicId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         
-        // Find the table that contains this record
-        var tableSql = @"SELECT t.Id, t.AppId, t.Name 
-                         FROM RecordMetadata rm 
-                         JOIN meta.AppTable t ON rm.TableId = t.Id 
-                         WHERE rm.PublicId = @publicId AND rm.TenantId = @tenantId";
-        var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { publicId = recordPublicId, tenantId = QueryContext.TenantId });
+        // Find table info
+        var tableSql = "SELECT Id, AppId, Name FROM meta.AppTable WHERE Id = @tableId";
+        var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { tableId });
         if (tableInfo == null) return new Dictionary<long, object?>();
 
         // Get fields for this table
@@ -62,8 +59,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (searchableFields.Count == 0) return new Dictionary<long, object?>();
 
         var fieldCols = BuildFieldColumnList(searchableFields);
-        var recordSql = $"SELECT {fieldCols} FROM {PhysicalNaming.FullTableName((long)tableInfo.Id)} WHERE Id = (SELECT RecordId FROM RecordMetadata WHERE PublicId = @publicId AND TenantId = @tenantId)";
-        var rawRow = (await connection.QueryAsync<dynamic>(recordSql, new { publicId = recordPublicId, tenantId = QueryContext.TenantId })).FirstOrDefault();
+        var recordSql = $"SELECT {fieldCols} FROM {PhysicalNaming.FullTableName((long)tableInfo.Id)} WHERE PublicId = @publicId AND IsDeleted = 0";
+        var rawRow = (await connection.QueryAsync<dynamic>(recordSql, new { publicId = recordPublicId })).FirstOrDefault();
         if (rawRow == null) return new Dictionary<long, object?>();
 
         var rowDict = (IDictionary<string, object?>)rawRow;
@@ -78,7 +75,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             
             if (rowDict.TryGetValue(colName, out var val))
             {
-                if (!f.IsSearchable)
+                if (!f.IsSearchable && !f.IsFilterable)
                 {
                     result[(long)f.Fid.Value] = null;
                 }
@@ -94,6 +91,21 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         
         return result;
+    }
+
+    public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var tablesSql = "SELECT Id FROM meta.AppTable WHERE IsDeleted = 0";
+        var tableIds = (await connection.QueryAsync<long>(tablesSql)).ToList();
+
+        foreach (var tableId in tableIds)
+        {
+            var res = await GetSearchableFieldsAsync(tableId, recordPublicId, ct);
+            if (res.Count > 0) return res;
+        }
+
+        return new Dictionary<long, object?>();
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
@@ -144,6 +156,42 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListByPublicIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
+    {
+        if (publicIds.Count == 0) return [];
+
+        var fieldCols = BuildFieldColumnList(fields);
+        var parameters = new DynamicParameters();
+        parameters.Add("publicIds", publicIds);
+
+        var sql = $"""
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND PublicId IN @publicIds
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = (await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct))).ToList();
+
+        var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
+
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        await enc.DecryptRowsAsync(mutableRows, fields, ct);
+
+        // Preserve the exact order of the requested publicIds (as returned by Azure AI Search)
+        var rowMap = mutableRows.Where(r => r.ContainsKey("PublicId") && r["PublicId"] is Guid).ToDictionary(r => (Guid)r["PublicId"]!);
+        var orderedRows = new List<IReadOnlyDictionary<string, object?>>(publicIds.Count);
+        foreach (var pid in publicIds)
+        {
+            if (rowMap.TryGetValue(pid, out var row))
+                orderedRows.Add((IReadOnlyDictionary<string, object?>)row);
+        }
+
+        return orderedRows;
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllMatchingAsync(
         AppTable table, IReadOnlyList<AppField> fields,
         FilterGroup? filterTree = null,
@@ -168,8 +216,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 .DefaultIfEmpty("Id"))
             : "Id";
 
+        // Guardrail: TOP 50000 ensures an in-memory pass on a massive table cannot pull millions of rows and trigger OutOfMemory
         var sql = $"""
-            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
+            SELECT TOP 50000 Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
             FROM {PhysicalNaming.FullTableName(table.Id)}
             WHERE IsDeleted = 0{filterWhere}
             ORDER BY {orderBy}
@@ -224,6 +273,29 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var parameters = new DynamicParameters();
         var fieldLookup = BuildFieldLookup(fields);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+
+        if (string.IsNullOrWhiteSpace(filterWhere))
+        {
+            try
+            {
+                var fastSql = $@"
+                    SELECT COALESCE(SUM(st.row_count), 0)
+                    FROM sys.dm_db_partition_stats st
+                    WHERE st.object_id = OBJECT_ID('{PhysicalNaming.FullTableName(table.Id)}')
+                      AND st.index_id < 2;";
+                await using var fastConn = await ConnectionFactory.CreateAsync(ct);
+                var fastCount = await fastConn.ExecuteScalarAsync<long>(new CommandDefinition(fastSql, cancellationToken: ct));
+                if (fastCount > 0)
+                {
+                    return (int)Math.Min(fastCount, int.MaxValue);
+                }
+            }
+            catch
+            {
+                // Fallback to exact count on any error
+            }
+        }
+
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
@@ -1345,7 +1417,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            _ = _messagePublisher.PublishAsync(msg, default);
+            _ = _messagePublisher.PublishAsync(msg, default).ContinueWith(
+                t => { /* Observed fire-and-forget: failure handled */ },
+                TaskContinuationOptions.OnlyOnFaulted);
         }
 
         return insertedPublicId;
@@ -1450,7 +1524,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (onIndexMessageCreated != null)
             foreach (var msg in messages) onIndexMessageCreated(msg);
         else
-            _ = _messagePublisher.PublishBatchAsync(messages, default);
+            _ = _messagePublisher.PublishBatchAsync(messages, default).ContinueWith(
+                t => { /* Observed fire-and-forget: failure handled */ },
+                TaskContinuationOptions.OnlyOnFaulted);
 
         return publicIds;
     }
@@ -1769,11 +1845,30 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET {col} = @valueToSet
+            OUTPUT INSERTED.PublicId
             WHERE IsDeleted = 0 AND ({col} IS NULL OR {col} = '')
             """;
 
-        return await connection.ExecuteAsync(
-            new CommandDefinition(sql, new { valueToSet }, cancellationToken: ct));
+        var updatedPublicIds = (await connection.QueryAsync<Guid>(
+            new CommandDefinition(sql, new { valueToSet }, cancellationToken: ct))).ToList();
+
+        if (updatedPublicIds.Count > 0 && field.Fid.HasValue && (field.IsSearchable || field.IsFilterable))
+        {
+            var fidStr = field.Fid.Value.ToString();
+            var messages = updatedPublicIds.Select(pid => new PowerBase.Application.Common.Models.SearchIndexMessage
+            {
+                Action = PowerBase.Application.Common.Models.IndexAction.Upsert,
+                TenantId = QueryContext.TenantId,
+                AppId = table.AppId,
+                TableId = table.Id,
+                RecordPublicId = pid,
+                Payload = new Dictionary<string, object?> { { fidStr, defaultValue } }
+            }).ToList();
+
+            _ = _messagePublisher.PublishBatchAsync(messages, default);
+        }
+
+        return updatedPublicIds.Count;
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
@@ -3379,7 +3474,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             
             var documentValues = new Dictionary<long, object?>();
 
-            if (isNullify || !field.IsSearchable)
+            if (isNullify || (!field.IsSearchable && !field.IsFilterable))
             {
                 documentValues[field.Fid.Value] = null;
             }

@@ -44,10 +44,12 @@ public static class ODataFilterBuilder
             .GroupBy(f => (long)f.Fid!.Value)
             .ToDictionary(g => g.Key, g => g.First());
 
-        return BuildGroup(group, fieldMap);
+        var slotMap = PowerBase.Application.Search.SearchSlotResolver.BuildSlotMap(allFields);
+
+        return BuildGroup(group, fieldMap, slotMap);
     }
 
-    private static string? BuildGroup(FilterGroup group, Dictionary<long, AppField> fieldMap)
+    private static string? BuildGroup(FilterGroup group, Dictionary<long, AppField> fieldMap, Dictionary<long, string> slotMap)
     {
         if (group.Nodes.Count == 0) return null;
 
@@ -56,13 +58,13 @@ public static class ODataFilterBuilder
         {
             if (node.Condition != null)
             {
-                var condStr = BuildCondition(node.Condition, fieldMap);
+                var condStr = BuildCondition(node.Condition, fieldMap, slotMap);
                 if (!string.IsNullOrEmpty(condStr))
                     parts.Add(condStr);
             }
             else if (node.Group != null)
             {
-                var grpStr = BuildGroup(node.Group, fieldMap);
+                var grpStr = BuildGroup(node.Group, fieldMap, slotMap);
                 if (!string.IsNullOrEmpty(grpStr))
                     parts.Add($"({grpStr})");
             }
@@ -75,20 +77,27 @@ public static class ODataFilterBuilder
         return string.Join(logic, parts);
     }
 
-    private static string? BuildCondition(FilterCondition c, Dictionary<long, AppField> fieldMap)
+    private static string? BuildCondition(FilterCondition c, Dictionary<long, AppField> fieldMap, Dictionary<long, string> slotMap)
     {
         if (!fieldMap.TryGetValue(c.FieldId, out var field)) return null;
         if (!field.IsSearchable && !field.IsFilterable) return null; // Cannot filter on fields not in Azure AI Search
 
-        var fieldName = $"f_{c.FieldId}";
+        var fieldName = slotMap.TryGetValue(c.FieldId, out var slot) ? slot : $"f_{c.FieldId}";
         var val = FormatValue(c.Value, field);
 
+        var isNumeric = PowerBase.Application.Search.SearchSlotResolver.IsNumeric(field.TypeCode);
+        var isDate = PowerBase.Application.Search.SearchSlotResolver.IsDate(field.TypeCode);
+        var isBoolean = PowerBase.Application.Search.SearchSlotResolver.IsBoolean(field.TypeCode);
         var isMulti = field.TypeCode is "MultiSelect" or "MultiUser" or "CheckboxGroup";
 
         return c.Operator switch
         {
-            "isEmpty"       => $"{fieldName} eq null or {fieldName} eq '' or {fieldName} eq '[]'",
-            "isNotEmpty"    => $"{fieldName} ne null and {fieldName} ne '' and {fieldName} ne '[]'",
+            "isEmpty"       => isNumeric || isDate || isBoolean 
+                                ? $"{fieldName} eq null" 
+                                : $"{fieldName} eq null or {fieldName} eq '' or {fieldName} eq '[]'",
+            "isNotEmpty"    => isNumeric || isDate || isBoolean 
+                                ? $"{fieldName} ne null" 
+                                : $"{fieldName} ne null and {fieldName} ne '' and {fieldName} ne '[]'",
             "eq"            => isMulti ? BuildPhraseQuery(c.Value, fieldName, false) : $"{fieldName} eq {val}",
             "ne"            => isMulti ? BuildPhraseQuery(c.Value, fieldName, true) : $"{fieldName} ne {val}",
             "gt"            => $"{fieldName} gt {val}",
@@ -155,19 +164,28 @@ public static class ODataFilterBuilder
     {
         if (string.IsNullOrEmpty(val)) return "''";
 
-        // Every f_{fid} field in the Azure Search index is created via AzureSearchService's
-        // SearchableField (see EnsureTableSchemaAsync) — which is always Edm.String, regardless
-        // of the PowerBase field's own type. There is no Edm.Double/Edm.Boolean field in this
-        // index for Number/Currency/Checkbox fields to map onto, so every value must be quoted
-        // as a string here. Emitting a bare numeric/boolean literal (as this used to for
-        // Number/Currency/Checkbox) produces a genuine OData type mismatch against the
-        // string-typed index field ("Found operand types 'Edm.String' and 'Edm.Int32'") — not
-        // just a cosmetic formatting difference.
-        //
-        // Known limitation this leaves in place: gt/gte/lt/lte comparisons against a Number/
-        // Currency field still compare as strings (lexicographic, not numeric) since the index
-        // has no numeric field to compare against — fixing that would mean adding real typed
-        // fields to the Azure index schema, out of scope here.
+        if (PowerBase.Application.Search.SearchSlotResolver.IsNumeric(field.TypeCode))
+        {
+            var num = PowerBase.Application.Search.SearchSlotResolver.ParseDouble(val);
+            if (num.HasValue)
+                return num.Value.ToString("0.####################", System.Globalization.CultureInfo.InvariantCulture);
+            return "0";
+        }
+
+        if (PowerBase.Application.Search.SearchSlotResolver.IsDate(field.TypeCode))
+        {
+            var dto = PowerBase.Application.Search.SearchSlotResolver.ParseDateTimeOffset(val);
+            if (dto.HasValue)
+                return dto.Value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
+            return $"'{val.Replace("'", "''")}'";
+        }
+
+        if (PowerBase.Application.Search.SearchSlotResolver.IsBoolean(field.TypeCode))
+        {
+            var b = PowerBase.Application.Search.SearchSlotResolver.ParseBoolean(val);
+            return (b.HasValue && b.Value) ? "true" : "false";
+        }
+
         return $"'{val.Replace("'", "''")}'";
     }
 

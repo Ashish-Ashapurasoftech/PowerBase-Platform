@@ -15,6 +15,8 @@ public class DeleteTableCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly IRelationshipRepository _relRepo;
     private readonly DeleteRelationshipCommandHandler _deleteRelationshipHandler;
+    private readonly IAzureSearchService? _searchService;
+    private readonly IQueryContext? _queryContext;
 
     public DeleteTableCommandHandler(
         IAppTableRepository tableRepo, 
@@ -22,7 +24,9 @@ public class DeleteTableCommandHandler
         IPipelineRepository pipelineRepo,
         IAuditRepository auditRepo,
         IRelationshipRepository relRepo,
-        DeleteRelationshipCommandHandler deleteRelationshipHandler)
+        DeleteRelationshipCommandHandler deleteRelationshipHandler,
+        IAzureSearchService? searchService = null,
+        IQueryContext? queryContext = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -30,6 +34,8 @@ public class DeleteTableCommandHandler
         _auditRepo = auditRepo;
         _relRepo = relRepo;
         _deleteRelationshipHandler = deleteRelationshipHandler;
+        _searchService = searchService;
+        _queryContext = queryContext;
     }
 
     public async Task HandleAsync(DeleteTableCommand command, CancellationToken ct = default)
@@ -92,6 +98,20 @@ public class DeleteTableCommandHandler
         }
 
         await _tableRepo.DeleteAsync(command.PublicId, ct);
+
+        // D13: Purge table documents from search index
+        if (_searchService != null && _searchService.IsEnabled && _queryContext != null)
+        {
+            try
+            {
+                await _searchService.PurgeTableRecordsAsync(_queryContext.TenantId, table.Id, ct);
+            }
+            catch
+            {
+                // Best-effort cleanup; table deletion in SQL must not be blocked
+            }
+        }
+
         await _auditRepo.LogActivityAsync(AuditActions.Deleted, AuditEntityTypes.AppTable, command.PublicId.ToString(), $"Table deleted: {table.Name}", appId: table.AppId, ct: ct);
     }
 }

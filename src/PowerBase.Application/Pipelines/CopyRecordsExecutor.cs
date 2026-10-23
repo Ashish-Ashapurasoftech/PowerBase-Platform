@@ -126,8 +126,14 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             {
                 try
                 {
+                    var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(sourceFields)
+                        ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(source.Id)
+                        : null;
                     var found = new List<long>();
-                    await foreach (var page in azureSearch.SearchRecordIdsByFilterPagedAsync(queryContext.TenantId, source.Id, aiPlan.ODataFilter!, null, ct))
+                    var searchPages = targetIndex != null
+                        ? azureSearch.SearchRecordIdsByFilterPagedAsync(queryContext.TenantId, source.Id, aiPlan.ODataFilter!, null, targetIndex, ct)
+                        : azureSearch.SearchRecordIdsByFilterPagedAsync(queryContext.TenantId, source.Id, aiPlan.ODataFilter!, null, ct);
+                    await foreach (var page in searchPages)
                         foreach (var publicIdChunk in page.Ids.Chunk(sqlIdChunkSize))
                             found.AddRange(await records.GetIdsByPublicIdsAsync(source, publicIdChunk, ct));
                     if (found.Count == 0)

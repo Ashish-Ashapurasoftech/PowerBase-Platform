@@ -226,8 +226,11 @@ public class UpdateFieldCommandHandler
         if (isUnique || existing.IsUnique)
             await _schemaEngine.SetUniqueAsync(table, existing, isUnique, ct);
 
-        // Save old IsSearchable state before UpdateAsync modifies metadata
+        // Save old search eligibility before UpdateAsync modifies metadata
         bool wasSearchable = existing.IsSearchable;
+        bool wasFilterable = existing.IsFilterable;
+        bool wasEligible = wasSearchable || wasFilterable;
+        bool isEligible = command.IsSearchable || isFilterable;
 
         var after = new FieldSnapshot(
             label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
@@ -271,12 +274,12 @@ public class UpdateFieldCommandHandler
             await _recordRepo.BackfillDefaultAsync(table, existing, defaultValue!, ct);
         }
 
-        // Search Index Sync: when IsSearchable changes, trigger a backfill or nullify
-        if (command.IsSearchable != wasSearchable && existing.Fid.HasValue)
+        // Search Index Sync: when search eligibility (IsSearchable || IsFilterable) changes, trigger a backfill or nullify
+        if (isEligible != wasEligible && existing.Fid.HasValue)
         {
-            await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: !command.IsSearchable, ct);
+            await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: !isEligible, ct);
         }
-        else if (percentRescaled && command.IsSearchable && existing.Fid.HasValue)
+        else if (percentRescaled && isEligible && existing.Fid.HasValue)
         {
             // The stored values changed (x100 or /100), so the already-indexed copies are stale.
             await SyncSearchIndexAsync(table, existing.Fid.Value, isNullify: false, ct);
@@ -295,11 +298,26 @@ public class UpdateFieldCommandHandler
 
     private async Task SyncSearchIndexAsync(AppTable table, int fid, bool isNullify, CancellationToken ct)
     {
+        var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+        var isWide = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields);
+        var targetIndex = isWide ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id) : null;
+        var slotMap = PowerBase.Application.Search.SearchSlotResolver.BuildSlotMap(allFields);
+
         var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, fid, isNullify, page: 1, pageSize: 500, ct);
 
         if (docs.Count > 0)
         {
-            await _searchService.BulkIndexRecordsAsync(docs, ct);
+            var slottedDocs = docs.Select(d =>
+            {
+                var slotVals = new Dictionary<string, object?>();
+                if (slotMap.TryGetValue(fid, out var slotName) && d.Values.TryGetValue(fid, out var val))
+                {
+                    slotVals[slotName] = isNullify ? null : val;
+                }
+                return new SearchIndexDocument(d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, slotVals, targetIndex);
+            }).ToList();
+
+            await _searchService.BulkIndexRecordsAsync(slottedDocs, ct);
         }
 
         var msg = new PowerBase.Application.Common.Models.SearchIndexMessage

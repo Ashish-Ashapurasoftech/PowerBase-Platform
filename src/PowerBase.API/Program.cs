@@ -269,7 +269,6 @@ builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineTriggerInterceptor, PowerBase.Infrastructure.Pipelines.PipelineTriggerInterceptor>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector, PowerBase.Infrastructure.Pipelines.PipelineWriteTimeRelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineAuditFormatter, PowerBase.Application.Pipelines.PipelineAuditFormatter>();
-builder.Services.AddScoped<IAzureSearchService, AzureSearchService>();
 builder.Services.AddSingleton<IEncryptionService, AesEncryptionService>();
 builder.Services.AddSingleton<IMessagePublisher, ServiceBusPublisher>();
 builder.Services.AddScoped<IFieldNameResolver, PowerBase.Application.Common.Services.FieldNameResolver>();
@@ -660,7 +659,10 @@ builder.Services.AddScoped<PowerBase.Application.Groups.Commands.ShareGroupWithA
 builder.Services.AddScoped<PowerBase.Application.Groups.Commands.UnshareGroupFromApp.UnshareGroupFromAppCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Groups.Queries.GetSharedApps.GetSharedAppsQueryHandler>();
 
-builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
+if (builder.Configuration.GetValue<bool>("Search:Indexer:Enabled", true))
+{
+    builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
+}
 
 var app = builder.Build();
 
