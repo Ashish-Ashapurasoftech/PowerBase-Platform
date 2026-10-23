@@ -551,6 +551,7 @@ public class RunReportQueryHandler
                 }
             }
 
+
             if (!aiSearchSucceeded)
             {
                 // Standard SQL LIKE fallback (used when AI Search is disabled, unhealthy, or returns 0 matches).
