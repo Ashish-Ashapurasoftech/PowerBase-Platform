@@ -426,6 +426,38 @@ public class PipelineAuditFormatterTests
         PipelineRecordDisplayName.Resolve(new AppTable(), fields, new Dictionary<string, object?> { ["fid_5"] = "  " }, id).Should().Be(id);
     }
 
+    [Theory]
+    [InlineData("2026-10-22T10:06:42.821")]    // read back from the table (a record a pipeline step wrote): no zone, but UTC
+    [InlineData("2026-10-22T10:06:42.821Z")]   // from the API
+    public async Task NewEventHistory_ShowsDatesAsStoredUtc_WhetherOrNotTheValueCarriesAZone(string createdOn)
+    {
+        var pipeline = new Pipeline { Id = 1, Name = "P", AppId = 10L, PublicId = Guid.NewGuid() };
+        _pipelineRepo.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(pipeline);
+        var tableGuid = Guid.NewGuid();
+        var table = new AppTable { Id = 20, Name = "Order", PublicId = tableGuid };
+        var fields = new List<AppField> {
+            new() { Id = 1, Fid = 1, Name = "Date Created", TypeCode = "DateTime", IsSystem = true },
+            new() { Id = 2, Fid = 6, Name = "Due", TypeCode = "Date" } };
+        _tableRepo.GetByPublicIdAsync(tableGuid, Arg.Any<CancellationToken>()).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id, Arg.Any<CancellationToken>()).Returns(fields);
+        var step = new PipelineStep { Id = 100, Type = "trigger", Subtype = "new-event", RefId = "t",
+            ConfigJson = JsonSerializer.Serialize(new { TriggerOnAdded = true }) };
+        var raw = JsonSerializer.Serialize(new { MessageId = Guid.NewGuid().ToString(), PipelineId = 1, EventType = "Added",
+            TablePublicId = tableGuid.ToString(), RecordPublicId = Guid.NewGuid().ToString(),
+            NewValues = new Dictionary<string, object> { ["fid_1"] = createdOn, ["fid_6"] = "2026-10-19" },
+            EventTimestamp = "2026-10-22T10:06:42Z" });
+        await _formatter.InitializeAsync(1, 0, CancellationToken.None);
+
+        var input = _formatter.FormatStepRun(step, raw, null, "Success", "c", DateTime.UtcNow, DateTime.UtcNow).InputContextJson;
+
+        using var parsed = JsonDocument.Parse(input);
+        var current = parsed.RootElement.GetProperty("Input").GetProperty("change").GetProperty("current").GetProperty("fields")
+            .EnumerateArray().ToDictionary(f => f.GetProperty("id").GetInt64(), f => f.GetProperty("value"));
+        current[1].GetProperty("iso").GetString().Should().Be("2026-10-22T10:06:42Z");
+        current[1].GetProperty("time").GetInt64().Should().Be(new DateTimeOffset(2026, 10, 22, 10, 6, 42, 821, TimeSpan.Zero).ToUnixTimeMilliseconds());
+        current[6].GetProperty("iso").GetString().Should().Be("2026-10-19T00:00:00Z");
+    }
+
     [Fact]
     public async Task NewEventHistory_NamesTheRecordByItsFirstPlainValue_NotByItsGuid()
     {

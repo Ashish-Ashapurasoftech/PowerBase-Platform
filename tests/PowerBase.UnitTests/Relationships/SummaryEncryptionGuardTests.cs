@@ -61,14 +61,23 @@ public class SummaryEncryptionGuardTests
         SummaryEncryptionGuard.FindProblem(EncryptedApp, ChildFields(), 10, targetFid: 13, null, null, null, sources).Should().BeNull();
     }
 
-    [Fact]
-    public void Encrypted_LookupTarget_WithCalculatedSource_IsRefused_AndNamed()
+    // A lookup of a Summary / Formula ("Dept - Min of Salary") has no column, but is worked out per child record in memory
+    // too — as the target, a criteria field or the sort.
+    [Theory]
+    [InlineData("Formula_Text", null)]
+    [InlineData("Summary", """{"function":"Min","targetTypeCode":"Currency","resultTypeCode":"Currency"}""")]
+    public void Encrypted_LookupOfACalculatedSource_IsSupported(string sourceType, string? sourceSettings)
     {
-        var sources = new Dictionary<long, AppField> { [13] = new() { Id = 6, Fid = 6, Name = "Calc", TypeCode = "Formula_Text" } };
+        var sources = new Dictionary<long, AppField> { [13] = new() { Id = 6, Fid = 6, Name = "Calc", TypeCode = sourceType, Settings = sourceSettings } };
 
-        SummaryEncryptionGuard.FindProblem(EncryptedApp, ChildFields(), 10, targetFid: 13, null, null, null, sources)
-            .Should().Contain("lookup").And.Contain("'Cust Name'");
+        SummaryEncryptionGuard.FindProblem(EncryptedApp, ChildFields(), 10, targetFid: 13, null, null, null, sources).Should().BeNull();
+        SummaryEncryptionGuard.FindProblem(EncryptedApp, ChildFields(), 10, targetFid: 11, sortFid: 13, Where(13), null, sources).Should().BeNull();
     }
+
+    [Fact]
+    public void Encrypted_LookupWhoseSourceIsGone_IsRefused_AndNamed() =>
+        SummaryEncryptionGuard.FindProblem(EncryptedApp, ChildFields(), 10, targetFid: 13, null, null, null, new Dictionary<long, AppField>())
+            .Should().Contain("source field is missing").And.Contain("'Cust Name'");
 
     [Fact]
     public void Encrypted_CalculatedTarget_IsSupported() =>

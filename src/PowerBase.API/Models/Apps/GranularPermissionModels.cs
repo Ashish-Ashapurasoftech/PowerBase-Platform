@@ -62,6 +62,8 @@ public class RecordLevelFilterDto
     /// <summary>Nested ALL/ANY tree (fields by Fid, same model as report static filters).
     /// On save, takes precedence over <see cref="Conditions"/> when it holds a condition.</summary>
     public FilterGroup? Group { get; init; }
+    /// <summary>"View" (default) or "Modify" — which permission the rules belong to.</summary>
+    public string Kind { get; init; } = "View";
 }
 
 public class RecordLevelFiltersResponse

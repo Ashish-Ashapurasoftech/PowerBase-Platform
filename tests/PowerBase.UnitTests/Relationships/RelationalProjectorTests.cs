@@ -612,6 +612,44 @@ public class RelationalProjectorTests
     }
 
     [Fact]
+    public async Task Sum_over_a_lookup_of_a_summary_in_an_encrypted_app_is_worked_out_per_decrypted_child_row()
+    {
+        // Department (5) › Employees (77), in an encrypted app: "Sum of Department - Min of Salary" sums each employee's
+        // lookup (fid 31) of the department's own "Min of Salary" summary — no column, so worked out per decrypted row.
+        const int lookupFid = 31;
+        _appRepo.GetByIdAsync(3, Arg.Any<CancellationToken>()).Returns(new App { Id = 3, IsEncrypted = true });
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, AppId = 3 });
+        _tableRepo.GetByIdAsync(5, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 5, AppId = 3 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            Field(10, "Department", "Reference", "{\"relationshipId\":1,\"parentTableId\":5}"),
+            Field(lookupFid, "Department - Min of Salary", "Lookup",
+                "{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":5,\"sourceFid\":8,\"sourceTypeCode\":\"Summary\",\"resultTypeCode\":\"Currency\"}"),
+        });
+        _fieldRepo.ListByTableAsync(5, Arg.Any<CancellationToken>())
+            .Returns(new List<AppField> { Field(8, "Min of Salary", "Summary", "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Min\",\"targetTypeCode\":\"Currency\"}") });
+        _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>());
+        _recordRepo.ListAllRowsDecryptedAsync(Arg.Is<AppTable>(t => t.Id == 77), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(Rows(
+                new Dictionary<string, object?> { ["Id"] = 1L, ["f_10"] = "1" },
+                new Dictionary<string, object?> { ["Id"] = 2L, ["f_10"] = "1" }));
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(new List<IReadOnlyDictionary<long, object?>>
+            {
+                new Dictionary<long, object?> { [lookupFid] = 40000m },
+                new Dictionary<long, object?> { [lookupFid] = 52000.5m },
+            });
+
+        var result = await ProjectOneSummary($"{{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Sum\",\"targetFid\":{lookupFid}}}", appId: 3);
+
+        result[0][20].Should().Be(92000.5m);
+        result[1][20].Should().BeNull();   // parent 2 has no employees
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default, default);
+    }
+
+    [Fact]
     public async Task Combined_text_over_an_encrypted_field_is_joined_in_memory()
     {
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
@@ -634,9 +672,10 @@ public class RelationalProjectorTests
 
     [Theory]
     [InlineData("Sum", "Formula_Time")]        // a formula result that can't be summarized
-    [InlineData("CombinedText", "Formula_Number")]   // a function the formula's result type doesn't support
+    [InlineData("DistinctCount", "Formula_Duration")]   // a function the formula's result type doesn't support
     [InlineData("Sum", "Summary")]             // no column, and not a formula
-    [InlineData("CombinedText", "User")]       // saved before today: would show raw user ids
+    [InlineData("CombinedText", "Formula_Url")]   // a link: no value to show
+    [InlineData("Max", "User")]                // saved before today: a user can't be ranked
     public async Task Summary_saved_under_older_rules_is_blank_and_never_computed(string function, string targetType)
     {
         _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
@@ -711,6 +750,11 @@ public class RelationalProjectorTests
     [InlineData("DistinctCount", "Formula_Bool", new object?[] { true, false, true, null }, 2)]
     [InlineData("DistinctCount", "Formula_Text", new object?[] { "a", "A", "b", "", null }, 2)]
     [InlineData("CombinedText", "Formula_Email", new object?[] { "a@x.com", null, "b@x.com" }, "a@x.com, b@x.com")]
+    // Combined Text over any calculated value, each shown in its display format (the app's defaults here).
+    [InlineData("CombinedText", "Formula_Number", new object?[] { 1200.5, 30.0 }, "1,200.50, 30.00")]
+    [InlineData("CombinedText", "Formula_Date", new object?[] { "2026-03-01", "2026-01-15" }, "03-01-2026, 01-15-2026")]
+    [InlineData("CombinedText", "Formula_Bool", new object?[] { true, false }, "Yes, No")]
+    [InlineData("CombinedText", "Formula_Time", new object?[] { "14:30", "09:05" }, "2:30 PM, 9:05 AM")]
     public async Task Summary_over_formula_field_is_computed_from_each_child_row(string function, string formulaType, object?[] childValues, object expected)
     {
         const int formulaFid = 32;
@@ -774,6 +818,80 @@ public class RelationalProjectorTests
 
         result[0][20].Should().Be(80000m);
         result[1][20].Should().BeNull();   // parent 2 has no employees
+        await _recordRepo.DidNotReceive().AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Sum", Arg.Any<int?>(), Arg.Any<IReadOnlyCollection<object>>(),
+            Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Combined_text_of_a_lookup_of_a_summary_shows_each_value_in_the_type_it_produces()
+    {
+        // "Client - Min of Session Charges" pulls a Currency summary down: Combined Text shows "$40,000.00", not 40000.0000.
+        const int lookupFid = 31;
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _tableRepo.GetByIdAsync(5, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 5 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            Field(10, "Department", "Reference", "{\"relationshipId\":1,\"parentTableId\":5}"),
+            Field(lookupFid, "Dept - Min of Salary", "Lookup",
+                "{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":5,\"sourceFid\":8,\"sourceTypeCode\":\"Summary\",\"resultTypeCode\":\"Currency\"}"),
+        });
+        _fieldRepo.ListByTableAsync(5, Arg.Any<CancellationToken>())
+            .Returns(new List<AppField> { Field(8, "Min of Salary", "Summary", "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Min\",\"targetTypeCode\":\"Currency\"}") });
+        _recordRepo.GetRowsByIdsAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, IReadOnlyDictionary<string, object?>>());
+        _recordRepo.ListRowsByReferenceAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 10,
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(),
+                Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
+            .Returns(Rows(
+                new Dictionary<string, object?> { ["Id"] = 1L, [PhysicalNaming.ColumnName(10)] = 1L },
+                new Dictionary<string, object?> { ["Id"] = 2L, [PhysicalNaming.ColumnName(10)] = 1L }));
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(new List<IReadOnlyDictionary<long, object?>>
+            {
+                new Dictionary<long, object?> { [lookupFid] = 40000.0000m },
+                new Dictionary<long, object?> { [lookupFid] = 52000.5m },
+            });
+
+        var result = await ProjectOneSummary($"{{\"childTableId\":77,\"referenceFid\":10,\"function\":\"CombinedText\",\"targetFid\":{lookupFid}}}");
+
+        result[0][20].Should().Be("$40,000.00, $52,000.50");
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListValuesByReferenceAsync(default!, default, default, default, default!, default, default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Combined_text_of_a_user_field_joins_the_users_names()
+    {
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField> { Field(10, "Item", "Reference"), Field(33, "Owner", "User") });
+        _recordRepo.ListValuesByReferenceAsync(Arg.Any<AppTable>(), 10, 33, Arg.Any<string?>(), Arg.Any<IReadOnlyCollection<object>>(),
+                Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<int?>(), Arg.Any<bool>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(),
+                Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
+            .Returns(new List<(object, object)> { (1L, 7L), (1L, 9L), (2L, 7L) });
+        _userRepo.GetNamesByIdsAsync(Arg.Is<IEnumerable<long>>(ids => ids.OrderBy(i => i).SequenceEqual(new long[] { 7, 9 })), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<long, string> { [7] = "Asha Patel", [9] = "Ravi Shah" });
+
+        var result = await ProjectOneSummary("""{"childTableId":77,"referenceFid":10,"function":"CombinedText","targetFid":33}""");
+
+        result[0][20].Should().Be("Asha Patel, Ravi Shah");
+        result[1][20].Should().Be("Asha Patel");
+    }
+
+    [Fact]
+    public async Task Combined_text_of_a_date_range_in_memory_shows_both_ends()
+    {
+        // An encrypted app is summarized over decrypted rows: the range's end is its second column.
+        _appRepo.GetByIdAsync(42, Arg.Any<CancellationToken>()).Returns(new App { Id = 42, IsEncrypted = true });
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, AppId = 42 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField> { Field(10, "Item", "Reference"), Field(34, "Term", "DateRange") });
+        _recordRepo.ListAllRowsDecryptedAsync(Arg.Is<AppTable>(t => t.Id == 77), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(Rows(
+                new Dictionary<string, object?> { ["Id"] = 1L, ["f_10"] = "1", ["f_34"] = new DateTime(2026, 1, 5), ["f_34_e"] = new DateTime(2026, 3, 31) },
+                new Dictionary<string, object?> { ["Id"] = 2L, ["f_10"] = "1", ["f_34"] = new DateTime(2026, 4, 1), ["f_34_e"] = null }));
+
+        var result = await ProjectOneSummary("""{"childTableId":77,"referenceFid":10,"function":"CombinedText","targetFid":34}""", appId: 42);
+
+        result[0][20].Should().Be("01-05-2026 – 03-31-2026, 04-01-2026 – …");
         await _recordRepo.DidNotReceive().AggregateByReferenceAsync(Arg.Any<AppTable>(), 10, "Sum", Arg.Any<int?>(), Arg.Any<IReadOnlyCollection<object>>(),
             Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>());
     }

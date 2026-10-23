@@ -15,7 +15,7 @@ public record FieldPermissionRow(Guid FieldPublicId, string FieldName, string Ac
 
 public record FieldPermissionScopedRow(Guid TablePublicId, Guid FieldPublicId, string Access);
 
-public record RecordFilterRow(Guid TablePublicId, string Conjunction, string FilterJson);
+public record RecordFilterRow(Guid TablePublicId, string Conjunction, string FilterJson, string Kind = "View");
 
 public interface IAppRolePermissionRepository
 {
@@ -38,6 +38,8 @@ public interface IAppRolePermissionRepository
     Task<IReadOnlyList<RecordFilterRow>> GetRecordFiltersAsync(long appRoleId, CancellationToken ct = default);
     Task SetRecordFiltersAsync(long appRoleId, IReadOnlyList<AppRoleRecordFilter> rows, IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<AppRoleRecordFilter?> GetRecordFilterAsync(long appRoleId, long appTableId, CancellationToken ct = default);
+    /// <summary>The role's Modify-scope Custom Rules row for the table (null when none).</summary>
+    Task<AppRoleRecordFilter?> GetModifyRecordFilterAsync(long appRoleId, long appTableId, CancellationToken ct = default);
 
     // Seeding helpers
     /// <summary>Insert default permission rows for every table in the app for the given role (skips tables already configured).</summary>

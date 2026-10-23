@@ -61,7 +61,10 @@ public class TablesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<IActionResult> Create(Guid appId, [FromBody] CreateTableRequest request, CancellationToken ct)
     {
-        var command = new CreateTableCommand(appId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon);
+        var fields = request.Fields?
+            .Select(f => new CreateTableFieldSpec(f.Label, f.TypeCode, f.Settings, f.IsRequired, f.IsEncrypted))
+            .ToList();
+        var command = new CreateTableCommand(appId, request.Name, request.SingularLabel, request.PluralLabel, request.Description, request.Icon, fields);
         var result = await _createHandler.HandleAsync(command, ct);
         return StatusCode(StatusCodes.Status201Created, new ApiResponse<TableSummaryResponse>(MapToSummaryResponse(result)));
     }

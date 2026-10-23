@@ -1967,7 +1967,7 @@ public partial class PipelineEngine : IPipelineEngine
             // evaluated in memory against candidate rows instead.
             var computedFieldFids = fields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))
                 .Select(f => (long)f.Fid!.Value).ToHashSet();
-            var inMemoryFilterFids = fields.Where(f => f.IsEncrypted && f.Fid.HasValue)
+            var inMemoryFilterFids = fields.Where(f => PowerBase.Application.Relationships.EncryptedRowFilter.IsEncrypted(f, appEncrypted: false) && f.Fid.HasValue)
                 .Select(f => (long)f.Fid!.Value).ToHashSet();
             inMemoryFilterFids.UnionWith(computedFieldFids);
             // A Rich Text holds the editor's HTML: SQL cannot read the text it shows, so its conditions are matched in memory.

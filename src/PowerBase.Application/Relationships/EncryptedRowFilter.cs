@@ -80,15 +80,27 @@ public static class EncryptedRowFilter
         var sourceCol = Column(source);
         var refCol = PhysicalNaming.ColumnName(settings.ReferenceFid!.Value);
         var lookupCol = PhysicalNaming.ColumnName(lookup.Fid!.Value);
+        // A looked-up range brings its end along too (Combined Text shows "start – end").
+        var withEnd = string.IsNullOrWhiteSpace(settings.SourceSubField) && PhysicalNaming.IsRangeTypeCode(source.TypeCode)
+            && source.Fid.HasValue;
+        var sourceEndCol = withEnd ? PhysicalNaming.EndColumnName(source.Fid!.Value) : null;
+        var lookupEndCol = withEnd ? PhysicalNaming.EndColumnName(lookup.Fid!.Value) : null;
         var copies = new List<IReadOnlyDictionary<string, object?>>(rows.Count);
         foreach (var row in rows)
         {
             var copy = new Dictionary<string, object?>(row);
             object? value = null;
+            object? end = null;
             if (row.TryGetValue(refCol, out var rawRef) && EncryptedSummaryAggregator.NormalizeKey(rawRef) is { } key
-                && sourceById.TryGetValue(key, out var sourceRow) && sourceRow.TryGetValue(sourceCol, out var v) && v is not DBNull)
-                value = string.IsNullOrWhiteSpace(settings.SourceSubField) ? v : RelationalProjector.ExtractJsonSubField(v, settings.SourceSubField);
+                && sourceById.TryGetValue(key, out var sourceRow))
+            {
+                if (sourceRow.TryGetValue(sourceCol, out var v) && v is not DBNull)
+                    value = string.IsNullOrWhiteSpace(settings.SourceSubField) ? v : RelationalProjector.ExtractJsonSubField(v, settings.SourceSubField);
+                if (sourceEndCol is not null && sourceRow.TryGetValue(sourceEndCol, out var e) && e is not DBNull)
+                    end = e;
+            }
             copy[lookupCol] = value;
+            if (lookupEndCol is not null) copy[lookupEndCol] = end;
             copies.Add(copy);
         }
 

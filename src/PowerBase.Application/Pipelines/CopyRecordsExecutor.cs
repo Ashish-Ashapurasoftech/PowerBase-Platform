@@ -156,7 +156,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         // to be selected and decrypted normally. Only their filter *conditions* must be pulled
         // out of the SQL tree (ciphertext can't satisfy a LIKE/=), so this set is used solely for
         // the tree split below, never for the snapshotFields exclusion further down.
-        var encryptedFilterFids = sourceFields.Where(f => f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && f.IsEncrypted)
+        var encryptedFilterFids = sourceFields.Where(f => f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && EncryptedRowFilter.IsEncrypted(f, appEncrypted: false))
             .Select(f => (long)f.Fid!.Value).ToHashSet();
         var inMemoryFilterFids = new HashSet<long>(computedFids);
         inMemoryFilterFids.UnionWith(encryptedFilterFids);
@@ -358,7 +358,9 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         // client-side approach RecordRepository.GetDistinctFieldValuesAsync uses for encrypted
         // fields), and keep it updated as rows are inserted so later rows in this same run still
         // see them, matching what a live per-row SQL lookup would have seen.
-        var mergeIndex = merge.IsEncrypted
+        // Encryption-exempt types (Number, Date, Boolean, User …) are stored natively even when flagged, so SQL compares them.
+        var mergeEncrypted = EncryptedRowFilter.IsEncrypted(merge, appEncrypted: false);
+        var mergeIndex = mergeEncrypted
             ? await BuildEncryptedMergeIndexAsync(records, destination, destinationFields, merge, ct)
             : null;
 
@@ -377,7 +379,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
 
         // A plain (not encrypted) Text or Number merge field is looked up for a whole page of rows with one IN query, then kept in
         // memory: the same answer a per-row "=" query gives, without a query per row. Anything else keeps the per-row query.
-        var mergeBatchable = !merge.IsEncrypted && merge.Fid.HasValue && merge.TypeCode is "Text" or "Number";
+        var mergeBatchable = !mergeEncrypted && merge.Fid.HasValue && merge.TypeCode is "Text" or "Number";
         var mergeNumeric = merge.TypeCode == "Number";
         var mergeLive = mergeBatchable ? new Dictionary<string, List<Guid>>(StringComparer.OrdinalIgnoreCase) : null;
         var mergeLooked = mergeBatchable ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) : null;
@@ -426,7 +428,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         async Task<IReadOnlyDictionary<string, object?>?> FindExistingAsync(string? keyStr)
         {
             if (string.IsNullOrEmpty(keyStr)) return null;
-            if (merge.IsEncrypted)
+            if (mergeEncrypted)
             {
                 if (!mergeIndex!.TryGetValue(EncryptedMergeKey(merge, keyStr), out var matches)) return null;
                 if (matches.Count > 1) throw CopyRecordsDefinition.Error("The destination merge value matches more than one record.");
@@ -451,7 +453,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         void RememberCreated(string? keyStr, Guid publicId)
         {
             if (string.IsNullOrEmpty(keyStr)) return;
-            if (merge.IsEncrypted)
+            if (mergeEncrypted)
             {
                 var encryptedKey = EncryptedMergeKey(merge, keyStr);
                 if (!mergeIndex!.TryGetValue(encryptedKey, out var list))
@@ -589,7 +591,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         // against the table with one query per field and against each other in memory, in the same order rows would be checked one by one.
         // An app that encrypts a field without flagging the field itself is found out the first time the page query below cannot compare it.
         foreach (var field in uniqueFields)
-            if (field.IsEncrypted) memoryUnique[field.Fid!.Value] = null;
+            if (EncryptedRowFilter.IsEncrypted(field, appEncrypted: false)) memoryUnique[field.Fid!.Value] = null;
         // A Reference field only ties one row to another written in the same page when it can point at the destination table itself. One that
         // points at a different table (like "Related A1" on A2) cannot, so it no longer sends the whole copy down the row-by-row path — which was
         // ~150 ms per record even when the field was not part of the copy at all.
@@ -598,7 +600,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var fastEligible = !(destination.IsCustomDataRuleEnabled && !string.IsNullOrWhiteSpace(destination.CustomDataRule))
             && uniqueFields.All(f => f.TypeCode is "Text" or "Number")
             && !destinationFields.Any(f => f.Fid.HasValue && !f.IsSystem && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && f.TypeCode == "Reference" && MayReferenceDestination(f))
-            && (merge.IsEncrypted || (mergeBatchable && (!merge.IsSystem || merge.PhysicalColumnName == "Id")));
+            && (mergeEncrypted || (mergeBatchable && (!merge.IsSystem || merge.PhysicalColumnName == "Id")));
 
         static string PageReceiptSuffix(int pageIndex) => $"/page/{pageIndex}";
 
@@ -726,7 +728,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                         continue;
                     }
                     // Two new rows with the same merge value: the second one must update the first, which only the row-by-row path does.
-                    if (!string.IsNullOrEmpty(keyStr) && !pageKeys.Add(merge.IsEncrypted ? EncryptedMergeKey(merge, keyStr) : MergeKey(keyStr) ?? keyStr))
+                    if (!string.IsNullOrEmpty(keyStr) && !pageKeys.Add(mergeEncrypted ? EncryptedMergeKey(merge, keyStr) : MergeKey(keyStr) ?? keyStr))
                         throw new FastPageNotApplicableException();
                     newRows.Add((rowKey, values, keyStr));
                     // This row is going in: later rows of the page must now see its unique values as taken.

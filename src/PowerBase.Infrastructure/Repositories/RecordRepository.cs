@@ -489,12 +489,18 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
         AppField? primaryLabelField = null, CancellationToken ct = default,
-        IReadOnlyList<ReferenceFilterClause>? filters = null)
+        IReadOnlyList<ReferenceFilterClause>? filters = null,
+        IReadOnlyCollection<long>? onlyRowIds = null)
     {
         take = Math.Clamp(take, 1, 200);
 
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
+        if (onlyRowIds is not null)
+        {
+            parameters.Add("onlyRowIds", System.Text.Json.JsonSerializer.Serialize(onlyRowIds));
+            where += " AND p.Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@onlyRowIds))";
+        }
         if (filters is { Count: > 0 })
             where += $" AND {BuildReferenceFilterSql(filters, parameters, await MatchEncryptedTreesAsync(parentTable, filters, ct))}";
 
@@ -857,7 +863,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (parentKeyValues.Count == 0) return result;
 
         var refCol = PhysicalNaming.ColumnName(referenceFid);
-        var targetExpr = TargetColumnExpr(targetFid, targetSubField, fieldLookup);
+        // A range shows both its ends — the end is a second column — as {"start","end"} JSON; anything else its one value.
+        var (targetExpr, hasValue) = RangeValueExpr(targetFid, targetSubField, fieldLookup) is { } range
+            ? range
+            : (TargetColumnExpr(targetFid, targetSubField, fieldLookup), $"{TargetColumnExpr(targetFid, targetSubField, fieldLookup)} IS NOT NULL");
         var dir = sortDescending ? "DESC" : "ASC";
         var order = sortFid.HasValue ? $"{TargetColumnExpr(sortFid.Value, null, fieldLookup)} {dir}, Id {dir}" : $"Id {dir}";
 
@@ -868,7 +877,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var sql = $"""
             SELECT {refCol} AS ParentKey, {targetExpr} AS Value
             FROM {PhysicalNaming.FullTableName(childTable.Id)} {ChildAlias}
-            WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues AND {targetExpr} IS NOT NULL{filterWhere}
+            WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues AND {hasValue}{filterWhere}
             ORDER BY {refCol}, {order}
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -1040,6 +1049,31 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return string.IsNullOrWhiteSpace(targetSubField)
             ? PhysicalNaming.ColumnName(targetFid)
             : $"JSON_VALUE({PhysicalNaming.ColumnName(targetFid)}, '$.{SafeJsonKey(targetSubField)}')";
+    }
+
+    /// <summary>For a range target — a DateRange / NumericRange field, or a lookup of one — the value as {"start","end"}
+    /// JSON (its end is a second column) and the condition that it has either end; null for any other target.</summary>
+    internal static (string Value, string HasValue)? RangeValueExpr(int targetFid, string? targetSubField,
+        IReadOnlyDictionary<long, AppField>? fieldLookup)
+    {
+        if (!string.IsNullOrWhiteSpace(targetSubField) || fieldLookup?.GetValueOrDefault(targetFid) is not { } field) return null;
+        if (PhysicalNaming.IsRangeTypeCode(field.TypeCode))
+        {
+            var start = $"{ChildAlias}.{PhysicalNaming.ColumnName(targetFid)}";
+            var end = $"{ChildAlias}.{PhysicalNaming.EndColumnName(targetFid)}";
+            return ($"(SELECT {start} AS [start], {end} AS [end] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)",
+                $"({start} IS NOT NULL OR {end} IS NOT NULL)");
+        }
+        if (SummaryLookupSources.Settings(field) is { SourceTableId: long sourceTableId, ReferenceFid: int refFid, SourceFid: int sourceFid } s
+            && string.IsNullOrWhiteSpace(s.SourceSubField) && PhysicalNaming.IsRangeTypeCode(s.SourceTypeCode ?? string.Empty))
+        {
+            var from = $"FROM {PhysicalNaming.FullTableName(sourceTableId)} lk WHERE lk.Id = {ChildAlias}.{PhysicalNaming.ColumnName(refFid)} AND lk.IsDeleted = 0";
+            var start = $"lk.{PhysicalNaming.ColumnName(sourceFid)}";
+            var end = $"lk.{PhysicalNaming.EndColumnName(sourceFid)}";
+            return ($"(SELECT {start} AS [start], {end} AS [end] {from} FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)",
+                $"EXISTS (SELECT 1 {from} AND ({start} IS NOT NULL OR {end} IS NOT NULL))");
+        }
+        return null;
     }
 
     /// <summary>A summary query's value for a child Lookup field: the parent column it pulls down,
@@ -2970,7 +3004,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     public async Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
-        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default)
+        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default,
+        IReadOnlyCollection<long>? onlyRowIds = null)
     {
         var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
             ? field.PhysicalColumnName!
@@ -2990,6 +3025,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             selectExpr = col;
         }
+
+        var parameters = new DynamicParameters();
+        if (onlyRowIds is not null)
+        {
+            parameters.Add("onlyRowIds", System.Text.Json.JsonSerializer.Serialize(onlyRowIds));
+            whereExtra += " AND Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@onlyRowIds))";
+        }
         
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var encContext = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
@@ -3007,7 +3049,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''{whereExtra}
               """;
 
-        var rawValues = await connection.QueryAsync<string>(new CommandDefinition(sql, cancellationToken: ct));
+        var rawValues = await connection.QueryAsync<string>(new CommandDefinition(sql, parameters, cancellationToken: ct));
         
         IEnumerable<string> processedValues = rawValues.Where(v => !string.IsNullOrWhiteSpace(v));
 

@@ -86,8 +86,11 @@ public class UpdateRecordFiltersCommandHandler
         var rows = new List<AppRoleRecordFilter>();
         foreach (var f in command.Filters)
         {
+            var kind = string.Equals(f.Kind, RoleRecordFilterJson.ModifyKind, StringComparison.OrdinalIgnoreCase)
+                ? RoleRecordFilterJson.ModifyKind : RoleRecordFilterJson.ViewKind;
+            var isModify = kind == RoleRecordFilterJson.ModifyKind;
             var hasGroup = RoleRecordFilterJson.CountConditions(f.Group) > 0;
-            if (!hasGroup && f.Conditions.Count == 0) continue; // empty filter ⇒ no restriction; don't store
+            if (!hasGroup && (isModify || f.Conditions.Count == 0)) continue; // empty filter ⇒ no restriction; don't store
             var table = await _tableRepo.GetByPublicIdAsync(f.TablePublicId, ct);
 
             if (hasGroup)
@@ -101,6 +104,7 @@ public class UpdateRecordFiltersCommandHandler
                     // Mirrors the root group's logic so the column stays meaningful for legacy readers.
                     Conjunction = string.Equals(f.Group!.Logic, "or", StringComparison.OrdinalIgnoreCase) ? "OR" : "AND",
                     FilterJson = RoleRecordFilterJson.SerializeGroup(f.Group),
+                    Kind = kind,
                 });
                 continue;
             }

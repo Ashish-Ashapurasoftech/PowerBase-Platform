@@ -26,6 +26,18 @@ public interface ISchemaEngineService
     Task WidenIntColumnToDecimalIfNeededAsync(AppTable table, AppField field, CancellationToken ct = default);
 
     /// <summary>
+    /// Re-types an existing field's physical column (and a range field's end column) when its
+    /// IsEncrypted flag is toggled, so the column matches what <see cref="AddColumnAsync"/> would
+    /// have created: ciphertext storage (VARCHAR(MAX), or the enclave-encrypted catalog type) when
+    /// <paramref name="isEncrypted"/> is true, the field type's catalog SQL type otherwise. A no-op
+    /// for computed and encryption-exempt fields, and in an encrypted App (every column there
+    /// already holds ciphertext). Only safe while the table has no live records — the caller
+    /// (UpdateField, behind ValidateEncryptionTransitionAsync) guarantees that. A unique index on
+    /// the column is dropped first; the caller re-creates it with <see cref="SetUniqueAsync"/>.
+    /// </summary>
+    Task SetColumnEncryptionAsync(AppTable table, AppField field, bool isEncrypted, CancellationToken ct = default);
+
+    /// <summary>
     /// Repurposes a non-numeric field's physical column as a Reference column (BIGINT, parent Record IDs).
     /// <paramref name="parentIdByRowId"/> maps each child row Id to the parent Record ID its value
     /// resolved to (the caller reads the values decrypted, so encrypted columns work too). Every other
