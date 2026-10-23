@@ -196,4 +196,73 @@ public class SearchSlotResolverTests
         var odata = ODataFilterBuilder.Build(tree, fields);
         odata.Should().Be("f_150 gt 999.5");
     }
+
+    [Fact]
+    public void ODataFilterBuilder_emits_day_range_for_date_eq()
+    {
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 10, TypeCode = "Date", IsSearchable = true, IsFilterable = true }
+        };
+
+        var tree = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 10, Operator = "date_eq", Value = "2026-10-05" } }]
+        };
+
+        var odata = ODataFilterBuilder.Build(tree, fields);
+        odata.Should().Be("(date_01 ge 2026-10-05T00:00:00.000Z and date_01 lt 2026-10-06T00:00:00.000Z)");
+    }
+
+    [Fact]
+    public void ODataFilterBuilder_emits_regex_for_endsWith_and_wildcard()
+    {
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 7, TypeCode = "Text", IsSearchable = true, IsFilterable = true }
+        };
+
+        var endsWithTree = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 7, Operator = "endsWith", Value = "Profiling" } }]
+        };
+        var endsWithOdata = ODataFilterBuilder.Build(endsWithTree, fields);
+        endsWithOdata.Should().Be("search.ismatch('+/.*profiling/', 'str_01')");
+
+        var wildcardTree = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 7, Operator = "wildcard", Value = "Source*Profiling" } }]
+        };
+        var wildcardOdata = ODataFilterBuilder.Build(wildcardTree, fields);
+        wildcardOdata.Should().Be("search.ismatch('/Source.*Profiling/', 'str_01')");
+    }
+
+    [Fact]
+    public void ODataFilterBuilder_CanExpress_validates_field_types_against_text_operators()
+    {
+        var fields = new List<AppField>
+        {
+            new() { Id = 1, Fid = 3, TypeCode = "Number", IsSearchable = true, IsFilterable = true },
+            new() { Id = 2, Fid = 7, TypeCode = "Text", IsSearchable = true, IsFilterable = true }
+        };
+
+        // Text operator on number field must be rejected
+        var invalidTree = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 3, Operator = "contains", Value = "123" } }]
+        };
+        ODataFilterBuilder.CanExpress(invalidTree, fields).Should().BeFalse();
+
+        // Text operator on string field must be accepted
+        var validTree = new FilterGroup
+        {
+            Logic = "and",
+            Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 7, Operator = "contains", Value = "Task" } }]
+        };
+        ODataFilterBuilder.CanExpress(validTree, fields).Should().BeTrue();
+    }
 }
