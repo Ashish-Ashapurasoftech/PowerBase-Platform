@@ -313,7 +313,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows, IReadOnlyList<Guid> publicIds, CancellationToken ct)
     {
         var searchable = fields.Where(f => f.Fid.HasValue && (f.IsSearchable || f.IsFilterable)).ToList();
-        if (searchable.Count == 0 || _searchIndexingFailed) return;
+        if (searchable.Count == 0) return;
         var messages = rows.Select((row, i) => new SearchIndexMessage
         {
             Action = IndexAction.Upsert, TenantId = QueryContext.TenantId, AppId = table.AppId, TableId = table.Id, RecordPublicId = publicIds[i],
@@ -321,11 +321,22 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
                 .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? row[f.Fid!.Value] : null)
         }).Where(m => m.Payload is { Count: > 0 }).ToList();
         if (messages.Count == 0) return;
-        try { await _publisher.PublishBatchAsync(messages, ct); }
+        try 
+        { 
+            await _publisher.PublishBatchAsync(messages, ct); 
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _searchIndexingFailed = true;
-            _logger.LogWarning(ex, "Search indexing is unavailable; imported records in table {TableId} will not be indexed until re-indexed.", table.Id);
+            try
+            {
+                // Retry chunk once with backoff before continuing to next chunks
+                await Task.Delay(500, ct);
+                await _publisher.PublishBatchAsync(messages, ct);
+            }
+            catch (Exception retryEx) when (retryEx is not OperationCanceledException)
+            {
+                _logger.LogWarning(retryEx, "Failed to publish search updates for chunk of {Count} records in table {TableId}. Continuing with subsequent chunks.", messages.Count, table.Id);
+            }
         }
     }
 

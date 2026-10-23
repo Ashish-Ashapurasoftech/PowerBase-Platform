@@ -40,7 +40,13 @@ public class ServiceBusPublisher : IMessagePublisher
     {
         if (!_configured) return;
         var json = JsonSerializer.Serialize(message);
-        var busMessage = new ServiceBusMessage(Encoding.UTF8.GetBytes(json));
+        var bytes = Encoding.UTF8.GetBytes(json);
+        if (bytes.Length > 256 * 1024)
+        {
+            throw new InvalidOperationException($"Message size {bytes.Length} bytes exceeds the 256 KB Service Bus limit.");
+        }
+
+        var busMessage = CreateServiceBusMessage(message, bytes);
         await _sender.SendMessageAsync(busMessage, ct);
     }
 
@@ -53,7 +59,13 @@ public class ServiceBusPublisher : IMessagePublisher
             foreach (var msg in messages)
             {
                 var json = JsonSerializer.Serialize(msg);
-                var serviceBusMessage = new ServiceBusMessage(Encoding.UTF8.GetBytes(json));
+                var bytes = Encoding.UTF8.GetBytes(json);
+                if (bytes.Length > 256 * 1024)
+                {
+                    continue; // Skip oversized single message in bulk publish to avoid failing the entire batch
+                }
+
+                var serviceBusMessage = CreateServiceBusMessage(msg, bytes);
 
                 if (!messageBatch.TryAddMessage(serviceBusMessage))
                 {
@@ -79,5 +91,21 @@ public class ServiceBusPublisher : IMessagePublisher
         {
             messageBatch.Dispose();
         }
+    }
+
+    private static ServiceBusMessage CreateServiceBusMessage<T>(T message, byte[] bodyBytes)
+    {
+        var msg = new ServiceBusMessage(bodyBytes);
+        if (message is PowerBase.Application.Common.Models.SearchIndexMessage sim && sim.RecordPublicId != Guid.Empty)
+        {
+            msg.MessageId = $"{sim.TenantId}_{sim.TableId}_{sim.RecordPublicId}_{sim.Action}";
+            msg.CorrelationId = sim.RecordPublicId.ToString();
+        }
+        else
+        {
+            msg.MessageId = Guid.NewGuid().ToString();
+            msg.CorrelationId = Guid.NewGuid().ToString();
+        }
+        return msg;
     }
 }

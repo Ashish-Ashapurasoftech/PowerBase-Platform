@@ -34,9 +34,26 @@ public class ODataFilterBuilderTests
     [InlineData("notContains")]
     [InlineData("startsWith")]
     [InlineData("notStartsWith")]
+    [InlineData("endsWith")]
+    [InlineData("notEndsWith")]
     [InlineData("gt")]
+    [InlineData("gte")]
+    [InlineData("lt")]
+    [InlineData("lte")]
     [InlineData("in")]
+    [InlineData("notIn")]
     [InlineData("isEmpty")]
+    [InlineData("isNotEmpty")]
+    [InlineData("date_eq")]
+    [InlineData("date_ne")]
+    [InlineData("date_gt")]
+    [InlineData("date_gte")]
+    [InlineData("date_lt")]
+    [InlineData("date_lte")]
+    [InlineData("wildcard")]
+    [InlineData("notWildcard")]
+    [InlineData("includes")]
+    [InlineData("notIncludes")]
     public void Plain_operators_can_be_expressed(string op) =>
         ODataFilterBuilder.CanExpress(Tree(Cond(op))).Should().BeTrue();
 
@@ -47,14 +64,11 @@ public class ODataFilterBuilderTests
     }
 
     [Theory]
-    [InlineData("wildcard")]
-    [InlineData("notWildcard")]
-    [InlineData("includes")]
-    [InlineData("notIncludes")]
-    [InlineData("endsWith")]
-    [InlineData("notEndsWith")]
-    [InlineData("date_eq")]
     [InlineData("isCurrentUser")]
+    [InlineData("isNotCurrentUser")]
+    [InlineData("during")]
+    [InlineData("notDuring")]
+    [InlineData("unknown_op")]
     public void Operators_with_no_AI_Search_translation_cannot_be_expressed(string op) =>
         ODataFilterBuilder.CanExpress(Tree(Cond(op))).Should().BeFalse();
 
@@ -74,7 +88,7 @@ public class ODataFilterBuilderTests
             Nodes =
             [
                 new FilterNode { Condition = Cond("eq") },
-                new FilterNode { Group = Tree(Cond("contains"), Cond("endsWith")) },
+                new FilterNode { Group = Tree(Cond("contains"), Cond("unknown_op")) },
             ],
         };
 
