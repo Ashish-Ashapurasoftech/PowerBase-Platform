@@ -1300,7 +1300,9 @@ public class ImportAppFromPblCommandHandler
                 try
                 {
                     var target = targetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == targetFid) : null;
-                    SummaryTargetValidator.Validate(function, targetFid, target, summary.TargetSubField, lookupSources: lookupSources);
+                    // A summary of a Reference reads the key its parent shows; CreateRelationship has the maps to judge that.
+                    if (target?.TypeCode != "Reference")
+                        SummaryTargetValidator.Validate(function, targetFid, target, summary.TargetSubField, lookupSources: lookupSources);
                 }
                 catch (ValidationException ex)
                 {

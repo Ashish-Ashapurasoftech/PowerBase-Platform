@@ -134,7 +134,9 @@ public class PblDeferredResolver
             try
             {
                 var target = targetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == targetFid) : null;
-                SummaryTargetValidator.Validate(function, (int?)targetFid, target, item.Summary.TargetSubField, lookupSources: lookupSources);
+                // A summary of a Reference reads the key its parent shows; only the create handler has the maps to judge that, so it decides.
+                if (target?.TypeCode != "Reference")
+                    SummaryTargetValidator.Validate(function, (int?)targetFid, target, item.Summary.TargetSubField, lookupSources: lookupSources);
                 await _addSummaryHandler.HandleAsync(new AddSummaryFieldCommand(
                     item.RelationshipPublicId, item.Summary.Label ?? item.Summary.Name, function, (int?)targetFid, matching), ct);
                 added++;
