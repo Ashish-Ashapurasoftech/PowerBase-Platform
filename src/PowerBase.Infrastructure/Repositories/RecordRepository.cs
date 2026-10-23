@@ -303,11 +303,16 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             try
             {
+                // Soft delete only sets IsDeleted = 1, so the heap/clustered row_count still includes deleted
+                // rows. The PublicId index is filtered to IsDeleted = 0 (SchemaEngineService), so its row_count is
+                // the live-row count; if the index doesn't exist this returns 0 and we fall through to COUNT(*).
                 var fastSql = $@"
                     SELECT COALESCE(SUM(st.row_count), 0)
                     FROM sys.dm_db_partition_stats st
+                    JOIN sys.indexes i ON i.object_id = st.object_id AND i.index_id = st.index_id
                     WHERE st.object_id = OBJECT_ID('{PhysicalNaming.FullTableName(table.Id)}')
-                      AND st.index_id < 2;";
+                      AND i.name = 'UX_{PhysicalNaming.TableName(table.Id)}_PublicId'
+                      AND i.has_filter = 1;";
                 await using var fastConn = await ConnectionFactory.CreateAsync(ct);
                 var fastCount = await fastConn.ExecuteScalarAsync<long>(new CommandDefinition(fastSql, cancellationToken: ct));
                 if (fastCount > 0)
@@ -3108,28 +3113,42 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var encContext = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         bool requiresClientSideDistinct = encContext.IsActive && !field.IsSystem && field.IsEncrypted;
 
-        var sql = requiresClientSideDistinct 
+        // One stored value maps to one dropdown option for every type except MultiSelect (a stored array holds
+        // several options), so for those we can stop once limit + 1 distinct values are seen — enough to know
+        // the list exceeds the limit — instead of reading every distinct value in the table.
+        var canStopEarly = field.TypeCode != "MultiSelect";
+        var distinctTop = canStopEarly ? $"TOP ({Math.Max(limit, 1) + 1}) " : "";
+
+        var sql = requiresClientSideDistinct
             ? $"""
-                SELECT CAST({selectExpr} AS NVARCHAR(MAX)) 
+                SELECT CAST({selectExpr} AS NVARCHAR(MAX))
                 FROM {PhysicalNaming.FullTableName(table.Id)}
                 WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''{whereExtra}
               """
             : $"""
-                SELECT DISTINCT CAST({selectExpr} AS NVARCHAR(MAX)) 
+                SELECT DISTINCT {distinctTop}CAST({selectExpr} AS NVARCHAR(MAX))
                 FROM {PhysicalNaming.FullTableName(table.Id)}
                 WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''{whereExtra}
               """;
 
-        var rawValues = await connection.QueryAsync<string>(new CommandDefinition(sql, parameters, cancellationToken: ct));
-        
-        IEnumerable<string> processedValues = rawValues.Where(v => !string.IsNullOrWhiteSpace(v));
-
+        IEnumerable<string> processedValues;
         if (requiresClientSideDistinct)
         {
-            var decrypted = new List<string>();
-            foreach (var v in processedValues)
-                decrypted.Add(await encContext.DecryptValueAsync(v, ct));
-            processedValues = decrypted.Distinct(StringComparer.OrdinalIgnoreCase);
+            // Encrypted values can only be de-duplicated after decrypting, so stream the rows and stop as soon
+            // as enough distinct plaintext values are found rather than decrypting the whole table.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await foreach (var v in connection.QueryUnbufferedAsync<string>(sql, parameters).WithCancellation(ct))
+            {
+                if (string.IsNullOrWhiteSpace(v)) continue;
+                seen.Add(await encContext.DecryptValueAsync(v, ct));
+                if (canStopEarly && seen.Count > limit) break;
+            }
+            processedValues = seen.Where(v => !string.IsNullOrWhiteSpace(v));
+        }
+        else
+        {
+            var rawValues = await connection.QueryAsync<string>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+            processedValues = rawValues.Where(v => !string.IsNullOrWhiteSpace(v));
         }
         
         if (field.TypeCode == "MultiSelect")
