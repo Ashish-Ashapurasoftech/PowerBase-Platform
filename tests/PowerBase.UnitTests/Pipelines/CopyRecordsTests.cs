@@ -366,7 +366,7 @@ public class CopyRecordsTests
         Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
         await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), id,
             Arg.Is<IReadOnlyDictionary<long, object?>>(v => !v.ContainsKey(42) && !v.ContainsKey(3)),
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -418,7 +418,7 @@ public class CopyRecordsTests
         var result = JsonDocument.Parse(await harness.Run()).RootElement;
         Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
         await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), id,
-            Arg.Is<IReadOnlyDictionary<long, object?>>(v => v.ContainsKey(9) && !v.ContainsKey(6)), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+            Arg.Is<IReadOnlyDictionary<long, object?>>(v => v.ContainsKey(9) && !v.ContainsKey(6)), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     // ── Encrypted-field filtering / merge-key matching regression coverage ──────────────────
@@ -476,8 +476,42 @@ public class CopyRecordsTests
         Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
         Assert.Equal(0, result.GetProperty("InsertedCount").GetInt32());
         await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), id,
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
         // The merge lookup must never run a SQL "=" condition against the encrypted column.
+        await harness.Records.DidNotReceive().ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(),
+            Arg.Is<FilterGroup?>(f => f != null), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Copy_EncryptedApp_UnflaggedQueryField_MatchesDecryptedValueInMemoryAndNeverReachesSql()
+    {
+        // An encrypted app stores every Text field as ciphertext even when the field's own IsEncrypted is off.
+        using var harness = new Harness();
+        harness.App.IsEncrypted = true;
+        harness.SourceValues.Clear();
+        harness.SourceValues.AddRange(new[] { "Active", "Inactive" });
+
+        var result = JsonDocument.Parse(await harness.Run("{6.EX.'active'}")).RootElement;
+
+        Assert.Equal(1, result.GetProperty("InsertedCount").GetInt32());
+        harness.Search.Received(1).ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
+            Arg.Is<FilterGroup?>(f => f == null), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Copy_EncryptedApp_UnflaggedMergeField_MatchesExistingRecordByDecryptedValue()
+    {
+        using var harness = new Harness();
+        harness.App.IsEncrypted = true;
+        var id = Guid.NewGuid();
+        harness.Records.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, Arg.Any<int>(),
+            Arg.Is<FilterGroup?>(f => f == null), null, null, Arg.Any<CancellationToken>())
+            .Returns(new List<IReadOnlyDictionary<string, object?>> { new Dictionary<string, object?> { ["PublicId"] = id, ["f_9"] = "none" } });
+
+        var result = JsonDocument.Parse(await harness.Run()).RootElement;
+
+        Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
+        Assert.Equal(0, result.GetProperty("InsertedCount").GetInt32());
         await harness.Records.DidNotReceive().ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<int>(), Arg.Any<int>(),
             Arg.Is<FilterGroup?>(f => f != null), Arg.Any<IReadOnlyList<SortSpec>>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
     }
@@ -529,6 +563,30 @@ public class CopyRecordsTests
         Assert.Equal("in", IdRestriction(capturedFilter).Operator);
         // The original condition is still there: the index proposes candidates, SQL decides.
         Assert.NotNull(capturedFilter!.Nodes[0].Group);
+    }
+
+    [Fact]
+    public async Task Copy_GridSearchEnabled_RecordsChangedTooRecentlyForTheIndex_AreCandidatesToo()
+    {
+        using var harness = new Harness();
+        IndexSource(harness);
+        harness.AzureSearch.SearchRecordIdsByFilterPagedAsync(Arg.Any<long>(), harness.Source.Id, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => AiPages(new AiSearchIdPage([Guid.NewGuid()], "~")));
+        harness.Records.GetIdsByPublicIdsAsync(harness.Source, Arg.Any<IReadOnlyCollection<Guid>>(), Arg.Any<CancellationToken>())
+            .Returns(new List<long> { 7 });
+        // Record 9 was created a moment ago (not in the index yet); record 7 was changed a moment ago too.
+        harness.Records.ListRecordsChangedSinceAsync(harness.Source, Arg.Any<DateTime>(), Arg.Is(0L), Arg.Any<long>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<(long Id, DateTime ChangedOn)>>([(7, DateTime.UtcNow), (9, DateTime.UtcNow)]));
+
+        FilterGroup? capturedFilter = null;
+        harness.Search.ReadCopySnapshotAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup>(), Arg.Any<CancellationToken>())
+            .Returns(ci => { capturedFilter = ci.ArgAt<FilterGroup?>(2); return harness.EmptyPage(); });
+
+        await harness.Run("{6.EX.'none'}");
+
+        Assert.NotNull(capturedFilter);
+        Assert.Equal(new long[] { 7, 9 }, JsonSerializer.Deserialize<long[]>(IdRestriction(capturedFilter).Value!));   // each once, in id order
+        Assert.NotNull(capturedFilter!.Nodes[0].Group);   // and SQL still applies the complete filter to them
     }
 
     [Fact]
@@ -1049,7 +1107,7 @@ public class CopyRecordsTests
         Assert.Equal(2, result.GetProperty("InsertedCount").GetInt32());
         Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
         await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), existing,
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
         Assert.Equal(1, Calls(harness, "CreateManyAsync"));
     }
 
@@ -1083,7 +1141,7 @@ public class CopyRecordsTests
         Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
         Assert.Equal(0, Calls(harness, "CreateManyAsync"));
         await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), created,
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -1483,7 +1541,7 @@ public class CopyRecordsTests
         Assert.Equal(1, result.GetProperty("InsertedCount").GetInt32());
         Assert.Equal(1, result.GetProperty("UpdatedCount").GetInt32());
         await harness.Writes.Received(1).ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), createdByRow[0],
-            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, null);
+            Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<IDbTransaction>(), false, Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]
@@ -1577,6 +1635,8 @@ public class CopyRecordsTests
         public IAppTableRepository Tables { get; } = Substitute.For<IAppTableRepository>();
         public IPipelineTriggerInterceptor Interceptor { get; } = Substitute.For<IPipelineTriggerInterceptor>();
         public IMessagePublisher Publisher { get; } = Substitute.For<IMessagePublisher>();
+        /// <summary>The app both tables belong to (AppId 1); a test sets IsEncrypted to encrypt every field without flagging any.</summary>
+        public App App { get; } = new() { Id = 1 };
         public List<string> SourceValues { get; } = new() { "none" };
         public List<AppField> SourceFields { get; } = new() { Field(6, "Source key") };
         public List<AppField> DestinationFields { get; } = new();
@@ -1642,6 +1702,8 @@ public class CopyRecordsTests
                 Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
                 .Returns(c => c.Arg<IReadOnlyList<IReadOnlyDictionary<string, object?>>>()
                     .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+            var apps = Substitute.For<IAppRepository>();
+            apps.GetByIdAsync(1, Arg.Any<CancellationToken>()).Returns(_ => App);
             var formulaProjector = FormulaProjector;
             formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
                 Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable>())
@@ -1653,7 +1715,7 @@ public class CopyRecordsTests
                 .AddSingleton(Substitute.For<IUserRepository>()).AddSingleton(Audit)
                 .AddSingleton(Substitute.For<IRelationshipRepository>())
                 .AddSingleton(relationalProjector).AddSingleton(formulaProjector).AddSingleton(AzureSearch)
-                .AddSingleton(Interceptor).AddSingleton(Publisher).AddSingleton<FormulaEngine>().BuildServiceProvider();
+                .AddSingleton(Interceptor).AddSingleton(Publisher).AddSingleton(apps).AddSingleton<FormulaEngine>().BuildServiceProvider();
         }
         private async IAsyncEnumerable<IReadOnlyList<IReadOnlyDictionary<string, object?>>> Page()
         {

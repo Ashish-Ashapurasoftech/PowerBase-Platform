@@ -284,7 +284,7 @@ public class PipelineChoiceValuesTests
         services.AddScoped<ITenantUnitOfWork>(_ => Substitute.For<ITenantUnitOfWork>());
         var records = Substitute.For<IRecordRepository>();
         records.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyDictionary<long, object?>>(),
-                Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>(), null)
+                Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(call => { written = new Dictionary<long, object?>(call.ArgAt<IReadOnlyDictionary<long, object?>>(2)); return Guid.NewGuid(); });
         services.AddSingleton(records);
         var tables = Substitute.For<IAppTableRepository>();

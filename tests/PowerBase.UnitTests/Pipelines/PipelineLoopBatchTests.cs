@@ -78,7 +78,7 @@ public class PipelineLoopBatchTests(ITestOutputHelper output)
             services.AddScoped<IRecordRepository>(_ => {
                 var records = Substitute.For<IRecordRepository>();
                 records.CreateAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(),
-                    Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>(), null)
+                    Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<IDbTransaction?>(), Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
                     .Returns(async call => {
                         Interlocked.Increment(ref Singles);
                         var active = Interlocked.Increment(ref Active);

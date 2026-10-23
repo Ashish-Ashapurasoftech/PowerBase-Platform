@@ -217,7 +217,7 @@ public class PipelineGapsVerificationTests
 
         // Assert: Ensure delete-record step deletes record and runs trigger interceptor
         await triggerInterceptor.Received(1).InterceptAsync(table, Arg.Any<IReadOnlyList<AppField>>(), recordPublicId, Arg.Any<IReadOnlyDictionary<long, object?>>(), "record-deleted", Arg.Any<CancellationToken>());
-        await recordRepo.Received(1).DeleteAsync(table, recordPublicId, dbTx, Arg.Any<CancellationToken>());
+        await recordRepo.Received(1).DeleteAsync(table, recordPublicId, dbTx, Arg.Any<CancellationToken>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
         await pipelineRepo.Received(1).CreateStepRunAsync(Arg.Is<PipelineStepRun>(sr => sr.StepId == 2 && sr.Status == "Success"), Arg.Any<CancellationToken>());
     }
 
