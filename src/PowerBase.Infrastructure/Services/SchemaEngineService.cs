@@ -40,6 +40,10 @@ public class SchemaEngineService : ISchemaEngineService
                 CREATE UNIQUE NONCLUSTERED INDEX UX_{PhysicalNaming.TableName(table.Id)}_PublicId
                     ON {physicalName}(PublicId)
                     WHERE IsDeleted = 0;
+                -- Pipeline searches answered by Azure AI Search re-read the records changed recently (the index may not have them yet).
+                CREATE NONCLUSTERED INDEX IX_{PhysicalNaming.TableName(table.Id)}_ModifiedOn
+                    ON {physicalName}(ModifiedOn)
+                    WHERE IsDeleted = 0 AND ModifiedOn IS NOT NULL;
             END
             """;
 
