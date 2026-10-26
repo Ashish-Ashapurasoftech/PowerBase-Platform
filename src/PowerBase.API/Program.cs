@@ -581,6 +581,7 @@ builder.Services.AddScoped<CreateRecordCommandHandler>();
 builder.Services.AddScoped<UpdateRecordCommandHandler>();
 builder.Services.AddScoped<DeleteRecordCommandHandler>();
 builder.Services.AddScoped<BulkDeleteRecordsCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Records.Commands.BulkCreateRecords.BulkCreateRecordsCommandHandler>();
 builder.Services.AddScoped<MassUpdateRecordsCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.RecordModifyGuard>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler>();
