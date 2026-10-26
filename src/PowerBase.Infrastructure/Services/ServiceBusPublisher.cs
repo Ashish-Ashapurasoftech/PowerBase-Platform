@@ -151,6 +151,62 @@ public class ServiceBusPublisher : IMessagePublisher
         }
     }
 
+    public async Task PublishPriorityBatchAsync<T>(IEnumerable<T> messages, CancellationToken ct = default)
+    {
+        if (!_configured) return;
+        if (!_priorityEnabled)
+        {
+            await PublishBatchAsync(messages, ct);
+            return;
+        }
+
+        try
+        {
+            var messageBatch = await _prioritySender.CreateMessageBatchAsync(ct);
+            var sent = 0;
+            try
+            {
+                foreach (var msg in messages)
+                {
+                    var json = JsonSerializer.Serialize(msg);
+                    var bytes = Encoding.UTF8.GetBytes(json);
+                    if (IsOversized(bytes))
+                    {
+                        _logger?.LogError("Search index priority message skipped, {Size} bytes exceeds the 256 KB Service Bus limit: {Message}", bytes.Length, Describe(msg));
+                        continue;
+                    }
+
+                    var serviceBusMessage = CreateServiceBusMessage(msg, bytes);
+                    if (!messageBatch.TryAddMessage(serviceBusMessage))
+                    {
+                        sent += messageBatch.Count;
+                        await _prioritySender.SendMessagesAsync(messageBatch, ct);
+                        messageBatch.Dispose();
+                        messageBatch = await _prioritySender.CreateMessageBatchAsync(ct);
+                        if (!messageBatch.TryAddMessage(serviceBusMessage))
+                        {
+                            throw new System.Exception("Message is too large to fit in an empty priority batch.");
+                        }
+                    }
+                }
+                if (messageBatch.Count > 0)
+                {
+                    await _prioritySender.SendMessagesAsync(messageBatch, ct);
+                }
+            }
+            finally
+            {
+                messageBatch.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to publish to priority queue {PriorityQueue}. Falling back to standard queue {StandardQueue}.",
+                _prioritySender.EntityPath, _sender.EntityPath);
+            await PublishBatchAsync(messages, ct);
+        }
+    }
+
     internal const int MaxMessageBytes = 256 * 1024;
 
     internal static bool IsOversized(byte[] body) => body.Length > MaxMessageBytes;

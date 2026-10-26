@@ -244,7 +244,8 @@ public interface IRecordRepository
     Task<IReadOnlyList<Guid>> CreateManyAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows,
         System.Data.IDbTransaction transaction, CancellationToken ct = default,
-        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
+        bool isPriority = false);
 
     /// <summary>For each requested key, the live records whose (plain, unencrypted Text or Number) <paramref name="field"/> equals
     /// it: (value as stored, PublicId). Keys are looked up in chunks, so the number of keys is not limited.</summary>

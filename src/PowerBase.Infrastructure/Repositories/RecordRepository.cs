@@ -1593,7 +1593,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            _ = _messagePublisher.PublishAsync(msg, default).ContinueWith(
+            _ = _messagePublisher.PublishPriorityAsync(msg, default).ContinueWith(
                 t => { /* Observed fire-and-forget: failure handled */ },
                 TaskContinuationOptions.OnlyOnFaulted);
         }
@@ -1603,7 +1603,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
     public async Task<IReadOnlyList<Guid>> CreateManyAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows,
-        IDbTransaction transaction, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+        IDbTransaction transaction, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
+        bool isPriority = false)
     {
         ArgumentNullException.ThrowIfNull(transaction);
         var publicIds = new Guid[rows.Count];
@@ -1700,6 +1701,10 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         await RecordSearchChangesAsync(messages, transaction, ct);
         if (onIndexMessageCreated != null)
             foreach (var msg in messages) onIndexMessageCreated(msg);
+        else if (isPriority || messages.Count <= 100)
+            _ = _messagePublisher.PublishPriorityBatchAsync(messages, default).ContinueWith(
+                t => { /* Observed fire-and-forget: failure handled */ },
+                TaskContinuationOptions.OnlyOnFaulted);
         else
             _ = _messagePublisher.PublishBatchAsync(messages, default).ContinueWith(
                 t => { /* Observed fire-and-forget: failure handled */ },
