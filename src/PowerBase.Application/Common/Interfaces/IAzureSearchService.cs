@@ -4,6 +4,13 @@ public interface IAzureSearchService
 {
     Task IndexRecordAsync(long tenantId, long appId, long tableId, Guid publicId, IReadOnlyDictionary<long, object?> values, CancellationToken ct = default);
     Task BulkIndexRecordsAsync(IEnumerable<SearchIndexDocument> documents, CancellationToken ct = default);
+
+    /// <summary>
+    /// Same upload as <see cref="BulkIndexRecordsAsync"/>, but returns every document Azure AI Search did not accept
+    /// (after retrying throttled ones) instead of dropping it. A request-level failure still throws. The indexer uses
+    /// this to dead-letter or redeliver exactly the messages whose documents failed.
+    /// </summary>
+    Task<IReadOnlyList<SearchIndexFailure>> BulkIndexRecordsWithResultsAsync(IEnumerable<SearchIndexDocument> documents, CancellationToken ct = default);
     Task BulkDeleteRecordsAsync(long tenantId, long tableId, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
     Task<IReadOnlyList<Guid>> SearchRecordsAsync(long tenantId, long tableId, string searchText, CancellationToken ct = default);
     Task<IReadOnlyList<Guid>> SearchRecordsAsync(long tenantId, long tableId, string searchText, string? indexName, CancellationToken ct = default);
@@ -55,4 +62,8 @@ public record SearchIndexDocument(
     Guid PublicId,
     IReadOnlyDictionary<long, object?> Values,
     IReadOnlyDictionary<string, object?>? SlotValues = null,
-    string? CustomIndexName = null);
+    string? CustomIndexName = null,
+    IReadOnlySet<string>? SearchTextSlots = null);
+
+/// <summary>One document Azure AI Search rejected or could not take. <see cref="Retryable"/> is true for 409/422/429/503.</summary>
+public record SearchIndexFailure(string Key, int Status, string? Error, bool Retryable);

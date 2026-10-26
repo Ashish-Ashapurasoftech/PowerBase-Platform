@@ -224,7 +224,7 @@ public sealed class ReferenceRelinkService(
         var messages = changed.Select(c =>
         {
             var payload = new Dictionary<string, object?>();
-            if (indexesReference) payload[target.Reference.Fid!.Value.ToString()] = target.Reference.IsSearchable ? c.ParentId : null;
+            if (indexesReference) payload[target.Reference.Fid!.Value.ToString()] = c.ParentId;
             if (indexesOriginal) payload[target.Original.Fid!.Value.ToString()] = null;
             return new SearchIndexMessage
             {

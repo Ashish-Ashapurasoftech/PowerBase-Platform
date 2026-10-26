@@ -318,7 +318,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
         {
             Action = IndexAction.Upsert, TenantId = QueryContext.TenantId, AppId = table.AppId, TableId = table.Id, RecordPublicId = publicIds[i],
             Payload = searchable.Where(f => row.ContainsKey(f.Fid!.Value))
-                .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? row[f.Fid!.Value] : null)
+                .ToDictionary(f => f.Fid!.Value.ToString(), f => row[f.Fid!.Value])
         }).Where(m => m.Payload is { Count: > 0 }).ToList();
         if (messages.Count == 0) return;
         try 

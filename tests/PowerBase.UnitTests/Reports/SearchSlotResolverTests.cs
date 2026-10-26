@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using FluentAssertions;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Queries.RunReport.OData;
@@ -11,6 +12,14 @@ namespace PowerBase.UnitTests.Reports;
 
 public class SearchSlotResolverTests
 {
+    /// <summary>Stores slots on the fields the way the application does (once, via the allocator), then returns the list.</summary>
+    internal static List<AppField> Slotted(List<AppField> fields)
+    {
+        foreach (var (fieldId, slot) in SearchSlotResolver.AllocateMissingSlots(fields))
+            fields.Single(f => f.Id == fieldId).SearchSlot = slot;
+        return fields;
+    }
+
     [Fact]
     public void Two_different_tables_sharing_fid_3_map_to_different_typed_slots()
     {
@@ -38,6 +47,8 @@ public class SearchSlotResolverTests
             new() { Id = 22, Fid = 3, TypeCode = "Text", IsSearchable = true, IsFilterable = true }
         };
 
+        Slotted(tableAFields); Slotted(tableBFields); Slotted(tableCFields);
+
         var fieldA3 = tableAFields[2];
         var fieldB3 = tableBFields[2];
         var fieldC3 = tableCFields[2];
@@ -60,6 +71,8 @@ public class SearchSlotResolverTests
             new() { Id = 1, Fid = 3, TypeCode = "Number", IsSearchable = true, IsFilterable = true }
         };
 
+        Slotted(fields);
+
         var tree = new FilterGroup
         {
             Logic = "and",
@@ -80,6 +93,8 @@ public class SearchSlotResolverTests
             new() { Id = 1, Fid = 3, TypeCode = "Date", IsSearchable = true, IsFilterable = true }
         };
 
+        Slotted(fields);
+
         var tree = new FilterGroup
         {
             Logic = "and",
@@ -99,6 +114,8 @@ public class SearchSlotResolverTests
         {
             new() { Id = 1, Fid = 5, TypeCode = "Boolean", IsSearchable = true, IsFilterable = true }
         };
+
+        Slotted(fields);
 
         var tree = new FilterGroup
         {
@@ -147,6 +164,8 @@ public class SearchSlotResolverTests
             });
         }
 
+        Slotted(fields);
+
         // Even though table has 900 columns in SQL, only 30 are active in search
         SearchSlotResolver.IsWideTable(fields).Should().BeFalse();
         SearchSlotResolver.GetTableIndexName(1, 101, fields, "pb-shard-001").Should().Be("pb-shard-001");
@@ -188,6 +207,8 @@ public class SearchSlotResolverTests
         slotMap[200].Should().Be("f_200");
 
         // OData translates directly on f_{fid} with native numeric comparisons
+        Slotted(fields);
+
         var tree = new FilterGroup
         {
             Logic = "and",
@@ -204,6 +225,8 @@ public class SearchSlotResolverTests
         {
             new() { Id = 1, Fid = 10, TypeCode = "Date", IsSearchable = true, IsFilterable = true }
         };
+
+        Slotted(fields);
 
         var tree = new FilterGroup
         {
@@ -222,6 +245,8 @@ public class SearchSlotResolverTests
         {
             new() { Id = 1, Fid = 7, TypeCode = "Text", IsSearchable = true, IsFilterable = true }
         };
+
+        Slotted(fields);
 
         var endsWithTree = new FilterGroup
         {
@@ -248,6 +273,8 @@ public class SearchSlotResolverTests
             new() { Id = 1, Fid = 3, TypeCode = "Number", IsSearchable = true, IsFilterable = true },
             new() { Id = 2, Fid = 7, TypeCode = "Text", IsSearchable = true, IsFilterable = true }
         };
+
+        Slotted(fields);
 
         // Text operator on number field must be rejected
         var invalidTree = new FilterGroup

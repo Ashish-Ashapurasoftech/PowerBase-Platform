@@ -37,6 +37,46 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         ORDER BY af.Id
         """;
 
+    // Same list, plus the stored Azure AI Search slot. Used only once the SearchSlot column exists (see HasSlotColumnAsync),
+    // so the application keeps working, with search answered from SQL, if it is deployed before migration 084 has run.
+    private const string ListByTableWithSlotSql = $"""
+        SELECT {SelectColumns}, af.SearchSlot
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+          AND af.IsDeleted  = 0
+        ORDER BY af.Id
+        """;
+
+    // Every field of the table, deleted ones included: a slot held by a deleted field must stay reserved.
+    private const string ListAllForSlotsSql = """
+        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.IsSearchable, af.IsFilterable, af.SearchSlot, ft.Code AS TypeCode
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+        """;
+
+    private const string SetSearchSlotSql = """
+        UPDATE meta.AppField SET SearchSlot = @slot WHERE Id = @id AND SearchSlot IS NULL
+        """;
+
+    // 0 = not checked yet, 1 = column exists, 2 = column missing (re-checked every minute).
+    private static int _slotColumnState;
+    private static long _slotColumnCheckedTicks;
+
+    private static async Task<bool> HasSlotColumnAsync(IDbConnection connection, CancellationToken ct)
+    {
+        var state = Volatile.Read(ref _slotColumnState);
+        if (state == 1) return true;
+        if (state == 2 && DateTime.UtcNow.Ticks - Interlocked.Read(ref _slotColumnCheckedTicks) < TimeSpan.FromMinutes(1).Ticks) return false;
+
+        var exists = await connection.ExecuteScalarAsync<int?>(
+            new CommandDefinition("SELECT COL_LENGTH('meta.AppField', 'SearchSlot')", cancellationToken: ct)) is not null;
+        Interlocked.Exchange(ref _slotColumnCheckedTicks, DateTime.UtcNow.Ticks);
+        Volatile.Write(ref _slotColumnState, exists ? 1 : 2);
+        return exists;
+    }
+
     // The three list/count templates below skip fields flagged IsHidden — the hidden "(original)" Text
     // field a relationship conversion creates (see HelperFields).
     // The field still exists everywhere else (ListByTableAsync is unchanged), so reads/projection can use it.
@@ -220,9 +260,40 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     public async Task<IReadOnlyList<AppField>> ListByTableAsync(long tableId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var sql = await HasSlotColumnAsync(connection, ct) ? ListByTableWithSlotSql : ListByTableSql;
         var results = await connection.QueryAsync<AppField>(
-            new CommandDefinition(ListByTableSql, new { tableId }, cancellationToken: ct));
+            new CommandDefinition(sql, new { tableId }, cancellationToken: ct));
         return results.AsList();
+    }
+
+    public async Task<int> EnsureSearchSlotsAsync(long tableId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        if (!await HasSlotColumnAsync(connection, ct)) return 0;
+
+        var total = 0;
+        // Two instances can pick the same free slot at the same moment; the unique index rejects the loser, which then
+        // reloads (now seeing the winner's slot) and picks the next free one.
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            var all = (await connection.QueryAsync<AppField>(
+                new CommandDefinition(ListAllForSlotsSql, new { tableId }, cancellationToken: ct))).AsList();
+            var missing = PowerBase.Application.Search.SearchSlotResolver.AllocateMissingSlots(all);
+            if (missing.Count == 0) return total;
+
+            try
+            {
+                foreach (var (fieldId, slot) in missing)
+                    total += await connection.ExecuteAsync(
+                        new CommandDefinition(SetSearchSlotSql, new { id = fieldId, slot }, cancellationToken: ct));
+                return total;
+            }
+            catch (SqlException ex) when (ex.Number is 2601 or 2627)
+            {
+                // slot taken by a concurrent allocation: reload and try again
+            }
+        }
+        return total;
     }
 
     public async Task<IReadOnlyList<AppFieldListItemDto>> ListByTablePagedAsync(

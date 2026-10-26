@@ -9,6 +9,14 @@ public interface IAppFieldRepository
 {
     Task<AppField> GetByIdInTableAsync(long fieldId, long tableId, CancellationToken ct = default);
     Task<IReadOnlyList<AppField>> ListByTableAsync(long tableId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Gives every search-eligible field of the table that has no Azure AI Search slot one (see
+    /// <see cref="PowerBase.Application.Search.SearchSlotResolver.AllocateMissingSlots"/>) and stores it. Safe to call
+    /// repeatedly and from several instances at once. Returns how many fields got a slot; 0 when the slot column does
+    /// not exist yet (migration not applied).
+    /// </summary>
+    Task<int> EnsureSearchSlotsAsync(long tableId, CancellationToken ct = default);
     /// <summary>Slim, paged, searchable (by Label), sortable, filterable listing for the fields grid.
     /// <paramref name="filter"/> accepts either a dropdown value (e.g. "System Fields", "Required Fields")
     /// or a category name (Text/Numeric/Date/Other/User/Formula/Relationship/Action); null/"All Fields"

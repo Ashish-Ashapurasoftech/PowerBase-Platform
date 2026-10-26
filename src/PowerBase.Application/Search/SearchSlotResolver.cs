@@ -21,8 +21,14 @@ public static class SearchSlotResolver
     /// </summary>
     public const int WideTableThreshold = 150;
 
+    /// <summary>Types the index cannot hold faithfully. A range is two values and a duration is not a point in time, so
+    /// mapping either to one number/date slot stores nothing useful. They are answered from SQL until they get a real
+    /// mapping (two slots for a range).</summary>
+    public static bool IsIndexableType(string? typeCode) =>
+        typeCode is not ("NumericRange" or "DateRange" or "Duration");
+
     public static bool IsSearchEligible(AppField field) =>
-        field.IsFilterable || field.IsSearchable;
+        (field.IsFilterable || field.IsSearchable) && IsIndexableType(field.TypeCode);
 
     public static bool IsWideTable(IReadOnlyList<AppField> tableFields) =>
         tableFields.Count(IsSearchEligible) > WideTableThreshold;
@@ -51,79 +57,38 @@ public static class SearchSlotResolver
     public static bool IsText(string? typeCode) =>
         !IsNumeric(typeCode) && !IsDate(typeCode) && !IsBoolean(typeCode);
 
-    /// <summary>
-    /// Resolves the dedicated index slot name for a given field within the table (e.g. num_01, date_01, str_01).
-    /// If the table is a wide table (> 150 fields), fields map directly to f_{Fid} for its dedicated index.
-    /// Only fields that are search-eligible (IsFilterable || IsSearchable) take up slots in standard shared tables.
-    /// </summary>
-    public static string ResolveSlotName(AppField field, IReadOnlyList<AppField> tableFields)
+    /// <summary>The slot column family a field type lives in: "num", "date", "bool" or "str".</summary>
+    public static string SlotPrefix(string? typeCode) =>
+        IsNumeric(typeCode) ? "num" : IsDate(typeCode) ? "date" : IsBoolean(typeCode) ? "bool" : "str";
+
+    public static int MaxSlots(string prefix) => prefix switch
     {
-        // Wide tables (> 150 active fields) map directly to f_{Fid} in their dedicated index
-        if (IsWideTable(tableFields))
-        {
-            return field.Fid.HasValue ? $"f_{field.Fid.Value}" : $"f_{field.Id}";
-        }
+        "num" => MaxNumericSlots,
+        "date" => MaxDateSlots,
+        "bool" => MaxBooleanSlots,
+        _ => MaxStringSlots
+    };
 
-        // If table has fields with explicit eligibility flags, fields that are neither filterable nor searchable
-        // do not occupy slots in the shared index.
-        if (tableFields.Any(IsSearchEligible) && !IsSearchEligible(field))
-        {
-            return field.Fid.HasValue ? $"f_{field.Fid.Value}" : $"f_{field.Id}";
-        }
+    public static string SlotName(string prefix, int number) => $"{prefix}_{number:D2}";
 
-        var eligibleFields = tableFields.Any(IsSearchEligible)
-            ? tableFields.Where(IsSearchEligible).ToList()
-            : tableFields;
+    private static string LegacyName(AppField field) =>
+        field.Fid.HasValue ? $"f_{field.Fid.Value}" : $"f_{field.Id}";
 
-        var typeCode = field.TypeCode ?? string.Empty;
+    /// <summary>
+    /// The index column a field is stored in. A slot is a stored decision (<see cref="AppField.SearchSlot"/>), never
+    /// recomputed from the field's position: position-based slots move every later field whenever one field is added,
+    /// removed or switched on/off, leaving existing documents with values in the wrong columns.
+    /// A field with no stored slot (not eligible, not yet allocated, or its pool is full) resolves to its legacy
+    /// "f_{fid}" name, which the filter builder treats as "answer this in SQL". Wide tables use "f_{fid}" in their own index.
+    /// </summary>
+    public static string ResolveSlotName(AppField field, IReadOnlyList<AppField> tableFields) =>
+        ResolveSlotName(field, IsWideTable(tableFields));
 
-        if (IsNumeric(typeCode))
-        {
-            var index = eligibleFields
-                .Where(f => IsNumeric(f.TypeCode))
-                .OrderBy(f => f.Fid ?? (int)f.Id)
-                .ToList()
-                .FindIndex(f => (f.Fid.HasValue && field.Fid.HasValue && f.Fid == field.Fid) || f.Id == field.Id);
-
-            if (index >= 0 && index < MaxNumericSlots)
-                return $"num_{index + 1:D2}";
-        }
-        else if (IsDate(typeCode))
-        {
-            var index = eligibleFields
-                .Where(f => IsDate(f.TypeCode))
-                .OrderBy(f => f.Fid ?? (int)f.Id)
-                .ToList()
-                .FindIndex(f => (f.Fid.HasValue && field.Fid.HasValue && f.Fid == field.Fid) || f.Id == field.Id);
-
-            if (index >= 0 && index < MaxDateSlots)
-                return $"date_{index + 1:D2}";
-        }
-        else if (IsBoolean(typeCode))
-        {
-            var index = eligibleFields
-                .Where(f => IsBoolean(f.TypeCode))
-                .OrderBy(f => f.Fid ?? (int)f.Id)
-                .ToList()
-                .FindIndex(f => (f.Fid.HasValue && field.Fid.HasValue && f.Fid == field.Fid) || f.Id == field.Id);
-
-            if (index >= 0 && index < MaxBooleanSlots)
-                return $"bool_{index + 1:D2}";
-        }
-        else
-        {
-            var index = eligibleFields
-                .Where(f => IsText(f.TypeCode))
-                .OrderBy(f => f.Fid ?? (int)f.Id)
-                .ToList()
-                .FindIndex(f => (f.Fid.HasValue && field.Fid.HasValue && f.Fid == field.Fid) || f.Id == field.Id);
-
-            if (index >= 0 && index < MaxStringSlots)
-                return $"str_{index + 1:D2}";
-        }
-
-        // Fallback to legacy field name if slot capacity is exceeded
-        return field.Fid.HasValue ? $"f_{field.Fid.Value}" : $"f_{field.Id}";
+    private static string ResolveSlotName(AppField field, bool isWideTable)
+    {
+        if (isWideTable) return LegacyName(field);
+        if (!IsSearchEligible(field)) return LegacyName(field);
+        return string.IsNullOrWhiteSpace(field.SearchSlot) ? LegacyName(field) : field.SearchSlot!;
     }
 
     /// <summary>
@@ -131,13 +96,63 @@ public static class SearchSlotResolver
     /// </summary>
     public static Dictionary<long, string> BuildSlotMap(IReadOnlyList<AppField> tableFields)
     {
+        var isWide = IsWideTable(tableFields);
         var map = new Dictionary<long, string>();
         foreach (var field in tableFields)
         {
             var key = field.Fid.HasValue ? (long)field.Fid.Value : field.Id;
-            map[key] = ResolveSlotName(field, tableFields);
+            map[key] = ResolveSlotName(field, isWide);
         }
         return map;
+    }
+
+    /// <summary>
+    /// Decides slots for eligible fields that have none. Pure: pass EVERY field of the table, deleted ones included, so a
+    /// slot held by a deleted field is never handed to another field (old documents may still carry its value there).
+    /// Each new field takes the lowest free slot of its family, in field-number order, so the result is deterministic.
+    /// A field whose family is full gets nothing and is answered from SQL. Wide tables use no slots.
+    /// </summary>
+    public static IReadOnlyList<(long FieldId, string Slot)> AllocateMissingSlots(IReadOnlyList<AppField> allTableFields)
+    {
+        var live = allTableFields.Where(f => !f.IsDeleted).ToList();
+        if (IsWideTable(live)) return [];
+
+        var used = new HashSet<string>(
+            allTableFields.Where(f => !string.IsNullOrWhiteSpace(f.SearchSlot)).Select(f => f.SearchSlot!),
+            StringComparer.OrdinalIgnoreCase);
+
+        var assigned = new List<(long, string)>();
+        foreach (var field in live
+                     .Where(f => IsSearchEligible(f) && string.IsNullOrWhiteSpace(f.SearchSlot))
+                     .OrderBy(f => f.Fid ?? int.MaxValue).ThenBy(f => f.Id))
+        {
+            var prefix = SlotPrefix(field.TypeCode);
+            for (var n = 1; n <= MaxSlots(prefix); n++)
+            {
+                var name = SlotName(prefix, n);
+                if (used.Add(name))
+                {
+                    assigned.Add((field.Id, name));
+                    break;
+                }
+            }
+        }
+        return assigned;
+    }
+
+    /// <summary>True when the table has an eligible field that still needs a slot (and could get one).</summary>
+    public static bool NeedsSlotAllocation(IReadOnlyList<AppField> liveTableFields) =>
+        !IsWideTable(liveTableFields) &&
+        liveTableFields.Any(f => IsSearchEligible(f) && string.IsNullOrWhiteSpace(f.SearchSlot));
+
+    /// <summary>Converts a stored value to what its slot column holds (number, date, boolean or text). Null stays null.</summary>
+    public static object? ToSlotValue(string? typeCode, object? value)
+    {
+        if (value is null || value is DBNull) return null;
+        if (IsNumeric(typeCode)) return ParseDouble(value);
+        if (IsDate(typeCode)) return ParseDateTimeOffset(value);
+        if (IsBoolean(typeCode)) return ParseBoolean(value);
+        return ParseString(value);
     }
 
     public static double? ParseDouble(object? val)

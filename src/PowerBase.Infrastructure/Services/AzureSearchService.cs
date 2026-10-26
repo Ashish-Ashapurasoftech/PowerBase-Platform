@@ -12,6 +12,7 @@ using Azure.Search.Documents.Indexes;
 using Azure.Search.Documents.Indexes.Models;
 using Azure.Search.Documents.Models;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Search;
 
@@ -34,13 +35,17 @@ public class AzureSearchService : IAzureSearchService
     private readonly long _maxDocsPerShard;
     private readonly HashSet<long> _dedicatedTenantIndexes = new();
     private readonly int _maxTenantIndexes;
+    private readonly bool _shardRotationEnabled;
+    private readonly ILogger<AzureSearchService>? _logger;
+    private const int MaxThrottleRetries = 3;
 
     private volatile string _currentActiveShard;
     private DateTime _lastDocCountCheck = DateTime.MinValue;
     private long _cachedActiveShardDocCount = 0;
 
-    public AzureSearchService(IConfiguration configuration)
+    public AzureSearchService(IConfiguration configuration, ILogger<AzureSearchService>? logger = null)
     {
+        _logger = logger;
         _endpoint = configuration["AzureAiSearch:Endpoint"] ?? string.Empty;
         var apiKey = configuration["AzureAiSearch:ApiKey"] ?? string.Empty;
         _defaultIndexName = configuration["AzureAiSearch:IndexName"] ?? "powerbase-records-index";
@@ -62,6 +67,12 @@ public class AzureSearchService : IAzureSearchService
             }
         }
         _maxTenantIndexes = int.TryParse(configuration["AzureAiSearch:MaxTenantIndexes"], out var mti) ? mti : 50;
+
+        // Rotating to a new "pb-shard-NNN" index is OFF unless asked for. Which shard holds a record is kept only in this
+        // process's memory (_knownShards/_currentActiveShard), so after a restart or on a second instance the new shard is
+        // unknown: its records vanish from search and updates land in a different shard, leaving stale duplicates.
+        // Turn on only once shard routing is stored somewhere every instance reads.
+        _shardRotationEnabled = bool.TryParse(configuration["AzureAiSearch:EnableShardRotation"], out var rot) && rot;
 
         _isEnabled = !string.IsNullOrEmpty(_endpoint) && !string.IsNullOrEmpty(apiKey) && !string.IsNullOrEmpty(_defaultIndexName);
 
@@ -247,7 +258,7 @@ public class AzureSearchService : IAzureSearchService
 
     private async Task CheckShardCapacityAndRotateAsync(CancellationToken ct)
     {
-        if (!_isEnabled || _searchIndexClient == null || _isMultipleIndex) return;
+        if (!_shardRotationEnabled || !_isEnabled || _searchIndexClient == null || _isMultipleIndex) return;
 
         if ((DateTime.UtcNow - _lastDocCountCheck).TotalSeconds < 60) return;
 
@@ -427,6 +438,7 @@ public class AzureSearchService : IAzureSearchService
                         if (!knownFields.Contains(fieldName) && !newlyAddedWideFields.Contains(fieldName) && !index.Fields.Any(f => f.Name.Equals(fieldName, StringComparison.OrdinalIgnoreCase)))
                         {
                             var val = kvp.Value;
+                            if (val == null) continue; // the column's type is taken from a real value; a null cannot decide it
                             SearchField newField = val switch
                             {
                                 double or float or decimal or int or long =>
@@ -472,10 +484,20 @@ public class AzureSearchService : IAzureSearchService
 
     public async Task BulkIndexRecordsAsync(IEnumerable<SearchIndexDocument> documents, CancellationToken ct = default)
     {
-        if (!_isEnabled) return;
+        // Callers that do not track individual documents keep their behavior (a request-level failure throws); documents
+        // the service rejected are no longer silent: they are logged with their key and status.
+        var failures = await BulkIndexRecordsWithResultsAsync(documents, ct);
+        foreach (var f in failures)
+            _logger?.LogError("Azure AI Search did not index document {DocumentKey}: status {Status}, retryable {Retryable}, error {Error}", f.Key, f.Status, f.Retryable, f.Error);
+    }
+
+    public async Task<IReadOnlyList<SearchIndexFailure>> BulkIndexRecordsWithResultsAsync(IEnumerable<SearchIndexDocument> documents, CancellationToken ct = default)
+    {
+        var allFailures = new List<SearchIndexFailure>();
+        if (!_isEnabled) return allFailures;
 
         var docList = documents.ToList();
-        if (docList.Count == 0) return;
+        if (docList.Count == 0) return allFailures;
 
         await CheckShardCapacityAndRotateAsync(ct);
 
@@ -495,7 +517,9 @@ public class AzureSearchService : IAzureSearchService
                 var dynamicFields = groupDocs
                     .Where(d => d.SlotValues != null)
                     .SelectMany(d => d.SlotValues!.Keys)
-                    .Concat(groupDocs.SelectMany(d => d.Values.Keys.Select(k => $"f_{k}")))
+                    // Legacy f_{fid} columns only for documents sent without slot values; a slotted document must not
+                    // add one column per field to the shared index.
+                    .Concat(groupDocs.Where(d => d.SlotValues == null).SelectMany(d => d.Values.Keys.Select(k => $"f_{k}")))
                     .Where(f => f.StartsWith("f_"))
                     .Distinct();
                 await EnsureIndexAndFieldsExistAsync(indexName, dynamicFields, ct);
@@ -515,26 +539,34 @@ public class AzureSearchService : IAzureSearchService
                 var textParts = new List<string>();
 
                 // Populate typed slot values if provided (for both standard shard slots and wide table native fields)
-                if (doc.SlotValues != null && doc.SlotValues.Count > 0)
+                if (doc.SlotValues != null)
                 {
+                    _knownFieldsPerIndex.TryGetValue(indexName, out var knownInIndex);
+                    var isWideIndex = indexName.StartsWith("pb-tbl-", StringComparison.OrdinalIgnoreCase);
                     foreach (var kvp in doc.SlotValues)
                     {
-                        if (kvp.Value != null)
-                        {
-                            // In standard shard, guard against phantom fields not in index
-                            if (!indexName.StartsWith("pb-tbl-", StringComparison.OrdinalIgnoreCase) && 
-                                kvp.Key.StartsWith("f_") && 
-                                (!_knownFieldsPerIndex.TryGetValue(indexName, out var known) || !known.Contains(kvp.Key)))
-                            {
-                                continue;
-                            }
+                        var isKnown = knownInIndex != null && knownInIndex.Contains(kvp.Key);
 
-                            searchDoc[kvp.Key] = kvp.Value;
-                            if (kvp.Key.StartsWith("str_") || kvp.Key.StartsWith("f_"))
-                            {
-                                var s = kvp.Value.ToString();
-                                if (!string.IsNullOrWhiteSpace(s)) textParts.Add(s);
-                            }
+                        // In standard shard, guard against phantom fields not in index
+                        if (!isWideIndex && kvp.Key.StartsWith("f_") && !isKnown) continue;
+
+                        if (kvp.Value == null)
+                        {
+                            // A cleared value must reach the column (an explicit null in a merge clears it). Without this a
+                            // number/date/boolean that is emptied, or switched off by NullifyField, keeps its old value in
+                            // the index. Only for columns the index really has: naming an unknown one fails the request.
+                            if (isKnown) searchDoc[kvp.Key] = null!;
+                            continue;
+                        }
+
+                        searchDoc[kvp.Key] = kvp.Value;
+                        // Only text the field owner marked searchable goes into the free-text field; a filterable-only
+                        // field keeps its value for filters but must not become findable by typing it.
+                        if ((kvp.Key.StartsWith("str_") || kvp.Key.StartsWith("f_"))
+                            && (doc.SearchTextSlots == null || doc.SearchTextSlots.Contains(kvp.Key)))
+                        {
+                            var s = kvp.Value.ToString();
+                            if (!string.IsNullOrWhiteSpace(s)) textParts.Add(s);
                         }
                     }
                 }
@@ -566,39 +598,7 @@ public class AzureSearchService : IAzureSearchService
             {
                 foreach (var batchList in batches)
                 {
-                    var batch = IndexDocumentsBatch.MergeOrUpload(batchList);
-                    var response = await searchClient.IndexDocumentsAsync(batch, cancellationToken: ct);
-
-                    // Inspect HTTP 207 Multi-Status for throttled (429/503) items and log permanent errors (D07)
-                    var failedResults = response.Value.Results.Where(r => !r.Succeeded).ToList();
-                    if (failedResults.Count > 0)
-                    {
-                        var throttledKeys = failedResults
-                            .Where(r => r.Status == 429 || r.Status == 503)
-                            .Select(r => r.Key)
-                            .ToHashSet();
-
-                        // Log non-throttled permanent errors (400 Bad Request, oversized terms, etc.)
-                        foreach (var failed in failedResults.Where(r => r.Status != 429 && r.Status != 503))
-                        {
-                            Console.WriteLine($"[AzureSearch] Document {failed.Key} indexing failed with permanent status {failed.Status}: {failed.ErrorMessage}");
-                        }
-
-                        if (throttledKeys.Count > 0)
-                        {
-                            await Task.Delay(1000, ct);
-                            var retryDocs = batchList.Where(d => throttledKeys.Contains(d["id"].ToString()!)).ToList();
-                            if (retryDocs.Count > 0)
-                            {
-                                var retryBatch = IndexDocumentsBatch.MergeOrUpload(retryDocs);
-                                var retryResponse = await searchClient.IndexDocumentsAsync(retryBatch, cancellationToken: ct);
-                                foreach (var failedRetry in retryResponse.Value.Results.Where(r => !r.Succeeded))
-                                {
-                                    Console.WriteLine($"[AzureSearch] Document {failedRetry.Key} indexing retry failed with status {failedRetry.Status}: {failedRetry.ErrorMessage}");
-                                }
-                            }
-                        }
-                    }
+                    allFailures.AddRange(await UploadBatchWithRetryAsync(searchClient, indexName, batchList, ct));
                 }
             }
             catch (RequestFailedException ex)
@@ -606,6 +606,41 @@ public class AzureSearchService : IAzureSearchService
                 throw new InvalidOperationException($"Failed to bulk index records in Azure AI Search (Index: {indexName}).", ex);
             }
         }
+
+        return allFailures;
+    }
+
+    /// <summary>
+    /// Uploads one batch and reads the per-document answers. Throttled documents (429/503) are retried a few times with
+    /// growing pauses; whatever still has not been accepted is returned so the caller can dead-letter or redeliver it.
+    /// </summary>
+    private async Task<IReadOnlyList<SearchIndexFailure>> UploadBatchWithRetryAsync(
+        SearchClient searchClient, string indexName, List<Dictionary<string, object>> docs, CancellationToken ct)
+    {
+        var pending = docs;
+        var permanent = new List<SearchIndexFailure>();
+        IReadOnlyList<SearchIndexFailure> lastFailures = [];
+
+        for (var attempt = 0; attempt <= MaxThrottleRetries; attempt++)
+        {
+            var response = await searchClient.IndexDocumentsAsync(IndexDocumentsBatch.MergeOrUpload(pending), cancellationToken: ct);
+            lastFailures = IndexingResultClassifier.Classify(response.Value.Results);
+            if (lastFailures.Count == 0) return permanent;
+
+            var throttled = lastFailures.Where(f => IndexingResultClassifier.IsThrottle(f.Status)).Select(f => f.Key).ToHashSet();
+            permanent.AddRange(lastFailures.Where(f => !IndexingResultClassifier.IsThrottle(f.Status)));
+            if (throttled.Count == 0) return permanent;
+            if (attempt == MaxThrottleRetries) break;
+
+            pending = pending.Where(d => throttled.Contains(d["id"].ToString()!)).ToList();
+            var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt)) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 250));
+            _logger?.LogWarning("Azure AI Search throttled {Count} documents in index {Index}; retrying in {Delay} (attempt {Attempt}/{Max}).", throttled.Count, indexName, delay, attempt + 1, MaxThrottleRetries);
+            await Task.Delay(delay, ct);
+        }
+
+        // Still throttled after the last attempt: report them as outstanding.
+        permanent.AddRange(lastFailures.Where(f => IndexingResultClassifier.IsThrottle(f.Status)));
+        return permanent;
     }
 
     private static List<List<Dictionary<string, object>>> ChunkByCountAndBytes(

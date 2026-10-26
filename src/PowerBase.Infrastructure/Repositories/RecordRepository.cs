@@ -1502,7 +1502,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // Push searchable/filterable fields to Azure AI Search (using ORIGINAL plaintext values)
         var searchableValues = fields
             .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
-            .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? values[(long)f.Fid.Value] : null);
+            .ToDictionary(f => f.Fid!.Value.ToString(), f => values[(long)f.Fid.Value]);
 
         var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
         {
@@ -1613,7 +1613,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             var payload = searchable
                 .Where(f => rows[r].ContainsKey((long)f.Fid!.Value))
-                .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? rows[r][(long)f.Fid!.Value] : null);
+                .ToDictionary(f => f.Fid!.Value.ToString(), f => rows[r][(long)f.Fid!.Value]);
             messages.Add(new PowerBase.Application.Common.Models.SearchIndexMessage
             {
                 Action = PowerBase.Application.Common.Models.IndexAction.Upsert,
@@ -1738,7 +1738,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         // Update Azure AI Search with searchable/filterable fields (using ORIGINAL plaintext values)
         var searchableValues = fields
             .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
-            .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? values[(long)f.Fid.Value] : null);
+            .ToDictionary(f => f.Fid!.Value.ToString(), f => values[(long)f.Fid.Value]);
 
         var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
         {
@@ -1819,7 +1819,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
             var searchableValues = fields
                 .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
-                .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? values[(long)f.Fid.Value] : null);
+                .ToDictionary(f => f.Fid!.Value.ToString(), f => values[(long)f.Fid.Value]);
 
             foreach (var pubId in publicIds)
             {
