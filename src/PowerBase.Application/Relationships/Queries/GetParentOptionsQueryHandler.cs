@@ -2,6 +2,7 @@ using System.Globalization;
 using PowerBase.Application.Common.Formatting;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Reports;
 using PowerBase.Domain.Entities;
 using PowerBase.Domain.Exceptions;
 using PowerBase.Domain.ValueObjects;
@@ -43,7 +44,9 @@ public class GetParentOptionsQueryHandler
 
     public async Task<GetParentOptionsResult> HandleAsync(
         Guid relationshipPublicId, string? search, int take,
-        IReadOnlyDictionary<int, string?>? filterValues = null, CancellationToken ct = default)
+        IReadOnlyDictionary<int, string?>? filterValues = null,
+        string? selectedRecordId = null,
+        CancellationToken ct = default)
     {
         var rel = await _relRepo.GetByPublicIdAsync(relationshipPublicId, ct)
             ?? throw new NotFoundException("Relationship", relationshipPublicId);
@@ -111,39 +114,113 @@ public class GetParentOptionsQueryHandler
         // Offer only the parent records the user's role may view: the picker must not reveal records hidden by
         // the parent table's Custom Rules / Own records scope (or any record of a table the role cannot view).
         IReadOnlyCollection<long>? onlyRowIds = null;
+        FilterGroup? roleFilter = null;
+        long? restrictToCreatedBy = null;
+
         if (_enforcer is not null)
         {
             var access = await _enforcer.GetTableAccessAsync(parent, parentFields, ct);
-            onlyRowIds = await Records.ViewableRowIds.ResolveAsync(
-                access, parent, parentFields, _recordRepo, _relationalProjector, _formulaProjector, ct);
-            if (onlyRowIds is { Count: 0 }) return new GetParentOptionsResult(headers, []);
+            if (!access.CanView) return new GetParentOptionsResult(headers, []);
+
+            if (!access.Unrestricted)
+            {
+                var formulaFids = parentFields
+                    .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
+                    .Select(f => (long)f.Fid!.Value)
+                    .ToHashSet();
+                var (physical, formula) = FormulaFilterSorter.SplitFilterTree(access.ViewFilter, formulaFids);
+
+                // If role filter contains NO formula conditions, pass roleFilter directly to SQL!
+                // Eliminates loading up to 50,000 entities and passing OPENJSON!
+                if (formula is null)
+                {
+                    roleFilter = physical;
+                    restrictToCreatedBy = access.RestrictToCreatedBy;
+                }
+                else
+                {
+                    // Fall back to ViewableRowIds for formula rules
+                    onlyRowIds = await Records.ViewableRowIds.ResolveAsync(
+                        access, parent, parentFields, _recordRepo, _relationalProjector, _formulaProjector, ct);
+                    if (onlyRowIds is { Count: 0 }) return new GetParentOptionsResult(headers, []);
+                }
+            }
         }
 
         var hasComputed = labelFields.Any(IsComputedLabel) || (primaryLabelField is not null && IsComputedLabel(primaryLabelField));
+        IReadOnlyList<ReferenceOption> options;
+
         if (!hasComputed)
         {
-            var plain = await _recordRepo.SearchForReferenceAsync(
-                parent, labelFields, search, effectiveTake, primaryLabelField, ct, filters, onlyRowIds);
-            return new GetParentOptionsResult(headers, plain);
+            options = await _recordRepo.SearchForReferenceAsync(
+                parent, labelFields, search, effectiveTake, primaryLabelField, ct, filters, onlyRowIds,
+                roleFilter: roleFilter, restrictToCreatedBy: restrictToCreatedBy, timeoutSeconds: 30, allParentFields: parentFields);
+        }
+        else
+        {
+            // A computed label (Formula/Lookup/Summary) has no SQL column, so it can't be searched in
+            // SQL: fetch the (capped) page unfiltered, compute the labels, then filter in memory.
+            var hasSearch = !string.IsNullOrWhiteSpace(search);
+            options = await _recordRepo.SearchForReferenceAsync(
+                parent, labelFields, null, hasSearch ? 200 : effectiveTake, primaryLabelField, ct, filters, onlyRowIds,
+                roleFilter: roleFilter, restrictToCreatedBy: restrictToCreatedBy, timeoutSeconds: 30, allParentFields: parentFields);
+            await FillComputedLabelsAsync(parent, parentFields, labelFields, primaryLabelField, options, ct);
+
+            if (hasSearch)
+            {
+                options = options
+                    .Where(o => new[] { o.Value1, o.Value2, o.Value3 }
+                        .Any(v => v is not null && v.Contains(search!, StringComparison.OrdinalIgnoreCase)))
+                    .Take(effectiveTake)
+                    .ToList();
+            }
         }
 
-        // A computed label (Formula/Lookup/Summary) has no SQL column, so it can't be searched in
-        // SQL: fetch the (capped) page unfiltered, compute the labels, then filter in memory.
-        var hasSearch = !string.IsNullOrWhiteSpace(search);
-        var options = await _recordRepo.SearchForReferenceAsync(
-            parent, labelFields, null, hasSearch ? 200 : effectiveTake, primaryLabelField, ct, filters, onlyRowIds);
-        await FillComputedLabelsAsync(parent, parentFields, labelFields, primaryLabelField, options, ct);
-
-        if (hasSearch)
+        // If a previously selected record is outside the current page, resolve it securely:
+        if (!string.IsNullOrWhiteSpace(selectedRecordId) && !options.Any(o => string.Equals(o.Id, selectedRecordId, StringComparison.OrdinalIgnoreCase)))
         {
-            options = options
-                .Where(o => new[] { o.Value1, o.Value2, o.Value3 }
-                    .Any(v => v is not null && v.Contains(search!, StringComparison.OrdinalIgnoreCase)))
-                .Take(effectiveTake)
-                .ToList();
+            var selectedOption = await ResolveSelectedRecordOptionAsync(
+                parent, parentFields, labelFields, primaryLabelField, selectedRecordId, filters, onlyRowIds, roleFilter, restrictToCreatedBy, ct);
+            if (selectedOption != null)
+            {
+                options = new List<ReferenceOption> { selectedOption }.Concat(options).ToList();
+            }
         }
 
         return new GetParentOptionsResult(headers, options);
+    }
+
+    private async Task<ReferenceOption?> ResolveSelectedRecordOptionAsync(
+        AppTable parent, IReadOnlyList<AppField> parentFields, IReadOnlyList<AppField> labelFields,
+        AppField? primaryLabelField, string selectedRecordId,
+        IReadOnlyList<ReferenceFilterClause>? filters,
+        IReadOnlyCollection<long>? onlyRowIds,
+        FilterGroup? roleFilter,
+        long? restrictToCreatedBy,
+        CancellationToken ct)
+    {
+        if (onlyRowIds != null && long.TryParse(selectedRecordId, out var numId) && !onlyRowIds.Contains(numId))
+            return null;
+
+        var selectedClause = new List<ReferenceFilterClause>();
+        if (filters != null) selectedClause.AddRange(filters);
+
+        var idField = parentFields.FirstOrDefault(f => f.Fid == 3 || (f.IsSystem && f.TypeCode == "RecordId"));
+        if (idField != null)
+        {
+            selectedClause.Add(new ReferenceFilterClause(idField, null, null, null, selectedRecordId));
+        }
+
+        var results = await _recordRepo.SearchForReferenceAsync(
+            parent, labelFields, null, 1, primaryLabelField, ct, selectedClause, onlyRowIds,
+            roleFilter: roleFilter, restrictToCreatedBy: restrictToCreatedBy, timeoutSeconds: 30, allParentFields: parentFields);
+
+        var opt = results.FirstOrDefault(o => string.Equals(o.Id, selectedRecordId, StringComparison.OrdinalIgnoreCase));
+        if (opt != null && (labelFields.Any(IsComputedLabel) || (primaryLabelField != null && IsComputedLabel(primaryLabelField))))
+        {
+            await FillComputedLabelsAsync(parent, parentFields, labelFields, primaryLabelField, new[] { opt }, ct);
+        }
+        return opt;
     }
 
     /// <summary>

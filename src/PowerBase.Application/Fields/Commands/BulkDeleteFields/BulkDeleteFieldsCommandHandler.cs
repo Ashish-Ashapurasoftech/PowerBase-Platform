@@ -19,6 +19,8 @@ public class BulkDeleteFieldsCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IMessagePublisher? _publisher;
+    private readonly IQueryContext? _queryContext;
 
     public BulkDeleteFieldsCommandHandler(
         IAppTableRepository tableRepo,
@@ -28,8 +30,12 @@ public class BulkDeleteFieldsCommandHandler
         IAuditRepository auditRepo,
         ITenantUnitOfWork uow,
         IRelationshipRepository relRepo,
-        IFieldReferenceIndexer? refIndexer = null)
+        IFieldReferenceIndexer? refIndexer = null,
+        IMessagePublisher? publisher = null,
+        IQueryContext? queryContext = null)
     {
+        _publisher = publisher;
+        _queryContext = queryContext;
         _relRepo = relRepo;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
@@ -47,6 +53,11 @@ public class BulkDeleteFieldsCommandHandler
         // Fetch all fields in the table to match their FIDs and system status
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
         var fieldsToDelete = fields.Where(f => command.FieldPublicIds.Contains(f.PublicId) && !f.IsSystem).ToList();
+
+        // The columns these fields used in the search index, read now: once they are deleted the table no longer says.
+        var indexCleanup = _queryContext == null
+            ? []
+            : PowerBase.Application.Search.FieldDeleteIndexCleanup.Capture(_queryContext.TenantId, table, fields, fieldsToDelete);
 
         await RelationshipKeyFieldDeleteGuard.EnsureNotRelationshipKeyAsync(table, fieldsToDelete, _relRepo, ct);
         ReferenceFilterDependencyGuard.EnsureNotControlling(table, fields, fieldsToDelete);
@@ -134,6 +145,7 @@ public class BulkDeleteFieldsCommandHandler
                 appId: table.AppId,
                 ct: ct);
             await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
+            await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
 
             return;
         }
@@ -148,6 +160,7 @@ public class BulkDeleteFieldsCommandHandler
             appId: table.AppId,
             ct: ct);
         await RemoveDeletedFieldsAsync(command.FieldPublicIds, ct);
+        await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
     }
 
     private async Task RemoveDeletedFieldsAsync(IEnumerable<Guid> fieldPublicIds, CancellationToken ct)

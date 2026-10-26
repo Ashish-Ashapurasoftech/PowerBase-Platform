@@ -1,9 +1,11 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Pipelines;
 using PowerBase.Application.Records;
+using PowerBase.Application.Relationships;
 using PowerBase.Application.Reports;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
@@ -437,19 +439,60 @@ public class RunReportQueryHandler
         // SOLUTION 1: Fast Azure AI Search paged execution for large tables.
         // If grid search is enabled and sorting or filtering involves encrypted fields (which are indexed as plaintext in AI Search)
         // or user filters / quick search, execute the paging and sorting directly in Azure AI Search.
-        // This avoids calling ListAllMatchingAsync (which pulls millions of rows into .NET memory to decrypt/sort in RAM).
+        // Merge ViewFilter into effective filter for AI Search verification
+        FilterGroup? effectiveFilterTree = userFilterTree;
+        if (access.ViewFilter != null)
+        {
+            effectiveFilterTree = effectiveFilterTree == null
+                ? access.ViewFilter
+                : new FilterGroup
+                {
+                    Logic = "and",
+                    Nodes = [new FilterNode { Group = effectiveFilterTree }, new FilterNode { Group = access.ViewFilter }]
+                };
+        }
+
+        var canExpressEffectiveFilter = effectiveFilterTree == null || OData.ODataFilterBuilder.CanExpress(effectiveFilterTree, allFields);
+
+        // SOLUTION 1: Fast Azure AI Search paged execution for large tables.
+        // If grid search is enabled and sorting or filtering involves encrypted fields (which are indexed as plaintext in AI Search)
+        // or user filters / quick search, execute the paging and sorting directly in Azure AI Search.
+        // Security requirement: Role ViewFilter must be fully expressible in AI Search, and RestrictToCreatedBy must not be present
+        // (CreatedBy is not indexed in AI Search; queries with RestrictToCreatedBy execute via SQL).
         var shouldTryFastAiPaging = _searchService.IsGridSearchEnabled
             && hasSearchableFields
-            && canExpressUserFilter
+            && canExpressEffectiveFilter
             && canSortInSearch
-            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, computedFids)
-            && (userFilterTree != null || !string.IsNullOrWhiteSpace(quickSearch) || hasFormulaSorts || hasFormulaFilters || isAppEncrypted);
+            && !access.RestrictToCreatedBy.HasValue
+            && !FormulaFilterSorter.TreeContainsFormulaField(effectiveFilterTree, computedFids)
+            && (effectiveFilterTree != null || !string.IsNullOrWhiteSpace(quickSearch) || hasFormulaSorts || hasFormulaFilters || isAppEncrypted);
+
+        // Issue 2: Newly created rows indexing latency check.
+        // If there were records inserted/updated in the last 15 seconds in the database for this table,
+        // search indexing may still be catching up. Fall back to standard SQL pipeline to guarantee
+        // newly created child rows are immediately visible.
+        if (shouldTryFastAiPaging)
+        {
+            try
+            {
+                var recentChanged = await _recordRepo.ListRecordsChangedSinceAsync(
+                    table, DateTime.UtcNow.AddSeconds(-15), 0, long.MaxValue, 1, ct);
+                if (recentChanged.Count > 0)
+                {
+                    shouldTryFastAiPaging = false;
+                }
+            }
+            catch
+            {
+                // Proceed if recent check is unavailable
+            }
+        }
 
         if (shouldTryFastAiPaging && await _searchService.IsHealthyAsync(ct))
         {
             try
             {
-                var odata = userFilterTree != null ? OData.ODataFilterBuilder.Build(userFilterTree, allFields) : null;
+                var odata = effectiveFilterTree != null ? OData.ODataFilterBuilder.Build(effectiveFilterTree, allFields) : null;
                 var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields)
                     ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id)
                     : null;
@@ -465,15 +508,20 @@ public class RunReportQueryHandler
                 // Fetch ONLY the requested page rows from SQL (e.g. 25 rows)
                 var pagedRows = await _recordRepo.ListByPublicIdsAsync(table, allFields, pagedIds, ct);
 
-                // If role ViewFilter or RestrictToCreatedBy applies, verify candidate page
+                // If role ViewFilter or RestrictToCreatedBy applies, verify candidate page (defense in depth)
                 if (access.RestrictToCreatedBy.HasValue)
                 {
-                    pagedRows = pagedRows.Where(r => r.TryGetValue("CreatedBy", out var cb) && cb is long lcb && lcb == access.RestrictToCreatedBy.Value).ToList();
+                    pagedRows = pagedRows.Where(r => r.TryGetValue("CreatedBy", out var cb) && cb != null && Convert.ToInt64(cb, CultureInfo.InvariantCulture) == access.RestrictToCreatedBy.Value).ToList();
                 }
                 if (access.ViewFilter != null)
                 {
-                    var valuesLookup = pagedRows.Select(r => (Row: r, Map: (IReadOnlyDictionary<long, object?>)r.Where(kv => long.TryParse(kv.Key, out _)).ToDictionary(kv => long.Parse(kv.Key), kv => kv.Value))).ToList();
+                    var valuesLookup = pagedRows.Select(r => (Row: r, Map: ExtractFieldValuesByFid(r, allFields))).ToList();
                     pagedRows = valuesLookup.Where(v => PipelineFilterEvaluator.EvaluateFilterGroup(access.ViewFilter, v.Map, allFields)).Select(v => v.Row).ToList();
+                }
+
+                if (pagedRows.Count == 0 && totalMatches > 0 && access.ViewFilter != null)
+                {
+                    throw new InvalidOperationException("Fast AI Search returned candidates that failed post-retrieval role authorization; falling back to SQL.");
                 }
 
                 var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, pagedRows,
@@ -482,6 +530,10 @@ public class RunReportQueryHandler
                 var userNames = await ResolveUserNamesAsync(pagedRows, allFields, _userRepo, ct, computed);
                 var itemsFast = pagedRows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
                 var totalFast = (int)Math.Min(totalMatches, int.MaxValue);
+                if (page == 1 && pagedRows.Count < pageSize && totalFast > pagedRows.Count)
+                {
+                    totalFast = pagedRows.Count;
+                }
 
                 var totalsFast = new Dictionary<string, ColumnTotal>();
                 var totalColsFast = definition.HideTotals || isMaskedPreview
@@ -1867,5 +1919,109 @@ public class RunReportQueryHandler
         }
 
         return await userRepo.GetPublicIdsByIdsAsync(ids, ct);
+    }
+
+    /// <summary>
+    /// Extracts field values from a row dictionary where keys can be physical column names (e.g. "f_103", "Id", "CreatedBy"),
+    /// numeric strings ("103"), or "fid_103", and maps them by both Fid (long) and Field Id (long) for PipelineFilterEvaluator.
+    /// Handles null values, DBNull, dates, and unexpected formats safely.
+    /// </summary>
+    public static IReadOnlyDictionary<long, object?> ExtractFieldValuesByFid(
+        IReadOnlyDictionary<string, object?> row,
+        IReadOnlyList<AppField> fields)
+    {
+        var map = new Dictionary<long, object?>();
+        if (row == null || row.Count == 0) return map;
+
+        // 1. Map fields from the table's field list
+        foreach (var field in fields)
+        {
+            var fid = field.Fid.HasValue ? (long)field.Fid.Value : (long?)null;
+            var id = field.Id;
+
+            object? val = null;
+            bool found = false;
+
+            // Physical column name: e.g. "f_103", "CreatedOn", "CreatedBy", "Id", etc.
+            var colName = EncryptedRowFilter.Column(field);
+            if (row.TryGetValue(colName, out val))
+            {
+                found = true;
+            }
+            else if (fid.HasValue && row.TryGetValue(PhysicalNaming.ColumnName((int)fid.Value), out val))
+            {
+                found = true;
+            }
+            else if (fid.HasValue && row.TryGetValue(fid.Value.ToString(CultureInfo.InvariantCulture), out val))
+            {
+                found = true;
+            }
+            else if (row.TryGetValue(id.ToString(CultureInfo.InvariantCulture), out val))
+            {
+                found = true;
+            }
+            else if (!string.IsNullOrWhiteSpace(field.Name) && row.TryGetValue(field.Name, out val))
+            {
+                found = true;
+            }
+            else if (fid.HasValue && row.TryGetValue($"fid_{fid.Value}", out val))
+            {
+                found = true;
+            }
+
+            if (found)
+            {
+                if (val is DBNull) val = null;
+                if (val is DateTime dt) val = dt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture);
+
+                if (fid.HasValue) map[fid.Value] = val;
+                map[id] = val;
+            }
+        }
+
+        // 2. Map standard system fields if present in row
+        if (row.TryGetValue("Id", out var idVal) && idVal is not DBNull)
+        {
+            map[3] = idVal; // FID 3 is Id / RecordId
+        }
+        if (row.TryGetValue("CreatedOn", out var createdOnVal) && createdOnVal is not DBNull)
+        {
+            map[1] = createdOnVal is DateTime dt ? dt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture) : createdOnVal;
+        }
+        if (row.TryGetValue("ModifiedOn", out var modOnVal) && modOnVal is not DBNull)
+        {
+            map[2] = modOnVal is DateTime dt ? dt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture) : modOnVal;
+        }
+        if (row.TryGetValue("CreatedBy", out var createdByVal) && createdByVal is not DBNull)
+        {
+            map[4] = createdByVal;
+        }
+        if (row.TryGetValue("ModifiedBy", out var modByVal) && modByVal is not DBNull)
+        {
+            map[5] = modByVal;
+        }
+
+        // 3. Scan row for any unmapped keys like "f_103", "fid_103", or numeric strings
+        foreach (var kv in row)
+        {
+            var key = kv.Key;
+            var val = kv.Value is DBNull ? null : kv.Value;
+            if (val is DateTime dt) val = dt.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture);
+
+            if (key.StartsWith("f_", StringComparison.OrdinalIgnoreCase) && long.TryParse(key.AsSpan(2), NumberStyles.Integer, CultureInfo.InvariantCulture, out var fNum))
+            {
+                map.TryAdd(fNum, val);
+            }
+            else if (key.StartsWith("fid_", StringComparison.OrdinalIgnoreCase) && long.TryParse(key.AsSpan(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out var fidNum))
+            {
+                map.TryAdd(fidNum, val);
+            }
+            else if (long.TryParse(key, NumberStyles.Integer, CultureInfo.InvariantCulture, out var directNum))
+            {
+                map.TryAdd(directNum, val);
+            }
+        }
+
+        return map;
     }
 }

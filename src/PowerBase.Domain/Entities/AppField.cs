@@ -32,6 +32,12 @@ public class AppField
     public bool IsAutoFill { get; set; }
     /// <summary>Helper field (e.g. a relationship's "(original)" copy) kept out of every user-facing field list.</summary>
     public bool IsHidden { get; set; }
+    /// <summary>The Azure AI Search column this field's value is stored in (e.g. "num_03"). Assigned once, never recomputed, so adding, removing or
+    /// switching other fields never moves it. Null until the field is search-eligible and has been allocated one.</summary>
+    public string? SearchSlot { get; set; }
+    /// <summary>For a range field (NumericRange/DateRange): the column holding its second value. Null for every other field.
+    /// "f_…" values (in SearchSlot and here) mean the table is wide and keeps one column per field in its own index.</summary>
+    public string? SearchSlotEnd { get; set; }
     public int? Fid { get; set; }
     public string? Settings { get; set; }
     public bool IsDeleted { get; set; }

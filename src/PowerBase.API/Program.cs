@@ -119,7 +119,17 @@ using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Host.UseSerilog((ctx, cfg) => cfg.ReadFrom.Configuration(ctx.Configuration));
+builder.Host.UseSerilog((ctx, cfg) =>
+{
+    // Console comes from configuration ("Serilog:WriteTo"). Application Insights is added only when a connection
+    // string is supplied (setting "ApplicationInsights:ConnectionString" or the standard APPLICATIONINSIGHTS_CONNECTION_STRING),
+    // so worker errors, dead-letters and indexing failures reach a place someone can query.
+    cfg.ReadFrom.Configuration(ctx.Configuration);
+    var appInsightsConnection = ctx.Configuration["ApplicationInsights:ConnectionString"]
+        ?? ctx.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
+    if (!string.IsNullOrWhiteSpace(appInsightsConnection) && !appInsightsConnection.StartsWith("<"))
+        cfg.WriteTo.ApplicationInsights(appInsightsConnection, new Serilog.Sinks.ApplicationInsights.TelemetryConverters.TraceTelemetryConverter());
+});
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 
@@ -368,6 +378,7 @@ builder.Services.AddScoped<IAppFieldRepository, AppFieldRepository>();
 builder.Services.AddScoped<IFieldVersionRepository, FieldVersionRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
+builder.Services.AddScoped<ISearchOutbox, SearchOutboxRepository>();
 
 // Import (Table-to-Table / file) — see PowerBase.Application/Imports
 builder.Services.AddScoped<PowerBase.Application.Imports.IImportDefinitionRepository, PowerBase.Infrastructure.Imports.ImportDefinitionRepository>();
@@ -689,6 +700,11 @@ if (builder.Configuration.GetValue<bool>("Search:Indexer:Enabled", true))
     builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerPriorityWorker>();
 }
 
+// Makes sure no record change is lost on the way to the search index: re-publishes changes the indexer has not confirmed, and checks daily.
+builder.Services.AddSingleton<PowerBase.Infrastructure.Services.SearchPipelineState>();
+builder.Services.AddHostedService<PowerBase.API.Workers.SearchOutboxRelay>();
+builder.Services.AddHealthChecks().AddCheck<PowerBase.API.Services.SearchPipelineHealthCheck>("search-pipeline");
+
 // Connected Tables: a standalone module (its own services, read-only write filter and workers).
 PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesModule(builder.Services, builder.Configuration);
 
@@ -723,6 +739,19 @@ app.UseStaticFiles(new StaticFileOptions
 app.UseMiddleware<QueryContextMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.MapControllers();
+// Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
+// or Azure Monitor availability test at it.
+app.MapHealthChecks("/health/search", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Name == "search-pipeline",
+    ResponseWriter = PowerBase.API.Services.SearchPipelineHealthCheck.WriteResponseAsync,
+    ResultStatusCodes =
+    {
+        [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Healthy] = StatusCodes.Status200OK,
+        [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Degraded] = StatusCodes.Status200OK,
+        [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable
+    }
+});
 
 app.Run();
 

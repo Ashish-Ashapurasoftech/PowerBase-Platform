@@ -62,7 +62,8 @@ public sealed class ReferenceRelinkService(
     IMessagePublisher publisher,
     IQueryContext queryContext,
     IReferenceRelinkQueue queue,
-    ILogger<ReferenceRelinkService> logger) : IReferenceRelinkService
+    ILogger<ReferenceRelinkService> logger,
+    ISearchOutbox? outbox = null) : IReferenceRelinkService
 {
     /// <summary>Parent records whose key is read per query: well under SQL Server's 2,100 parameters per statement.</summary>
     private const int ReadBatchSize = 1000;
@@ -197,7 +198,7 @@ public sealed class ReferenceRelinkService(
         await audit.LogActivitiesAsync(
             AuditActions.Updated, AuditEntityTypes.Record, changed.Select(c => c.PublicId.ToString()).ToList(),
             $"Record linked to {parent.Name} through its unmatched {Label(target.Reference)} value", target.Child.AppId, transaction: null, ct);
-        PublishIndexUpdates(target, changed);
+        await PublishIndexUpdatesAsync(target, changed, ct);
         return changed.Count;
     }
 
@@ -215,7 +216,7 @@ public sealed class ReferenceRelinkService(
     private static void Add<TKey>(Dictionary<TKey, long?> map, TKey key, long id) where TKey : notnull
         => map[key] = map.TryGetValue(key, out var seen) && seen != id ? null : id;
 
-    private void PublishIndexUpdates(Target target, IReadOnlyList<(Guid PublicId, long ParentId)> changed)
+    private async Task PublishIndexUpdatesAsync(Target target, IReadOnlyList<(Guid PublicId, long ParentId)> changed, CancellationToken ct)
     {
         var indexesReference = target.Reference.IsSearchable || target.Reference.IsFilterable;
         var indexesOriginal = target.Original.IsSearchable || target.Original.IsFilterable;
@@ -224,7 +225,7 @@ public sealed class ReferenceRelinkService(
         var messages = changed.Select(c =>
         {
             var payload = new Dictionary<string, object?>();
-            if (indexesReference) payload[target.Reference.Fid!.Value.ToString()] = target.Reference.IsSearchable ? c.ParentId : null;
+            if (indexesReference) payload[target.Reference.Fid!.Value.ToString()] = c.ParentId;
             if (indexesOriginal) payload[target.Original.Fid!.Value.ToString()] = null;
             return new SearchIndexMessage
             {
@@ -236,6 +237,9 @@ public sealed class ReferenceRelinkService(
                 Payload = payload,
             };
         }).ToList();
+        // The links are already saved (separate transaction), so the change is recorded right after; the outbox then keeps the index
+        // catching up from depending on this one publish.
+        if (outbox != null) await outbox.AddAsync(messages, null, ct);
         // Like every other write path: the search index catching up is not a condition of the data change.
         _ = publisher.PublishBatchAsync(messages, default);
     }

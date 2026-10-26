@@ -167,27 +167,16 @@ public class RestoreFieldVersionCommandHandler
         if (isEligible != wasEligible && existing.Fid.HasValue)
         {
             var isNullify = !isEligible;
-            var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
-            var isWide = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields);
-            var targetIndex = isWide ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id) : null;
-            var slotMap = PowerBase.Application.Search.SearchSlotResolver.BuildSlotMap(allFields);
+            var plan = await PowerBase.Application.Search.FieldSlotSync.PlanAsync(_fieldRepo, table.Id, existing.Fid.Value, isNullify, ct);
 
             var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, existing.Fid.Value, isNullify, page: 1, pageSize: 500, ct);
 
-            if (docs.Count > 0)
+            if (docs.Count > 0 && plan.HasTarget)
             {
-                var slottedDocs = docs.Select(d =>
-                {
-                    var slotVals = new Dictionary<string, object?>();
-                    if (slotMap.TryGetValue(existing.Fid.Value, out var slotName) && d.Values.TryGetValue(existing.Fid.Value, out var val))
-                    {
-                        slotVals[slotName] = isNullify ? null : val;
-                    }
-                    return new SearchIndexDocument(d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, slotVals, targetIndex);
-                }).ToList();
-
-                await _searchService.BulkIndexRecordsAsync(slottedDocs, ct);
+                await _searchService.BulkIndexRecordsAsync(PowerBase.Application.Search.FieldSlotSync.ToDocuments(docs, plan), ct);
             }
+
+            await PowerBase.Application.Search.SearchWideMigration.StartIfNeededAsync(_fieldRepo, _messagePublisher, _searchService, _queryContext.TenantId, table.AppId, table.Id, ct);
 
             var action = isEligible ? PowerBase.Application.Common.Models.IndexAction.BackfillField : PowerBase.Application.Common.Models.IndexAction.NullifyField;
             var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
