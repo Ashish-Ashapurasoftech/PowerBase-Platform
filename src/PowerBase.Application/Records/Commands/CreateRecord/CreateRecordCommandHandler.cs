@@ -190,7 +190,7 @@ public class CreateRecordCommandHandler
 
         if (indexMessage != null)
         {
-            _ = _messagePublisher.PublishAsync(indexMessage, default).ContinueWith(
+            _ = _messagePublisher.PublishPriorityAsync(indexMessage, default).ContinueWith(
                 t => { /* Observed fire-and-forget: failure logged if faulted */ },
                 TaskContinuationOptions.OnlyOnFaulted);
         }
