@@ -42,6 +42,10 @@ public class PagedReportRunResult
     public IReadOnlyDictionary<string, ColumnTotal> Totals { get; init; } = new Dictionary<string, ColumnTotal>();
 }
 
+/// <summary>See <see cref="RunReportQueryHandler.ResolveDeleteScopeAsync"/>.</summary>
+public sealed record ReportDeleteScope(
+    AppTable Table, IReadOnlyList<AppField> Fields, TableAccessContext Access, FilterGroup? FilterTree, long? RestrictToCreatedBy);
+
 public class RunReportQueryHandler
 {
     private readonly IReportRepository _reportRepo;
@@ -145,38 +149,9 @@ public class RunReportQueryHandler
         // was narrowed after the client loaded it.
         var effectiveRuntimeFilters = FilterRuntimeFiltersByDynamicFilterConfig(definition, query.RuntimeFilters);
 
-        // Resolve filter tree — support legacy flat Filters list
-        var filterTree = definition.FilterTree;
-        if (filterTree == null && definition.Filters.Count > 0)
-        {
-            filterTree = new FilterGroup
-            {
-                Logic = "and",
-                Nodes = definition.Filters.Select(f => new FilterNode
-                {
-                    Condition = new FilterCondition { FieldId = f.FieldId, Operator = f.Operator, Value = f.Value }
-                }).ToList()
-            };
-        }
-
-        // "<ask the user>" answers are substituted directly into the saved tree's own leaf
-        // positions FIRST — before the User/Date resolvers below, so an answer that's itself a
-        // picked user's Guid or a relative date tier gets picked up by them exactly like any other
-        // literal value. Preserves the saved tree's exact AND/OR structure (see
-        // ResolveAskAnswers's doc comment for why this can't be a separate AND'd-on-top group).
-        filterTree = ResolveAskAnswers(filterTree, query.AskAnswers, []);
-
-        // "is the current user" AND literal User/MultiUser picker values both need resolving to
-        // the plain long core.[User].Id the column actually stores before this tree reaches the
-        // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
-        var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
-        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId);
-
-        // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
-        // future) must resolve to an actual date freshly EVERY time the report runs, not once at
-        // save time — so this can't be done client-side when the filter is saved. See
-        // ResolveDateValueModeConditions's doc comment for the "today" anchor caveat.
-        filterTree = ResolveDateValueModeConditions(filterTree);
+        // The report's saved filter tree with the runtime (Advanced builder / per-column) filter tree AND'd on top,
+        // every "ask the user" answer, User-field and relative-date value already resolved.
+        var filterTree = await BuildFilterTreeAsync(definition, query, table, allFields, ct);
 
         // Table reports: TableSortGroup (Phase 1's unified Sort+Group list) supersedes the legacy
         // single-field GroupByFieldId + SortFields when non-empty — derive both the sort order
@@ -220,6 +195,52 @@ public class RunReportQueryHandler
             }
         }
 
+        if (report.ReportType is "Summary" or "Chart")
+            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
+
+        return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
+            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
+    }
+
+    /// <summary>Saved filter tree (legacy flat Filters list supported) with the runtime filter tree AND'd on top; the
+    /// "ask the user" answers, User-field and relative-date values are resolved. Role ViewFilter, dynamic and quick-search
+    /// filters are merged in by the caller.</summary>
+    private async Task<FilterGroup?> BuildFilterTreeAsync(
+        ReportDefinition definition, RunReportQuery query, AppTable table, IReadOnlyList<AppField> allFields, CancellationToken ct)
+    {
+        // Resolve filter tree — support legacy flat Filters list
+        var filterTree = definition.FilterTree;
+        if (filterTree == null && definition.Filters.Count > 0)
+        {
+            filterTree = new FilterGroup
+            {
+                Logic = "and",
+                Nodes = definition.Filters.Select(f => new FilterNode
+                {
+                    Condition = new FilterCondition { FieldId = f.FieldId, Operator = f.Operator, Value = f.Value }
+                }).ToList()
+            };
+        }
+
+        // "<ask the user>" answers are substituted directly into the saved tree's own leaf
+        // positions FIRST — before the User/Date resolvers below, so an answer that's itself a
+        // picked user's Guid or a relative date tier gets picked up by them exactly like any other
+        // literal value. Preserves the saved tree's exact AND/OR structure (see
+        // ResolveAskAnswers's doc comment for why this can't be a separate AND'd-on-top group).
+        filterTree = ResolveAskAnswers(filterTree, query.AskAnswers, []);
+
+        // "is the current user" AND literal User/MultiUser picker values both need resolving to
+        // the plain long core.[User].Id the column actually stores before this tree reaches the
+        // SQL builder — see ResolveUserFieldValuesAsync's doc comment for the full reasoning.
+        var userFieldLookup = allFields.Where(f => f.Fid.HasValue).ToDictionary(f => (long)f.Fid!.Value);
+        filterTree = await ResolveUserFieldValuesAsync(filterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId, _queryContext.UserEmail, _queryContext.UserName);
+
+        // Date fields' relative value-mode tiers (today/yesterday/tomorrow/N days in the past or
+        // future) must resolve to an actual date freshly EVERY time the report runs, not once at
+        // save time — so this can't be done client-side when the filter is saved. See
+        // ResolveDateValueModeConditions's doc comment for the "today" anchor caveat.
+        filterTree = ResolveDateValueModeConditions(filterTree);
+
         // Runtime filter tree (Advanced builder / per-column filters / the "ask the user"
         // prompt's answers — see table-report-view.component.ts's buildRuntimeFilterTree()),
         // AND'd on top of the saved tree — role ViewFilter and dynamic/quick-search filters are
@@ -236,18 +257,57 @@ public class RunReportQueryHandler
         // against the same now-correct data — saved matches, ask doesn't, until this runs).
         if (query.RuntimeFilterTree is { Nodes.Count: > 0 })
         {
-            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId);
+            var resolvedRuntimeTree = await ResolveUserFieldValuesAsync(query.RuntimeFilterTree, userFieldLookup, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct, _appUserRepo, table.AppId, _queryContext.UserEmail, _queryContext.UserName);
             resolvedRuntimeTree = ResolveDateValueModeConditions(resolvedRuntimeTree);
             filterTree = filterTree == null
                 ? resolvedRuntimeTree
                 : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = filterTree }, new FilterNode { Group = resolvedRuntimeTree }] };
         }
 
-        if (report.ReportType is "Summary" or "Chart")
-            return await RunSummaryAsync(table, allFields, access, definition, page, pageSize, query.QuickSearch, effectiveRuntimeFilters, filterTree, isMaskedPreview, ct);
+        return filterTree;
+    }
 
-        return await RunTableAsync(table, allFields, access, definition, page, pageSize, filterTree, sortFields,
-            effectiveRuntimeFilters, query.QuickSearch, query.QuickSearchFieldIds, query.QuickSearchExact, isMaskedPreview, isAppEncrypted, ct);
+    /// <summary>What a background "Delete these records" job needs to walk the report's matches by Id with plain SQL:
+    /// the report's filters plus the role's View and Modify rules as ONE SQL filter tree. Null when the report can't
+    /// be answered that way (not a Table report, quick search, a filter on a computed/encrypted field, a role rule on a
+    /// computed field) — the caller then falls back to running the report page by page.</summary>
+    public async Task<ReportDeleteScope?> ResolveDeleteScopeAsync(RunReportQuery query, CancellationToken ct = default)
+    {
+        var report = await _reportRepo.GetVisibleReportAsync(query.ReportPublicId, ct)
+            ?? throw new NotFoundException("Report", query.ReportPublicId);
+        if (report.ReportType != "Table" || !string.IsNullOrWhiteSpace(query.QuickSearch)) return null;
+
+        var table = await _tableRepo.GetByIdAsync(report.AppTableId, ct);
+        var app = _appRepo != null ? await _appRepo.GetByIdAsync(table.AppId, ct) : null;
+        var isAppEncrypted = app?.IsEncrypted ?? false;
+        var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+        var access = await _enforcer.GetTableAccessAsync(table, allFields, ct);
+        if (!access.CanView) return null;
+
+        var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+        var runtimeFilters = FilterRuntimeFiltersByDynamicFilterConfig(definition, query.RuntimeFilters);
+        var tree = await BuildFilterTreeAsync(definition, query, table, allFields, ct);
+        tree = MergeRuntimeFilters(tree, allFields, runtimeFilters);
+
+        FilterGroup? And(FilterGroup? left, FilterGroup? right) =>
+            left == null ? right
+            : right == null ? left
+            : new FilterGroup { Logic = "and", Nodes = [new FilterNode { Group = left }, new FilterNode { Group = right }] };
+
+        // Same rules RecordModifyGuard enforces on a delete: View rules AND Modify rules.
+        tree = And(tree, access.ViewFilter);
+        if (!access.Unrestricted) tree = And(tree, access.ModifyFilter);
+
+        var formulaFids = allFields
+            .Where(f => (f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings)) ||
+                        (f.Fid.HasValue && Relationships.EncryptedRowFilter.IsEncrypted(f, isAppEncrypted)))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
+        if (FormulaFilterSorter.TreeContainsFormulaField(tree, formulaFids)) return null;
+
+        var restrictToCreatedBy = access.RestrictToCreatedBy
+            ?? (!access.Unrestricted && access.ModifyScope == Domain.Constants.RecordScopes.OwnRecords ? _queryContext.UserId : null);
+        return new ReportDeleteScope(table, allFields, access, tree, restrictToCreatedBy);
     }
 
     private async Task<PagedReportRunResult> RunTableAsync(
@@ -360,6 +420,12 @@ public class RunReportQueryHandler
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
+        // Computed fields only (no encrypted ones): they are not stored, so the AI Search index cannot filter on them.
+        var computedFids = allFields
+            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
+
         var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, formulaFids);
         var hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
 
@@ -376,6 +442,7 @@ public class RunReportQueryHandler
             && hasSearchableFields
             && canExpressUserFilter
             && canSortInSearch
+            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, computedFids)
             && (userFilterTree != null || !string.IsNullOrWhiteSpace(quickSearch) || hasFormulaSorts || hasFormulaFilters || isAppEncrypted);
 
         if (shouldTryFastAiPaging && await _searchService.IsHealthyAsync(ct))
@@ -484,6 +551,7 @@ public class RunReportQueryHandler
                 }
             }
 
+
             if (!aiSearchSucceeded)
             {
                 // Standard SQL LIKE fallback (used when AI Search is disabled, unhealthy, or returns 0 matches).
@@ -518,8 +586,12 @@ public class RunReportQueryHandler
         // Fallback: If Fast AI Search could not be used (e.g. sorting by an in-memory formula),
         // but user filter can be expressed in AI search, pre-filter IDs (capped at AiSearchMaxResults)
         // so that SQL only pulls matching rows.
+        // A computed field (Formula / Lookup / Summary) has no stored value, so the search index holds nothing for
+        // it: routing a condition on one through AI Search matches no record at all. Such a tree runs through the
+        // SQL + in-memory path below instead, which evaluates the formula.
         if (_searchService.IsGridSearchEnabled && userFilterTree != null && hasSearchableFields
-            && OData.ODataFilterBuilder.CanExpress(userFilterTree, allFields))
+            && OData.ODataFilterBuilder.CanExpress(userFilterTree, allFields)
+            && !FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, computedFids))
         {
             var odata = OData.ODataFilterBuilder.Build(userFilterTree, allFields);
             if (!string.IsNullOrWhiteSpace(odata))
@@ -1025,7 +1097,8 @@ public class RunReportQueryHandler
     public static async Task<FilterGroup?> ResolveUserFieldValuesAsync(
         FilterGroup? group, IReadOnlyDictionary<long, AppField> fieldLookup, long currentUserId,
         Dictionary<Guid, long> guidCache, IUserRepository userRepo, CancellationToken ct,
-        IAppUserRepository? appUserRepo = null, long appId = 0)
+        IAppUserRepository? appUserRepo = null, long appId = 0,
+        string? currentUserEmail = null, string? currentUserName = null)
     {
         if (group is null) return null;
         var nodes = new List<FilterNode>();
@@ -1034,7 +1107,31 @@ public class RunReportQueryHandler
             FilterCondition? newCondition = n.Condition;
             if (n.Condition is { } cond)
             {
-                if (string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase))
+                var hasIdentity = !string.IsNullOrWhiteSpace(currentUserEmail) || !string.IsNullOrWhiteSpace(currentUserName);
+                if (hasIdentity
+                    && string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase)
+                    && fieldLookup.TryGetValue(cond.FieldId, out var formulaUserField)
+                    && FormulaFilterSorter.EffectiveTypeCode(formulaUserField) is "Formula_User" or "Formula_ListUser")
+                {
+                    // A formula's user is whatever the formula builds: [Record Owner] gives the id, but ToUser([Name])
+                    // or ToUser([Email]) gives the text itself as the user's identity. Match the current user by id,
+                    // email or name so both kinds of formula work.
+                    var listOfUsers = FormulaFilterSorter.EffectiveTypeCode(formulaUserField) == "Formula_ListUser";
+                    var matchName = await IsNameUniqueInAppAsync(appUserRepo, appId, currentUserName, ct);
+                    nodes.Add(new FilterNode { Group = CurrentUserIdentityGroup(cond.FieldId, listOfUsers, false, currentUserId, currentUserEmail, matchName ? currentUserName : null) });
+                    continue;
+                }
+                else if (hasIdentity
+                    && string.Equals(cond.Operator, "isNotCurrentUser", StringComparison.OrdinalIgnoreCase)
+                    && fieldLookup.TryGetValue(cond.FieldId, out var formulaUserField2)
+                    && FormulaFilterSorter.EffectiveTypeCode(formulaUserField2) is "Formula_User" or "Formula_ListUser")
+                {
+                    var listOfUsers2 = FormulaFilterSorter.EffectiveTypeCode(formulaUserField2) == "Formula_ListUser";
+                    var matchName2 = await IsNameUniqueInAppAsync(appUserRepo, appId, currentUserName, ct);
+                    nodes.Add(new FilterNode { Group = CurrentUserIdentityGroup(cond.FieldId, listOfUsers2, true, currentUserId, currentUserEmail, matchName2 ? currentUserName : null) });
+                    continue;
+                }
+                else if (string.Equals(cond.Operator, "isCurrentUser", StringComparison.OrdinalIgnoreCase))
                 {
                     // On a list of users (MultiUser, Formula_ListUser) "is the current user" means the list contains
                     // them — an exact match would only ever find lists holding nobody else.
@@ -1087,10 +1184,57 @@ public class RunReportQueryHandler
             nodes.Add(new FilterNode
             {
                 Condition = newCondition,
-                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, userRepo, ct, appUserRepo, appId),
+                Group = await ResolveUserFieldValuesAsync(n.Group, fieldLookup, currentUserId, guidCache, userRepo, ct, appUserRepo, appId, currentUserEmail, currentUserName),
             });
         }
         return new FilterGroup { Logic = group.Logic, Nodes = nodes };
+    }
+
+    /// <summary>A display name identifies a user only when nobody else in the app shares it - otherwise matching a
+    /// formula's text against it would hand one user the records of another with the same name. Without the app's
+    /// user list to check against, a name is never trusted.</summary>
+    private static async Task<bool> IsNameUniqueInAppAsync(IAppUserRepository? appUserRepo, long appId, string? name, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(name) || appUserRepo is null || appId <= 0) return false;
+        var users = await appUserRepo.ListByAppIdAsync(appId, ct);
+        return users
+            .Where(u => string.Equals(u.UserName?.Trim(), name.Trim(), StringComparison.OrdinalIgnoreCase))
+            .Select(u => u.UserPublicId)
+            .Distinct()
+            .Count() <= 1;
+    }
+
+    /// <summary>"is the current user" (or, negated, "is not the current user") for a formula that yields a user. Its
+    /// value may be the user's id, email or - when it is unique in the app - name, so the field matches when it equals
+    /// ANY of those (a list of users: when it includes any of them). Negated: blank, or none of them.</summary>
+    public static FilterGroup CurrentUserIdentityGroup(
+        long fieldId, bool isUserList, bool negate, long currentUserId, string? email, string? name)
+    {
+        var identities = new[] { currentUserId.ToString(), email, name }
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var matches = identities.Select(v => new FilterNode
+        {
+            Condition = new FilterCondition { FieldId = fieldId, Operator = isUserList ? "includes" : "eq", Value = v },
+        }).ToList();
+
+        if (!negate) return new FilterGroup { Logic = "or", Nodes = matches };
+
+        var none = identities.Select(v => new FilterNode
+        {
+            Condition = new FilterCondition { FieldId = fieldId, Operator = isUserList ? "notIncludes" : "ne", Value = v },
+        }).ToList();
+        return new FilterGroup
+        {
+            Logic = "or",
+            Nodes =
+            [
+                new FilterNode { Condition = new FilterCondition { FieldId = fieldId, Operator = "isEmpty" } },
+                new FilterNode { Group = new FilterGroup { Logic = "and", Nodes = none } },
+            ],
+        };
     }
 
     /// <summary>"is not the current user": the field is blank, or (for a list of users) holds nobody but others /

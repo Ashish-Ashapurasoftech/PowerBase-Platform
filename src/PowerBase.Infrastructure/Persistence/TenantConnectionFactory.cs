@@ -40,6 +40,13 @@ public class TenantConnectionFactory : ITenantConnectionFactory
             }
         }
 
+        // An import (hundreds of CREATE/ALTERs) runs with a longer command timeout than a normal request.
+        if (PowerBase.Application.Import.Jobs.ImportRuntime.CommandTimeoutSeconds is { } seconds)
+        {
+            var builder = new SqlConnectionStringBuilder(_resolvedConnStr) { CommandTimeout = seconds };
+            return new SqlConnection(builder.ConnectionString);
+        }
+
         return new SqlConnection(_resolvedConnStr);
     }
 }

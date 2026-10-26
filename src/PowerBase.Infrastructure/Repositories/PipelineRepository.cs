@@ -2318,6 +2318,21 @@ public class PipelineRepository : TenantRepositoryBase, IPipelineRepository
         }
     }
 
+    public async Task<IReadOnlySet<Guid>> GetStagedSearchWorksetRecordsAsync(
+        Guid worksetId, IReadOnlyCollection<Guid> recordPublicIds, CancellationToken ct = default)
+    {
+        var staged = new HashSet<Guid>();
+        if (recordPublicIds.Count == 0) return staged;
+        const string sql = """
+            SELECT RecordPublicId FROM meta.PipelineBulkEventRecord
+            WHERE SearchWorksetId = @worksetId AND RecordPublicId IN @ids;
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        foreach (var ids in recordPublicIds.Chunk(2000))
+            staged.UnionWith(await connection.QueryAsync<Guid>(new CommandDefinition(sql, new { worksetId, ids }, cancellationToken: ct)));
+        return staged;
+    }
+
     public async Task CompleteSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default)
     {
         const string sql = """

@@ -178,7 +178,7 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             if (p.ViewScope != RecordScopes.AllRecords) continue;
 
             var stored = await _permRepo.GetRecordFilterAsync(p.AppRoleId, table.Id, ct);
-            var rules = await BuildRoleViewRulesAsync(stored, appUser, fields, ct);
+            var rules = await BuildRoleViewRulesAsync(stored, appUser, table.AppId, fields, ct);
             if (rules.Unrestricted) return (RecordScopes.AllRecords, null);
             if (rules.Filter is not null) grants.Add(rules.Filter);
         }
@@ -191,7 +191,7 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
     /// otherwise means the rules exist but cannot be used, so the role grants nothing.
     /// </summary>
     private async Task<(bool Unrestricted, FilterGroup? Filter)> BuildRoleViewRulesAsync(
-        AppRoleRecordFilter? stored, AppUser? appUser, IReadOnlyList<AppField> fields, CancellationToken ct)
+        AppRoleRecordFilter? stored, AppUser? appUser, long appId, IReadOnlyList<AppField> fields, CancellationToken ct)
     {
         if (stored is null || string.IsNullOrWhiteSpace(stored.FilterJson)) return (true, null);
 
@@ -200,7 +200,7 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             var parsed = RoleRecordFilterJson.ParseGroup(stored.FilterJson);
             if (parsed is null) return (false, null);
             if (RoleRecordFilterJson.CountConditions(parsed) == 0) return (true, null);
-            return (false, await BuildGroupFilterAsync(stored.FilterJson, fields, ct));
+            return (false, await BuildGroupFilterAsync(stored.FilterJson, appId, fields, ct));
         }
 
         List<RoleRecordFilterCondition>? conditions;
@@ -253,7 +253,7 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
             if (parsed is not null && RoleRecordFilterJson.CountConditions(parsed) == 0)
                 return (RecordScopes.AllRecords, null); // saved without a condition: no rules
 
-            var group = parsed is null ? null : await BuildGroupFilterAsync(stored.FilterJson, fields, ct);
+            var group = parsed is null ? null : await BuildGroupFilterAsync(stored.FilterJson, table.AppId, fields, ct);
             if (group is not null) grants.Add(group);
         }
 
@@ -306,7 +306,7 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
     /// everywhere. Conditions on fields that no longer exist are dropped, as in the legacy path.
     /// </summary>
     private async Task<FilterGroup?> BuildGroupFilterAsync(
-        string filterJson, IReadOnlyList<AppField> fields, CancellationToken ct)
+        string filterJson, long appId, IReadOnlyList<AppField> fields, CancellationToken ct)
     {
         var stored = RoleRecordFilterJson.ParseGroup(filterJson);
         if (stored is null) return null;
@@ -319,7 +319,9 @@ public class RolePermissionEnforcer : IRolePermissionEnforcer
 
         var resolved = RunReportQueryHandler.ResolveDateValueModeConditions(pruned);
         return await RunReportQueryHandler.ResolveUserFieldValuesAsync(
-            resolved, byFieldId, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct);
+            resolved, byFieldId, _queryContext.UserId, new Dictionary<Guid, long>(), _userRepo, ct,
+            appUserRepo: _appUserRepo, appId: appId,
+            currentUserEmail: _queryContext.UserEmail, currentUserName: _queryContext.UserName);
     }
 
     /// <summary>Drops unusable conditions ("ask the user" / parent-field tiers have no meaning for a

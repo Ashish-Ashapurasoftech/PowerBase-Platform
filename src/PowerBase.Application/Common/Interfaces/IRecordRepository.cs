@@ -31,6 +31,16 @@ public interface IRecordRepository
     /// (used by mass update to validate every record before writing anything).</summary>
     Task<IReadOnlyDictionary<Guid, long>> GetIdsByPublicIdsMapAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, CancellationToken ct = default);
 
+    /// <summary>Live records created or modified at or after <paramref name="sinceUtc"/> (the time they last changed: Date Modified,
+    /// else Date Created), with Id in (<paramref name="afterId"/>, <paramref name="maxRecordId"/>], at most <paramref name="take"/>,
+    /// ordered by Id — a keyset page. These are the records the search index may not have caught up with yet.</summary>
+    Task<IReadOnlyList<(long Id, DateTime ChangedOn)>> ListRecordsChangedSinceAsync(
+        AppTable table, DateTime sinceUtc, long afterId, long maxRecordId, int take, CancellationToken ct = default);
+
+    /// <summary>Which of <paramref name="recordIds"/> are live records created or modified at or after <paramref name="sinceUtc"/>.</summary>
+    Task<IReadOnlySet<long>> GetRecordIdsChangedSinceAsync(
+        AppTable table, IReadOnlyCollection<long> recordIds, DateTime sinceUtc, CancellationToken ct = default);
+
     /// <summary>Count non-deleted child records whose reference column (f_{referenceFid}) points at the parent row.</summary>
     Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default);
 
@@ -173,6 +183,22 @@ public interface IRecordRepository
         FilterGroup? filterTree = null,
         long? restrictToCreatedBy = null,
         CancellationToken ct = default);
+
+    /// <summary>Like <see cref="ListBatchAfterIdAsync"/> but returns only (Id, PublicId) — no field columns, no
+    /// decryption — so a background delete can walk millions of matching records cheaply. The filter must be
+    /// expressible in SQL (no computed or encrypted fields).</summary>
+    Task<IReadOnlyList<(long Id, Guid PublicId)>> ListIdsAfterIdAsync(
+        AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default);
+
+    /// <summary>Soft-deletes the given rows by internal Id in a single statement (the ids travel as one JSON
+    /// parameter, so there is no 2,100-parameter limit) and reports one search-index delete per record.</summary>
+    Task BulkDeleteByIdsAsync(
+        AppTable table, IReadOnlyList<(long Id, Guid PublicId)> rows,
+        System.Data.IDbTransaction? transaction = null, CancellationToken ct = default,
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
 
     Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
 

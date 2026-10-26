@@ -154,6 +154,14 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         WHERE Id = @tableId AND IsDeleted = 0
         """;
 
+    private const string SetDisplayFieldSql = """
+        UPDATE meta.AppTable
+        SET DisplayFieldId = @displayFieldId,
+            ModifiedOn = SYSUTCDATETIME(),
+            ModifiedBy = @modifiedBy
+        WHERE Id = @tableId AND IsDeleted = 0
+        """;
+
     private const string SetDefaultRecordPickerFieldsSql = """
         UPDATE meta.AppTable
         SET DefaultRecordPickerField1Id = @field1Id,
@@ -391,6 +399,13 @@ public class AppTableRepository : TenantRepositoryBase, IAppTableRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(SetKeyFieldSql, new { tableId, keyFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
+    }
+
+    public async Task SetDisplayFieldAsync(long tableId, long? displayFieldId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(
+            new CommandDefinition(SetDisplayFieldSql, new { tableId, displayFieldId, modifiedBy = QueryContext.UserId }, cancellationToken: ct));
     }
 
     public async Task SetDefaultRecordPickerFieldsAsync(long tableId, long? field1Id, long? field2Id, long? field3Id, CancellationToken ct = default)

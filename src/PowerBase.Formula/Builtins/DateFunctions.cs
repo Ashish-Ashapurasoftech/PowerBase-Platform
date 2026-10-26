@@ -65,7 +65,20 @@ internal static class DateFunctions
         r.Add(Fn.Exact("ToSeconds", FormulaType.Number, new[] { P.Duration }, (a, _) => DurNum(a[0], t => (decimal)t.TotalSeconds)));
         r.Add(Fn.Exact("ToWeeks", FormulaType.Number, new[] { P.Duration }, (a, _) => DurNum(a[0], t => (decimal)t.TotalDays / 7)));
 
-        r.Add(Fn.Exact("ToTimestamp", FormulaType.DateTime, new[] { P.Any }, (a, _) => ValueConvert.ToDateTimeValue(a[0])));
+        // ToTimestamp(value) converts; ToTimestamp(date, time) joins a date (or the date part of a timestamp) with a time of day.
+        r.Add(Fn.Range("ToTimestamp", FormulaType.DateTime, new[] { P.Any }, new[] { P.Time }, (a, _) => ToTimestamp(a)));
+
+        // ToTimeOfDay accepts a time, a timestamp (its time part) or text such as "11:30 AM" / "13:05".
+        r.Add(Fn.Exact("ToTimeOfDay", FormulaType.Time, new[] { P.Any }, (a, _) => ValueConvert.ToTimeValue(a[0])));
+    }
+
+    private static FormulaValue ToTimestamp(IReadOnlyList<FormulaValue> a)
+    {
+        if (a.Count == 1) return ValueConvert.ToDateTimeValue(a[0]);
+
+        var date = ValueConvert.ToDateValue(a[0]);
+        if (date.IsNull || a[1].IsNull) return FormulaValue.Null(FormulaType.DateTime);
+        return FormulaValue.DateTime(date.AsDate().ToDateTime(a[1].AsTime()));
     }
 
     private static readonly System.Globalization.DateTimeFormatInfo Inv = System.Globalization.CultureInfo.InvariantCulture.DateTimeFormat;

@@ -55,7 +55,7 @@ public class PipelineTriggersAndExternalActionsTests
         _emailService = Substitute.For<IEmailService>();
         _fileStorageService = Substitute.For<IFileStorageService>();
         _httpClientFactory = Substitute.For<IHttpClientFactory>();
-        _recordWriteService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<bool>())
+        _recordWriteService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(new Dictionary<long, object?>());
 
         _engine = new PipelineEngine(
@@ -1196,7 +1196,7 @@ public class PipelineTriggersAndExternalActionsTests
         var pipelineRepo = Substitute.For<IPipelineRepository>();
         var recordRepo = Substitute.For<IRecordRepository>();
         var writeService = Substitute.For<IRecordWriteService>();
-        writeService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<bool>())
+        writeService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(new Dictionary<long, object?>());
         var tableRepo = Substitute.For<IAppTableRepository>();
         var fieldRepo = Substitute.For<IAppFieldRepository>();
@@ -1260,7 +1260,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         // Verify writeService was called with suppressInterception = true
         await writeService.Received(1).ApplyAsync(
-            table, fields, Arg.Any<Guid>(), row, AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), dbTx, suppressInterception: true, existingRecord: existingRow);
+            table, fields, Arg.Any<Guid>(), row, AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), dbTx, suppressInterception: true, existingRecord: existingRow, onIndexMessageCreated: Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
 
         // Verify triggerInterceptor was called for bulk modified exactly once with UserId 1
         await triggerInterceptor.Received(1).InterceptBulkAsync(
@@ -1280,7 +1280,7 @@ public class PipelineTriggersAndExternalActionsTests
         var pipelineRepo = Substitute.For<IPipelineRepository>();
         var recordRepo = Substitute.For<IRecordRepository>();
         var writeService = Substitute.For<IRecordWriteService>();
-        writeService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<bool>())
+        writeService.ApplyAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(), Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>())
             .Returns(new Dictionary<long, object?>());
         var tableRepo = Substitute.For<IAppTableRepository>();
         var fieldRepo = Substitute.For<IAppFieldRepository>();
@@ -1328,7 +1328,7 @@ public class PipelineTriggersAndExternalActionsTests
 
         // Verify ApplyAsync was called with the active transaction
         await writeService.Received(1).ApplyAsync(
-            table, fields, triggerGuid, Arg.Is<IReadOnlyDictionary<long, object?>>(dict => dict[101] as string == "Completed"), AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), dbTx);
+            table, fields, triggerGuid, Arg.Is<IReadOnlyDictionary<long, object?>>(dict => dict[101] as string == "Completed"), AuditActions.Updated, Arg.Any<string>(), Arg.Any<CancellationToken>(), dbTx, Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>());
     }
 
     [Fact]

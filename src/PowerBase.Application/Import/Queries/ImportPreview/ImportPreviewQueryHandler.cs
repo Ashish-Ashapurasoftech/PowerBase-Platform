@@ -1,4 +1,6 @@
 using System.Text.Json;
+using PowerBase.Application.Common.Interfaces;
+using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.Pbl;
 using PowerBase.Application.Import.Qbl;
 using YamlDotNet.Core;
@@ -8,36 +10,60 @@ namespace PowerBase.Application.Import.Queries.ImportPreview;
 public class ImportPreviewQueryHandler
 {
     private readonly PblValidator _validator;
+    private readonly IAppRepository _appRepo;
 
-    public ImportPreviewQueryHandler(PblValidator validator)
+    public ImportPreviewQueryHandler(PblValidator validator, IAppRepository appRepo)
     {
         _validator = validator;
+        _appRepo = appRepo;
     }
 
-    public Task<ImportPreviewResult> HandleAsync(ImportPreviewQuery query, CancellationToken ct = default)
+    public async Task<ImportPreviewResult> HandleAsync(ImportPreviewQuery query, CancellationToken ct = default)
     {
-        PblDocument document;
-        List<PblIssue> conversionIssues;
+        IReadOnlyList<ParsedApp> parsed;
         try
         {
-            (document, conversionIssues) = ImportDocumentParser.Parse(query.PblJson);
+            parsed = ImportDocumentParser.ParseAll(query.PblJson);
         }
         catch (JsonException ex)
         {
-            return Task.FromResult(new ImportPreviewResult
-            {
-                IsValid = false,
-                Errors = [new PblIssueDto { Code = "INVALID_JSON", Message = $"Could not parse PBL document: {ex.Message}" }],
-            });
+            return FileError("INVALID_JSON", $"Could not parse PBL document: {ex.Message}");
         }
         catch (YamlException ex)
         {
-            return Task.FromResult(new ImportPreviewResult
+            return FileError("INVALID_YAML", $"Could not parse QBL document: {ex.Message}");
+        }
+
+        // Update works on exactly one application; nothing in the file is worth reviewing when it has several.
+        if (query.Mode == ImportMode.UpdateExistingApp && parsed.Count > 1)
+            return new ImportPreviewResult
             {
                 IsValid = false,
-                Errors = [new PblIssueDto { Code = "INVALID_YAML", Message = $"Could not parse QBL document: {ex.Message}" }],
-            });
-        }
+                AppCount = parsed.Count,
+                Errors = [new PblIssueDto { Code = ImportDocumentParser.MULTIPLE_APPS_NOT_ALLOWED_FOR_UPDATE, Message = ImportDocumentParser.MultipleAppsMessage(parsed) }],
+            };
+
+        var apps = new List<ImportPreviewAppItem>();
+        foreach (var app in parsed)
+            apps.Add(await BuildAppAsync(app, query.Mode, ct));
+
+        // Two applications in one file sharing a name cannot both be created.
+        foreach (var group in apps.Where(a => a.IsValid).GroupBy(a => a.AppName.Trim(), StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+            foreach (var dup in group.Skip(1))
+                dup.Warnings.Add(new PblIssueDto { Code = "APP_NAME_DUPLICATED_IN_FILE", Message = $"Another application in this file is also named '{dup.AppName}'. Rename one of them to import both.", ElementRef = dup.AppRef });
+
+        return new ImportPreviewResult
+        {
+            IsValid = apps.Any(a => a.IsValid),
+            AppCount = apps.Count,
+            Apps = apps,
+        };
+    }
+
+    private async Task<ImportPreviewAppItem> BuildAppAsync(ParsedApp parsed, ImportMode mode, CancellationToken ct)
+    {
+        var document = parsed.Document;
+        var conversionIssues = parsed.Issues;
 
         var validation = _validator.Validate(document);
         var isValid = validation.IsValid && conversionIssues.All(i => i.Severity != PblIssueSeverity.Error);
@@ -85,18 +111,36 @@ public class ImportPreviewQueryHandler
             TablePermissionCount = r.TablePermissions.Count,
         }).ToList();
 
-        return Task.FromResult(new ImportPreviewResult
+        var appName = document.App?.Name ?? string.Empty;
+        var nameExists = mode == ImportMode.CreateNewApp && isValid && !string.IsNullOrWhiteSpace(appName)
+            && await _appRepo.NameExistsAsync(appName.Trim(), ct);
+
+        var warnings = validation.Warnings.Concat(conversionIssues.Where(i => i.Severity == PblIssueSeverity.Warning)).Select(ToDto).ToList();
+        if (nameExists)
+            warnings.Add(new PblIssueDto { Code = "APP_NAME_ALREADY_EXISTS", Message = $"An app named '{appName}' already exists. Rename it to import.", ElementRef = parsed.AppRef });
+
+        return new ImportPreviewAppItem
         {
+            AppRef = parsed.AppRef,
+            AppName = appName,
             IsValid = isValid,
-            AppName = document.App?.Name ?? string.Empty,
+            NameExists = nameExists,
             Tables = tables,
             Relationships = relationships,
             Forms = forms,
             Roles = roles,
+            Variables = (document.Variables ?? []).Select(v => v.Name).ToList(),
+            Pages = (document.Pages ?? []).Select(p => p.Name).ToList(),
             Errors = validation.Errors.Concat(conversionIssues.Where(i => i.Severity == PblIssueSeverity.Error)).Select(ToDto).ToList(),
-            Warnings = validation.Warnings.Concat(conversionIssues.Where(i => i.Severity == PblIssueSeverity.Warning)).Select(ToDto).ToList(),
-        });
+            Warnings = warnings,
+        };
     }
+
+    private static ImportPreviewResult FileError(string code, string message) => new()
+    {
+        IsValid = false,
+        Errors = [new PblIssueDto { Code = code, Message = message }],
+    };
 
     private static PblIssueDto ToDto(PblIssue issue) => new()
     {

@@ -1967,7 +1967,9 @@ public partial class PipelineEngine : IPipelineEngine
             // evaluated in memory against candidate rows instead.
             var computedFieldFids = fields.Where(f => f.Fid.HasValue && PhysicalNaming.IsComputedTypeCode(f.TypeCode))
                 .Select(f => (long)f.Fid!.Value).ToHashSet();
-            var inMemoryFilterFids = fields.Where(f => PowerBase.Application.Relationships.EncryptedRowFilter.IsEncrypted(f, appEncrypted: false) && f.Fid.HasValue)
+            // An encrypted app stores every non-exempt field as ciphertext, even one whose own IsEncrypted flag is off.
+            var appEncrypted = await IsAppEncryptedAsync(table, ct);
+            var inMemoryFilterFids = fields.Where(f => PowerBase.Application.Relationships.EncryptedRowFilter.IsEncrypted(f, appEncrypted) && f.Fid.HasValue)
                 .Select(f => (long)f.Fid!.Value).ToHashSet();
             inMemoryFilterFids.UnionWith(computedFieldFids);
             // A Rich Text holds the editor's HTML: SQL cannot read the text it shows, so its conditions are matched in memory.
@@ -2007,10 +2009,13 @@ public partial class PipelineEngine : IPipelineEngine
                     // records twice or skip some.
                     var aiFilled = false;
                     // An AI read that already reached the end of the index (or its MaxResults) before the step was interrupted needs
-                    // nothing more from the index: it is complete as it stands — or, with nothing staged, simply read from SQL.
-                    var aiReadComplete = workset.DiscoverySource == "Ai" &&
-                        (workset.LastSearchCursor == AiSearchIdPage.EndCursor || (limit.HasValue && workset.DiscoveredCount >= limit.Value));
-                    var streamAiPlan = aiReadComplete
+                    // nothing more from the index: it is complete as it stands, or has only its index-lag tail (read from SQL) left —
+                    // or, with nothing staged, is simply read from SQL.
+                    var aiLimitReached = limit.HasValue && workset.DiscoveredCount >= limit.Value;
+                    var aiIndexRead = workset.DiscoverySource == "Ai" && (IsAiIndexReadDone(workset.LastSearchCursor) || aiLimitReached);
+                    var aiReadComplete = aiIndexRead &&
+                        (aiLimitReached || workset.LastSearchCursor == AiIndexLagEndCursor || _options.AiSearchIndexLagSeconds <= 0);
+                    var streamAiPlan = aiIndexRead
                         ? new PipelineAiSearchPlan(null, "the index was already read")
                         : workset.DiscoverySource == "Ai" || (workset.DiscoveredCount == 0 && workset.LastRecordId == 0)
                             ? await PlanAiSearchAsync(table, fields, filterTree, ct)
@@ -2018,6 +2023,12 @@ public partial class PipelineEngine : IPipelineEngine
                     if (aiReadComplete && workset.DiscoveredCount > 0)
                     {
                         aiFilled = true;
+                    }
+                    else if (aiIndexRead && workset.DiscoveredCount > 0)
+                    {
+                        // Only the index-lag tail is left: it is read from SQL, so the index is not needed to finish.
+                        aiFilled = await DiscoverFromAiSearchAsync(table, fields, filterTree, null, workset, worksetId, limit,
+                            snapshotMaxRecordId, readableFids, inMemoryFilterFids, computedFieldFids, recordSearchService, recordRepo, ct);
                     }
                     else if (workset.DiscoverySource == "Ai" && !streamAiPlan.UseAiSearch)
                     {

@@ -46,6 +46,8 @@ public interface IAppTableRepository
     Task SetAutoSaveOnLeaveAsync(Guid publicId, bool isEnabled, CancellationToken ct = default);
     /// <summary>Sets the table's key field (null = reset to Record ID#, the default).</summary>
     Task SetKeyFieldAsync(long tableId, long? keyFieldId, CancellationToken ct = default);
+    /// <summary>Sets the field that titles a record in this table (null clears it). Read by relationship pickers, global search and pipeline history.</summary>
+    Task SetDisplayFieldAsync(long tableId, long? displayFieldId, CancellationToken ct = default);
     /// <summary>Targeted update of just the three Identifying Records fields — used by table/field
     /// creation to auto-advance the picker slots without touching Name/Description/etc.</summary>
     Task SetDefaultRecordPickerFieldsAsync(long tableId, long? field1Id, long? field2Id, long? field3Id, CancellationToken ct = default);

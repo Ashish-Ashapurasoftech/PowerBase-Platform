@@ -37,6 +37,21 @@ public partial class PipelineEngine
     /// are not tried in bulk again for the rest of the loop: each try is wasted work before the record-by-record write.</summary>
     private const int BulkCreateMaxConsecutiveFallbacks = 3;
 
+    /// <summary>Queues the search-index updates a step collected while it wrote, once its transaction has committed. A step's writes
+    /// collect these messages instead of letting the repository publish them inside the transaction: a rollback would otherwise leave
+    /// the index holding a record that was never written, or missing one whose delete was undone. Never fails the step.</summary>
+    private void PublishCommittedIndexMessages(IReadOnlyCollection<SearchIndexMessage> messages, string source)
+    {
+        if (messages.Count == 0) return;
+        var publisher = CurrentStepServices.GetService<IMessagePublisher>() ?? _serviceProvider.GetService<IMessagePublisher>();
+        if (publisher == null) return;
+        var count = messages.Count;
+        _ = publisher.PublishBatchAsync(messages, CancellationToken.None).ContinueWith(
+            t => _logger.LogWarning("Pipeline {Source}: could not queue the search-index updates of {Count} records: {Error}",
+                source, count, t.Exception!.GetBaseException().Message),
+            CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+    }
+
     /// <summary>The loop's Create Record step when its batches can be written in bulk, otherwise null (and the reason is logged once).</summary>
     private async Task<PipelineStep?> GetLoopBulkCreateStepAsync(PipelineStep loop, LoopStepConfig config, List<PipelineStep> allSteps, CancellationToken ct)
     {
@@ -322,14 +337,7 @@ public partial class PipelineEngine
         }
 
         // Committed. Everything below is bookkeeping: it must never turn the written records into a failed (and retried) batch.
-        if (indexMessages.Count > 0 && _serviceProvider.GetService<IMessagePublisher>() is { } publisher)
-        {
-            var count = indexMessages.Count;
-            _ = publisher.PublishBatchAsync(indexMessages, CancellationToken.None).ContinueWith(
-                t => _logger.LogWarning("Pipeline run {RunId}: could not queue the search-index updates of {Count} created records: {Error}",
-                    runId, count, t.Exception!.GetBaseException().Message),
-                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-        }
+        PublishCommittedIndexMessages(indexMessages, $"loop {loop.RefId} of run {runId}");
         foreach (var (fid, held) in state.MemoryUnique)
             if (inBatch.TryGetValue(fid, out var batchValues)) held.UnionWith(batchValues);
 

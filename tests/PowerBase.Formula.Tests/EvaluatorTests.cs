@@ -60,6 +60,11 @@ public class EvaluatorTests
     [InlineData("Hour(ToTimestamp(\"2026-06-11 14:30:45\"))", "14")]
     [InlineData("Minute(ToTimestamp(\"2026-06-11 14:30:45\"))", "30")]
     [InlineData("Second(ToTimestamp(\"2026-06-11 14:30:45\"))", "45")]
+    [InlineData("Hour(ToTimestamp(ToDate(\"2026-06-11\"), ToTimeOfDay(\"1:30 PM\")))", "13")]
+    [InlineData("Minute(ToTimestamp(ToDate(\"2026-06-11\"), ToTimeOfDay(\"1:30 PM\")))", "30")]
+    [InlineData("Day(ToTimestamp(ToTimestamp(\"2026-06-11 14:30:45\"), ToTimeOfDay(\"09:00\")))", "11")]
+    [InlineData("If(ToTimeOfDay(\"2:00 PM\") > ToTimeOfDay(\"11:30 AM\"), 1, 0)", "1")]
+    [InlineData("If(ToTimeOfDay(ToTimestamp(\"2026-06-11 10:00:00\")) < ToTimeOfDay(\"11:30 AM\"), 1, 0)", "1")]
     [InlineData("ToHours(Hours(2))", "2")]
     [InlineData("ToMinutes(Hours(1))", "60")]
     [InlineData("ToSeconds(Minutes(2))", "120")]
@@ -342,5 +347,20 @@ public class EvaluatorTests
         compiled.HasErrors.Should().BeTrue();
         Action act = () => engine.Evaluate(compiled, EmptyContext.Instance, EvaluationOptions.Default);
         act.Should().Throw<FormulaEvaluationException>();
+    }
+
+    [Theory]
+    [InlineData("Left(\"a;b;c\", \";\")", "a")]
+    [InlineData("Right(\"a;b;c\", \";\")", "c")]
+    [InlineData("NotLeft(\"a;b;c\", \";\")", "b;c")]
+    [InlineData("NotRight(\"a;b;c\", \";\")", "a;b")]
+    [InlineData("Left(\"abc\", \";\")", "abc")]
+    [InlineData("Right(\"abc\", \";\")", "abc")]
+    [InlineData("NotLeft(\"abc\", \";\")", "")]
+    [InlineData("Left(\"abcdef\", 3)", "abc")]
+    [InlineData("Right(\"abcdef\", 3)", "def")]
+    public void Evaluate_LeftRightFamily_AcceptsCountOrTextDelimiter(string formula, string expected)
+    {
+        FormulaEval.Const(formula).AsText().Should().Be(expected);
     }
 }

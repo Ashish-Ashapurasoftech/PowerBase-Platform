@@ -117,7 +117,8 @@ public class PipelineContainerScopeIsolationTests
 
         _recordWriteService.ApplyAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(),
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>()
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(),
+            Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()
         ).Returns(Task.FromResult<IReadOnlyDictionary<long, object?>>(new Dictionary<long, object?>()));
 
         IReadOnlyList<IReadOnlyDictionary<string, object?>> searchRecords = recordIds
@@ -145,7 +146,8 @@ public class PipelineContainerScopeIsolationTests
         // Assert: Update record write service called 3 times
         await _recordWriteService.Received(3).ApplyAsync(
             Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<Guid>(), Arg.Any<IReadOnlyDictionary<long, object?>>(),
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>()
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>(), Arg.Any<System.Data.IDbTransaction>(),
+            Arg.Any<bool>(), Arg.Any<Action<PowerBase.Application.Common.Models.SearchIndexMessage>?>()
         );
     }
 
