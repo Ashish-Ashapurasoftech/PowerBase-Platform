@@ -58,6 +58,8 @@ public class ExportReportQueryHandler
             return BuildExport([], [], "export", query.Format);
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+        // Totals/grouping that no longer fit a field whose type was changed are skipped (Change Type).
+        PowerBase.Application.Fields.TypeConversion.ReportDefinitionTypeSanitizer.Apply(definition, allFields);
 
         var filterTree = definition.FilterTree;
         if (filterTree == null && definition.Filters.Count > 0)

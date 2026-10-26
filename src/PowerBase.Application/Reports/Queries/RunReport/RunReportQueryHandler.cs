@@ -141,6 +141,8 @@ public class RunReportQueryHandler
         }
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+        // Totals/grouping that no longer fit a field whose type was changed are skipped (Change Type).
+        PowerBase.Application.Fields.TypeConversion.ReportDefinitionTypeSanitizer.Apply(definition, allFields);
 
         // Enforce the report's Dynamic Filter configuration server-side: when DynamicFilterType
         // is "Custom", only the fields the report designer picked may be used as a runtime
