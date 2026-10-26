@@ -624,12 +624,25 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
         AppField? primaryLabelField = null, CancellationToken ct = default,
         IReadOnlyList<ReferenceFilterClause>? filters = null,
-        IReadOnlyCollection<long>? onlyRowIds = null)
+        IReadOnlyCollection<long>? onlyRowIds = null,
+        FilterGroup? roleFilter = null,
+        long? restrictToCreatedBy = null,
+        int timeoutSeconds = 30,
+        IReadOnlyList<AppField>? allParentFields = null)
     {
         take = Math.Clamp(take, 1, 200);
 
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
+
+        if (roleFilter is not null || restrictToCreatedBy.HasValue)
+        {
+            var fieldsForRole = allParentFields ?? labelFields;
+            var fieldLookup = BuildFieldLookup(fieldsForRole);
+            var roleWhere = BuildFilterTreeWhere(roleFilter, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+            where += roleWhere;
+        }
+
         if (onlyRowIds is not null)
         {
             parameters.Add("onlyRowIds", System.Text.Json.JsonSerializer.Serialize(onlyRowIds));
@@ -682,33 +695,65 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var enc = await GetEncryptionContextAsync(connection, parentTable.AppId, null, ct);
-        var rows = await connection.QueryAsync<ReferenceOption>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        var rows = await connection.QueryAsync<ReferenceOption>(new CommandDefinition(sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct));
         var list = rows.AsList();
 
         // Decrypt label-field values in place when the parent app has field encryption active.
         // Id is the parent's internal BIGINT row Id (a system column) — it is never encrypted.
-        if (enc.IsActive)
+        if (list.Count > 0 && (enc.IsAppEncrypted || labelFields.Any(f => f.IsEncrypted)))
         {
-            var f1 = labelFields.Count > 0 ? labelFields[0] : null;
-            var f2 = labelFields.Count > 1 ? labelFields[1] : null;
-            var f3 = labelFields.Count > 2 ? labelFields[2] : null;
-            var fLabel = primaryLabelField ?? f1;
-
-            foreach (var opt in list)
+            var decryptCols = new[]
             {
-                if (opt.Value1 is not null && (NeedsDecrypt(enc, f1) || opt.Value1.Length >= 40))
-                    opt.Value1 = await enc.DecryptValueAsync(opt.Value1, ct);
-                if (opt.Value2 is not null && (NeedsDecrypt(enc, f2) || opt.Value2.Length >= 40))
-                    opt.Value2 = await enc.DecryptValueAsync(opt.Value2, ct);
-                if (opt.Value3 is not null && (NeedsDecrypt(enc, f3) || opt.Value3.Length >= 40))
-                    opt.Value3 = await enc.DecryptValueAsync(opt.Value3, ct);
-                if (opt.Label is not null && (NeedsDecrypt(enc, fLabel) || opt.Label.Length >= 40))
-                    opt.Label = await enc.DecryptValueAsync(opt.Label, ct);
+                (labelFields.Count > 0 ? labelFields[0] : null, (Action<ReferenceOption, string?>)((o, v) => o.Value1 = v)),
+                (labelFields.Count > 1 ? labelFields[1] : null, (Action<ReferenceOption, string?>)((o, v) => o.Value2 = v)),
+                (labelFields.Count > 2 ? labelFields[2] : null, (Action<ReferenceOption, string?>)((o, v) => o.Value3 = v)),
+                (primaryLabelField,                             (Action<ReferenceOption, string?>)((o, v) => o.Label = v)),
+            };
+            foreach (var (field, assign) in decryptCols)
+            {
+                if (field is null || !Services.FieldEncryptionContext.StoresCiphertext(field, enc.IsAppEncrypted)) continue;
+                foreach (var opt in list)
+                {
+                    var raw = assign == decryptCols[0].Item2 ? opt.Value1 :
+                              assign == decryptCols[1].Item2 ? opt.Value2 :
+                              assign == decryptCols[2].Item2 ? opt.Value3 : opt.Label;
+                    if (raw is not null)
+                    {
+                        try { assign(opt, await enc.DecryptValueAsync(raw, ct)); }
+                        catch { /* not a valid ciphertext - keep raw */ }
+                    }
+                }
             }
         }
-
         return list;
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<long>> ListMatchingRowIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        int maxRows = 10000,
+        int timeoutSeconds = 30,
+        CancellationToken ct = default)
+    {
+        var parameters = new DynamicParameters();
+        var fieldLookup = BuildFieldLookup(fields);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+        parameters.Add("maxRows", maxRows);
+
+        var sql = $"""
+            SELECT TOP (@maxRows) Id
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0{filterWhere}
+            ORDER BY Id
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var ids = await connection.QueryAsync<long>(new CommandDefinition(sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct));
+        return ids.AsList();
+    }
+
 
     public async Task<bool> MatchesReferenceFilterAsync(
         AppTable parentTable, long parentRowId, IReadOnlyList<ReferenceFilterClause> filters, CancellationToken ct = default)

@@ -253,11 +253,11 @@ public class RelationshipsController : ControllerBase
     [ProducesResponseType(typeof(ApiResponse<ParentOptionsResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ParentOptions(
         Guid tableId, Guid relId, [FromQuery] string? search, [FromQuery] int take,
-        [FromQuery] string? filterValues, CancellationToken ct)
+        [FromQuery] string? filterValues, [FromQuery] string? selectedRecordId, CancellationToken ct)
     {
         if (!TryParseFilterValues(filterValues, out var values))
             return InvalidFilterValues();
-        var result = await _parentOptions.HandleAsync(relId, search, take, values, ct);
+        var result = await _parentOptions.HandleAsync(relId, search, take, values, selectedRecordId, ct);
         return Ok(new ApiResponse<ParentOptionsResponse>(new ParentOptionsResponse(result.Headers, result.Options)));
     }
 

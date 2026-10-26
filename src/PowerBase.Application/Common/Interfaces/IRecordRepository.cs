@@ -52,7 +52,20 @@ public interface IRecordRepository
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
         AppField? primaryLabelField = null, CancellationToken ct = default,
         IReadOnlyList<ReferenceFilterClause>? filters = null,
-        IReadOnlyCollection<long>? onlyRowIds = null);
+        IReadOnlyCollection<long>? onlyRowIds = null,
+        FilterGroup? roleFilter = null,
+        long? restrictToCreatedBy = null,
+        int timeoutSeconds = 30,
+        IReadOnlyList<AppField>? allParentFields = null);
+
+    /// <summary>Fast lookup of matching row Ids only (1 column, bounded, with timeout) for security filtering.</summary>
+    Task<IReadOnlyList<long>> ListMatchingRowIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        int maxRows = 10000,
+        int timeoutSeconds = 30,
+        CancellationToken ct = default);
 
     /// <summary>True when the parent row satisfies every dependent-dropdown clause (used to reject a
     /// Reference value the picker would not have offered).</summary>
