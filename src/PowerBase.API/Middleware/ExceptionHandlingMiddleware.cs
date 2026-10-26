@@ -39,6 +39,7 @@ public class ExceptionHandlingMiddleware
             UnauthorizedActionException e => (StatusCodes.Status403Forbidden, e.ErrorCode, e.Message, (object?)null),
             Domain.Exceptions.ValidationException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)e.Errors),
             RecordConstraintViolationException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)e.Violations),
+            BulkCreateValidationException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)e.Violations),
             BadRequestException e => (StatusCodes.Status400BadRequest, e.ErrorCode, e.Message, (object?)null),
             LinkExpiredException e => (StatusCodes.Status410Gone, e.ErrorCode, e.Message, (object?)null),
             ActionGateException e => (422, e.ErrorCode, e.Message, (object?)null),

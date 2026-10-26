@@ -5,6 +5,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.API.Models;
 using PowerBase.API.Models.Records;
 using PowerBase.Application.Records;
+using PowerBase.Application.Records.Commands.BulkCreateRecords;
 using PowerBase.Application.Records.Commands.BulkDeleteRecords;
 using PowerBase.Application.Records.Commands.CreateRecord;
 using PowerBase.Application.Records.Commands.DeleteRecord;
@@ -23,6 +24,7 @@ public class RecordsController : ControllerBase
     private readonly UpdateRecordCommandHandler _updateHandler;
     private readonly DeleteRecordCommandHandler _deleteHandler;
     private readonly BulkDeleteRecordsCommandHandler _bulkDeleteHandler;
+    private readonly BulkCreateRecordsCommandHandler _bulkCreateHandler;
     private readonly MassUpdateRecordsCommandHandler _massUpdateHandler;
     private readonly ListRecordsQueryHandler _listHandler;
     private readonly GetRecordQueryHandler _getHandler;
@@ -35,6 +37,7 @@ public class RecordsController : ControllerBase
         UpdateRecordCommandHandler updateHandler,
         DeleteRecordCommandHandler deleteHandler,
         BulkDeleteRecordsCommandHandler bulkDeleteHandler,
+        BulkCreateRecordsCommandHandler bulkCreateHandler,
         MassUpdateRecordsCommandHandler massUpdateHandler,
         ListRecordsQueryHandler listHandler,
         GetRecordQueryHandler getHandler,
@@ -46,6 +49,7 @@ public class RecordsController : ControllerBase
         _updateHandler = updateHandler;
         _deleteHandler = deleteHandler;
         _bulkDeleteHandler = bulkDeleteHandler;
+        _bulkCreateHandler = bulkCreateHandler;
         _massUpdateHandler = massUpdateHandler;
         _listHandler = listHandler;
         _getHandler = getHandler;
@@ -210,6 +214,28 @@ public class RecordsController : ControllerBase
             Redirect = result.Redirect,
         };
         return Ok(new ApiResponse<InvokeButtonActionResponse>(response));
+    }
+
+    /// <summary>Add up to 500 records in one save — the new rows of a report's Grid Edit.
+    /// All-or-nothing: every row gets the same checks as a single-record create (Required, Unique —
+    /// also between the new rows themselves —, format, references, Custom Data Rule, Form Rules)
+    /// before anything is written. A single failure fails the whole request with a 400 listing every
+    /// violation (rowIndex, fieldId, constraintType, message); otherwise all rows are written in one
+    /// transaction and returned in request order.</summary>
+    [HttpPost("tables/{tableId:guid}/records/bulk-create")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<BulkCreateRecordsResponse>), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> BulkCreate(Guid tableId, [FromBody] BulkCreateRecordsRequest request, CancellationToken ct)
+    {
+        var command = new BulkCreateRecordsCommand(
+            tableId, request.Records.Select(r => ParseFieldValues(r.Fields)).ToList(), request.ReportId, request.IsGridEditSave);
+        var results = await _bulkCreateHandler.HandleAsync(command, ct);
+        var response = new BulkCreateRecordsResponse { Records = results.Select(MapToResponse).ToList() };
+        return StatusCode(StatusCodes.Status201Created, new ApiResponse<BulkCreateRecordsResponse>(response));
     }
 
     /// <summary>Bulk soft-delete up to 500 records by public ID.</summary>
