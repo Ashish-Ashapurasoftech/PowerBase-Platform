@@ -119,7 +119,17 @@ using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Host.UseSerilog((ctx, cfg) => cfg.ReadFrom.Configuration(ctx.Configuration));
+builder.Host.UseSerilog((ctx, cfg) =>
+{
+    // Console comes from configuration ("Serilog:WriteTo"). Application Insights is added only when a connection
+    // string is supplied (setting "ApplicationInsights:ConnectionString" or the standard APPLICATIONINSIGHTS_CONNECTION_STRING),
+    // so worker errors, dead-letters and indexing failures reach a place someone can query.
+    cfg.ReadFrom.Configuration(ctx.Configuration);
+    var appInsightsConnection = ctx.Configuration["ApplicationInsights:ConnectionString"]
+        ?? ctx.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
+    if (!string.IsNullOrWhiteSpace(appInsightsConnection) && !appInsightsConnection.StartsWith("<"))
+        cfg.WriteTo.ApplicationInsights(appInsightsConnection, new Serilog.Sinks.ApplicationInsights.TelemetryConverters.TraceTelemetryConverter());
+});
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 
