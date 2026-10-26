@@ -16,29 +16,49 @@ namespace PowerBase.API.Workers;
 
 public class SearchIndexerWorker : BackgroundService
 {
-    private readonly ServiceBusClient _client;
-    private ServiceBusReceiver _receiver;
-    private readonly string _queueName;
-    private readonly IServiceProvider _serviceProvider;
-    private readonly ILogger<SearchIndexerWorker> _logger;
-    private const int MaxBatchSize = 250;
+    protected readonly ServiceBusClient _client;
+    protected ServiceBusReceiver _receiver;
+    protected readonly string _queueName;
+    protected readonly IServiceProvider _serviceProvider;
+    protected readonly ILogger _logger;
+    protected readonly int _maxBatchSize;
+    protected readonly TimeSpan _maxWaitTime;
 
     public SearchIndexerWorker(IConfiguration configuration, IServiceProvider serviceProvider, ILogger<SearchIndexerWorker> logger)
+        : this(
+            configuration, 
+            serviceProvider, 
+            logger, 
+            configuration["AzureServiceBus:SearchIndexQueue"] ?? "search-indexing-queue", 
+            maxBatchSize: 500, 
+            maxWaitTime: TimeSpan.FromSeconds(5))
+    {
+    }
+
+    protected SearchIndexerWorker(
+        IConfiguration configuration,
+        IServiceProvider serviceProvider,
+        ILogger logger,
+        string queueName,
+        int maxBatchSize,
+        TimeSpan maxWaitTime)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
+        _queueName = queueName;
+        _maxBatchSize = maxBatchSize;
+        _maxWaitTime = maxWaitTime;
         
         var connectionString = configuration["AzureServiceBus:ConnectionString"];
         if (string.IsNullOrWhiteSpace(connectionString) || connectionString.StartsWith("<") || !connectionString.Contains("Endpoint="))
         {
             connectionString = "Endpoint=sb://mock.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=mock";
         }
-        _queueName = configuration["AzureServiceBus:SearchIndexQueue"] ?? "search-indexing-queue";
 
         _client = new ServiceBusClient(connectionString);
         _receiver = _client.CreateReceiver(_queueName, new ServiceBusReceiverOptions
         {
-            PrefetchCount = MaxBatchSize
+            PrefetchCount = _maxBatchSize
         });
     }
 
@@ -56,7 +76,7 @@ public class SearchIndexerWorker : BackgroundService
                     var searchService = checkScope.ServiceProvider.GetRequiredService<IAzureSearchService>();
                     if (!searchService.IsEnabled)
                     {
-                        _logger.LogWarning("Azure AI Search is disabled in configuration. SearchIndexerWorker will pause and not drain messages.");
+                        _logger.LogWarning("Azure AI Search is disabled in configuration. {WorkerName} on {QueueName} will pause and not drain messages.", GetType().Name, _queueName);
                         await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
                         continue;
                     }
@@ -67,12 +87,12 @@ public class SearchIndexerWorker : BackgroundService
                 {
                     _receiver = _client.CreateReceiver(_queueName, new ServiceBusReceiverOptions
                     {
-                        PrefetchCount = MaxBatchSize
+                        PrefetchCount = _maxBatchSize
                     });
                 }
 
-                // Wait for a batch of messages with a maximum wait time of 5 seconds to form a batch
-                var messages = await _receiver.ReceiveMessagesAsync(maxMessages: MaxBatchSize, maxWaitTime: TimeSpan.FromSeconds(5), cancellationToken: stoppingToken);
+                // Wait for a batch of messages
+                var messages = await _receiver.ReceiveMessagesAsync(maxMessages: _maxBatchSize, maxWaitTime: _maxWaitTime, cancellationToken: stoppingToken);
                 
                 if (messages == null || !messages.Any())
                 {
@@ -81,12 +101,12 @@ public class SearchIndexerWorker : BackgroundService
                 }
 
                 // D15: Backlog congestion detection
-                if (messages.Count >= MaxBatchSize)
+                if (messages.Count >= _maxBatchSize)
                 {
                     _consecutiveFullBatches++;
                     if (_consecutiveFullBatches >= 3)
                     {
-                        _logger.LogWarning("Search indexer queue backlog alert: received {BatchSize} messages continuously for {Count} batches. Queue backlog is active.", MaxBatchSize, _consecutiveFullBatches);
+                        _logger.LogWarning("{WorkerName} queue backlog alert: received {BatchSize} messages continuously for {Count} batches on {QueueName}. Queue backlog is active.", GetType().Name, _maxBatchSize, _consecutiveFullBatches, _queueName);
                     }
                 }
                 else
@@ -328,18 +348,26 @@ public class SearchIndexerWorker : BackgroundService
                 }
             }
 
-            // Complete successfully processed messages
-            foreach (var sbMessage in messagesToComplete)
+            // Complete successfully processed messages concurrently to avoid lock expiration
+            await Parallel.ForEachAsync(messagesToComplete, new ParallelOptions
+            {
+                MaxDegreeOfParallelism = 25,
+                CancellationToken = stoppingToken
+            }, async (sbMessage, ct) =>
             {
                 try
                 {
-                    await _receiver.CompleteMessageAsync(sbMessage, stoppingToken);
+                    await _receiver.CompleteMessageAsync(sbMessage, ct);
                 }
                 catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.MessageLockLost)
                 {
                     _logger.LogWarning("Message lock lost for {MessageId}; message will be redelivered.", sbMessage.MessageId);
                 }
-            }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to complete message {MessageId}.", sbMessage.MessageId);
+                }
+            });
         }
         catch (Exception ex)
         {

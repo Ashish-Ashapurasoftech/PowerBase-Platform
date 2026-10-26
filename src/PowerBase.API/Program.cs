@@ -685,6 +685,7 @@ builder.Services.AddScoped<PowerBase.Application.Groups.Queries.GetSharedApps.Ge
 if (builder.Configuration.GetValue<bool>("Search:Indexer:Enabled", true))
 {
     builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
+    builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerPriorityWorker>();
 }
 
 // Connected Tables: a standalone module (its own services, read-only write filter and workers).

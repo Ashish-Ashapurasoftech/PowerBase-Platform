@@ -14,12 +14,15 @@ public class ServiceBusPublisher : IMessagePublisher
 {
     private readonly ServiceBusClient _client;
     private readonly ServiceBusSender _sender;
+    private readonly ServiceBusSender _prioritySender;
+    private readonly Microsoft.Extensions.Logging.ILogger<ServiceBusPublisher>? _logger;
     // False when AzureServiceBus:ConnectionString is missing or still the placeholder: publishing is then skipped (one warning)
     // instead of every call dialling a host that cannot exist and retrying for seconds in the background.
     private readonly bool _configured;
 
     public ServiceBusPublisher(IConfiguration configuration, Microsoft.Extensions.Logging.ILogger<ServiceBusPublisher>? logger = null)
     {
+        _logger = logger;
         var connectionString = configuration["AzureServiceBus:ConnectionString"];
         if (string.IsNullOrWhiteSpace(connectionString) || connectionString.StartsWith("<") || !connectionString.Contains("Endpoint="))
         {
@@ -31,9 +34,34 @@ public class ServiceBusPublisher : IMessagePublisher
             _configured = true;
         }
         var queueName = configuration["AzureServiceBus:SearchIndexQueue"] ?? "search-indexing-queue";
+        var priorityQueueName = configuration["AzureServiceBus:SearchIndexPriorityQueue"] ?? "search-indexing-priority-queue";
         
         _client = new ServiceBusClient(connectionString);
         _sender = _client.CreateSender(queueName);
+        _prioritySender = _client.CreateSender(priorityQueueName);
+    }
+
+    public async Task PublishPriorityAsync<T>(T message, CancellationToken ct = default)
+    {
+        if (!_configured) return;
+        var json = JsonSerializer.Serialize(message);
+        var bytes = Encoding.UTF8.GetBytes(json);
+        if (bytes.Length > 256 * 1024)
+        {
+            throw new InvalidOperationException($"Message size {bytes.Length} bytes exceeds the 256 KB Service Bus limit.");
+        }
+
+        var busMessage = CreateServiceBusMessage(message, bytes);
+        try
+        {
+            await _prioritySender.SendMessageAsync(busMessage, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to publish to priority queue {PriorityQueue}. Falling back to standard queue {StandardQueue}.", 
+                _prioritySender.EntityPath, _sender.EntityPath);
+            await _sender.SendMessageAsync(busMessage, ct);
+        }
     }
 
     public async Task PublishAsync<T>(T message, CancellationToken ct = default)
