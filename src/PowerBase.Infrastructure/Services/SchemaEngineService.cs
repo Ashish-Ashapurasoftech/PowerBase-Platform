@@ -44,6 +44,14 @@ public class SchemaEngineService : ISchemaEngineService
                 CREATE NONCLUSTERED INDEX IX_{PhysicalNaming.TableName(table.Id)}_ModifiedOn
                     ON {physicalName}(ModifiedOn)
                     WHERE IsDeleted = 0 AND ModifiedOn IS NOT NULL;
+                -- Seeks for role-based ownership filtering (RestrictToCreatedBy)
+                CREATE NONCLUSTERED INDEX IX_{PhysicalNaming.TableName(table.Id)}_CreatedBy
+                    ON {physicalName}(CreatedBy)
+                    WHERE IsDeleted = 0;
+                -- Seeks for recent record detection and created-date ordering
+                CREATE NONCLUSTERED INDEX IX_{PhysicalNaming.TableName(table.Id)}_CreatedOn
+                    ON {physicalName}(CreatedOn)
+                    WHERE IsDeleted = 0;
             END
             """;
 
