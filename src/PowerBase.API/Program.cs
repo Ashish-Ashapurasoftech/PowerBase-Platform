@@ -244,6 +244,13 @@ builder.Services.AddScoped<IRolePermissionEnforcer, RolePermissionEnforcer>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
+// Field Type Conversion ("Change Type") module — PowerBase.Application/Fields/TypeConversion
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.IFieldColumnConversionService, FieldColumnConversionService>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.FieldTypeChangeAnalyzer>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.FieldTypeChangePlanner>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.GetFieldTypeChangeTargetsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.PreviewFieldTypeChangeQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.ChangeFieldTypeCommandHandler>();
 var storageProvider = builder.Configuration["Storage:Provider"] ?? "Local";
 var azureBlobConnStr = builder.Configuration["Storage:AzureBlob:ConnectionString"] ?? builder.Configuration["AzureBlob:ConnectionString"];
 bool hasValidAzureBlobConfig = !string.IsNullOrWhiteSpace(azureBlobConnStr) && 
