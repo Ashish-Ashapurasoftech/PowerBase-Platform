@@ -42,16 +42,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         System.Data.IDbConnection connection, long appId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
         => Services.FieldEncryptionContext.ResolveAsync(connection, appId, QueryContext.TenantId, _encryptionService, transaction, ct);
 
-    public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default)
+    public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(long tableId, Guid recordPublicId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         
-        // Find the table that contains this record
-        var tableSql = @"SELECT t.Id, t.AppId, t.Name 
-                         FROM RecordMetadata rm 
-                         JOIN meta.AppTable t ON rm.TableId = t.Id 
-                         WHERE rm.PublicId = @publicId AND rm.TenantId = @tenantId";
-        var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { publicId = recordPublicId, tenantId = QueryContext.TenantId });
+        // Find table info
+        var tableSql = "SELECT Id, AppId, Name FROM meta.AppTable WHERE Id = @tableId";
+        var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { tableId });
         if (tableInfo == null) return new Dictionary<long, object?>();
 
         // Get fields for this table
@@ -62,8 +59,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (searchableFields.Count == 0) return new Dictionary<long, object?>();
 
         var fieldCols = BuildFieldColumnList(searchableFields);
-        var recordSql = $"SELECT {fieldCols} FROM {PhysicalNaming.FullTableName((long)tableInfo.Id)} WHERE Id = (SELECT RecordId FROM RecordMetadata WHERE PublicId = @publicId AND TenantId = @tenantId)";
-        var rawRow = (await connection.QueryAsync<dynamic>(recordSql, new { publicId = recordPublicId, tenantId = QueryContext.TenantId })).FirstOrDefault();
+        var recordSql = $"SELECT {fieldCols} FROM {PhysicalNaming.FullTableName((long)tableInfo.Id)} WHERE PublicId = @publicId AND IsDeleted = 0";
+        var rawRow = (await connection.QueryAsync<dynamic>(recordSql, new { publicId = recordPublicId })).FirstOrDefault();
         if (rawRow == null) return new Dictionary<long, object?>();
 
         var rowDict = (IDictionary<string, object?>)rawRow;
@@ -78,7 +75,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             
             if (rowDict.TryGetValue(colName, out var val))
             {
-                if (!f.IsSearchable)
+                if (!f.IsSearchable && !f.IsFilterable)
                 {
                     result[(long)f.Fid.Value] = null;
                 }
@@ -94,6 +91,21 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         
         return result;
+    }
+
+    public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var tablesSql = "SELECT Id FROM meta.AppTable WHERE IsDeleted = 0";
+        var tableIds = (await connection.QueryAsync<long>(tablesSql)).ToList();
+
+        foreach (var tableId in tableIds)
+        {
+            var res = await GetSearchableFieldsAsync(tableId, recordPublicId, ct);
+            if (res.Count > 0) return res;
+        }
+
+        return new Dictionary<long, object?>();
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
@@ -144,6 +156,42 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListByPublicIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
+    {
+        if (publicIds.Count == 0) return [];
+
+        var fieldCols = BuildFieldColumnList(fields);
+        var parameters = new DynamicParameters();
+        parameters.Add("publicIds", publicIds);
+
+        var sql = $"""
+            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND PublicId IN @publicIds
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = (await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct))).ToList();
+
+        var mutableRows = rows.Select(r => (IDictionary<string, object?>)ToDictionary(r)).ToList();
+
+        var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
+        await enc.DecryptRowsAsync(mutableRows, fields, ct);
+
+        // Preserve the exact order of the requested publicIds (as returned by Azure AI Search)
+        var rowMap = mutableRows.Where(r => r.ContainsKey("PublicId") && r["PublicId"] is Guid).ToDictionary(r => (Guid)r["PublicId"]!);
+        var orderedRows = new List<IReadOnlyDictionary<string, object?>>(publicIds.Count);
+        foreach (var pid in publicIds)
+        {
+            if (rowMap.TryGetValue(pid, out var row))
+                orderedRows.Add((IReadOnlyDictionary<string, object?>)row);
+        }
+
+        return orderedRows;
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllMatchingAsync(
         AppTable table, IReadOnlyList<AppField> fields,
         FilterGroup? filterTree = null,
@@ -168,8 +216,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 .DefaultIfEmpty("Id"))
             : "Id";
 
+        // Guardrail: TOP 50000 ensures an in-memory pass on a massive table cannot pull millions of rows and trigger OutOfMemory
         var sql = $"""
-            SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
+            SELECT TOP 50000 Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
             FROM {PhysicalNaming.FullTableName(table.Id)}
             WHERE IsDeleted = 0{filterWhere}
             ORDER BY {orderBy}
@@ -219,11 +268,64 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return mutableRows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
     }
 
+    public async Task<IReadOnlyList<(long Id, Guid PublicId)>> ListIdsAfterIdAsync(
+        AppTable table, IReadOnlyList<AppField> fields, long afterId, int batchSize,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        CancellationToken ct = default)
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("afterId", afterId);
+        parameters.Add("batchSize", batchSize);
+        var fieldLookup = BuildFieldLookup(fields);
+        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+
+        var sql = $"""
+            SELECT TOP (@batchSize) Id, PublicId
+            FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE IsDeleted = 0 AND Id > @afterId{filterWhere}
+            ORDER BY Id
+            """;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<(long Id, Guid PublicId)>(
+            new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct));
+        return rows.AsList();
+    }
+
     public async Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
     {
         var parameters = new DynamicParameters();
         var fieldLookup = BuildFieldLookup(fields);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+
+        if (string.IsNullOrWhiteSpace(filterWhere))
+        {
+            try
+            {
+                // Soft delete only sets IsDeleted = 1, so the heap/clustered row_count still includes deleted
+                // rows. The PublicId index is filtered to IsDeleted = 0 (SchemaEngineService), so its row_count is
+                // the live-row count; if the index doesn't exist this returns 0 and we fall through to COUNT(*).
+                var fastSql = $@"
+                    SELECT COALESCE(SUM(st.row_count), 0)
+                    FROM sys.dm_db_partition_stats st
+                    JOIN sys.indexes i ON i.object_id = st.object_id AND i.index_id = st.index_id
+                    WHERE st.object_id = OBJECT_ID('{PhysicalNaming.FullTableName(table.Id)}')
+                      AND i.name = 'UX_{PhysicalNaming.TableName(table.Id)}_PublicId'
+                      AND i.has_filter = 1;";
+                await using var fastConn = await ConnectionFactory.CreateAsync(ct);
+                var fastCount = await fastConn.ExecuteScalarAsync<long>(new CommandDefinition(fastSql, cancellationToken: ct));
+                if (fastCount > 0)
+                {
+                    return (int)Math.Min(fastCount, int.MaxValue);
+                }
+            }
+            catch
+            {
+                // Fallback to exact count on any error
+            }
+        }
+
         var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
@@ -384,6 +486,45 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return rows.ToDictionary(r => r.PublicId, r => r.Id);
     }
 
+    public async Task<IReadOnlyList<(long Id, DateTime ChangedOn)>> ListRecordsChangedSinceAsync(
+        AppTable table, DateTime sinceUtc, long afterId, long maxRecordId, int take, CancellationToken ct = default)
+    {
+        var physicalTable = PhysicalNaming.FullTableName(table.Id);
+        // Two seeks instead of one scan: records modified since (IX_t_X_ModifiedOn), and records created since — the rows above the
+        // newest row created before it. CreatedOn is set by the database at insert, so it grows with Id: the backward scan for that row
+        // stops after the recent rows.
+        var sql = $"""
+            DECLARE @createdAbove BIGINT = ISNULL((SELECT TOP (1) Id FROM {physicalTable} WHERE CreatedOn < @sinceUtc ORDER BY Id DESC), 0);
+            SELECT TOP (@take) Id, ChangedOn FROM (
+                SELECT Id, ISNULL(ModifiedOn, CreatedOn) AS ChangedOn FROM {physicalTable}
+                WHERE IsDeleted = 0 AND ModifiedOn >= @sinceUtc AND Id > @afterId AND Id <= @maxRecordId
+                UNION
+                SELECT Id, ISNULL(ModifiedOn, CreatedOn) AS ChangedOn FROM {physicalTable}
+                WHERE IsDeleted = 0 AND Id > @createdAbove AND Id > @afterId AND Id <= @maxRecordId
+            ) changed
+            ORDER BY Id;
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<(long Id, DateTime ChangedOn)>(new CommandDefinition(sql,
+            new { sinceUtc, afterId, maxRecordId, take }, commandTimeout: 600, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<IReadOnlySet<long>> GetRecordIdsChangedSinceAsync(
+        AppTable table, IReadOnlyCollection<long> recordIds, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        var changed = new HashSet<long>();
+        if (recordIds.Count == 0) return changed;
+        var sql = $"""
+            SELECT Id FROM {PhysicalNaming.FullTableName(table.Id)}
+            WHERE Id IN @ids AND IsDeleted = 0 AND ISNULL(ModifiedOn, CreatedOn) >= @sinceUtc
+            """;
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        foreach (var ids in recordIds.Chunk(2000))
+            changed.UnionWith(await connection.QueryAsync<long>(new CommandDefinition(sql, new { ids, sinceUtc }, cancellationToken: ct)));
+        return changed;
+    }
+
     public async Task<int> CountReferencingAsync(AppTable childTable, int referenceFid, long parentRecordId, CancellationToken ct = default)
     {
         var col = PhysicalNaming.ColumnName(referenceFid);
@@ -417,12 +558,18 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     public async Task<IReadOnlyList<ReferenceOption>> SearchForReferenceAsync(
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
         AppField? primaryLabelField = null, CancellationToken ct = default,
-        IReadOnlyList<ReferenceFilterClause>? filters = null)
+        IReadOnlyList<ReferenceFilterClause>? filters = null,
+        IReadOnlyCollection<long>? onlyRowIds = null)
     {
         take = Math.Clamp(take, 1, 200);
 
         var parameters = new DynamicParameters();
         var where = "IsDeleted = 0";
+        if (onlyRowIds is not null)
+        {
+            parameters.Add("onlyRowIds", System.Text.Json.JsonSerializer.Serialize(onlyRowIds));
+            where += " AND p.Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@onlyRowIds))";
+        }
         if (filters is { Count: > 0 })
             where += $" AND {BuildReferenceFilterSql(filters, parameters, await MatchEncryptedTreesAsync(parentTable, filters, ct))}";
 
@@ -1373,7 +1520,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         else
         {
-            _ = _messagePublisher.PublishAsync(msg, default);
+            _ = _messagePublisher.PublishAsync(msg, default).ContinueWith(
+                t => { /* Observed fire-and-forget: failure handled */ },
+                TaskContinuationOptions.OnlyOnFaulted);
         }
 
         return insertedPublicId;
@@ -1478,7 +1627,9 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (onIndexMessageCreated != null)
             foreach (var msg in messages) onIndexMessageCreated(msg);
         else
-            _ = _messagePublisher.PublishBatchAsync(messages, default);
+            _ = _messagePublisher.PublishBatchAsync(messages, default).ContinueWith(
+                t => { /* Observed fire-and-forget: failure handled */ },
+                TaskContinuationOptions.OnlyOnFaulted);
 
         return publicIds;
     }
@@ -1780,6 +1931,52 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
     }
 
+    public async Task BulkDeleteByIdsAsync(AppTable table, IReadOnlyList<(long Id, Guid PublicId)> rows, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
+    {
+        if (rows.Count == 0) return;
+
+        // The ids go in as ONE JSON parameter and the UPDATE joins on the clustered Id, so a chunk of thousands of
+        // records is a single statement (an IN @list would be capped at 2,100 parameters and be re-planned each time).
+        var sql = $"""
+            UPDATE t
+            SET t.IsDeleted = 1, t.ModifiedOn = SYSUTCDATETIME(), t.ModifiedBy = @modifiedBy
+            FROM {PhysicalNaming.FullTableName(table.Id)} t
+            JOIN OPENJSON(@idsJson) WITH (Id bigint '$') j ON j.Id = t.Id
+            WHERE t.IsDeleted = 0
+            """;
+        var idsJson = System.Text.Json.JsonSerializer.Serialize(rows.Select(r => r.Id));
+        var args = new { idsJson, modifiedBy = QueryContext.UserId };
+
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(
+                new CommandDefinition(sql, args, transaction, commandTimeout: 0, cancellationToken: ct));
+        }
+        else
+        {
+            await using var connection = await ConnectionFactory.CreateAsync(ct);
+            await connection.ExecuteAsync(new CommandDefinition(sql, args, commandTimeout: 0, cancellationToken: ct));
+        }
+
+        // Remove from Azure AI Search
+        var deleteMessages = rows.Select(r => new PowerBase.Application.Common.Models.SearchIndexMessage
+        {
+            Action = PowerBase.Application.Common.Models.IndexAction.Delete,
+            TenantId = QueryContext.TenantId,
+            AppId = table.AppId,
+            TableId = table.Id,
+            RecordPublicId = r.PublicId
+        }).ToList();
+        if (onIndexMessageCreated != null)
+        {
+            foreach (var msg in deleteMessages) onIndexMessageCreated(msg);
+        }
+        else
+        {
+            _ = _messagePublisher.PublishBatchAsync(deleteMessages, default);
+        }
+    }
+
     public async Task<int> BackfillDefaultAsync(AppTable table, AppField field, string defaultValue, CancellationToken ct = default)
     {
         var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
@@ -1797,11 +1994,30 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var sql = $"""
             UPDATE {PhysicalNaming.FullTableName(table.Id)}
             SET {col} = @valueToSet
+            OUTPUT INSERTED.PublicId
             WHERE IsDeleted = 0 AND ({col} IS NULL OR {col} = '')
             """;
 
-        return await connection.ExecuteAsync(
-            new CommandDefinition(sql, new { valueToSet }, cancellationToken: ct));
+        var updatedPublicIds = (await connection.QueryAsync<Guid>(
+            new CommandDefinition(sql, new { valueToSet }, cancellationToken: ct))).ToList();
+
+        if (updatedPublicIds.Count > 0 && field.Fid.HasValue && (field.IsSearchable || field.IsFilterable))
+        {
+            var fidStr = field.Fid.Value.ToString();
+            var messages = updatedPublicIds.Select(pid => new PowerBase.Application.Common.Models.SearchIndexMessage
+            {
+                Action = PowerBase.Application.Common.Models.IndexAction.Upsert,
+                TenantId = QueryContext.TenantId,
+                AppId = table.AppId,
+                TableId = table.Id,
+                RecordPublicId = pid,
+                Payload = new Dictionary<string, object?> { { fidStr, defaultValue } }
+            }).ToList();
+
+            _ = _messagePublisher.PublishBatchAsync(messages, default);
+        }
+
+        return updatedPublicIds.Count;
     }
 
     public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> SummarizeAsync(
@@ -2903,7 +3119,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     }
 
     public async Task<(IReadOnlyList<string> Values, bool ExceedsLimit)> GetDistinctFieldValuesAsync(
-        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default)
+        AppTable table, AppField field, int limit, string? subField = null, CancellationToken ct = default,
+        IReadOnlyCollection<long>? onlyRowIds = null)
     {
         var col = field.IsSystem && !string.IsNullOrEmpty(field.PhysicalColumnName)
             ? field.PhysicalColumnName!
@@ -2923,33 +3140,54 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         {
             selectExpr = col;
         }
+
+        var parameters = new DynamicParameters();
+        if (onlyRowIds is not null)
+        {
+            parameters.Add("onlyRowIds", System.Text.Json.JsonSerializer.Serialize(onlyRowIds));
+            whereExtra += " AND Id IN (SELECT CAST([value] AS BIGINT) FROM OPENJSON(@onlyRowIds))";
+        }
         
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var encContext = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
         bool requiresClientSideDistinct = encContext.IsActive && !field.IsSystem && field.IsEncrypted;
 
-        var sql = requiresClientSideDistinct 
+        // One stored value maps to one dropdown option for every type except MultiSelect (a stored array holds
+        // several options), so for those we can stop once limit + 1 distinct values are seen — enough to know
+        // the list exceeds the limit — instead of reading every distinct value in the table.
+        var canStopEarly = field.TypeCode != "MultiSelect";
+        var distinctTop = canStopEarly ? $"TOP ({Math.Max(limit, 1) + 1}) " : "";
+
+        var sql = requiresClientSideDistinct
             ? $"""
-                SELECT CAST({selectExpr} AS NVARCHAR(MAX)) 
+                SELECT CAST({selectExpr} AS NVARCHAR(MAX))
                 FROM {PhysicalNaming.FullTableName(table.Id)}
                 WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''{whereExtra}
               """
             : $"""
-                SELECT DISTINCT CAST({selectExpr} AS NVARCHAR(MAX)) 
+                SELECT DISTINCT {distinctTop}CAST({selectExpr} AS NVARCHAR(MAX))
                 FROM {PhysicalNaming.FullTableName(table.Id)}
                 WHERE IsDeleted = 0 AND {col} IS NOT NULL AND CAST({col} AS NVARCHAR(MAX)) <> ''{whereExtra}
               """;
 
-        var rawValues = await connection.QueryAsync<string>(new CommandDefinition(sql, cancellationToken: ct));
-        
-        IEnumerable<string> processedValues = rawValues.Where(v => !string.IsNullOrWhiteSpace(v));
-
+        IEnumerable<string> processedValues;
         if (requiresClientSideDistinct)
         {
-            var decrypted = new List<string>();
-            foreach (var v in processedValues)
-                decrypted.Add(await encContext.DecryptValueAsync(v, ct));
-            processedValues = decrypted.Distinct(StringComparer.OrdinalIgnoreCase);
+            // Encrypted values can only be de-duplicated after decrypting, so stream the rows and stop as soon
+            // as enough distinct plaintext values are found rather than decrypting the whole table.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await foreach (var v in connection.QueryUnbufferedAsync<string>(sql, parameters).WithCancellation(ct))
+            {
+                if (string.IsNullOrWhiteSpace(v)) continue;
+                seen.Add(await encContext.DecryptValueAsync(v, ct));
+                if (canStopEarly && seen.Count > limit) break;
+            }
+            processedValues = seen.Where(v => !string.IsNullOrWhiteSpace(v));
+        }
+        else
+        {
+            var rawValues = await connection.QueryAsync<string>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+            processedValues = rawValues.Where(v => !string.IsNullOrWhiteSpace(v));
         }
         
         if (field.TypeCode == "MultiSelect")
@@ -3379,7 +3617,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { tableId });
         if (tableInfo == null) return result;
 
-        var fieldSql = "SELECT Id, AppTableId, Name, PhysicalColumnName, Fid, IsSystem, IsSearchable, IsFilterable, IsEncrypted FROM meta.AppField WHERE Fid = @fieldId AND AppTableId = @tableId";
+        var fieldSql = """
+            SELECT af.Id, af.AppTableId, af.Name, ft.Code AS TypeCode, af.PhysicalColumnName, af.Fid, af.IsSystem, af.IsSearchable, af.IsFilterable, af.IsEncrypted
+            FROM meta.AppField af
+            JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+            WHERE af.Fid = @fieldId AND af.AppTableId = @tableId
+            """;
         var field = await connection.QueryFirstOrDefaultAsync<AppField>(fieldSql, new { fieldId, tableId });
         if (field == null || !field.Fid.HasValue) return result;
 
@@ -3407,7 +3650,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             
             var documentValues = new Dictionary<long, object?>();
 
-            if (isNullify || !field.IsSearchable)
+            if (isNullify || (!field.IsSearchable && !field.IsFilterable))
             {
                 documentValues[field.Fid.Value] = null;
             }
@@ -3415,7 +3658,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             {
                 if (rowDict.TryGetValue(colName, out var val))
                 {
-                    if (field.IsEncrypted && val is string cipherStr)
+                    // An encrypted App stores ciphertext in every field, not only the ones flagged IsEncrypted: the index needs the plain text.
+                    if (Services.FieldEncryptionContext.StoresCiphertext(field, enc.IsAppEncrypted) && val is string cipherStr)
                     {
                         try
                         {

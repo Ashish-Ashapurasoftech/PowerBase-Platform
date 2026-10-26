@@ -1039,8 +1039,11 @@ public static class PipelineFilterEvaluator
     {
         null => string.Empty,
         string text => text,
+        DateTime dt => dt.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+        DateOnly d => d.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
         System.Collections.IDictionary map => JsonSerializer.Serialize(map),
         System.Collections.IEnumerable list => JsonSerializer.Serialize(list.Cast<object?>().Select(item => item?.ToString() ?? string.Empty)),
+        IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
         _ => value.ToString() ?? string.Empty
     };
 

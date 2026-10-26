@@ -16,6 +16,7 @@ public static class VariableTypes
         ["bool"] = FormulaType.Bool,
         ["date"] = FormulaType.Date,
         ["timestamp"] = FormulaType.DateTime,
+        ["datetime"] = FormulaType.DateTime,   // how Quickbase exports spell it
         ["timeofday"] = FormulaType.Time,
         ["duration"] = FormulaType.Duration,
         ["user"] = FormulaType.User,

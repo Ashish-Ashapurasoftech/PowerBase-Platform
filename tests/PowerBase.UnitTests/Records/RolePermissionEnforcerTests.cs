@@ -218,10 +218,10 @@ public class RolePermissionEnforcerTests
         innerConditions.Should().BeEquivalentTo(new[] { "RegionA", "RegionB" });
     }
 
-    // Only one of the user's roles actually contributes a filter — result should be that role's group directly,
-    // not wrapped in an extra single-child "or" group.
+    // Only one of the user's roles has Custom Rules; the other grants All records without rules. Roles add up
+    // (union), so the user sees every record — the first role's rules do not narrow the second one.
     [Fact]
-    public async Task GetTableAccessAsync_OnlyOneOfTwoRolesHasFilter_ReturnsThatGroupUnwrapped()
+    public async Task GetTableAccessAsync_OnlyOneOfTwoRolesHasFilter_OtherRoleGrantsEveryRecord()
     {
         var table = MakeTable();
         var fieldPublicId = Guid.NewGuid();
@@ -237,14 +237,14 @@ public class RolePermissionEnforcerTests
         var sut = CreateSut();
         var result = await sut.GetTableAccessAsync(table, new[] { field }, CancellationToken.None);
 
-        result.ViewFilter.Should().NotBeNull();
-        result.ViewFilter!.Logic.Should().Be("and");
-        result.ViewFilter.Nodes.Should().ContainSingle(n => n.Condition != null && n.Condition.Value == "OnlyValue");
+        result.CanView.Should().BeTrue();
+        result.ViewFilter.Should().BeNull();
     }
 
-    // Malformed FilterJson must not throw — the role's filter is silently skipped (defense-in-depth against bad data).
+    // Malformed FilterJson must not throw — and must not widen access: the role's rules cannot be used, so it
+    // grants nothing (fails closed).
     [Fact]
-    public async Task GetTableAccessAsync_MalformedFilterJson_SkipsRoleFilterWithoutThrowing()
+    public async Task GetTableAccessAsync_MalformedFilterJson_GrantsNothingWithoutThrowing()
     {
         var table = MakeTable();
         var field = MakeField(id: 1, publicId: Guid.NewGuid());
@@ -259,6 +259,7 @@ public class RolePermissionEnforcerTests
         var result = await sut.GetTableAccessAsync(table, new[] { field }, CancellationToken.None);
 
         result.ViewFilter.Should().BeNull();
+        result.CanView.Should().BeFalse();
     }
 
     // A condition referencing a field PublicId that isn't in the current table's fields is dropped silently, not errored.
@@ -279,6 +280,7 @@ public class RolePermissionEnforcerTests
         var result = await sut.GetTableAccessAsync(table, new[] { knownField }, CancellationToken.None);
 
         result.ViewFilter.Should().BeNull(); // the role's only condition was dropped, so the role contributes nothing
+        result.CanView.Should().BeFalse();   // ...and grants nothing: a deleted field must not widen access
     }
 
     // When a field has no Quickbase-style Fid assigned, the filter falls back to the field's internal Id.

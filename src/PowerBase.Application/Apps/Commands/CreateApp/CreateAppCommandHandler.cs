@@ -180,9 +180,20 @@ public class CreateAppCommandHandler
 
             if (command.Tables != null && command.Tables.Any())
             {
-                foreach (var spec in command.Tables)
+                try
                 {
-                    await SeedTableAsync(appId, _queryContext.UserId, spec, ct);
+                    foreach (var spec in command.Tables)
+                    {
+                        await SeedTableAsync(appId, _queryContext.UserId, spec, ct);
+                    }
+                }
+                catch
+                {
+                    // The app row is already committed; leaving it would keep a half-built app (some tables, nothing else)
+                    // that blocks creating the app again under the same name.
+                    try { await _appRepo.DeleteAsync(publicId, CancellationToken.None); }
+                    catch { /* the original failure is the one to report */ }
+                    throw;
                 }
             }
 
@@ -231,15 +242,16 @@ public class CreateAppCommandHandler
             PluralLabel = pluralLabel,
             Description = description,
             Icon = spec.Icon,
+            Alias = spec.Alias ?? string.Empty,
             CreatedBy = userId,
         };
 
-        table = await _appSeeder.CreateTableWithDefaultsAsync(table, userId, spec.SeedDefaultViews, ct);
+        table = await _appSeeder.CreateTableWithDefaultsAsync(table, userId, spec.SeedDefaultViews, ct, spec.SeedDefaultReports, spec.SeedDefaultForm);
 
         // Process Custom Fields
         if (spec.Fields != null && spec.Fields.Any())
         {
-            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label.Trim(), Settings: f.Settings, IsEncrypted: f.IsEncrypted, Name: f.Name)).ToList();
+            var items = spec.Fields.Select(f => new BulkCreateFieldItem(f.TypeCode, f.Label.Trim(), f.Description, f.IsRequired, f.IsAuditable, f.Settings, f.DefaultValue, f.IsEncrypted, f.Name, f.HelpText, f.IsSearchable, f.IsReportable, f.Fid)).ToList();
             await _bulkCreateHandler.HandleAsync(new BulkCreateFieldsCommand(table.PublicId, items), ct);
         }
     }

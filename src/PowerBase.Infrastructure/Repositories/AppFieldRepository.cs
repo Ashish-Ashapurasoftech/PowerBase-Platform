@@ -101,11 +101,11 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
 
     private const string InsertSql = """
         INSERT INTO meta.AppField
-            (AppTableId, FieldTypeId, Name, Label, Description, IsRequired, DefaultValue,
+            (AppTableId, FieldTypeId, Name, Label, Description, HelpText, IsRequired, DefaultValue,
              IsSystem, PhysicalColumnName, IsSearchable, IsSortable, IsFilterable, IsReportable, IsAuditable, IsEncrypted, IsAutoFill, IsHidden,
              Fid, Settings, DisplayOrder, IsDeleted, CreatedOn, CreatedBy)
         OUTPUT INSERTED.Id, INSERTED.PublicId
-        VALUES (@tableId, @fieldTypeId, @name, @label, @description, @isRequired, @defaultValue,
+        VALUES (@tableId, @fieldTypeId, @name, @label, @description, @helpText, @isRequired, @defaultValue,
                 @isSystem, @physicalColumnName, @isSearchable, @isSortable, @isFilterable, @isReportable, @isAuditable, @isEncrypted, @isAutoFill, @isHidden,
                 @fid, @settings, @displayOrder, 0, SYSUTCDATETIME(), @createdBy)
         """;
@@ -374,8 +374,11 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     public async Task<int> GetNextFidAsync(long tableId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        return await connection.ExecuteScalarAsync<int>(
+        var next = await connection.ExecuteScalarAsync<int>(
             new CommandDefinition(GetNextFidSql, new { tableId }, cancellationToken: ct));
+        // During an import, numbers up to the highest source field id of the table are kept for the source fields.
+        var floor = PowerBase.Application.Import.Jobs.ImportRuntime.Fids?.FloorOf(tableId) ?? 0;
+        return Math.Max(next, floor + 1);
     }
 
     public async Task<AppField?> GetByFidInTableAsync(long tableId, int fid, CancellationToken ct = default)
@@ -396,6 +399,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
                 name = field.Name,
                 label = field.Label,
                 description = field.Description,
+                helpText = field.HelpText,
                 isRequired = field.IsRequired,
                 defaultValue = field.DefaultValue,
                 isSystem = field.IsSystem,

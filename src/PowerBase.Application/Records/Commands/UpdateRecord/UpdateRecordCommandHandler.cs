@@ -14,6 +14,7 @@ public class UpdateRecordCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly IMessagePublisher _messagePublisher;
     private readonly IReferenceRelinkService? _relink;
+    private readonly RecordModifyGuard? _modifyGuard;
 
     public UpdateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -22,7 +23,8 @@ public class UpdateRecordCommandHandler
         IRecordWriteService writeService,
         ITenantUnitOfWork uow,
         IMessagePublisher messagePublisher,
-        IReferenceRelinkService? relink = null)
+        IReferenceRelinkService? relink = null,
+        RecordModifyGuard? modifyGuard = null)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -31,6 +33,7 @@ public class UpdateRecordCommandHandler
         _uow = uow;
         _messagePublisher = messagePublisher;
         _relink = relink;
+        _modifyGuard = modifyGuard;
     }
 
     public async Task HandleAsync(UpdateRecordCommand command, CancellationToken ct = default)
@@ -61,12 +64,15 @@ public class UpdateRecordCommandHandler
                 throw new UnauthorizedActionException("You do not have permission to edit records in this table.");
             if (access.ViewScope == RecordScopes.OwnRecords || access.ModifyScope == RecordScopes.OwnRecords)
                 await _enforcer.EnsureRecordOwnedAsync(table, command.RecordPublicId, ct);
+            if (_modifyGuard is not null)
+                await _modifyGuard.EnsureAsync(access, table, fields, [command.RecordPublicId], ct);
             var blocked = command.FieldValues.Keys.Where(k => !access.EditableFieldIds.Contains(k)).ToList();
             if (blocked.Count > 0)
                 throw new UnauthorizedActionException("You do not have permission to write to one or more of the specified fields.");
         }
 
         PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;
+        IReadOnlyDictionary<long, object?> written = command.FieldValues;
 
         await _uow.BeginAsync(ct);
         try
@@ -76,7 +82,6 @@ public class UpdateRecordCommandHandler
             var keyBefore = _relink is null ? null
                 : await _relink.SnapshotAsync(table, fields, command.RecordPublicId, command.FieldValues.Keys, _uow.Transaction, ct);
 
-            IReadOnlyDictionary<long, object?> written;
             var writesFileField = fields.Any(field => field.Fid.HasValue &&
                 command.FieldValues.ContainsKey(field.Fid.Value) &&
                 string.Equals(field.TypeCode, "File", StringComparison.OrdinalIgnoreCase));
@@ -122,7 +127,7 @@ public class UpdateRecordCommandHandler
 
         if (indexMessage != null)
         {
-            _ = _messagePublisher.PublishAsync(indexMessage, default);
+            _ = _messagePublisher.PublishPriorityAsync(indexMessage, default);
         }
     }
 }

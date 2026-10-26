@@ -1,5 +1,6 @@
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Formulas;
+using PowerBase.Application.Relationships;
 using PowerBase.Domain.Entities;
 using System.Linq;
 
@@ -15,17 +16,26 @@ public class GetDistinctFieldValuesQueryHandler
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
     private readonly IUserRepository _userRepo;
+    private readonly IRolePermissionEnforcer _enforcer;
+    private readonly IRelationalProjector _relationalProjector;
+    private readonly IFormulaProjector _formulaProjector;
 
     public GetDistinctFieldValuesQueryHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
         IRecordRepository recordRepo,
-        IUserRepository userRepo)
+        IUserRepository userRepo,
+        IRolePermissionEnforcer enforcer,
+        IRelationalProjector relationalProjector,
+        IFormulaProjector formulaProjector)
     {
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
         _userRepo = userRepo;
+        _enforcer = enforcer;
+        _relationalProjector = relationalProjector;
+        _formulaProjector = formulaProjector;
     }
 
     public async Task<DistinctValuesResponse> HandleAsync(GetDistinctFieldValuesQuery query, CancellationToken ct = default)
@@ -41,7 +51,17 @@ public class GetDistinctFieldValuesQueryHandler
         if (FormulaTypeMap.IsComputedField(field.TypeCode, field.Settings))
             return new DistinctValuesResponse(new List<string>(), true);
 
-        var (values, exceedsLimit) = await _recordRepo.GetDistinctFieldValuesAsync(table, field, query.Limit, query.SubField, ct);
+        // Only values of records the role may view, and only for a field it may see — otherwise the dropdown
+        // would reveal values from records hidden by its Custom Rules / Own records scope.
+        var access = await _enforcer.GetTableAccessAsync(table, fields, ct);
+        if (!access.CanView || !access.VisibleFields.Any(f => f.Id == field.Id))
+            return new DistinctValuesResponse(new List<string>(), false);
+        var onlyRowIds = await Records.ViewableRowIds.ResolveAsync(
+            access, table, fields, _recordRepo, _relationalProjector, _formulaProjector, ct);
+        if (onlyRowIds is { Count: 0 }) return new DistinctValuesResponse(new List<string>(), false);
+
+        var (values, exceedsLimit) = await _recordRepo.GetDistinctFieldValuesAsync(
+            table, field, query.Limit, query.SubField, ct, onlyRowIds);
 
         // User/MultiUser (incl. the built-in Record Owner/Last Modified By system fields) store
         // a plain core.[User].Id (BIGINT) in the tenant column — RecordRepository intentionally

@@ -101,6 +101,8 @@ public interface IPipelineRepository
     /// <summary>Stages one page of AI-found records and moves the AI cursor past it, atomically (the cursor must still be
     /// <see cref="PipelineSearchWorkset.LastSearchCursor"/>). An empty page still advances the cursor.</summary>
     Task AppendSearchWorksetAiPageAsync(PipelineSearchWorkset workset, List<PipelineBulkEventRecord> records, string nextCursor, CancellationToken ct = default);
+    /// <summary>Which of these records a search workset has already staged.</summary>
+    Task<IReadOnlySet<Guid>> GetStagedSearchWorksetRecordsAsync(Guid worksetId, IReadOnlyCollection<Guid> recordPublicIds, CancellationToken ct = default);
     Task CompleteSearchWorksetDiscoveryAsync(Guid worksetId, CancellationToken ct = default);
     /// <summary>The first pending rows of a search workset with an ordinal above <paramref name="afterOrdinal"/>. A loop passes the last
     /// ordinal it finished, so each page is found right where the previous one ended instead of from the start of the workset.</summary>

@@ -19,5 +19,7 @@ public class SearchIndexMessage
     public Guid RecordPublicId { get; set; }
     public long? FieldId { get; set; }
     public int Page { get; set; } = 1;
+    public long Version { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public DateTime TimestampUtc { get; set; } = DateTime.UtcNow;
     public System.Collections.Generic.Dictionary<string, object?>? Payload { get; set; }
 }

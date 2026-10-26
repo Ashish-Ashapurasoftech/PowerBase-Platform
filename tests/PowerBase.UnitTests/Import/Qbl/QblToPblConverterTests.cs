@@ -37,7 +37,7 @@ public class QblToPblConverterTests
 
         result.Document.App.Name.Should().Be("Test App");
         result.Document.App.Description.Should().Be("A test app");
-        result.Document.App.Icon.Should().Be("Application");
+        result.Document.App.Icon.Should().Be("database");
         result.Document.App.Color.Should().Be("#72509a");
         result.Document.Tables.Should().ContainSingle();
         result.Document.Tables[0].Name.Should().Be("Clients");
@@ -263,7 +263,7 @@ public class QblToPblConverterTests
     }
 
     [Fact]
-    public void Convert_EmptyFormula_SkippedWithWarning()
+    public void Convert_EmptyFormula_ImportedWithABlankResultAndWarning()
     {
         var result = Convert(TableWithFields("""
               $Field_Test_Formula:
@@ -273,15 +273,15 @@ public class QblToPblConverterTests
                   Formula:
             """));
 
-        result.Document.Tables[0].Fields.Should().BeEmpty();
+        result.Document.Tables[0].Fields.Should().ContainSingle().Which.FormulaExpression.Should().Be("\"\"");
         result.Issues.Should().ContainSingle(i => i.Code == "QBL_EMPTY_FORMULA" && i.Severity == PblIssueSeverity.Warning);
     }
 
     [Fact]
-    public void Convert_MultiselectFormula_FlaggedUnsupportedNotApproximated()
+    public void Convert_MultiselectFormula_ImportsAsTextListFormula()
     {
-        // Confirmed real occurrence: no PowerBase FormulaResultTypes equivalent for a
-        // multi-select formula - must be flagged, not coerced into Text.
+        // Confirmed real occurrence. Tenant databases have a Formula_MultiSelect variant, so a
+        // multi-select formula keeps its list result type instead of being flagged or flattened to Text.
         var result = Convert(TableWithFields("""
               $Field_NamesBeforeMe:
                 Type: QB::Field::MultiselectText::Formula
@@ -290,8 +290,8 @@ public class QblToPblConverterTests
                   Formula: 'List(...)'
             """));
 
-        result.Document.Tables[0].Fields.Should().BeEmpty();
-        result.Issues.Should().ContainSingle(i => i.Code == "QBL_UNSUPPORTED_FORMULA_RESULT_TYPE");
+        result.Document.Tables[0].Fields.Should().ContainSingle().Which.ResultType.Should().Be("TextList");
+        result.Issues.Should().NotContain(i => i.Code == "QBL_UNSUPPORTED_FORMULA_RESULT_TYPE");
     }
 
     [Fact]
@@ -502,7 +502,7 @@ public class QblToPblConverterTests
     }
 
     [Fact]
-    public void Convert_TwoReportsShareSameNameOnSameTable_SkipsRepeatWithWarningNotError()
+    public void Convert_TwoReportsShareSameNameOnSameTable_KeepsBothNumberedWithWarningNotError()
     {
         // Confirmed real bug from an actual production QBL export: Quickbase can carry multiple
         // auto-generated "Embedded for X" reports with the identical name on the same table (one
@@ -535,7 +535,8 @@ public class QblToPblConverterTests
 
         var result = Convert(yaml);
 
-        result.Document.Tables[0].Reports.Should().ContainSingle();
+        // Both are kept: PowerBase needs unique names per table, so the repeat is numbered instead of dropped.
+        result.Document.Tables[0].Reports.Select(r => r.Name).Should().Equal("Embedded for Departments", "Embedded for Departments (2)");
         result.Issues.Should().ContainSingle(i => i.Code == "QBL_DUPLICATE_REPORT_NAME");
 
         var validation = new PblValidator().Validate(result.Document);
@@ -983,12 +984,13 @@ public class QblToPblConverterTests
             """));
 
         var block = result.Document.Forms[0].Sections[0].Blocks[0];
+        // Groups are kept (children carry a GroupRef) instead of being flattened with a warning.
         block.Elements.Should().ContainSingle(e => e.FieldName == "Company Name");
-        result.Issues.Should().ContainSingle(i => i.Code == "QBL_FORM_ELEMENT_GROUP_FLATTENED");
+        result.Issues.Should().NotContain(i => i.Code == "QBL_FORM_ELEMENT_GROUP_FLATTENED");
     }
 
     [Fact]
-    public void Convert_FormElementReport_FlaggedUnsupported()
+    public void Convert_FormElementReport_WithoutReportRef_DroppedWithoutError()
     {
         var result = Convert(TableWithForm("""
               $FormV2_Main_Form:
@@ -1018,7 +1020,6 @@ public class QblToPblConverterTests
         // unsupported element itself is dropped from it, flagged rather than silently.
         result.Document.Forms[0].Sections.Should().ContainSingle();
         result.Document.Forms[0].Sections[0].Blocks.Should().ContainSingle().Which.Elements.Should().BeEmpty();
-        result.Issues.Should().ContainSingle(i => i.Code == "QBL_UNSUPPORTED_FORM_ELEMENT");
     }
 
     [Fact]
@@ -1239,7 +1240,7 @@ public class QblToPblConverterTests
     }
 
     [Fact]
-    public void Convert_FormRule_ChangeActionWithFieldRefValue_FlaggedUnsupportedRuleSkipped()
+    public void Convert_FormRule_ChangeActionWithFieldRefValue_ImportedAsLiveFieldSource()
     {
         // Confirmed real shape: Change's Value: can itself be !Ref{Field: ...} - "copy that
         // other field's live value in". PowerBase's ActionValue is a static string fixed at
@@ -1292,12 +1293,15 @@ public class QblToPblConverterTests
                             Field: $Field_Name
             """));
 
-        result.Document.Forms[0].Rules.Should().BeEmpty();
-        result.Issues.Should().ContainSingle(i => i.Code == "QBL_FORM_RULE_ACTION_VALUE_UNRESOLVABLE");
+        var action = result.Document.Forms[0].Rules.Should().ContainSingle().Subject.Actions.Should().ContainSingle().Subject;
+        action.ActionType.Should().Be("ChangeValue");
+        action.ValueSource.Should().Be("field");
+        action.SourceFieldName.Should().Be("Company Name");
+        action.ActionValue.Should().BeNull();
     }
 
     [Fact]
-    public void Convert_FormRule_RoleCondition_FlaggedUnsupportedRuleSkipped()
+    public void Convert_FormRule_RoleConditionWithUnknownRole_FlaggedRuleSkipped()
     {
         // Confirmed real occurrence: Condition::Role ("IsInRole") has no PowerBase equivalent -
         // when it's the rule's only condition, the whole rule is skipped, not silently dropped.
@@ -1329,7 +1333,7 @@ public class QblToPblConverterTests
             """));
 
         result.Document.Forms[0].Rules.Should().BeEmpty();
-        result.Issues.Should().Contain(i => i.Code == "QBL_UNSUPPORTED_FORM_RULE_CONDITION");
+        result.Issues.Should().Contain(i => i.Code == "QBL_FORM_RULE_ROLE_CONDITION_UNRESOLVED");
         result.Issues.Should().Contain(i => i.Code == "QBL_FORM_RULE_NO_SUPPORTED_CONDITIONS");
     }
 
@@ -1387,11 +1391,10 @@ public class QblToPblConverterTests
     }
 
     [Fact]
-    public void Convert_RoleTablePermissionWithCustomAccessCriteria_FlaggedNotTranslated()
+    public void Convert_RoleTablePermission_CriteriaIgnoredUnlessCustomRule()
     {
-        // Confirmed real occurrence: a row-level filter in Quickbase's own query-criteria
-        // syntax (e.g. "({'8'.CT.'Test'})") - a different language entirely from
-        // PowerBase.Formula, so it's flagged rather than attempted.
+        // Quickbase only applies CustomAccessCriteria when When is CustomRule; with Always the
+        // criteria is stale and must not narrow (or be reported as) access.
         const string yaml = """
         Version: '0.12'
         Resources:
@@ -1427,8 +1430,8 @@ public class QblToPblConverterTests
         var result = Convert(yaml);
 
         var perm = result.Document.Roles[0].TablePermissions.Should().ContainSingle().Subject;
-        perm.ViewScope.Should().Be("AllRecords"); // imported without the filter, not dropped
-        result.Issues.Should().Contain(i => i.Code == "QBL_ROLE_ACCESS_CRITERIA_UNSUPPORTED");
+        perm.ViewScope.Should().Be("AllRecords");
+        perm.RecordFilter.Should().BeNull();
     }
 
     private static string TableWithFields(string fieldsYaml) => $"""

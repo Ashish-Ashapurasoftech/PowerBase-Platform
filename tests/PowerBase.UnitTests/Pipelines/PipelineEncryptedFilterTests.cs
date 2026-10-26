@@ -28,7 +28,8 @@ public class PipelineEncryptedFilterTests
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IPipelineRecordSearchService _searchService;
-    private readonly AppTable _table = new() { Id = 100, PublicId = Guid.NewGuid() };
+    private readonly IServiceProvider _serviceProvider;
+    private readonly AppTable _table = new() { Id = 100, AppId = 5, PublicId = Guid.NewGuid() };
 
     public PipelineEncryptedFilterTests()
     {
@@ -41,6 +42,7 @@ public class PipelineEncryptedFilterTests
         var serviceProvider = Substitute.For<IServiceProvider>();
         serviceProvider.GetService(typeof(IPipelineRecordSearchService)).Returns(_searchService);
         serviceProvider.GetService(typeof(IPipelineApiRequestDispatcher)).Returns(Substitute.For<IPipelineApiRequestDispatcher>());
+        _serviceProvider = serviceProvider;
 
         _engine = new PipelineEngine(
             Substitute.For<IPipelineRepository>(),
@@ -265,6 +267,23 @@ public class PipelineEncryptedFilterTests
         Assert.Contains("Active", json);
         Assert.NotNull(physicalFilter);
         Assert.True(ContainsFieldCondition(physicalFilter!, 7));
+    }
+
+    [Fact]
+    public async Task EncryptedApp_UnflaggedField_IsMatchedInMemoryNotSql()
+    {
+        // An encrypted app stores every Text field as ciphertext even when the field's own IsEncrypted is off:
+        // "Status is Active" sent to SQL compared "Active" with ciphertext and found nothing.
+        var apps = Substitute.For<IAppRepository>();
+        apps.GetByIdAsync(_table.AppId, Arg.Any<CancellationToken>()).Returns(new App { Id = _table.AppId, IsEncrypted = true });
+        _serviceProvider.GetService(typeof(IAppRepository)).Returns(apps);
+        var candidates = new[] { Row("Ronak", "Active"), Row("Hardik", "Inactive"), Row("Dipak", "active") };
+
+        var (json, physicalFilter) = await RunSearchAsync(ConfigWithFilters(new[] { ("fid_7", "is", "Active") }), candidates);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(2, doc.RootElement.GetProperty("records").GetArrayLength());
+        Assert.True(physicalFilter is null || !ContainsFieldCondition(physicalFilter, 7));
     }
 
     private static bool ContainsFieldCondition(FilterGroup group, long fieldId)

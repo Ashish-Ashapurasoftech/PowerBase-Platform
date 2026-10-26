@@ -16,10 +16,10 @@ internal static class TextFunctions
         //r.Add(Fn.Exact("Trim", FormulaType.Text, new[] { P.Text }, (a, _) => FormulaValue.Text(a[0].AsText().())));
         r.Add(Fn.Exact("Lower", FormulaType.Text, new[] { P.Text }, (a, _) => FormulaValue.Text(a[0].AsText().ToLowerInvariant())));
         r.Add(Fn.Exact("Upper", FormulaType.Text, new[] { P.Text }, (a, _) => FormulaValue.Text(a[0].AsText().ToUpperInvariant())));
-        r.Add(Fn.Exact("Left", FormulaType.Text, new[] { P.Text, P.Number }, (a, _) => FormulaValue.Text(Left(a[0].AsText(), ToInt(a[1])))));
-        r.Add(Fn.Exact("Right", FormulaType.Text, new[] { P.Text, P.Number }, (a, _) => FormulaValue.Text(Right(a[0].AsText(), ToInt(a[1])))));
-        r.Add(Fn.Exact("NotLeft", FormulaType.Text, new[] { P.Text, P.Number }, (a, _) => FormulaValue.Text(NotLeft(a[0].AsText(), ToInt(a[1])))));
-        r.Add(Fn.Exact("NotRight", FormulaType.Text, new[] { P.Text, P.Number }, (a, _) => FormulaValue.Text(NotRight(a[0].AsText(), ToInt(a[1])))));
+        r.Add(Fn.Exact("Left", FormulaType.Text, new[] { P.Text, P.NumberOrText }, (a, _) => FormulaValue.Text(a[1].Type == FormulaType.Text ? LeftBy(a[0].AsText(), a[1].IsNull ? "" : a[1].AsText()) : Left(a[0].AsText(), ToInt(a[1])))));
+        r.Add(Fn.Exact("Right", FormulaType.Text, new[] { P.Text, P.NumberOrText }, (a, _) => FormulaValue.Text(a[1].Type == FormulaType.Text ? RightBy(a[0].AsText(), a[1].IsNull ? "" : a[1].AsText()) : Right(a[0].AsText(), ToInt(a[1])))));
+        r.Add(Fn.Exact("NotLeft", FormulaType.Text, new[] { P.Text, P.NumberOrText }, (a, _) => FormulaValue.Text(a[1].Type == FormulaType.Text ? NotLeftBy(a[0].AsText(), a[1].IsNull ? "" : a[1].AsText()) : NotLeft(a[0].AsText(), ToInt(a[1])))));
+        r.Add(Fn.Exact("NotRight", FormulaType.Text, new[] { P.Text, P.NumberOrText }, (a, _) => FormulaValue.Text(a[1].Type == FormulaType.Text ? NotRightBy(a[0].AsText(), a[1].IsNull ? "" : a[1].AsText()) : NotRight(a[0].AsText(), ToInt(a[1])))));
         r.Add(Fn.Exact("Mid", FormulaType.Text, new[] { P.Text, P.Number, P.Number }, (a, _) => FormulaValue.Text(Mid(a[0].AsText(), ToInt(a[1]), ToInt(a[2])))));
         r.Add(Fn.Exact("Contains", FormulaType.Bool, new[] { P.Text, P.Text }, (a, _) => FormulaValue.Bool(a[0].AsText().Contains(a[1].AsText(), StringComparison.Ordinal))));
         r.Add(Fn.Exact("Begins", FormulaType.Bool, new[] { P.Text, P.Text }, (a, _) => FormulaValue.Bool(a[0].AsText().StartsWith(a[1].AsText(), StringComparison.Ordinal))));
@@ -56,6 +56,16 @@ internal static class TextFunctions
     private static string NotLeft(string s, int n) { n = Math.Clamp(n, 0, s.Length); return s.Substring(n); }
 
     private static string NotRight(string s, int n) { n = Math.Clamp(n, 0, s.Length); return s.Substring(0, s.Length - n); }
+
+    // Delimiter forms: Left/NotLeft split around the FIRST occurrence of the delimiter, Right/NotRight around the LAST.
+    // When the delimiter is empty or absent, Left/Right return the whole text and NotLeft/NotRight return nothing.
+    private static string LeftBy(string s, string d) { var i = d.Length == 0 ? -1 : s.IndexOf(d, StringComparison.Ordinal); return i < 0 ? s : s.Substring(0, i); }
+
+    private static string NotLeftBy(string s, string d) { var i = d.Length == 0 ? -1 : s.IndexOf(d, StringComparison.Ordinal); return i < 0 ? string.Empty : s.Substring(i + d.Length); }
+
+    private static string RightBy(string s, string d) { var i = d.Length == 0 ? -1 : s.LastIndexOf(d, StringComparison.Ordinal); return i < 0 ? s : s.Substring(i + d.Length); }
+
+    private static string NotRightBy(string s, string d) { var i = d.Length == 0 ? -1 : s.LastIndexOf(d, StringComparison.Ordinal); return i < 0 ? string.Empty : s.Substring(0, i); }
 
     // 1-based position of the first occurrence; 0 when absent (Quickbase semantics).
     private static int Find(string s, string sub)

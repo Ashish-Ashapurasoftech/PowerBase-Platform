@@ -116,10 +116,17 @@ public class RestoreFieldVersionCommandHandler
         await _guard.ValidateUniqueTransitionAsync(table, existing, label, target.IsUnique, ct);
         await _guard.ValidateEncryptionTransitionAsync(table, existing, target.IsEncrypted, ct);
 
+        // Same column re-typing UpdateField does when the encryption flag flips (before SetUniqueAsync re-creates the index).
+        if (target.IsEncrypted != existing.IsEncrypted)
+            await _schemaEngine.SetColumnEncryptionAsync(table, existing, target.IsEncrypted, ct);
+
         if (target.IsUnique || existing.IsUnique)
             await _schemaEngine.SetUniqueAsync(table, existing, target.IsUnique, ct);
 
         bool wasSearchable = existing.IsSearchable;
+        bool wasFilterable = existing.IsFilterable;
+        bool wasEligible = wasSearchable || wasFilterable;
+        bool isEligible = target.IsSearchable || target.IsFilterable;
 
         await _uow.BeginAsync(ct);
         try
@@ -157,15 +164,32 @@ public class RestoreFieldVersionCommandHandler
             await _recordRepo.BackfillDefaultAsync(table, existing, target.DefaultValue!, ct);
         }
 
-        if (target.IsSearchable != wasSearchable && existing.Fid.HasValue)
+        if (isEligible != wasEligible && existing.Fid.HasValue)
         {
-            var isNullify = !target.IsSearchable;
+            var isNullify = !isEligible;
+            var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+            var isWide = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields);
+            var targetIndex = isWide ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id) : null;
+            var slotMap = PowerBase.Application.Search.SearchSlotResolver.BuildSlotMap(allFields);
+
             var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, existing.Fid.Value, isNullify, page: 1, pageSize: 500, ct);
 
             if (docs.Count > 0)
-                await _searchService.BulkIndexRecordsAsync(docs, ct);
+            {
+                var slottedDocs = docs.Select(d =>
+                {
+                    var slotVals = new Dictionary<string, object?>();
+                    if (slotMap.TryGetValue(existing.Fid.Value, out var slotName) && d.Values.TryGetValue(existing.Fid.Value, out var val))
+                    {
+                        slotVals[slotName] = isNullify ? null : val;
+                    }
+                    return new SearchIndexDocument(d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, slotVals, targetIndex);
+                }).ToList();
 
-            var action = target.IsSearchable ? PowerBase.Application.Common.Models.IndexAction.BackfillField : PowerBase.Application.Common.Models.IndexAction.NullifyField;
+                await _searchService.BulkIndexRecordsAsync(slottedDocs, ct);
+            }
+
+            var action = isEligible ? PowerBase.Application.Common.Models.IndexAction.BackfillField : PowerBase.Application.Common.Models.IndexAction.NullifyField;
             var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
             {
                 Action = action,

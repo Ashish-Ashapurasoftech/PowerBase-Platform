@@ -31,6 +31,7 @@ public class RecordsController : ControllerBase
     private readonly GetDistinctFieldValuesQueryHandler _distinctHandler;
     private readonly InvokeButtonActionCommandHandler _invokeButtonHandler;
     private readonly IAppAccessService _appAccessService;
+    private readonly PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler _modifiableHandler;
 
     public RecordsController(
         CreateRecordCommandHandler createHandler,
@@ -43,7 +44,8 @@ public class RecordsController : ControllerBase
         GetRecordQueryHandler getHandler,
         GetDistinctFieldValuesQueryHandler distinctHandler,
         InvokeButtonActionCommandHandler invokeButtonHandler,
-        IAppAccessService appAccessService)
+        IAppAccessService appAccessService,
+        PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler modifiableHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -56,6 +58,19 @@ public class RecordsController : ControllerBase
         _distinctHandler = distinctHandler;
         _invokeButtonHandler = invokeButtonHandler;
         _appAccessService = appAccessService;
+        _modifiableHandler = modifiableHandler;
+    }
+
+    /// <summary>Of the given record ids, the ones the current user may edit / delete under the role's Modify
+    /// Custom Rules (up to 500). Drives which rows show Edit / Delete; the write endpoints enforce the same rules.</summary>
+    [HttpPost("tables/{tableId:guid}/records/can-modify")]
+    [RequireAppMember(AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<Guid>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> CanModify(Guid tableId, [FromBody] BulkDeleteRequest request, CancellationToken ct)
+    {
+        var ids = await _modifiableHandler.HandleAsync(
+            new PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQuery(tableId, request.Ids), ct);
+        return Ok(new ApiResponse<IReadOnlyList<Guid>>(ids));
     }
 
     /// <summary>Get distinct values for a field in a table.</summary>

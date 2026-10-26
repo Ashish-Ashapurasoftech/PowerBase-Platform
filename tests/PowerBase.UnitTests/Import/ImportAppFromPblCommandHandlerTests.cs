@@ -17,6 +17,7 @@ using PowerBase.Application.Forms.Queries.GetFormLayout;
 using PowerBase.Application.Import.Commands.ImportAppFromPbl;
 using PowerBase.Application.Import.FormulaTranslation;
 using PowerBase.Application.Import.Pbl;
+using PowerBase.Application.Import.Services;
 using PowerBase.Application.Relationships.Commands.CreateRelationship;
 using PowerBase.Application.Reports;
 using PowerBase.Application.Reports.Commands.CreateReport;
@@ -109,12 +110,29 @@ public class ImportAppFromPblCommandHandlerTests
 
         var deleteAppHandler = new DeleteAppCommandHandler(_appRepo, _auditRepo);
 
+        var variableRepo = Substitute.For<IAppVariableRepository>();
+        var accessService = Substitute.For<IAppAccessService>();
+        var extrasImporter = new PblExtrasImporter(
+            new PowerBase.Application.Apps.Commands.CreateAppVariable.CreateAppVariableCommandHandler(_appRepo, variableRepo, accessService),
+            new PowerBase.Application.Apps.Commands.UpdateAppVariable.UpdateAppVariableCommandHandler(_appRepo, variableRepo, accessService),
+            new PowerBase.Application.Pages.Commands.CreatePage.CreatePageCommandHandler(
+                _appRepo, _appRoleRepo, _appUserRepo, Substitute.For<IPageRepository>(), _queryContext, _auditRepo, Substitute.For<ITenantRepository>()),
+            _appRepo, variableRepo);
+        var sourceRefRecorder = new ImportSourceRefRecorder(
+            _appRepo, _tableRepo, _fieldRepo, _reportRepo, _formRepo, _appRoleRepo, variableRepo,
+            Substitute.For<IPageRepository>(), Substitute.For<IImportSourceRefRepository>());
+
         return new ImportAppFromPblCommandHandler(
             _validator, createAppHandler, deleteAppHandler, _appRepo, _tableRepo, _fieldRepo,
             _formRepo, _reportRepo, _appRoleRepo, bulkCreateHandler,
             formulaTranslator, createReportHandler, createRelationshipHandler, createFormHandler, saveFormLayoutHandler,
             getFormLayoutHandler, createFormRuleHandler, saveFormRuleHandler,
-            createAppRoleHandler, updateTablePermissionsHandler);
+            createAppRoleHandler, updateTablePermissionsHandler, extrasImporter, sourceRefRecorder,
+            new PblDeferredResolver(null!, null!, _fieldRepo),
+            new ImportFieldSanitizer(new FieldSettingsValidatorRegistry(Array.Empty<IFieldSettingsValidator>())),
+            // The settings applier drives other handlers (update app/table/field, set key); it has its own tests — here it is a no-op.
+            Substitute.For<PblSettingsApplier>(new object?[] { null, null, null, null, null, null, null, null, null, null }),
+            Substitute.For<PblPermissionsApplier>(new object?[] { null, null, null, null, null, null, null }));
     }
 
     public ImportAppFromPblCommandHandlerTests()
@@ -134,7 +152,7 @@ public class ImportAppFromPblCommandHandlerTests
         _tableRepo.NameExistsInAppAsync(Arg.Any<long>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(false);
 
-        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<bool>(), Arg.Any<CancellationToken>())
+        _appSeeder.CreateTableWithDefaultsAsync(Arg.Any<AppTable>(), Arg.Any<long>(), Arg.Any<bool>(), Arg.Any<CancellationToken>(), Arg.Any<bool>(), Arg.Any<bool>())
             .Returns(ci =>
             {
                 var t = ci.Arg<AppTable>();
@@ -222,6 +240,34 @@ public class ImportAppFromPblCommandHandlerTests
         await _fieldRepo.Received(2).CreateAsync(Arg.Any<AppField>(), Arg.Any<CancellationToken>());
     }
 
+    private const string LabelClashPbl = """
+    {
+      "version": "1.0",
+      "app": { "logicalRef": "$App_Test", "name": "Imported App" },
+      "tables": [
+        {
+          "logicalRef": "$Table_Logs",
+          "name": "Logs",
+          "fields": [
+            { "logicalRef": "$Field_Logs_Created", "name": "Date Created", "typeCode": "DateTime" },
+            { "logicalRef": "$Field_Logs_Title", "name": "Title", "typeCode": "Text" }
+          ]
+        }
+      ]
+    }
+    """;
+
+    [Fact]
+    public async Task HandleAsync_FieldLabelClashingWithSystemField_IsNumberedNotRejected()
+    {
+        var sut = CreateSut();
+
+        var report = await sut.HandleAsync(new ImportAppFromPblCommand(LabelClashPbl));
+
+        report.FieldsCreated.Should().Be(2);
+        report.Skipped.Should().Contain(s => s.LogicalRef == "$Field_Logs_Created" && s.Reason.Contains("Date Created (2)"));
+    }
+
     [Fact]
     public async Task HandleAsync_MalformedJson_ThrowsValidationException()
     {
@@ -283,7 +329,7 @@ public class ImportAppFromPblCommandHandlerTests
         report.FormulaTranslations.Should().ContainSingle(f => f.Name == "Total" && f.Status == "Clean");
 
         await _fieldRepo.Received(1).CreateAsync(
-            Arg.Is<AppField>(f => f.Name == "Total" && f.TypeCode == "Formula"),
+            Arg.Is<AppField>(f => f.Name == "Total" && f.TypeCode == "Formula_Number"),
             Arg.Any<CancellationToken>());
     }
 
@@ -333,8 +379,8 @@ public class ImportAppFromPblCommandHandlerTests
 
         var report = await sut.HandleAsync(new ImportAppFromPblCommand(PblWithFormulaReferencingUnknownField));
 
-        report.FieldsCreated.Should().Be(1); // only Qty; Total was never created
-        report.Skipped.Should().ContainSingle(s => s.Name == "Total" && s.Reason.Contains("manual review"));
+        report.FieldsCreated.Should().Be(2); // Qty, plus a repairable Text placeholder for Total (no real formula field)
+        report.Skipped.Should().ContainSingle(s => s.Name == "Total" && s.Reason.Contains("manual review") && s.Reason.Contains("placeholder"));
         report.FormulaTranslations.Should().ContainSingle(f => f.Name == "Total" && f.Status == "NeedsManualReview");
 
         await _fieldRepo.DidNotReceive().CreateAsync(

@@ -20,6 +20,11 @@ public sealed class QblDocument
     /// Table's own children, not listed flatly here — see <see cref="QblResourceNode.Children"/>.</summary>
     public IReadOnlyDictionary<string, QblResourceNode> Resources { get; init; } =
         new Dictionary<string, QblResourceNode>();
+
+    /// <summary>Top-level <c>ExternalResources</c>: the connected-table data sources (other Quickbase apps), each with its record sets and
+    /// their columns. A table's <c>ConnectedData</c> points into this by ref.</summary>
+    public IReadOnlyDictionary<string, QblResourceNode> ExternalResources { get; init; } =
+        new Dictionary<string, QblResourceNode>();
 }
 
 /// <summary>One QBL node: <c>Type: &lt;namespaced type&gt;</c> + <c>Properties: &lt;map&gt;</c> +
@@ -27,6 +32,10 @@ public sealed class QblDocument
 public sealed class QblResourceNode
 {
     public string Type { get; init; } = string.Empty;
+
+    /// <summary>The node's numeric <c>Id:</c> (a field id, report id, form id…) — null when absent. Every QBL
+    /// field carries one; formulas, record filters and picker/key settings refer to fields by it.</summary>
+    public int? SourceId { get; init; }
 
     /// <summary>Raw property values. May contain nested <see cref="Dictionary{TKey,TValue}"/>,
     /// <see cref="List{T}"/>, scalars, or <see cref="QblRef"/>/<see cref="QblBadRef"/>/

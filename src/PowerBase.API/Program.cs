@@ -144,6 +144,7 @@ builder.Services.AddCors(options =>
     });
 });
 
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
@@ -269,7 +270,6 @@ builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineTriggerInterceptor, PowerBase.Infrastructure.Pipelines.PipelineTriggerInterceptor>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector, PowerBase.Infrastructure.Pipelines.PipelineWriteTimeRelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineAuditFormatter, PowerBase.Application.Pipelines.PipelineAuditFormatter>();
-builder.Services.AddScoped<IAzureSearchService, AzureSearchService>();
 builder.Services.AddSingleton<IEncryptionService, AesEncryptionService>();
 builder.Services.AddSingleton<IMessagePublisher, ServiceBusPublisher>();
 builder.Services.AddScoped<IFieldNameResolver, PowerBase.Application.Common.Services.FieldNameResolver>();
@@ -346,6 +346,16 @@ builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListNavPages.List
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
 builder.Services.AddScoped<IAppVariableRepository, AppVariableRepository>();
+builder.Services.AddScoped<IImportSourceRefRepository, ImportSourceRefRepository>();
+builder.Services.AddScoped<IAppImportJobRepository, AppImportJobRepository>();
+builder.Services.AddScoped<IEmailTemplateRepository, EmailTemplateRepository>();
+builder.Services.AddSingleton<PowerBase.Application.Import.Jobs.AppImportJobQueue>();
+PowerBase.Application.Import.Jobs.ImportRuntime.ConfiguredCommandTimeoutSeconds =
+    builder.Configuration.GetValue("Import:SqlCommandTimeoutSeconds", PowerBase.Application.Import.Jobs.ImportRuntime.DEFAULT_COMMAND_TIMEOUT_SECONDS);
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.AppImportJobService>();
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.EmailTemplateService>();
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.AppImportJobRunner>();
+builder.Services.AddHostedService<PowerBase.API.Workers.AppImportJobWorker>();
 builder.Services.AddScoped<IAppRoleRepository, AppRoleRepository>();
 builder.Services.AddScoped<IAppRolePermissionRepository, AppRolePermissionRepository>();
 builder.Services.AddScoped<IAppUserRepository, AppUserRepository>();
@@ -490,6 +500,16 @@ builder.Services.AddScoped<CreateAppCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Pbl.PblValidator>();
 builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.FormulaTranslator>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblExtrasImporter>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblDeferredResolver>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportFieldSanitizer>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblSettingsApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPermissionsApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblConnectedTablesApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Diff.ImportDiffBuilder>();
+builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportDiff.ImportDiffQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Commands.UpdateAppFromPbl.UpdateAppFromPblCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportSourceRefRecorder>();
 builder.Services.AddScoped<PowerBase.Application.Import.Commands.ImportAppFromPbl.ImportAppFromPblCommandHandler>();
 builder.Services.AddScoped<UpdateAppCommandHandler>();
 builder.Services.AddScoped<ListAppUsersQueryHandler>();
@@ -552,6 +572,8 @@ builder.Services.AddScoped<DeleteRecordCommandHandler>();
 builder.Services.AddScoped<BulkDeleteRecordsCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Commands.BulkCreateRecords.BulkCreateRecordsCommandHandler>();
 builder.Services.AddScoped<MassUpdateRecordsCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Records.RecordModifyGuard>();
+builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler>();
 builder.Services.AddScoped<ListRecordsQueryHandler>();
 builder.Services.AddScoped<GetRecordQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.SearchGlobalRecords.SearchGlobalRecordsQueryHandler>();
@@ -661,7 +683,14 @@ builder.Services.AddScoped<PowerBase.Application.Groups.Commands.ShareGroupWithA
 builder.Services.AddScoped<PowerBase.Application.Groups.Commands.UnshareGroupFromApp.UnshareGroupFromAppCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Groups.Queries.GetSharedApps.GetSharedAppsQueryHandler>();
 
-builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
+if (builder.Configuration.GetValue<bool>("Search:Indexer:Enabled", true))
+{
+    builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
+    builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerPriorityWorker>();
+}
+
+// Connected Tables: a standalone module (its own services, read-only write filter and workers).
+PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesModule(builder.Services, builder.Configuration);
 
 var app = builder.Build();
 

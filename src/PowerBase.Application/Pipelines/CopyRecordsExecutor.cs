@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using PowerBase.Application.Common.Configurations;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Records;
 using PowerBase.Application.Relationships;
@@ -79,6 +81,12 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var sourceFields = await fieldRepo.ListByTableAsync(source.Id, ct);
         var destinationFields = await fieldRepo.ListByTableAsync(destination.Id, ct);
         onTablesLoaded?.Invoke(source, sourceFields, destination, destinationFields);
+        // An encrypted app stores every non-exempt field as ciphertext, even one whose own IsEncrypted flag is off.
+        var apps = services.GetService<IAppRepository>();
+        var sourceAppEncrypted = apps != null && (await apps.GetByIdAsync(source.AppId, ct)).IsEncrypted;
+        var destinationAppEncrypted = destination.AppId == source.AppId
+            ? sourceAppEncrypted
+            : apps != null && (await apps.GetByIdAsync(destination.AppId, ct)).IsEncrypted;
         config.ValidateFields(sourceFields, destinationFields);
         var sourceAccess = await enforcer.GetTableAccessAsync(source, sourceFields, ct);
         var destinationAccess = await enforcer.GetTableAccessAsync(destination, destinationFields, ct);
@@ -126,16 +134,36 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             {
                 try
                 {
+                    var targetIndex = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(sourceFields)
+                        ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(source.Id)
+                        : null;
+                    var lagSeconds = (services.GetService<IOptions<PipelineExecutionOptions>>()?.Value ?? new PipelineExecutionOptions()).AiSearchIndexLagSeconds;
+                    var searchStarted = DateTime.UtcNow;
                     var found = new List<long>();
-                    await foreach (var page in azureSearch.SearchRecordIdsByFilterPagedAsync(queryContext.TenantId, source.Id, aiPlan.ODataFilter!, null, ct))
+                    var searchPages = targetIndex != null
+                        ? azureSearch.SearchRecordIdsByFilterPagedAsync(queryContext.TenantId, source.Id, aiPlan.ODataFilter!, null, targetIndex, ct)
+                        : azureSearch.SearchRecordIdsByFilterPagedAsync(queryContext.TenantId, source.Id, aiPlan.ODataFilter!, null, ct);
+                    await foreach (var page in searchPages)
                         foreach (var publicIdChunk in page.Ids.Chunk(sqlIdChunkSize))
                             found.AddRange(await records.GetIdsByPublicIdsAsync(source, publicIdChunk, ct));
                     if (found.Count == 0)
                         copyLogger?.LogInformation("[CopyRecords] Azure AI Search found no matching record for table {TableId}; checking SQL.", source.Id);
                     else
                     {
-                        found.Sort();   // the same order a SQL read would give
-                        aiCandidateIds = found;
+                        // The index lags SQL: every record changed shortly before the copy started is a candidate too (the
+                        // snapshot read below applies the complete filter to all of them), whether or not the index has it yet.
+                        if (lagSeconds > 0)
+                        {
+                            var since = searchStarted.AddSeconds(-lagSeconds);
+                            for (var afterId = 0L; ;)
+                            {
+                                var changed = await records.ListRecordsChangedSinceAsync(source, since, afterId, long.MaxValue, sqlIdChunkSize, ct);
+                                found.AddRange(changed.Select(c => c.Id));
+                                if (changed.Count < sqlIdChunkSize) break;
+                                afterId = changed[^1].Id;
+                            }
+                        }
+                        aiCandidateIds = found.Distinct().Order().ToList();   // the same order a SQL read would give
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -150,7 +178,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         // to be selected and decrypted normally. Only their filter *conditions* must be pulled
         // out of the SQL tree (ciphertext can't satisfy a LIKE/=), so this set is used solely for
         // the tree split below, never for the snapshotFields exclusion further down.
-        var encryptedFilterFids = sourceFields.Where(f => f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && f.IsEncrypted)
+        var encryptedFilterFids = sourceFields.Where(f => f.Fid.HasValue && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && EncryptedRowFilter.IsEncrypted(f, sourceAppEncrypted))
             .Select(f => (long)f.Fid!.Value).ToHashSet();
         var inMemoryFilterFids = new HashSet<long>(computedFids);
         inMemoryFilterFids.UnionWith(encryptedFilterFids);
@@ -352,7 +380,9 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         // client-side approach RecordRepository.GetDistinctFieldValuesAsync uses for encrypted
         // fields), and keep it updated as rows are inserted so later rows in this same run still
         // see them, matching what a live per-row SQL lookup would have seen.
-        var mergeIndex = merge.IsEncrypted
+        // Encryption-exempt types (Number, Date, Boolean, User …) are stored natively even when flagged, so SQL compares them.
+        var mergeEncrypted = EncryptedRowFilter.IsEncrypted(merge, destinationAppEncrypted);
+        var mergeIndex = mergeEncrypted
             ? await BuildEncryptedMergeIndexAsync(records, destination, destinationFields, merge, ct)
             : null;
 
@@ -371,7 +401,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
 
         // A plain (not encrypted) Text or Number merge field is looked up for a whole page of rows with one IN query, then kept in
         // memory: the same answer a per-row "=" query gives, without a query per row. Anything else keeps the per-row query.
-        var mergeBatchable = !merge.IsEncrypted && merge.Fid.HasValue && merge.TypeCode is "Text" or "Number";
+        var mergeBatchable = !mergeEncrypted && merge.Fid.HasValue && merge.TypeCode is "Text" or "Number";
         var mergeNumeric = merge.TypeCode == "Number";
         var mergeLive = mergeBatchable ? new Dictionary<string, List<Guid>>(StringComparer.OrdinalIgnoreCase) : null;
         var mergeLooked = mergeBatchable ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) : null;
@@ -420,7 +450,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         async Task<IReadOnlyDictionary<string, object?>?> FindExistingAsync(string? keyStr)
         {
             if (string.IsNullOrEmpty(keyStr)) return null;
-            if (merge.IsEncrypted)
+            if (mergeEncrypted)
             {
                 if (!mergeIndex!.TryGetValue(EncryptedMergeKey(merge, keyStr), out var matches)) return null;
                 if (matches.Count > 1) throw CopyRecordsDefinition.Error("The destination merge value matches more than one record.");
@@ -445,7 +475,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         void RememberCreated(string? keyStr, Guid publicId)
         {
             if (string.IsNullOrEmpty(keyStr)) return;
-            if (merge.IsEncrypted)
+            if (mergeEncrypted)
             {
                 var encryptedKey = EncryptedMergeKey(merge, keyStr);
                 if (!mergeIndex!.TryGetValue(encryptedKey, out var list))
@@ -518,7 +548,9 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             values.TryGetValue(merge.Fid!.Value, out var key);
             return key != null ? Convert.ToString(key, CultureInfo.InvariantCulture) : null;
         }
-        async Task ApplyUpdateAsync(IReadOnlyDictionary<string, object?> existing, Dictionary<long, object?> values)
+        // The record's search-index update goes to onIndexMessage, to be queued once the caller's transaction has committed.
+        async Task ApplyUpdateAsync(IReadOnlyDictionary<string, object?> existing, Dictionary<long, object?> values,
+            Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessage)
         {
             var identity = existing.FirstOrDefault(p => p.Key.Equals("PublicId", StringComparison.OrdinalIgnoreCase)).Value;
             if (!Guid.TryParse(identity?.ToString(), out var publicId)) throw new InvalidOperationException("Destination record identity is missing.");
@@ -532,7 +564,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                 if (destinationAccess.ModifyScope == RecordScopes.OwnRecords) await enforcer.EnsureRecordOwnedAsync(destination, publicId, ct);
             }
             await writes.ApplyAsync(destination, destinationFields, publicId, values, AuditActions.Updated,
-                "Record updated via PowerFlow Copy Records", ct, uow.Transaction);
+                "Record updated via PowerFlow Copy Records", ct, uow.Transaction, onIndexMessageCreated: onIndexMessage);
             // An update can change a unique value (and free the old one): the in-memory index is read again before it is trusted.
             foreach (var fid in memoryUnique.Keys.ToList())
                 if (values.ContainsKey(fid)) memoryUnique[fid] = null;
@@ -563,6 +595,15 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var copyCreatedOnField = destinationFields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedOn" && f.Fid.HasValue);
         var copyCreatedByField = destinationFields.FirstOrDefault(f => f.IsSystem && f.PhysicalColumnName == "CreatedBy" && f.Fid.HasValue);
         var messagePublisher = services.GetService<IMessagePublisher>();
+        // Queued in the background once the records are committed, never before: a rolled-back write must not reach the search index.
+        void PublishCommittedIndexMessages(List<PowerBase.Application.Common.Models.SearchIndexMessage> indexMessages)
+        {
+            if (messagePublisher == null || indexMessages.Count == 0) return;
+            var count = indexMessages.Count;
+            _ = messagePublisher.PublishBatchAsync(indexMessages, CancellationToken.None).ContinueWith(
+                t => copyLogger?.LogWarning("[CopyRecords] Could not queue the search-index updates for {Count} copied records: {Error}", count, t.Exception!.GetBaseException().Message),
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        }
         // Whether any pipeline listens to record events on the destination table, asked once per page: when nobody does, every record's
         // trigger call would only look the listeners up again (one control-database round trip per record) and find none.
         var triggerInterceptor = services.GetRequiredService<IPipelineTriggerInterceptor>();
@@ -583,7 +624,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         // against the table with one query per field and against each other in memory, in the same order rows would be checked one by one.
         // An app that encrypts a field without flagging the field itself is found out the first time the page query below cannot compare it.
         foreach (var field in uniqueFields)
-            if (field.IsEncrypted) memoryUnique[field.Fid!.Value] = null;
+            if (EncryptedRowFilter.IsEncrypted(field, destinationAppEncrypted)) memoryUnique[field.Fid!.Value] = null;
         // A Reference field only ties one row to another written in the same page when it can point at the destination table itself. One that
         // points at a different table (like "Related A1" on A2) cannot, so it no longer sends the whole copy down the row-by-row path — which was
         // ~150 ms per record even when the field was not part of the copy at all.
@@ -592,7 +633,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
         var fastEligible = !(destination.IsCustomDataRuleEnabled && !string.IsNullOrWhiteSpace(destination.CustomDataRule))
             && uniqueFields.All(f => f.TypeCode is "Text" or "Number")
             && !destinationFields.Any(f => f.Fid.HasValue && !f.IsSystem && !PhysicalNaming.IsComputedTypeCode(f.TypeCode) && f.TypeCode == "Reference" && MayReferenceDestination(f))
-            && (merge.IsEncrypted || (mergeBatchable && (!merge.IsSystem || merge.PhysicalColumnName == "Id")));
+            && (mergeEncrypted || (mergeBatchable && (!merge.IsSystem || merge.PhysicalColumnName == "Id")));
 
         static string PageReceiptSuffix(int pageIndex) => $"/page/{pageIndex}";
 
@@ -714,13 +755,13 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                     if (existing != null)
                     {
                         var updateStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-                        await ApplyUpdateAsync(existing, values);
+                        await ApplyUpdateAsync(existing, values, messagePublisher != null ? indexMessages.Add : null);
                         AddPhase("update", updateStarted);
                         results[rowKey] = new(false, true);
                         continue;
                     }
                     // Two new rows with the same merge value: the second one must update the first, which only the row-by-row path does.
-                    if (!string.IsNullOrEmpty(keyStr) && !pageKeys.Add(merge.IsEncrypted ? EncryptedMergeKey(merge, keyStr) : MergeKey(keyStr) ?? keyStr))
+                    if (!string.IsNullOrEmpty(keyStr) && !pageKeys.Add(mergeEncrypted ? EncryptedMergeKey(merge, keyStr) : MergeKey(keyStr) ?? keyStr))
                         throw new FastPageNotApplicableException();
                     newRows.Add((rowKey, values, keyStr));
                     // This row is going in: later rows of the page must now see its unique values as taken.
@@ -809,14 +850,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
 
                 for (var i = 0; i < newRows.Count; i++)
                     RememberCreated(merge.IsSystem && identityField != null ? Convert.ToString(newRows[i].Values[identityField.Fid!.Value], CultureInfo.InvariantCulture) : newRows[i].KeyStr, created[i]);
-                if (messagePublisher != null && indexMessages.Count > 0)
-                {
-                    // Queued in the background, like the one-by-one insert always did: the records are committed, the search index catches up.
-                    var count = indexMessages.Count;
-                    _ = messagePublisher.PublishBatchAsync(indexMessages, CancellationToken.None).ContinueWith(
-                        t => copyLogger?.LogWarning("[CopyRecords] Could not queue the search-index updates for {Count} copied records: {Error}", count, t.Exception!.GetBaseException().Message),
-                        CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-                }
+                PublishCommittedIndexMessages(indexMessages);
                 return results;
             }
             catch (Exception ex)
@@ -877,6 +911,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                 else
                 {
                     var rowStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    var rowIndexMessages = new List<PowerBase.Application.Common.Models.SearchIndexMessage>();
                     await uow.BeginAsync(ct);
                     try
                     {
@@ -887,7 +922,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                             values.Remove(systemField.Fid!.Value); // System identities are match-only, never writable.
                         if (existing != null)
                         {
-                            await ApplyUpdateAsync(existing, values);
+                            await ApplyUpdateAsync(existing, values, rowIndexMessages.Add);
                             receipt = new(false, true);
                         }
                         else if (await PrepareInsertAsync(values, KnownDuplicate) is { } rejection)
@@ -897,7 +932,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                         }
                         else
                         {
-                            var publicId = await records.CreateAsync(destination, destinationFields, values, uow.Transaction, ct);
+                            var publicId = await records.CreateAsync(destination, destinationFields, values, uow.Transaction, ct, rowIndexMessages.Add);
                             if (identityField != null)
                                 values[identityField.Fid!.Value] = await records.GetActiveRecordIdByPublicIdAsync(destination, publicId, uow.Transaction, ct);
                             // Date Created / Record Owner were stripped from values above (system
@@ -917,6 +952,7 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
                         }
                         await Store(rowKey, JsonSerializer.Serialize(receipt));
                         await uow.CommitAsync(ct);
+                        PublishCommittedIndexMessages(rowIndexMessages);
                         if (receipt.Inserted) RememberUnique(values);
                     }
                     catch (ValidationException ex)

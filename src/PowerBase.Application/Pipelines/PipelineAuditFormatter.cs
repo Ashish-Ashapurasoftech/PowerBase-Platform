@@ -686,7 +686,7 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
 
                 var timestampStr = inputDict.TryGetValue("EventTimestamp", out var ts) ? ts?.ToString() : null;
                 DateTime triggerTime = DateTime.UtcNow;
-                if (!string.IsNullOrEmpty(timestampStr) && DateTime.TryParse(timestampStr, out var triggerTimeVal))
+                if (!string.IsNullOrEmpty(timestampStr) && TryParseStoredUtc(timestampStr, out var triggerTimeVal))
                 {
                     triggerTime = triggerTimeVal;
                 }
@@ -1511,9 +1511,8 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
             object? finalVal = rawVal;
             if (rawVal != null && matchedField != null && (matchedField.TypeCode.Equals("DATETIME", StringComparison.OrdinalIgnoreCase) || matchedField.TypeCode.Equals("DATE", StringComparison.OrdinalIgnoreCase)))
             {
-                if (DateTime.TryParse(rawVal.ToString(), out var dt))
+                if (TryParseStoredUtc(rawVal, out var utcDt))
                 {
-                    var utcDt = dt.ToUniversalTime();
                     finalVal = new Dictionary<string, object?>
                     {
                         { "@type", "datetime" },
@@ -1581,13 +1580,21 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
         }
         else if (type == "DATETIME" || type == "DATE")
         {
-            if (DateTime.TryParse(value.ToString(), out var dt))
+            if (TryParseStoredUtc(value, out var utc))
             {
-                return dt.ToString("g");
+                // A Date has no time of day to move; a Date & Time reads in the server's time, whatever form it arrived in.
+                return (type == "DATE" ? utc : utc.ToLocalTime()).ToString("g");
             }
         }
         return null;
     }
+
+    /// <summary>A stored date / date &amp; time as its UTC instant. The tables keep UTC, but a value read back from them
+    /// (a record a pipeline step wrote, say) carries no zone — "2026-10-22T10:06:42.821" — while one from the API ends in "Z".
+    /// Plain DateTime.TryParse took the first as the server's local time, moving it by the server's offset (5:30 on IST).</summary>
+    private static bool TryParseStoredUtc(object value, out DateTime utc) =>
+        DateTime.TryParse(value.ToString(), System.Globalization.CultureInfo.CurrentCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out utc);
 
     /// <summary>Maps raw keys like "fid_3" to the field's original label so users can decode raw input/output.</summary>
     private static Dictionary<string, object?> BuildFieldLabelMap(List<AppField> fields)
@@ -1651,9 +1658,8 @@ public class PipelineAuditFormatter : IPipelineAuditFormatter
                 object? val = kvp.Value;
                 if (val != null && (matchedField.TypeCode.Equals("DATETIME", StringComparison.OrdinalIgnoreCase) || matchedField.TypeCode.Equals("DATE", StringComparison.OrdinalIgnoreCase)))
                 {
-                    if (DateTime.TryParse(val.ToString(), out var dt))
+                    if (TryParseStoredUtc(val, out var utcDt))
                     {
-                        var utcDt = dt.ToUniversalTime();
                         val = new Dictionary<string, object?>
                         {
                             { "@type", "datetime" },

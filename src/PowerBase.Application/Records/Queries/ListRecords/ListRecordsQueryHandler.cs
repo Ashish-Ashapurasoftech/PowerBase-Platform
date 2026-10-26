@@ -59,6 +59,38 @@ public class ListRecordsQueryHandler
         // Merge the permission view-filter with an optional Report Link ad-hoc filter.
         var effectiveFilter = BuildEffectiveFilter(access.ViewFilter, query.FilterFid, query.FilterValue, table, fields);
 
+        // Conditions on Formula/Lookup/Summary fields have no column, so the SQL builder skips them: evaluate
+        // them in memory over every physically matching row, then page (same approach as RunReportQueryHandler).
+        // Without this a View Custom Rule on a formula field would not restrict this endpoint at all.
+        var formulaFids = fields
+            .Where(f => f.Fid.HasValue && FormulaTypeMap.IsComputedField(f.TypeCode, f.Settings))
+            .Select(f => (long)f.Fid!.Value)
+            .ToHashSet();
+        if (FormulaFilterSorter.TreeContainsFormulaField(effectiveFilter, formulaFids))
+        {
+            var (physicalFilter, formulaFilter) = FormulaFilterSorter.SplitFilterTree(effectiveFilter, formulaFids);
+            var allRows = await _recordRepo.ListAllMatchingAsync(
+                table, fields, physicalFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+            // Project every field: a rule's formula may itself be hidden from the role, or depend on hidden fields.
+            var allRelational = Relationships.ReferenceOriginalFallback.Apply(fields, allRows,
+                await _relationalProjector.ProjectAsync(table, fields, allRows, ct));
+            var allComputed = _formulaProjector.Project(fields, allRows, allRelational, table);
+            var pairs = allRows.Zip(allComputed, (r, c) => (Row: r, Computed: c)).ToList();
+            if (formulaFilter is not null)
+                pairs = FormulaFilterSorter.ApplyFormulaFilters(pairs, formulaFilter, fields);
+
+            var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            var pageUserNames = await RunReportQueryHandler.ResolveUserNamesAsync(
+                pagePairs.Select(p => p.Row), visibleFields, _userRepo, ct, pagePairs.Select(p => p.Computed));
+            return new PagedRecordResult
+            {
+                Items = pagePairs.Select(p => Records.RecordResult.FromRow(p.Row, visibleFields, pageUserNames, p.Computed)).ToList(),
+                TotalCount = pairs.Count,
+                Page = page,
+                PageSize = pageSize,
+            };
+        }
+
         var rows = await _recordRepo.ListAsync(
             table, visibleFields, page, pageSize,
             filterTree: effectiveFilter, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
