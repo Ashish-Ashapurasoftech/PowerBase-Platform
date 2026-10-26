@@ -42,6 +42,14 @@ public class PagedReportRunResult
     /// record matching the report's filters, not just this page. Only columns that opted into a
     /// total/average row appear here; empty when the report hides totals.</summary>
     public IReadOnlyDictionary<string, ColumnTotal> Totals { get; init; } = new Dictionary<string, ColumnTotal>();
+    /// <summary>Set (to <see cref="InMemoryReadLimit.Rows"/>) when the report sorts or filters by a calculated or encrypted
+    /// field and more records matched than one in-memory read holds: the order and <see cref="TotalCount"/> then cover only
+    /// the first this-many records (by Record ID#). Null when they cover every matching record.</summary>
+    public int? InMemoryRowLimit { get; init; }
+    /// <summary>True when a column that opted into a total/average row has none in <see cref="Totals"/> because it couldn't
+    /// be worked out exactly over every matching record (too many to read into memory, or matched by a quick search /
+    /// calculated filter SQL can't repeat). Left out rather than shown covering only some records.</summary>
+    public bool TotalsIncomplete { get; init; }
 }
 
 /// <summary>See <see cref="RunReportQueryHandler.ResolveDeleteScopeAsync"/>.</summary>
@@ -430,6 +438,15 @@ public class RunReportQueryHandler
             .Select(f => (long)f.Fid!.Value)
             .ToHashSet();
 
+        // A Lookup of a stored, unencrypted parent field is read in SQL — the parent column, through the row's reference —
+        // so filtering or sorting on it covers every record instead of the first InMemoryReadLimit.Rows read into memory.
+        // Only the lookups this run filters or sorts on are checked. They stay in computedFids: the search index has none.
+        var sqlLookupFids = await SqlReadableLookupFidsAsync(table, allFields, isAppEncrypted,
+            SummaryEncryptionGuard.ConditionFieldIds(userFilterTree)
+                .Concat(SummaryEncryptionGuard.ConditionFieldIds(access.ViewFilter))
+                .Concat(sortFields.Select(s => s.FieldId)), ct);
+        if (sqlLookupFids is not null) formulaFids.ExceptWith(sqlLookupFids);
+
         var hasFormulaFilters = FormulaFilterSorter.TreeContainsFormulaField(userFilterTree, formulaFids);
         var hasFormulaSorts   = sortFields.Any(s => formulaFids.Contains(s.FieldId));
 
@@ -456,6 +473,17 @@ public class RunReportQueryHandler
 
         var canExpressEffectiveFilter = effectiveFilterTree == null || OData.ODataFilterBuilder.CanExpress(effectiveFilterTree, allFields);
 
+        // Columns that opted into a Total/Average row — aggregated over ALL matching records, never just a page.
+        var totalCols = definition.HideTotals || isMaskedPreview
+            ? new List<AppField>()
+            : selectedFields.Where(WantsTotals).ToList();
+
+        // AI Search only hands back a page of matches, so the fast path works out totals in SQL over the same filter. A
+        // quick search, or a filter on an encrypted / calculated field, can't be repeated in SQL: such a report with totals
+        // takes the standard pipeline below instead, which totals exactly what it matched.
+        var totalsExpressibleInSql = string.IsNullOrWhiteSpace(quickSearch)
+            && !FormulaFilterSorter.TreeContainsFormulaField(effectiveFilterTree, formulaFids);
+
         // SOLUTION 1: Fast Azure AI Search paged execution for large tables.
         // If grid search is enabled and sorting or filtering involves encrypted fields (which are indexed as plaintext in AI Search)
         // or user filters / quick search, execute the paging and sorting directly in Azure AI Search.
@@ -467,6 +495,7 @@ public class RunReportQueryHandler
             && canSortInSearch
             && !access.RestrictToCreatedBy.HasValue
             && !FormulaFilterSorter.TreeContainsFormulaField(effectiveFilterTree, computedFids)
+            && (totalCols.Count == 0 || totalsExpressibleInSql)
             && (effectiveFilterTree != null || !string.IsNullOrWhiteSpace(quickSearch) || hasFormulaSorts || hasFormulaFilters || isAppEncrypted);
 
         // Issue 2: Newly created rows indexing latency check.
@@ -537,14 +566,11 @@ public class RunReportQueryHandler
                     totalFast = pagedRows.Count;
                 }
 
-                var totalsFast = new Dictionary<string, ColumnTotal>();
-                var totalColsFast = definition.HideTotals || isMaskedPreview
-                    ? new List<AppField>()
-                    : selectedFields.Where(WantsTotals).ToList();
-                if (totalColsFast.Count > 0 && itemsFast.Count > 0)
-                {
-                    totalsFast = AggregateInMemory(itemsFast, totalColsFast);
-                }
+                // Over every match, not this page: the filter is plain SQL here (see totalsExpressibleInSql).
+                var (totalsFast, totalsFastIncomplete) = totalCols.Count > 0
+                    ? await TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, effectiveFilterTree, null,
+                        fitsInMemory: totalMatches <= InMemoryReadLimit.Rows, sqlLookupFids, ct)
+                    : (new Dictionary<string, ColumnTotal>(), false);
 
                 return new PagedReportRunResult
                 {
@@ -555,6 +581,7 @@ public class RunReportQueryHandler
                     PageSize = pageSize,
                     IsDataMasked = isMaskedPreview,
                     Totals = totalsFast,
+                    TotalsIncomplete = totalsFastIncomplete,
                 };
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -696,10 +723,8 @@ public class RunReportQueryHandler
         IReadOnlyList<RecordResult> items;
         int total;
         var totals = new Dictionary<string, ColumnTotal>();
-        // Columns that opted into a Total/Average row — aggregated over ALL matching records below.
-        var totalCols = definition.HideTotals || isMaskedPreview
-            ? new List<AppField>()
-            : selectedFields.Where(WantsTotals).ToList();
+        var totalsIncomplete = false;
+        int? inMemoryRowLimit = null;
 
         if (hasFormulaFilters || hasFormulaSorts)
         {
@@ -711,7 +736,10 @@ public class RunReportQueryHandler
 
             var allRows = await _recordRepo.ListAllMatchingAsync(table, allFields,
                 physicalFilterTree, sqlSorts,
-                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
+            // The read stops at InMemoryReadLimit.Rows: past that the in-memory order and filter below only cover the
+            // first that-many records, which the result says (InMemoryRowLimit) instead of passing them off as all.
+            var readEveryMatch = allRows.Count < InMemoryReadLimit.Rows;
 
             var allRelational = Relationships.ReferenceOriginalFallback.Apply(allFields, allRows,
                 await _relationalProjector.ProjectAsync(table, allFields, allRows, ct));
@@ -727,10 +755,28 @@ public class RunReportQueryHandler
                 pairs = FormulaFilterSorter.ApplySort(pairs, sortFields, allFields);
 
             total = pairs.Count;
+            if (!readEveryMatch) inMemoryRowLimit = InMemoryReadLimit.Rows;
 
-            // Every matching row is already in memory here, so aggregate them directly.
             if (totalCols.Count > 0)
-                totals = AggregateInMemory(pairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, null, p.Computed)).ToList(), totalCols);
+            {
+                if (readEveryMatch)
+                {
+                    // Every matching row is already in memory here, so aggregate them directly.
+                    totals = AggregateInMemory(pairs.Select(p => RecordResult.FromRow(p.Row, selectedFields, null, p.Computed)).ToList(), totalCols);
+                }
+                else if (formulaConditions == null)
+                {
+                    // Only the order is calculated: which records match is plain SQL, so stored columns are still totalled
+                    // over all of them; calculated ones would cover only the rows read, so they're left out.
+                    (totals, totalsIncomplete) = await TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols,
+                        physicalFilterTree, access.RestrictToCreatedBy, fitsInMemory: false, sqlLookupFids, ct);
+                }
+                else
+                {
+                    // Which records match is itself worked out in memory, over only the rows read: no total can be exact.
+                    totalsIncomplete = true;
+                }
+            }
 
             // Paginate in memory.
             var pagePairs = pairs.Skip((page - 1) * pageSize).Take(pageSize).ToList();
@@ -741,9 +787,9 @@ public class RunReportQueryHandler
         {
             // Normal path — SQL handles pagination, sorting, and filtering entirely.
             var rows = await _recordRepo.ListAsync(table, allFields, page, pageSize, filterTree, sortFields,
-                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
             total = await _recordRepo.CountAsync(table, allFields, filterTree,
-                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+                restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids);
 
             var relational = Relationships.ReferenceOriginalFallback.Apply(allFields, rows,
                 await _relationalProjector.ProjectAsync(table, allFields, rows, ct));
@@ -752,30 +798,8 @@ public class RunReportQueryHandler
             items = rows.Select((row, i) => RecordResult.FromRow(row, selectedFields, userNames, computed[i])).ToList();
 
             if (totalCols.Count > 0)
-            {
-                // Plain stored columns: one SQL aggregate with the same WHERE as the page query.
-                var physicalCols = totalCols.Where(c => !PhysicalNaming.IsComputedTypeCode(c.TypeCode) && !c.IsEncrypted).ToList();
-                if (physicalCols.Count > 0)
-                {
-                    foreach (var kv in await _recordRepo.AggregateColumnsAsync(table, allFields, physicalCols, filterTree,
-                                 restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct))
-                        totals[kv.Key.ToString()] = kv.Value;
-                }
-
-                // Formula / encrypted columns have no SQL-aggregatable value, so evaluate them over
-                // every matching record in memory (capped at 10,000 for unfiltered 10M-row tables to prevent OOM).
-                var memoryCols = totalCols.Except(physicalCols).ToList();
-                if (memoryCols.Count > 0)
-                {
-                    var everyRow = await _recordRepo.ListAllMatchingAsync(table, allFields, filterTree, [], restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-
-                    var everyRelational = await _relationalProjector.ProjectAsync(table, allFields, everyRow, ct);
-                    var everyComputed = _formulaProjector.Project(allFields, everyRow, everyRelational, table);
-                    var everyResult = everyRow.Select((r, i) => RecordResult.FromRow(r, selectedFields, null, everyComputed[i])).ToList();
-                    foreach (var kv in AggregateInMemory(everyResult, memoryCols))
-                        totals[kv.Key] = kv.Value;
-                }
-            }
+                (totals, totalsIncomplete) = await TotalsOverAllMatchesAsync(table, allFields, selectedFields, totalCols, filterTree,
+                    access.RestrictToCreatedBy, fitsInMemory: total <= InMemoryReadLimit.Rows, sqlLookupFids, ct);
         }
 
         if (isMaskedPreview)
@@ -798,7 +822,104 @@ public class RunReportQueryHandler
             PageSize = pageSize,
             IsDataMasked = isMaskedPreview,
             Totals = totals,
+            InMemoryRowLimit = inMemoryRowLimit,
+            TotalsIncomplete = totalsIncomplete,
         };
+    }
+
+    /// <summary>The Total/Average row over EVERY record matching <paramref name="filterTree"/>, which must be plain SQL (no
+    /// condition on a calculated or encrypted field). Stored columns are one SQL aggregate with the same WHERE as the page
+    /// query. Formula / encrypted columns have no SQL-aggregatable value, so they're evaluated over the matching records in
+    /// memory — only when those all fit in one read (<paramref name="fitsInMemory"/>, see <see cref="InMemoryReadLimit"/>):
+    /// otherwise their total would cover only some records, so it is left out and Incomplete is true.</summary>
+    /// <param name="sqlLookupFids">The Lookups <paramref name="filterTree"/> reads in SQL (see SqlReadableLookupFidsAsync).</param>
+    private async Task<(Dictionary<string, ColumnTotal> Totals, bool Incomplete)> TotalsOverAllMatchesAsync(
+        AppTable table, IReadOnlyList<AppField> allFields, IReadOnlyList<AppField> selectedFields, IReadOnlyList<AppField> totalCols,
+        FilterGroup? filterTree, long? restrictToCreatedBy, bool fitsInMemory, IReadOnlySet<long>? sqlLookupFids, CancellationToken ct)
+    {
+        var totals = new Dictionary<string, ColumnTotal>();
+        var physicalCols = totalCols.Where(c => !PhysicalNaming.IsComputedTypeCode(c.TypeCode) && !c.IsEncrypted).ToList();
+        if (physicalCols.Count > 0)
+        {
+            foreach (var kv in await _recordRepo.AggregateColumnsAsync(table, allFields, physicalCols, filterTree,
+                         restrictToCreatedBy: restrictToCreatedBy, ct: ct, sqlLookupFids: sqlLookupFids))
+                totals[kv.Key.ToString()] = kv.Value;
+        }
+
+        var memoryCols = totalCols.Except(physicalCols).ToList();
+        if (memoryCols.Count == 0) return (totals, false);
+        if (!fitsInMemory) return (totals, true);
+
+        var everyRow = await _recordRepo.ListAllMatchingAsync(table, allFields, filterTree, [], restrictToCreatedBy: restrictToCreatedBy, ct: ct,
+            sqlLookupFids: sqlLookupFids);
+        var everyRelational = await _relationalProjector.ProjectAsync(table, allFields, everyRow, ct);
+        var everyComputed = _formulaProjector.Project(allFields, everyRow, everyRelational, table);
+        var everyResult = everyRow.Select((r, i) => RecordResult.FromRow(r, selectedFields, null, everyComputed[i])).ToList();
+        foreach (var kv in AggregateInMemory(everyResult, memoryCols))
+            totals[kv.Key] = kv.Value;
+        return (totals, false);
+    }
+
+    /// <summary>Parent field types a Lookup of which SQL filters and sorts exactly as the field itself: one plain value per
+    /// record. Not users (a picked user is resolved to its id only for the record's own User fields), multi-value, range,
+    /// JSON (Address, File) or Reference types (shown as a key, stored as a Record ID#).</summary>
+    private static readonly HashSet<string> SqlLookupSourceTypes = new(StringComparer.Ordinal)
+    {
+        "Text", "TextMultiLine", "Email", "Phone", "Url", "SingleSelect",
+        "Number", "Currency", "Percent", "Rating", "Duration",
+        "Date", "DateTime", "Time", "Boolean",
+    };
+
+    /// <summary>The Lookups among <paramref name="usedFids"/> SQL can read in place of the in-memory projection — the parent
+    /// column through this table's own Reference: a stored (not calculated), unencrypted source of a
+    /// <see cref="SqlLookupSourceTypes"/> type, still of the type the lookup was saved with. Null when there are none, and
+    /// whenever the parent app's encryption can't be known.</summary>
+    private async Task<IReadOnlySet<long>?> SqlReadableLookupFidsAsync(
+        AppTable table, IReadOnlyList<AppField> allFields, bool isAppEncrypted, IEnumerable<long> usedFids, CancellationToken ct)
+    {
+        var used = usedFids.ToHashSet();
+        var lookups = allFields.Where(f => f.Fid is int fid && used.Contains(fid) && SummaryLookupSources.IsLookup(f)).ToList();
+        if (lookups.Count == 0 || _appRepo is null) return null;
+
+        var sources = await SummaryLookupSources.LoadAsync(lookups, _fieldRepo, ct);
+        var appEncryptedByTable = new Dictionary<long, bool?>();   // null: the parent table is gone
+        var result = new HashSet<long>();
+        foreach (var lookup in lookups)
+        {
+            if (SummaryLookupSources.Settings(lookup) is not { SourceTableId: long sourceTableId, ReferenceFid: int refFid } settings
+                || !sources.TryGetValue(lookup.Fid!.Value, out var source)
+                || !allFields.Any(f => f.Fid == refFid && f.TypeCode == "Reference")
+                || PhysicalNaming.IsComputedTypeCode(source.TypeCode)
+                || !SqlLookupSourceTypes.Contains(source.TypeCode)
+                || !string.Equals(settings.SourceTypeCode, source.TypeCode, StringComparison.Ordinal)
+                || !string.IsNullOrWhiteSpace(settings.SourceSubField))
+                continue;
+
+            if (!appEncryptedByTable.TryGetValue(sourceTableId, out var sourceAppEncrypted))
+            {
+                try
+                {
+                    var sourceTable = await _tableRepo.GetByIdAsync(sourceTableId, ct);
+                    sourceAppEncrypted = sourceTable.AppId == table.AppId
+                        ? isAppEncrypted
+                        : (await _appRepo.GetByIdAsync(sourceTable.AppId, ct)).IsEncrypted;
+                }
+                catch (NotFoundException)
+                {
+                    sourceAppEncrypted = null;
+                }
+                appEncryptedByTable[sourceTableId] = sourceAppEncrypted;
+            }
+            // Parent table gone: left to the in-memory projection, as before. Ciphertext can't be compared or ordered in SQL;
+            // a field marked encrypted counts whatever its type (an exempt type encrypted before the exemption existed,
+            // until the cleanup converts it).
+            if (sourceAppEncrypted is not bool appEncrypted
+                || (!source.IsSystem && (source.IsEncrypted || (appEncrypted && !PhysicalNaming.IsEncryptionExemptTypeCode(source.TypeCode)))))
+                continue;
+
+            result.Add(lookup.Fid!.Value);
+        }
+        return result.Count > 0 ? result : null;
     }
 
     /// <summary>True when this column opted into a Total/Average row (numeric family, Duration and

@@ -178,7 +178,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         FilterGroup? filterTree = null,
         IReadOnlyList<SortSpec>? sortFields = null,
         long? restrictToCreatedBy = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null)
     {
         var fieldCols = BuildFieldColumnList(fields);
         var parameters = new DynamicParameters();
@@ -186,23 +187,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         parameters.Add("pageSize", pageSize);
 
         var fieldLookup = BuildFieldLookup(fields);
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
-        var orderBy = sortFields?.Count > 0
-            ? string.Join(", ", sortFields
-                .Where(s => !fieldLookup.TryGetValue(s.FieldId, out var sf2) || !PhysicalNaming.IsComputedTypeCode(sf2.TypeCode))
-                .Select(s =>
-                {
-                    var colName = fieldLookup.TryGetValue(s.FieldId, out var sf)
-                        ? ResolveColumnName(sf, s.FieldId)
-                        : PhysicalNaming.ColumnName((int)s.FieldId);
-                    return $"{colName} {(s.Desc ? "DESC" : "ASC")}";
-                })
-                .DefaultIfEmpty("Id"))
-            : "Id";
+        var filterWhere = BuildReportFilterWhere(filterTree, parameters, fieldLookup, sqlLookupFids) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+        var orderBy = BuildReportOrderBy(sortFields, fieldLookup, sqlLookupFids);
 
         var sql = $"""
             SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
-            FROM {PhysicalNaming.FullTableName(table.Id)}
+            FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)}
             WHERE IsDeleted = 0{filterWhere}
             ORDER BY {orderBy}
             OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
@@ -262,29 +252,20 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         FilterGroup? filterTree = null,
         IReadOnlyList<SortSpec>? sortFields = null,
         long? restrictToCreatedBy = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null)
     {
         var parameters = new DynamicParameters();
         var fieldLookup = BuildFieldLookup(fields);
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+        var filterWhere = BuildReportFilterWhere(filterTree, parameters, fieldLookup, sqlLookupFids) + BuildOwnerWhere(restrictToCreatedBy, parameters);
         // Same ORDER BY rules as ListAsync: computed fields have no column and are skipped; Id when nothing sortable remains.
-        var orderBy = sortFields?.Count > 0
-            ? string.Join(", ", sortFields
-                .Where(s => !fieldLookup.TryGetValue(s.FieldId, out var sf2) || !PhysicalNaming.IsComputedTypeCode(sf2.TypeCode))
-                .Select(s =>
-                {
-                    var colName = fieldLookup.TryGetValue(s.FieldId, out var sf)
-                        ? ResolveColumnName(sf, s.FieldId)
-                        : PhysicalNaming.ColumnName((int)s.FieldId);
-                    return $"{colName} {(s.Desc ? "DESC" : "ASC")}";
-                })
-                .DefaultIfEmpty("Id"))
-            : "Id";
+        var orderBy = BuildReportOrderBy(sortFields, fieldLookup, sqlLookupFids);
 
-        // Guardrail: TOP 50000 ensures an in-memory pass on a massive table cannot pull millions of rows and trigger OutOfMemory
+        // Guardrail: TOP InMemoryReadLimit.Rows (50,000) ensures an in-memory pass on a massive table cannot pull millions of rows
+        // and trigger OutOfMemory. Callers that hit it say so (see RunReportQueryHandler).
         var sql = $"""
-            SELECT TOP 50000 Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
-            FROM {PhysicalNaming.FullTableName(table.Id)}
+            SELECT TOP {Application.Records.InMemoryReadLimit.Rows} Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
+            FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)}
             WHERE IsDeleted = 0{filterWhere}
             ORDER BY {orderBy}
             """;
@@ -358,11 +339,12 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return rows.AsList();
     }
 
-    public async Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
+    public async Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null)
     {
         var parameters = new DynamicParameters();
         var fieldLookup = BuildFieldLookup(fields);
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+        var filterWhere = BuildReportFilterWhere(filterTree, parameters, fieldLookup, sqlLookupFids) + BuildOwnerWhere(restrictToCreatedBy, parameters);
 
         if (string.IsNullOrWhiteSpace(filterWhere))
         {
@@ -391,14 +373,15 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             }
         }
 
-        var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
+        var sql = $"SELECT COUNT(*) FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyDictionary<long, Application.Records.ColumnTotal>> AggregateColumnsAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<AppField> columns,
-        FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default)
+        FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null)
     {
         var result = new Dictionary<long, Application.Records.ColumnTotal>();
         var targets = columns.Where(c => c.Fid.HasValue).ToList();
@@ -406,7 +389,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         var parameters = new DynamicParameters();
         var fieldLookup = BuildFieldLookup(fields);
-        var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup) + BuildOwnerWhere(restrictToCreatedBy, parameters);
+        var filterWhere = BuildReportFilterWhere(filterTree, parameters, fieldLookup, sqlLookupFids) + BuildOwnerWhere(restrictToCreatedBy, parameters);
 
         // SUM ignores NULLs, so it already equals "blank counts as 0"; COUNT(col) is the non-blank
         // count, and COUNT(*) the row count — together they let the caller pick either average.
@@ -419,7 +402,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             selects.Add($"COUNT_BIG({col}) AS n{fid}");
         }
 
-        var sql = $"SELECT {string.Join(", ", selects)} FROM {PhysicalNaming.FullTableName(table.Id)} WHERE IsDeleted = 0{filterWhere}";
+        var sql = $"SELECT {string.Join(", ", selects)} FROM {PhysicalNaming.FullTableName(table.Id)}{ReportFromAlias(sqlLookupFids)} WHERE IsDeleted = 0{filterWhere}";
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         var row = (IDictionary<string, object?>)(await connection.QuerySingleAsync<dynamic>(new CommandDefinition(sql, parameters, commandTimeout: 0, cancellationToken: ct)));
 
@@ -881,13 +864,14 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         if (ids.Count == 0) return result;
 
         var fieldCols = BuildFieldColumnList(fields);
+        var parameters = new DynamicParameters();
         var sql = $"""
             SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{fieldCols}
             FROM {PhysicalNaming.FullTableName(table.Id)}
-            WHERE IsDeleted = 0 AND Id IN @ids
+            WHERE IsDeleted = 0 AND {SqlInList.Predicate("Id", "ids", ids, parameters)}
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var rows = await connection.QueryAsync(new CommandDefinition(sql, new { ids }, cancellationToken: ct));
+        var rows = await connection.QueryAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
 
         var enc = await GetEncryptionContextAsync(connection, table.AppId, null, ct);
 
@@ -999,7 +983,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var targetSelect = targetFid.HasValue ? $", {TargetColumnExpr(targetFid.Value, targetSubField, fieldLookup)} AS {target}" : "";
 
         var parameters = new DynamicParameters();
-        parameters.Add("parentKeyValues", parentKeyValues);
+        var parentKeyIn = SqlInList.Predicate(refCol, "parentKeyValues", parentKeyValues, parameters);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup, parentScope);
 
         // Aliased so a "parentField" condition's subquery can name this row's reference column
@@ -1009,7 +993,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             FROM (
                 SELECT {refCol} AS ParentKey{targetSelect}
                 FROM {PhysicalNaming.FullTableName(childTable.Id)} {ChildAlias}
-                WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues{filterWhere}
+                WHERE IsDeleted = 0 AND {parentKeyIn}{filterWhere}
             ) matched
             GROUP BY ParentKey
             """;
@@ -1050,13 +1034,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         var order = sortFid.HasValue ? $"{TargetColumnExpr(sortFid.Value, null, fieldLookup)} {dir}, Id {dir}" : $"Id {dir}";
 
         var parameters = new DynamicParameters();
-        parameters.Add("parentKeyValues", parentKeyValues);
+        var parentKeyIn = SqlInList.Predicate(refCol, "parentKeyValues", parentKeyValues, parameters);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup, parentScope);
 
         var sql = $"""
             SELECT {refCol} AS ParentKey, {targetExpr} AS Value
             FROM {PhysicalNaming.FullTableName(childTable.Id)} {ChildAlias}
-            WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues AND {hasValue}{filterWhere}
+            WHERE IsDeleted = 0 AND {parentKeyIn} AND {hasValue}{filterWhere}
             ORDER BY {refCol}, {order}
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -1081,13 +1065,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
 
         var refCol = PhysicalNaming.ColumnName(referenceFid);
         var parameters = new DynamicParameters();
-        parameters.Add("parentKeyValues", parentKeyValues);
+        var parentKeyIn = SqlInList.Predicate(refCol, "parentKeyValues", parentKeyValues, parameters);
         var filterWhere = BuildFilterTreeWhere(filterTree, parameters, fieldLookup, parentScope);
 
         var sql = $"""
             SELECT Id, PublicId, CreatedOn, CreatedBy, ModifiedOn, ModifiedBy{BuildFieldColumnList(fields)}
             FROM {PhysicalNaming.FullTableName(childTable.Id)} {ChildAlias}
-            WHERE IsDeleted = 0 AND {refCol} IN @parentKeyValues{filterWhere}
+            WHERE IsDeleted = 0 AND {parentKeyIn}{filterWhere}
             ORDER BY Id
             """;
         await using var connection = await ConnectionFactory.CreateAsync(ct);
@@ -2585,23 +2569,69 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return string.IsNullOrEmpty(fragment) ? string.Empty : $" AND ({fragment})";
     }
 
+    /// <summary>The alias a report read (ListAsync / CountAsync / AggregateColumnsAsync / ListAllMatchingAsync) gives its table
+    /// when it reads Lookups in SQL: a lookup is a subquery on the parent table, correlated on this row's reference column.</summary>
+    private const string ReportRowAlias = "t";
+
+    /// <summary>The table's FROM alias for a report read: <see cref="ReportRowAlias"/> when it reads Lookups in SQL, none
+    /// otherwise (the SQL is then exactly what it always was).</summary>
+    private static string ReportFromAlias(IReadOnlySet<long>? sqlLookupFids) => sqlLookupFids is { Count: > 0 } ? $" {ReportRowAlias}" : "";
+
+    /// <summary><see cref="BuildFilterTreeWhere"/> for a report read: conditions on the Lookups in <paramref name="sqlLookupFids"/>
+    /// compare the parent column they pull down (the caller checked it's stored and plain); any other calculated field is
+    /// skipped, as always — the caller judges it in memory. The FROM must use <see cref="ReportFromAlias"/>.</summary>
+    internal static string BuildReportFilterWhere(FilterGroup? group, DynamicParameters parameters,
+        IReadOnlyDictionary<long, AppField>? fieldLookup, IReadOnlySet<long>? sqlLookupFids)
+    {
+        if (sqlLookupFids is not { Count: > 0 }) return BuildFilterTreeWhere(group, parameters, fieldLookup);
+        if (group is null || group.Nodes.Count == 0) return string.Empty;
+        var paramIdx = 0;
+        var fragment = BuildTreeFragment(group, parameters, ref paramIdx, fieldLookup, null, ReportRowAlias, sqlLookupFids);
+        return string.IsNullOrEmpty(fragment) ? string.Empty : $" AND ({fragment})";
+    }
+
+    /// <summary>ORDER BY for a report read: stored columns, and the Lookups in <paramref name="sqlLookupFids"/> as the parent
+    /// column they pull down. Other calculated fields have no column and are skipped (the caller sorts them in memory); Id
+    /// when nothing sortable remains.</summary>
+    internal static string BuildReportOrderBy(IReadOnlyList<SortSpec>? sortFields, IReadOnlyDictionary<long, AppField> fieldLookup,
+        IReadOnlySet<long>? sqlLookupFids) =>
+        sortFields?.Count > 0
+            ? string.Join(", ", sortFields
+                .Select(s => (Sort: s, Column: fieldLookup.TryGetValue(s.FieldId, out var sf)
+                    ? (sqlLookupFids?.Contains(s.FieldId) == true && SummaryLookupSources.IsLookup(sf)
+                        ? LookupColumnExpr(sf, ReportRowAlias)
+                        : PhysicalNaming.IsComputedTypeCode(sf.TypeCode) ? null : ResolveColumnName(sf, s.FieldId))
+                    : PhysicalNaming.ColumnName((int)s.FieldId)))
+                .Where(x => x.Column is not null)
+                .Select(x => $"{x.Column} {(x.Sort.Desc ? "DESC" : "ASC")}")
+                .DefaultIfEmpty("Id"))
+            : "Id";
+
+    /// <summary>Whether a Lookup condition is compiled to its parent column: always in a summary query (parentScope), and in
+    /// a query that aliases the row holding the reference (lookupAlias) — for a report read, only the Lookups it was given.</summary>
+    private static bool ReadsLookupInSql(long fid, ParentFieldScope? parentScope, string? lookupAlias, IReadOnlySet<long>? sqlLookupFids) =>
+        parentScope is not null || (lookupAlias is not null && (sqlLookupFids is null || sqlLookupFids.Contains(fid)));
+
     /// <param name="lookupAlias">For a query that isn't a summary (no <paramref name="parentScope"/>) but filters a
     /// table's own Lookup fields — the reference dropdown filters the parent table aliased <c>p</c>: the alias
     /// of the row that holds the lookup's reference column.</param>
+    /// <param name="sqlLookupFids">With <paramref name="lookupAlias"/>: the only Lookups compiled to SQL (a report read's);
+    /// null compiles every one (the reference dropdown).</param>
     private static string BuildTreeFragment(FilterGroup group, DynamicParameters parameters, ref int paramIdx,
-        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null, string? lookupAlias = null)
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null, string? lookupAlias = null,
+        IReadOnlySet<long>? sqlLookupFids = null)
     {
         var parts = new List<string>();
         foreach (var node in group.Nodes)
         {
             if (node.Condition is { } cond)
             {
-                var clause = BuildConditionClause(cond, parameters, ref paramIdx, fieldLookup, parentScope, lookupAlias);
+                var clause = BuildConditionClause(cond, parameters, ref paramIdx, fieldLookup, parentScope, lookupAlias, sqlLookupFids);
                 if (clause is not null) parts.Add(clause);
             }
             else if (node.Group is { } sub && sub.Nodes.Count > 0)
             {
-                var subSql = BuildTreeFragment(sub, parameters, ref paramIdx, fieldLookup, parentScope, lookupAlias);
+                var subSql = BuildTreeFragment(sub, parameters, ref paramIdx, fieldLookup, parentScope, lookupAlias, sqlLookupFids);
                 if (!string.IsNullOrEmpty(subSql)) parts.Add($"({subSql})");
             }
         }
@@ -2776,7 +2806,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     };
 
     private static string? BuildConditionClause(FilterCondition cond, DynamicParameters p, ref int i,
-        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null, string? lookupAlias = null)
+        IReadOnlyDictionary<long, AppField>? fieldLookup = null, ParentFieldScope? parentScope = null, string? lookupAlias = null,
+        IReadOnlySet<long>? sqlLookupFids = null)
     {
         // "the value in the field" / "the value in the parent's field" conditions legitimately
         // carry no Value at all (ValueFieldId is the comparison target instead) — don't let the
@@ -2796,7 +2827,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         AppField? lookupAsSource = null;
         string? lookupCol = null;
         var rowAlias = lookupAlias ?? ChildAlias;
-        if ((parentScope is not null || lookupAlias is not null) && fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var lookupField)
+        if (ReadsLookupInSql(cond.FieldId, parentScope, lookupAlias, sqlLookupFids) && fieldLookup != null && fieldLookup.TryGetValue(cond.FieldId, out var lookupField)
             && SummaryLookupSources.IsLookup(lookupField) && LookupColumnExpr(lookupField, rowAlias) is { } lookupExpr)
         {
             lookupCol = lookupExpr;
@@ -2908,7 +2939,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             {
                 if (fieldLookup == null || !fieldLookup.TryGetValue(cond.ValueFieldId!.Value, out var targetField))
                     return null;
-                if ((parentScope is not null || lookupAlias is not null) && SummaryLookupSources.IsLookup(targetField) && LookupColumnExpr(targetField, rowAlias) is { } otherLookup)
+                if (ReadsLookupInSql(cond.ValueFieldId!.Value, parentScope, lookupAlias, sqlLookupFids)
+                    && SummaryLookupSources.IsLookup(targetField) && LookupColumnExpr(targetField, rowAlias) is { } otherLookup)
                     colExpr2 = otherLookup;
                 else if (PhysicalNaming.IsComputedTypeCode(targetField.TypeCode))
                     return null;
