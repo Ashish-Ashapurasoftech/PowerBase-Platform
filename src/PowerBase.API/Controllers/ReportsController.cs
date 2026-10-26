@@ -637,6 +637,8 @@ public class ReportsController : ControllerBase
         Totals = result.Totals.ToDictionary(
             kv => kv.Key,
             kv => new ReportColumnTotalDto { Sum = kv.Value.Sum, NonBlankCount = kv.Value.NonBlankCount, RowCount = kv.Value.RowCount }),
+        InMemoryRowLimit = result.InMemoryRowLimit,
+        TotalsIncomplete = result.TotalsIncomplete,
     };
 
     /// <summary>Export report results as CSV. Optional dynamicFilters=fieldId:value (repeatable), same as run.</summary>

@@ -546,24 +546,21 @@ public sealed class RelationalProjector : IRelationalProjector
         return v => DisplayValueFormatter.Format(v, typeCode, settings, appFormatting, userNames: userNames);
     }
 
-    /// <summary>Child rows by table, decrypted, loaded once per projector (scoped per request) so several
-    /// summaries over the same child table share one read.</summary>
-    private readonly Dictionary<long, IReadOnlyList<IReadOnlyDictionary<string, object?>>> _decryptedChildRows = new();
+    /// <summary>Decrypted child rows by (child table, reference Fid), loaded once per projector (scoped per request) so
+    /// several summaries over the same children share one read — with the parent keys they were read for (null: the
+    /// whole table). Only rows read for every parent a later summary asks about can answer it.</summary>
+    private readonly Dictionary<(long TableId, int RefFid), (IReadOnlySet<string>? Keys, IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows)> _decryptedChildRows = new();
 
-    /// <summary>A summary over encrypted data: SQL can't match or aggregate ciphertext (the reference
-    /// column included), so the child table's rows are decrypted and aggregated here
-    /// (<see cref="EncryptedSummaryAggregator"/>). Returns parentKey → value.</summary>
+    /// <summary>A summary over encrypted data: SQL can't match or aggregate ciphertext, so the children of the page's
+    /// parents are decrypted and aggregated here (<see cref="EncryptedSummaryAggregator"/>). Returns parentKey → value.</summary>
     private async Task<IReadOnlyDictionary<object, object?>> AggregateInMemoryAsync(
         App app, AppTable parentTable, IReadOnlyList<AppField>? parentFields, AppTable childTable,
         IReadOnlyList<AppField> childFields, IReadOnlyDictionary<long, AppField> lookupSources,
         string function, int refFid, SummarySettings s, int? sortFid, IReadOnlyCollection<object> parentKeyValues,
         FilterGroup? filter, IReadOnlyDictionary<long, IReadOnlyDictionary<long, object?>>? computedParentValues, CancellationToken ct)
     {
-        if (!_decryptedChildRows.TryGetValue(childTable.Id, out var childRows))
-        {
-            childRows = await _recordRepo.ListAllRowsDecryptedAsync(childTable, childFields, ct);
-            _decryptedChildRows[childTable.Id] = childRows;
-        }
+        var parentKeys = parentKeyValues.Select(NormalizeParentKey).OfType<string>().ToHashSet();
+        var childRows = await DecryptedChildRowsAsync(app, childTable, childFields, refFid, parentKeyValues, parentKeys, ct);
 
         var readFids = new List<long>();
         if (s.TargetFid.HasValue) readFids.Add(s.TargetFid.Value);
@@ -594,16 +591,15 @@ public sealed class RelationalProjector : IRelationalProjector
             ? new AppField { Id = f.Id, Fid = f.Fid, Name = f.Name, Label = f.Label, IsSystem = f.IsSystem, TypeCode = "Number" }
             : f).ToList();
 
-        var parentKeys = parentKeyValues.Select(NormalizeParentKey).OfType<string>().ToHashSet();
-
         // Criteria that compare a child field to a field of its own parent (e.g. "Due is on or after the
         // parent's Start Date"): the parent's value, decrypted, stands in for it - one criteria tree per parent.
+        // Only the page's parents are read: the parent key is the parent's Record ID#.
         Func<string, FilterGroup?>? filterFor = null;
         if (HasParentFieldCondition(filter) && parentFields is not null)
         {
-            var parentRows = await _recordRepo.ListAllRowsDecryptedAsync(parentTable, parentFields, ct);
+            var parentRows = await _recordRepo.GetRowsByIdsAsync(parentTable, parentFields, RowIds(parentKeyValues), ct);
             var parentById = new Dictionary<string, IReadOnlyDictionary<string, object?>>();
-            foreach (var r in parentRows)
+            foreach (var r in parentRows.Values)
                 if (r.TryGetValue("Id", out var pid) && EncryptedSummaryAggregator.NormalizeKey(pid) is { } pk) parentById[pk] = r;
             var parentFieldsByFid = parentFields.Where(f => f.Fid.HasValue).GroupBy(f => (long)f.Fid!.Value).ToDictionary(g => g.Key, g => g.First());
             var perParent = new Dictionary<string, FilterGroup?>();
@@ -653,6 +649,37 @@ public sealed class RelationalProjector : IRelationalProjector
             childRows, childFields, function, refFid, s.TargetFid, s.TargetSubField, parentKeys, filter, options, format, filterFor);
     }
 
+    /// <summary>The decrypted child rows an in-memory summary reads: only the children of <paramref name="parentKeys"/>.
+    /// The reference column is never encrypted (a plain Record ID#, see PhysicalNaming.IsEncryptionExemptTypeCode), so
+    /// SQL still picks the children out by it; only the criteria are judged in memory. A reference marked encrypted
+    /// (<see cref="SummaryEncryptionGuard.IsEncrypted"/>) can't be matched in SQL, so the whole table is read for it.</summary>
+    private async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> DecryptedChildRowsAsync(
+        App app, AppTable childTable, IReadOnlyList<AppField> childFields, int refFid,
+        IReadOnlyCollection<object> parentKeyValues, IReadOnlySet<string> parentKeys, CancellationToken ct)
+    {
+        var cacheKey = (childTable.Id, refFid);
+        if (_decryptedChildRows.TryGetValue(cacheKey, out var cached) && (cached.Keys is null || cached.Keys.IsSupersetOf(parentKeys)))
+            return cached.Rows;
+
+        var reference = childFields.FirstOrDefault(f => f.Fid == refFid);
+        (IReadOnlySet<string>? Keys, IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows) read =
+            reference is null
+                // No reference column: no child row can belong to a parent (it wouldn't be read into the row either).
+                ? (null, [])
+                : SummaryEncryptionGuard.IsEncrypted(app, reference)
+                ? (null, await _recordRepo.ListAllRowsDecryptedAsync(childTable, childFields, ct))
+                : (parentKeys, await _recordRepo.ListRowsByReferenceAsync(childTable, childFields, refFid, parentKeyValues, null, ct: ct));
+        _decryptedChildRows[cacheKey] = read;
+        return read.Rows;
+    }
+
+    /// <summary>The row Ids among <paramref name="keys"/> — as rows and decrypted text hold them (42L, 42.0000m, "42").</summary>
+    private static HashSet<long> RowIds(IEnumerable<object?> keys) =>
+        keys.Select(EncryptedSummaryAggregator.NormalizeKey)
+            .Select(k => long.TryParse(k, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var id) ? id : (long?)null)
+            .OfType<long>()
+            .ToHashSet();
+
     /// <summary>The criteria with each "the value in the parent's field" comparison replaced by that parent's
     /// (decrypted) value as a literal — for a parent Lookup / Summary / Formula, the value worked out for it
     /// (<paramref name="computedValues"/>). A parent with no value (or no such field) can match nothing, like in SQL.</summary>
@@ -695,8 +722,8 @@ public sealed class RelationalProjector : IRelationalProjector
     }
 
     /// <summary>A lookup has no column, so for the lookups the summary reads (target, sort, criteria) its
-    /// value is put into a copy of each child row under the lookup's own column: the source table's rows
-    /// are decrypted and the value is taken through the child's reference to it. Those lookups are also
+    /// value is put into a copy of each child row under the lookup's own column: the source rows the children
+    /// reference are decrypted and the value is taken through the child's reference to it. Those lookups are also
     /// replaced, in the returned field list, by a field of their source's type, so they are compared,
     /// summed and formatted as that type. Everything else is returned as it came — a lookup of a Formula / Summary too:
     /// its source has no column to read, so it's worked out per record with the formulas (EncryptedRowFilter.WithComputedValues).</summary>
@@ -715,12 +742,16 @@ public sealed class RelationalProjector : IRelationalProjector
         foreach (var lookup in lookups)
         {
             var settings = SummaryLookupSources.Settings(lookup);
-            if (settings is not { SourceTableId: long sourceTableId, ReferenceFid: int } || !lookupSources.TryGetValue(lookup.Fid!.Value, out var source))
+            if (settings is not { SourceTableId: long sourceTableId, ReferenceFid: int lookupRefFid } || !lookupSources.TryGetValue(lookup.Fid!.Value, out var source))
                 continue;
 
             var sourceTable = await _tableRepo.GetByIdAsync(sourceTableId, ct);
             var sourceFields = await _fieldRepo.ListByTableAsync(sourceTableId, ct);
-            var sourceRows = await _recordRepo.ListAllRowsDecryptedAsync(sourceTable, sourceFields, ct);
+            var refCol = PhysicalNaming.ColumnName(lookupRefFid);
+            var sourceIds = RowIds(resultRows.Select(r => r.GetValueOrDefault(refCol)));
+            IReadOnlyList<IReadOnlyDictionary<string, object?>> sourceRows = sourceIds.Count == 0
+                ? []
+                : (await _recordRepo.GetRowsByIdsAsync(sourceTable, sourceFields, sourceIds, ct)).Values.ToList();
             (resultRows, resultFields) = EncryptedRowFilter.WithLookupValue(resultRows, resultFields, lookup, settings, source, sourceRows);
         }
         return (resultRows, resultFields);
