@@ -17,6 +17,12 @@ public interface IAppFieldRepository
     /// not exist yet (migration not applied).
     /// </summary>
     Task<int> EnsureSearchSlotsAsync(long tableId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Marks the table as wide: its eligible fields get "f_{fid}" slots (and "f_{fid}_e" for ranges), which is what makes the application read and write
+    /// the table's own index. Call it only after the table's documents have been copied there.
+    /// </summary>
+    Task MarkTableWideAsync(long tableId, CancellationToken ct = default);
     /// <summary>Slim, paged, searchable (by Label), sortable, filterable listing for the fields grid.
     /// <paramref name="filter"/> accepts either a dropdown value (e.g. "System Fields", "Required Fields")
     /// or a category name (Text/Numeric/Date/Other/User/Formula/Relationship/Action); null/"All Fields"

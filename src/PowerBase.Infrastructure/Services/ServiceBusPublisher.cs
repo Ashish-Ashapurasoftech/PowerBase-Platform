@@ -20,24 +20,17 @@ public class ServiceBusPublisher : IMessagePublisher
     // False when AzureServiceBus:ConnectionString is missing or still the placeholder: publishing is then skipped (one warning)
     // instead of every call dialling a host that cannot exist and retrying for seconds in the background.
     private readonly bool _configured;
+    private readonly bool _priorityEnabled;
 
     public ServiceBusPublisher(IConfiguration configuration, Microsoft.Extensions.Logging.ILogger<ServiceBusPublisher>? logger = null)
     {
         _logger = logger;
-        var connectionString = configuration["AzureServiceBus:ConnectionString"];
-        if (string.IsNullOrWhiteSpace(connectionString) || connectionString.StartsWith("<") || !connectionString.Contains("Endpoint="))
-        {
-            connectionString = "Endpoint=sb://mock.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=mock";
-            logger?.LogWarning("AzureServiceBus:ConnectionString is not configured; search-index updates will not be queued until it is set.");
-        }
-        else
-        {
-            _configured = true;
-        }
+        _client = ServiceBusRetry.CreateClient(configuration, out var configured, logger);
+        _configured = configured;
         var queueName = configuration["AzureServiceBus:SearchIndexQueue"] ?? "search-indexing-queue";
         var priorityQueueName = configuration["AzureServiceBus:SearchIndexPriorityQueue"] ?? "search-indexing-priority-queue";
+        _priorityEnabled = !string.Equals(configuration["AzureServiceBus:SearchIndexPriorityQueueEnabled"], "false", StringComparison.OrdinalIgnoreCase);
 
-        _client = new ServiceBusClient(connectionString);
         _sender = _client.CreateSender(queueName);
         _prioritySender = _client.CreateSender(priorityQueueName);
     }
@@ -45,6 +38,11 @@ public class ServiceBusPublisher : IMessagePublisher
     public async Task PublishPriorityAsync<T>(T message, CancellationToken ct = default)
     {
         if (!_configured) return;
+        if (!_priorityEnabled)
+        {
+            await PublishAsync(message, ct); // no priority queue in this deployment
+            return;
+        }
         var json = JsonSerializer.Serialize(message);
         var bytes = Encoding.UTF8.GetBytes(json);
         if (IsOversized(bytes))

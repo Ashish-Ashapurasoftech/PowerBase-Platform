@@ -38,6 +38,18 @@ public interface IAzureSearchService
     Task<(IReadOnlyList<GlobalSearchResult> Items, long? TotalCount)> SearchGlobalAsync(long tenantId, string searchText, long? appId = null, int page = 1, int pageSize = 50, CancellationToken ct = default);
     Task EnsureTableSchemaAsync(long tenantId, long tableId, IEnumerable<(int Fid, bool IsSearchable, bool IsFilterable)> fields, CancellationToken ct = default);
     Task PurgeTableRecordsAsync(long tenantId, long tableId, CancellationToken ct = default);
+
+    /// <summary>Removes the table's documents from the shared index(es) only, leaving its own index (if any) alone. Used once a table has been moved to its own index.</summary>
+    Task PurgeTableFromSharedIndexesAsync(long tenantId, long tableId, CancellationToken ct = default);
+
+    /// <summary>Removes every document of the tenant from the search indexes (its shared index and any table-owned index). The database is untouched; a backfill brings the data back.</summary>
+    Task PurgeTenantRecordsAsync(long tenantId, CancellationToken ct = default);
+
+    /// <summary>Whether the table may have its own index: it already has one, or the configured budget of such indexes (they count against the service's index limit) is not used up.</summary>
+    Task<bool> CanUseWideIndexAsync(long tableId, CancellationToken ct = default);
+
+    /// <summary>The source version last written for each record that is in the index (records not in the index, or written before versions existed, are absent).</summary>
+    Task<IReadOnlyDictionary<Guid, long>> GetSourceVersionsAsync(long tenantId, long tableId, string? indexName, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
     Task PurgeAppRecordsAsync(long tenantId, long appId, CancellationToken ct = default);
     Task ResetIndexAsync(string? indexName = null, CancellationToken ct = default);
     Task<bool> CreateIndexAsync(string? indexName = null, bool force = false, CancellationToken ct = default);
@@ -63,7 +75,8 @@ public record SearchIndexDocument(
     IReadOnlyDictionary<long, object?> Values,
     IReadOnlyDictionary<string, object?>? SlotValues = null,
     string? CustomIndexName = null,
-    IReadOnlySet<string>? SearchTextSlots = null);
+    IReadOnlySet<string>? SearchTextSlots = null,
+    long? SourceVersion = null);
 
 /// <summary>One document Azure AI Search rejected or could not take. <see cref="Retryable"/> is true for 409/422/429/503.</summary>
 public record SearchIndexFailure(string Key, int Status, string? Error, bool Retryable);

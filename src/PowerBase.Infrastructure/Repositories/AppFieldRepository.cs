@@ -37,8 +37,8 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         ORDER BY af.Id
         """;
 
-    // Same list, plus the stored Azure AI Search slot. Used only once the SearchSlot column exists (see HasSlotColumnAsync),
-    // so the application keeps working, with search answered from SQL, if it is deployed before migration 084 has run.
+    // Same list, plus the stored Azure AI Search slot(s). Which variant runs depends on which columns exist (see GetSlotColumnsAsync),
+    // so the application keeps working, with search answered from SQL, if it is deployed before migrations 084/085 have run.
     private const string ListByTableWithSlotSql = $"""
         SELECT {SelectColumns}, af.SearchSlot
         FROM meta.AppField af
@@ -48,33 +48,80 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         ORDER BY af.Id
         """;
 
+    private const string ListByTableWithSlotsSql = $"""
+        SELECT {SelectColumns}, af.SearchSlot, af.SearchSlotEnd
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+          AND af.IsDeleted  = 0
+        ORDER BY af.Id
+        """;
+
     // Every field of the table, deleted ones included: a slot held by a deleted field must stay reserved.
-    private const string ListAllForSlotsSql = """
+    private const string ListAllForSlotSql = """
         SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.IsSearchable, af.IsFilterable, af.SearchSlot, ft.Code AS TypeCode
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
         """;
 
-    private const string SetSearchSlotSql = """
-        UPDATE meta.AppField SET SearchSlot = @slot WHERE Id = @id AND SearchSlot IS NULL
+    private const string ListAllForSlotsSql = """
+        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.IsSearchable, af.IsFilterable, af.SearchSlot, af.SearchSlotEnd, ft.Code AS TypeCode
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
         """;
 
-    // 0 = not checked yet, 1 = column exists, 2 = column missing (re-checked every minute).
-    private static int _slotColumnState;
-    private static long _slotColumnCheckedTicks;
+    // Compare-and-set: only if the field still holds what the decision was based on.
+    private const string SetSearchSlotSql = """
+        UPDATE meta.AppField SET SearchSlot = @slot
+        WHERE Id = @id AND ISNULL(SearchSlot, '') = ISNULL(@oldSlot, '')
+        """;
 
-    private static async Task<bool> HasSlotColumnAsync(IDbConnection connection, CancellationToken ct)
+    private const string SetSearchSlotsSql = """
+        UPDATE meta.AppField SET SearchSlot = @slot, SearchSlotEnd = @endSlot
+        WHERE Id = @id AND ISNULL(SearchSlot, '') = ISNULL(@oldSlot, '') AND ISNULL(SearchSlotEnd, '') = ISNULL(@oldEndSlot, '')
+        """;
+
+    private const string MarkWideSql = """
+        UPDATE af
+        SET af.SearchSlot = 'f_' + CAST(af.Fid AS VARCHAR(11)),
+            af.SearchSlotEnd = CASE WHEN ft.Code IN ('NumericRange', 'DateRange') THEN 'f_' + CAST(af.Fid AS VARCHAR(11)) + '_e' END
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId AND af.IsDeleted = 0 AND af.Fid IS NOT NULL
+          AND (af.IsFilterable = 1 OR af.IsSearchable = 1) AND ft.Code <> 'Time'
+        """;
+
+    private const string MarkWideNoEndSql = """
+        UPDATE af
+        SET af.SearchSlot = 'f_' + CAST(af.Fid AS VARCHAR(11))
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId AND af.IsDeleted = 0 AND af.Fid IS NOT NULL
+          AND (af.IsFilterable = 1 OR af.IsSearchable = 1) AND ft.Code <> 'Time'
+        """;
+
+    private enum SlotColumns { Unknown = 0, None = 1, SlotOnly = 2, Both = 3 }
+
+    // Which slot columns exist. A positive answer is cached for the life of the process; a "missing" answer is re-checked every minute.
+    private static int _slotColumns;
+    private static long _slotColumnsCheckedTicks;
+
+    private static async Task<SlotColumns> GetSlotColumnsAsync(IDbConnection connection, CancellationToken ct, IDbTransaction? tx = null)
     {
-        var state = Volatile.Read(ref _slotColumnState);
-        if (state == 1) return true;
-        if (state == 2 && DateTime.UtcNow.Ticks - Interlocked.Read(ref _slotColumnCheckedTicks) < TimeSpan.FromMinutes(1).Ticks) return false;
+        var known = (SlotColumns)Volatile.Read(ref _slotColumns);
+        if (known == SlotColumns.Both) return known;
+        if (known != SlotColumns.Unknown && DateTime.UtcNow.Ticks - Interlocked.Read(ref _slotColumnsCheckedTicks) < TimeSpan.FromMinutes(1).Ticks)
+            return known;
 
-        var exists = await connection.ExecuteScalarAsync<int?>(
-            new CommandDefinition("SELECT COL_LENGTH('meta.AppField', 'SearchSlot')", cancellationToken: ct)) is not null;
-        Interlocked.Exchange(ref _slotColumnCheckedTicks, DateTime.UtcNow.Ticks);
-        Volatile.Write(ref _slotColumnState, exists ? 1 : 2);
-        return exists;
+        var row = await connection.QuerySingleAsync<(int? Slot, int? End)>(new CommandDefinition(
+            "SELECT COL_LENGTH('meta.AppField', 'SearchSlot') AS Slot, COL_LENGTH('meta.AppField', 'SearchSlotEnd') AS [End]",
+            transaction: tx, cancellationToken: ct));
+        var state = row.Slot is null ? SlotColumns.None : row.End is null ? SlotColumns.SlotOnly : SlotColumns.Both;
+        Interlocked.Exchange(ref _slotColumnsCheckedTicks, DateTime.UtcNow.Ticks);
+        Volatile.Write(ref _slotColumns, (int)state);
+        return state;
     }
 
     // The three list/count templates below skip fields flagged IsHidden — the hidden "(original)" Text
@@ -260,7 +307,12 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     public async Task<IReadOnlyList<AppField>> ListByTableAsync(long tableId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        var sql = await HasSlotColumnAsync(connection, ct) ? ListByTableWithSlotSql : ListByTableSql;
+        var sql = await GetSlotColumnsAsync(connection, ct) switch
+        {
+            SlotColumns.Both => ListByTableWithSlotsSql,
+            SlotColumns.SlotOnly => ListByTableWithSlotSql,
+            _ => ListByTableSql
+        };
         var results = await connection.QueryAsync<AppField>(
             new CommandDefinition(sql, new { tableId }, cancellationToken: ct));
         return results.AsList();
@@ -269,31 +321,52 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     public async Task<int> EnsureSearchSlotsAsync(long tableId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
-        if (!await HasSlotColumnAsync(connection, ct)) return 0;
+        await connection.OpenAsync(ct);
+        var columns = await GetSlotColumnsAsync(connection, ct);
+        if (columns is SlotColumns.None or SlotColumns.Unknown) return 0;
+        var supportsEnd = columns == SlotColumns.Both;
 
-        var total = 0;
-        // Two instances can pick the same free slot at the same moment; the unique index rejects the loser, which then
-        // reloads (now seeing the winner's slot) and picks the next free one.
-        for (var attempt = 0; attempt < 4; attempt++)
+        // Allocation runs under a per-table lock held for the transaction: two instances (or the API and a worker) allocating for
+        // the same table at once would otherwise both see the same free slot. The unique indexes stay as a backstop.
+        await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(ct);
+        try
         {
-            var all = (await connection.QueryAsync<AppField>(
-                new CommandDefinition(ListAllForSlotsSql, new { tableId }, cancellationToken: ct))).AsList();
-            var missing = PowerBase.Application.Search.SearchSlotResolver.AllocateMissingSlots(all);
-            if (missing.Count == 0) return total;
+            // sp_getapplock reports failure (timeout, deadlock victim) by return code, not by exception.
+            var rc = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                "DECLARE @r INT; EXEC @r = sp_getapplock @Resource = @res, @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 15000; SELECT @r;",
+                new { res = $"pb_search_slots_{tableId}" }, tx, cancellationToken: ct));
+            if (rc < 0) throw new InvalidOperationException($"Could not lock search slot allocation for table {tableId} (sp_getapplock returned {rc}).");
 
-            try
+            var all = (await connection.QueryAsync<AppField>(new CommandDefinition(
+                supportsEnd ? ListAllForSlotsSql : ListAllForSlotSql, new { tableId }, tx, cancellationToken: ct))).AsList();
+            var assignments = PowerBase.Application.Search.SearchSlotResolver.AllocateMissingSlots(all, supportsEnd);
+
+            var changed = 0;
+            foreach (var a in assignments)
             {
-                foreach (var (fieldId, slot) in missing)
-                    total += await connection.ExecuteAsync(
-                        new CommandDefinition(SetSearchSlotSql, new { id = fieldId, slot }, cancellationToken: ct));
-                return total;
+                changed += supportsEnd
+                    ? await connection.ExecuteAsync(new CommandDefinition(SetSearchSlotsSql,
+                        new { id = a.FieldId, slot = a.Slot, endSlot = a.EndSlot, oldSlot = a.OldSlot, oldEndSlot = a.OldEndSlot }, tx, cancellationToken: ct))
+                    : await connection.ExecuteAsync(new CommandDefinition(SetSearchSlotSql,
+                        new { id = a.FieldId, slot = a.Slot, oldSlot = a.OldSlot }, tx, cancellationToken: ct));
             }
-            catch (SqlException ex) when (ex.Number is 2601 or 2627)
-            {
-                // slot taken by a concurrent allocation: reload and try again
-            }
+            await tx.CommitAsync(ct);
+            return changed;
         }
-        return total;
+        catch
+        {
+            await tx.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+    }
+
+    public async Task MarkTableWideAsync(long tableId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var columns = await GetSlotColumnsAsync(connection, ct);
+        if (columns is SlotColumns.None or SlotColumns.Unknown) return;
+        await connection.ExecuteAsync(new CommandDefinition(
+            columns == SlotColumns.Both ? MarkWideSql : MarkWideNoEndSql, new { tableId }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<AppFieldListItemDto>> ListByTablePagedAsync(

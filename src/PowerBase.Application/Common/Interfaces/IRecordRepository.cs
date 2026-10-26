@@ -223,6 +223,12 @@ public interface IRecordRepository
 
     Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(long tableId, Guid recordPublicId, CancellationToken ct = default);
     Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default);
+
+    /// <summary>Current (decrypted) values of the search-eligible fields for these records, read from the database in one query. A record that is deleted or missing is absent from the result.</summary>
+    Task<IReadOnlyDictionary<Guid, IReadOnlyDictionary<long, object?>>> GetSearchableFieldsBatchAsync(long tableId, IReadOnlyList<Guid> recordPublicIds, CancellationToken ct = default);
+
+    /// <summary>One page of the table's live records with all their search-eligible values, in a stable order. Used to reindex a whole table.</summary>
+    Task<IReadOnlyList<SearchIndexDocument>> GetTableIndexBatchAsync(long tenantId, long tableId, int page, int pageSize, CancellationToken ct = default);
     Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<long> GetActiveRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);

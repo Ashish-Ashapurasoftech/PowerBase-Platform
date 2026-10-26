@@ -15,8 +15,12 @@ public class SearchSlotResolverTests
     /// <summary>Stores slots on the fields the way the application does (once, via the allocator), then returns the list.</summary>
     internal static List<AppField> Slotted(List<AppField> fields)
     {
-        foreach (var (fieldId, slot) in SearchSlotResolver.AllocateMissingSlots(fields))
-            fields.Single(f => f.Id == fieldId).SearchSlot = slot;
+        foreach (var a in SearchSlotResolver.AllocateMissingSlots(fields))
+        {
+            var field = fields.Single(f => f.Id == a.FieldId);
+            field.SearchSlot = a.Slot;
+            field.SearchSlotEnd = a.EndSlot;
+        }
         return fields;
     }
 
@@ -197,6 +201,10 @@ public class SearchSlotResolverTests
             });
         }
 
+        // Routing is stored: until the table has been moved it still uses the shared index.
+        SearchSlotResolver.IsWideTable(fields).Should().BeFalse();
+        SearchSlotResolver.ShouldBeWide(fields).Should().BeTrue();
+        foreach (var f in fields) f.SearchSlot = $"f_{f.Fid}"; // what MarkTableWideAsync stores once the copy is done
         SearchSlotResolver.IsWideTable(fields).Should().BeTrue();
         SearchSlotResolver.GetTableIndexName(1, 102, fields, "pb-shard-001").Should().Be("pb-tbl-102");
 

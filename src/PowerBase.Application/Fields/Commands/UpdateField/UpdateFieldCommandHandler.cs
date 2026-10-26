@@ -310,10 +310,13 @@ public class UpdateFieldCommandHandler
 
         var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, fid, isNullify, page: 1, pageSize: 500, ct);
 
-        if (docs.Count > 0 && plan.Slot != null)
+        if (docs.Count > 0 && plan.HasTarget)
         {
-            await _searchService.BulkIndexRecordsAsync(PowerBase.Application.Search.FieldSlotSync.ToDocuments(docs, plan, fid, isNullify), ct);
+            await _searchService.BulkIndexRecordsAsync(PowerBase.Application.Search.FieldSlotSync.ToDocuments(docs, plan), ct);
         }
+
+        // Switching this field on can push the table past what the shared index takes: start moving it to its own index.
+        await PowerBase.Application.Search.SearchWideMigration.StartIfNeededAsync(_fieldRepo, _messagePublisher, _searchService, _queryContext.TenantId, table.AppId, table.Id, ct);
 
         var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
         {

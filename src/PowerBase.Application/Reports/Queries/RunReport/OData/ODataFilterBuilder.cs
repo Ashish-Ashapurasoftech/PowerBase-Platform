@@ -66,7 +66,7 @@ public static class ODataFilterBuilder
                 {
                     if (!fieldMap.TryGetValue(c.FieldId, out var field)) return false;
                     if (!field.IsSearchable && !field.IsFilterable) return false;
-                    if (!PowerBase.Application.Search.SearchSlotResolver.IsIndexableType(field.TypeCode)) return false; // ranges, durations: SQL
+                    if (!PowerBase.Application.Search.SearchSlotResolver.IsAiFilterableType(field.TypeCode)) return false; // ranges, durations, time of day: SQL
 
                     if (!isWide && slotMap != null && slotMap.TryGetValue(c.FieldId, out var slot) && slot.StartsWith("f_"))
                     {
@@ -140,7 +140,7 @@ public static class ODataFilterBuilder
     {
         if (!fieldMap.TryGetValue(c.FieldId, out var field)) return null;
         if (!field.IsSearchable && !field.IsFilterable) return null; // Cannot filter on fields not in Azure AI Search
-        if (!PowerBase.Application.Search.SearchSlotResolver.IsIndexableType(field.TypeCode)) return null;
+        if (!PowerBase.Application.Search.SearchSlotResolver.IsAiFilterableType(field.TypeCode)) return null;
 
         if (!slotMap.TryGetValue(c.FieldId, out var slot))
         {

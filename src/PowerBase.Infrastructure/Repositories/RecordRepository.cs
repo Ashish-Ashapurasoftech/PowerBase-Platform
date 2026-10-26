@@ -20,6 +20,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
     private readonly IMessagePublisher _messagePublisher;
     private readonly IEncryptionService _encryptionService;
     private readonly IControlConnectionFactory _controlConnectionFactory;
+    /// <summary>Durable record of index changes, written in the record's own transaction (null where the repository is built by hand).</summary>
+    private readonly ISearchOutbox? _outbox;
     /// <summary>Resolves the projectors lazily (they depend on this repository, so they can't be constructor-injected).</summary>
     private readonly IServiceProvider? _services;
 
@@ -29,9 +31,11 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         IMessagePublisher messagePublisher,
         IEncryptionService encryptionService,
         IControlConnectionFactory controlConnectionFactory,
-        IServiceProvider? services = null)
+        IServiceProvider? services = null,
+        ISearchOutbox? outbox = null)
         : base(connectionFactory, queryContext)
     {
+        _outbox = outbox;
         _services = services;
         _messagePublisher = messagePublisher;
         _encryptionService = encryptionService;
@@ -42,55 +46,116 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         System.Data.IDbConnection connection, long appId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default)
         => Services.FieldEncryptionContext.ResolveAsync(connection, appId, QueryContext.TenantId, _encryptionService, transaction, ct);
 
-    public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(long tableId, Guid recordPublicId, CancellationToken ct = default)
+    // ---- reading records for the search index
+    // One reader for every path that indexes from the database (payload-less messages, the stale-message check, a table
+    // reindex, a field backfill), so they all produce the same values.
+
+    // TypeCode is not a column of meta.AppField (the type is a join to core.FieldType). The previous query selected it directly and
+    // would have failed on every call.
+    private const string IndexFieldsSql = """
+        SELECT af.Id, af.AppTableId, af.Name, ft.Code AS TypeCode, af.PhysicalColumnName, af.Fid, af.IsSystem, af.IsSearchable, af.IsFilterable, af.IsEncrypted
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId AND af.IsDeleted = 0 AND af.Fid IS NOT NULL
+        """;
+
+    private static bool IsIndexedField(AppField f) =>
+        (f.IsSearchable || f.IsFilterable)
+        && PowerBase.Application.Search.SearchSlotResolver.IsIndexableType(f.TypeCode)
+        && !PhysicalNaming.IsComputedTypeCode(f.TypeCode);
+
+    private static string IndexColumn(AppField f) =>
+        f.IsSystem && !string.IsNullOrWhiteSpace(f.PhysicalColumnName) ? f.PhysicalColumnName! : PhysicalNaming.ColumnName(f.Fid!.Value);
+
+    private static async Task<(long AppId, List<AppField> Fields)?> LoadIndexTableAsync(System.Data.IDbConnection connection, long tableId)
     {
-        await using var connection = await ConnectionFactory.CreateAsync(ct);
-        
-        // Find table info
-        var tableSql = "SELECT Id, AppId, Name FROM meta.AppTable WHERE Id = @tableId";
-        var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { tableId });
-        if (tableInfo == null) return new Dictionary<long, object?>();
+        var appId = await connection.QueryFirstOrDefaultAsync<long?>("SELECT AppId FROM meta.AppTable WHERE Id = @tableId AND IsDeleted = 0", new { tableId });
+        if (appId == null) return null;
+        var fields = (await connection.QueryAsync<AppField>(IndexFieldsSql, new { tableId })).Where(IsIndexedField).ToList();
+        return (appId.Value, fields);
+    }
 
-        // Get fields for this table
-        var fieldsSql = "SELECT Id, AppTableId, Name, TypeCode, Settings, PhysicalColumnName, Fid, IsSystem, IsSearchable, IsFilterable, IsEncrypted FROM meta.AppField WHERE AppTableId = @tableId";
-        var fields = (await connection.QueryAsync<AppField>(fieldsSql, new { tableId = (long)tableInfo.Id })).ToList();
-        
-        var searchableFields = fields.Where(f => f.IsSearchable || f.IsFilterable).ToList();
-        if (searchableFields.Count == 0) return new Dictionary<long, object?>();
-
-        var fieldCols = BuildFieldColumnList(searchableFields);
-        var recordSql = $"SELECT {fieldCols} FROM {PhysicalNaming.FullTableName((long)tableInfo.Id)} WHERE PublicId = @publicId AND IsDeleted = 0";
-        var rawRow = (await connection.QueryAsync<dynamic>(recordSql, new { publicId = recordPublicId })).FirstOrDefault();
-        if (rawRow == null) return new Dictionary<long, object?>();
-
-        var rowDict = (IDictionary<string, object?>)rawRow;
-        var result = new Dictionary<long, object?>();
-
-        var enc = await GetEncryptionContextAsync(connection, (long)tableInfo.AppId, null, ct);
-
-        foreach (var f in searchableFields)
+    /// <summary>Reads <paramref name="fields"/> of the rows selected by <paramref name="tail"/> (a WHERE/ORDER clause on alias t). A range
+    /// comes back as {start,end}. Encrypted values are decrypted; a value that cannot be decrypted is left out, never indexed as ciphertext.</summary>
+    private async Task<List<(Guid PublicId, Dictionary<long, object?> Values)>> ReadIndexRowsAsync(
+        System.Data.IDbConnection connection, long tableId, long appId, IReadOnlyList<AppField> fields, string tail, object parameters, CancellationToken ct)
+    {
+        var cols = new List<string>();
+        foreach (var f in fields)
         {
-            if (!f.Fid.HasValue) continue;
-            var colName = f.IsSystem ? f.PhysicalColumnName! : PhysicalNaming.ColumnName((int)f.Fid.Value);
-            
-            if (rowDict.TryGetValue(colName, out var val))
+            cols.Add($"t.{IndexColumn(f)}");
+            if (PhysicalNaming.IsRangeTypeCode(f.TypeCode)) cols.Add($"t.{PhysicalNaming.EndColumnName(f.Fid!.Value)}");
+        }
+        var sql = $"SELECT t.PublicId{(cols.Count > 0 ? ", " + string.Join(", ", cols) : "")} FROM {PhysicalNaming.FullTableName(tableId)} t {tail}";
+        var rows = (await connection.QueryAsync<dynamic>(new CommandDefinition(sql, parameters, cancellationToken: ct))).ToList();
+
+        var result = new List<(Guid, Dictionary<long, object?>)>(rows.Count);
+        if (rows.Count == 0) return result;
+
+        var enc = await GetEncryptionContextAsync(connection, appId, null, ct);
+        foreach (var raw in rows)
+        {
+            var row = (IDictionary<string, object?>)raw;
+            var values = new Dictionary<long, object?>();
+            foreach (var f in fields)
             {
-                if (!f.IsSearchable && !f.IsFilterable)
+                if (!row.TryGetValue(IndexColumn(f), out var v)) continue;
+                var fid = (long)f.Fid!.Value;
+                if (PhysicalNaming.IsRangeTypeCode(f.TypeCode))
                 {
-                    result[(long)f.Fid.Value] = null;
+                    row.TryGetValue(PhysicalNaming.EndColumnName(f.Fid!.Value), out var end);
+                    values[fid] = new Dictionary<string, object?> { ["start"] = v, ["end"] = end };
                 }
-                else if (f.IsEncrypted && val is string cipherHex)
+                else if (Services.FieldEncryptionContext.StoresCiphertext(f, enc.IsAppEncrypted) && v is string cipher)
                 {
-                    result[(long)f.Fid.Value] = await enc.DecryptValueAsync(cipherHex, ct);
+                    try { values[fid] = await enc.DecryptValueAsync(cipher, ct); }
+                    catch { /* not decryptable: leave the field out rather than index ciphertext */ }
                 }
                 else
                 {
-                    result[(long)f.Fid.Value] = val;
+                    values[fid] = v;
                 }
             }
+            result.Add(((Guid)row["PublicId"]!, values));
         }
-        
         return result;
+    }
+
+    public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(long tableId, Guid recordPublicId, CancellationToken ct = default)
+    {
+        var batch = await GetSearchableFieldsBatchAsync(tableId, [recordPublicId], ct);
+        return batch.TryGetValue(recordPublicId, out var values) ? values : new Dictionary<long, object?>();
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, IReadOnlyDictionary<long, object?>>> GetSearchableFieldsBatchAsync(
+        long tableId, IReadOnlyList<Guid> recordPublicIds, CancellationToken ct = default)
+    {
+        var result = new Dictionary<Guid, IReadOnlyDictionary<long, object?>>();
+        if (recordPublicIds.Count == 0) return result;
+
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var table = await LoadIndexTableAsync(connection, tableId);
+        if (table == null) return result;
+
+        foreach (var chunk in recordPublicIds.Distinct().Chunk(1000))
+            foreach (var (publicId, values) in await ReadIndexRowsAsync(connection, tableId, table.Value.AppId, table.Value.Fields,
+                         "WHERE t.IsDeleted = 0 AND t.PublicId IN @ids", new { ids = chunk }, ct))
+                result[publicId] = values;
+        return result;
+    }
+
+    public async Task<IReadOnlyList<PowerBase.Application.Common.Interfaces.SearchIndexDocument>> GetTableIndexBatchAsync(
+        long tenantId, long tableId, int page, int pageSize, CancellationToken ct = default)
+    {
+        if (tenantId > 0) QueryContext.SetTenantId(tenantId);
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var table = await LoadIndexTableAsync(connection, tableId);
+        if (table == null) return [];
+
+        var rows = await ReadIndexRowsAsync(connection, tableId, table.Value.AppId, table.Value.Fields,
+            "WHERE t.IsDeleted = 0 ORDER BY t.Id OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY",
+            new { offset = Math.Max(0, (page - 1) * pageSize), pageSize }, ct);
+        return rows.Select(r => new PowerBase.Application.Common.Interfaces.SearchIndexDocument(tenantId, table.Value.AppId, tableId, r.PublicId, r.Values)).ToList();
     }
 
     public async Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default)
@@ -1399,6 +1464,13 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         return resRows.ToDictionary(x => x.PublicId, x => x.Id);
     }
 
+    /// <summary>
+    /// Records the index changes durably. With the record write's transaction the rows commit or roll back together with it, so a change
+    /// can never be saved without its row; the relay and the indexer's acknowledgement take it from there.
+    /// </summary>
+    private Task RecordSearchChangesAsync(IReadOnlyCollection<PowerBase.Application.Common.Models.SearchIndexMessage> changes, IDbTransaction? transaction, CancellationToken ct) =>
+        _outbox == null ? Task.CompletedTask : _outbox.AddAsync(changes, transaction, ct);
+
     public async Task<Guid> CreateAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyDictionary<long, object?> values, IDbTransaction? transaction = null, CancellationToken ct = default, Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null)
     {
@@ -1514,6 +1586,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             Payload = searchableValues.Count > 0 ? searchableValues : null
         };
 
+        await RecordSearchChangesAsync([msg], transaction, ct);
         if (onIndexMessageCreated != null)
         {
             onIndexMessageCreated(msg);
@@ -1624,6 +1697,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 Payload = payload.Count > 0 ? payload : null
             });
         }
+        await RecordSearchChangesAsync(messages, transaction, ct);
         if (onIndexMessageCreated != null)
             foreach (var msg in messages) onIndexMessageCreated(msg);
         else
@@ -1750,6 +1824,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             Payload = searchableValues.Count > 0 ? searchableValues : null
         };
 
+        await RecordSearchChangesAsync([msg], transaction, ct);
         if (onIndexMessageCreated != null)
         {
             onIndexMessageCreated(msg);
@@ -1821,6 +1896,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 .Where(f => (f.IsSearchable || f.IsFilterable) && f.Fid.HasValue && values.ContainsKey((long)f.Fid.Value))
                 .ToDictionary(f => f.Fid!.Value.ToString(), f => values[(long)f.Fid.Value]);
 
+            var outboxChanges = new List<PowerBase.Application.Common.Models.SearchIndexMessage>();
             foreach (var pubId in publicIds)
             {
                 var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
@@ -1833,6 +1909,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                     Payload = searchableValues.Count > 0 ? searchableValues : null
                 };
 
+                outboxChanges.Add(msg);
+
                 if (onIndexMessageCreated != null)
                 {
                     onIndexMessageCreated(msg);
@@ -1842,6 +1920,8 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                     _ = _messagePublisher.PublishAsync(msg, default);
                 }
             }
+
+            await RecordSearchChangesAsync(outboxChanges, transaction, ct);
         }
 
         return affected;
@@ -1879,6 +1959,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             RecordPublicId = publicId
         };
 
+        await RecordSearchChangesAsync([msg], transaction, ct);
         if (onIndexMessageCreated != null)
         {
             onIndexMessageCreated(msg);
@@ -1918,6 +1999,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             TableId = table.Id,
             RecordPublicId = id
         }).ToList();
+        await RecordSearchChangesAsync(deleteMessages, transaction, ct);
         if (onIndexMessageCreated != null)
         {
             foreach (var msg in deleteMessages)
@@ -1967,6 +2049,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             TableId = table.Id,
             RecordPublicId = r.PublicId
         }).ToList();
+        await RecordSearchChangesAsync(deleteMessages, transaction, ct);
         if (onIndexMessageCreated != null)
         {
             foreach (var msg in deleteMessages) onIndexMessageCreated(msg);
@@ -2014,6 +2097,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                 Payload = new Dictionary<string, object?> { { fidStr, defaultValue } }
             }).ToList();
 
+            await RecordSearchChangesAsync(messages, null, ct);
             _ = _messagePublisher.PublishBatchAsync(messages, default);
         }
 
@@ -3595,6 +3679,7 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
                         Payload = searchPayload.Count > 0 ? searchPayload : null
                     };
 
+                    await RecordSearchChangesAsync([msg], null, ct);
                     _ = _messagePublisher.PublishAsync(msg, default);
                 }
             }
@@ -3613,10 +3698,6 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
         }
         await using var connection = await ConnectionFactory.CreateAsync(ct);
 
-        var tableSql = "SELECT Name FROM meta.AppTable WHERE Id = @tableId";
-        var tableInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(tableSql, new { tableId });
-        if (tableInfo == null) return result;
-
         var fieldSql = """
             SELECT af.Id, af.AppTableId, af.Name, ft.Code AS TypeCode, af.PhysicalColumnName, af.Fid, af.IsSystem, af.IsSearchable, af.IsFilterable, af.IsEncrypted
             FROM meta.AppField af
@@ -3625,58 +3706,17 @@ public class RecordRepository : TenantRepositoryBase, IRecordRepository
             """;
         var field = await connection.QueryFirstOrDefaultAsync<AppField>(fieldSql, new { fieldId, tableId });
         if (field == null || !field.Fid.HasValue) return result;
+        if (await connection.QueryFirstOrDefaultAsync<long?>("SELECT Id FROM meta.AppTable WHERE Id = @tableId", new { tableId }) == null) return result;
 
-        var colName = field.IsSystem ? field.PhysicalColumnName! : PhysicalNaming.ColumnName(field.Fid.Value);
+        // A field that is switched off (or being nullified) only needs the record ids, to write null into its column(s).
+        var readsValue = !isNullify && IsIndexedField(field);
+        var rows = await ReadIndexRowsAsync(connection, tableId, appId, readsValue ? new[] { field } : Array.Empty<AppField>(),
+            "WHERE t.IsDeleted = 0 ORDER BY t.Id OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY",
+            new { offset = Math.Max(0, (page - 1) * pageSize), pageSize }, ct);
 
-        var selectSql = $"""
-            SELECT t.PublicId, t.{colName}
-            FROM {PhysicalNaming.FullTableName(tableId)} t
-            WHERE t.IsDeleted = 0
-            ORDER BY t.Id
-            OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
-            """;
-
-        var offset = (page - 1) * pageSize;
-        var rows = (await connection.QueryAsync<dynamic>(selectSql, new { offset, pageSize })).ToList();
-        
-        if (rows.Count == 0) return result;
-
-        var enc = await GetEncryptionContextAsync(connection, appId, null, ct);
-
-        foreach (var rawRow in rows)
+        foreach (var (publicId, values) in rows)
         {
-            var rowDict = (IDictionary<string, object?>)rawRow;
-            var publicId = (Guid)rowDict["PublicId"]!;
-            
-            var documentValues = new Dictionary<long, object?>();
-
-            if (isNullify || (!field.IsSearchable && !field.IsFilterable))
-            {
-                documentValues[field.Fid.Value] = null;
-            }
-            else
-            {
-                if (rowDict.TryGetValue(colName, out var val))
-                {
-                    // An encrypted App stores ciphertext in every field, not only the ones flagged IsEncrypted: the index needs the plain text.
-                    if (Services.FieldEncryptionContext.StoresCiphertext(field, enc.IsAppEncrypted) && val is string cipherStr)
-                    {
-                        try
-                        {
-                            documentValues[field.Fid.Value] = await enc.DecryptValueAsync(cipherStr, ct);
-                        }
-                        catch
-                        {
-                            documentValues[field.Fid.Value] = val; // fallback
-                        }
-                    }
-                    else
-                    {
-                        documentValues[field.Fid.Value] = val;
-                    }
-                }
-            }
-
+            var documentValues = readsValue ? values : new Dictionary<long, object?> { [field.Fid.Value] = null };
             result.Add(new PowerBase.Application.Common.Interfaces.SearchIndexDocument(tenantId, appId, tableId, publicId, documentValues));
         }
 

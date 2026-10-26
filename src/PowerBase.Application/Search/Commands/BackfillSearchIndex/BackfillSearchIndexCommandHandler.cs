@@ -67,99 +67,74 @@ public class BackfillSearchIndexCommandHandler
 
                     try
                     {
+                        // Same slots, same reads and same document builder as the indexer worker, so a backfill can never write a layout
+                        // the queries do not read. A table that has outgrown the shared index is copied to its own index too, then switched.
+                        await _fieldRepo.EnsureSearchSlotsAsync(table.Id, cancellationToken);
                         var fields = await _fieldRepo.ListByTableAsync(table.Id, cancellationToken);
+                        var info = SearchTableSlotInfo.From(table.Id, fields);
+                        var copiedAllPages = true;
 
                         int recordPage = 1;
                         while (true)
                         {
-                            IReadOnlyList<IReadOnlyDictionary<string, object?>> records;
+                            IReadOnlyList<SearchIndexDocument> batch;
                             try
                             {
-                                records = await _recordRepo.ListAsync(table, fields, recordPage, 500, null, null, null, cancellationToken);
+                                batch = await _recordRepo.GetTableIndexBatchAsync(request.TenantId, table.Id, recordPage, SearchWideMigration.PageSize, cancellationToken);
                             }
                             catch (Exception ex)
                             {
-                                _logger.LogError(ex, "Failed to list records for Table {TableName} (ID: {TableId}) at page {RecordPage}.", table.Name, table.Id, recordPage);
+                                copiedAllPages = false;
+                                _logger.LogError(ex, "Failed to read records for Table {TableName} (ID: {TableId}) at page {RecordPage}.", table.Name, table.Id, recordPage);
                                 break; // Break out of this table's record paging
                             }
 
                             // D24: Terminate paging when table has no more records
-                            if (records == null || records.Count == 0)
+                            if (batch.Count == 0)
                             {
                                 break;
                             }
 
-                            var isWide = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(fields);
-                            var targetIndex = isWide ? $"pb-tbl-{table.Id}" : null;
-                            var slotMap = PowerBase.Application.Search.SearchSlotResolver.BuildSlotMap(fields);
-                            var docsToBatch = new List<SearchIndexDocument>();
-
-                            foreach (var record in records)
-                            {
-                                var publicIdStr = record["PublicId"]?.ToString();
-                                if (Guid.TryParse(publicIdStr, out var publicId))
-                                {
-                                    var searchableValues = new Dictionary<long, object?>();
-                                    var slotValues = new Dictionary<string, object?>();
-
-                                    foreach (var field in fields)
-                                    {
-                                        var colName = PowerBase.Domain.Constants.PhysicalNaming.GetPhysicalColumnName(field);
-                                        if (field.Fid.HasValue && record.TryGetValue(colName, out var val))
-                                        {
-                                            searchableValues[field.Fid.Value] = val;
-                                            if (slotMap.TryGetValue(field.Fid.Value, out var slotName))
-                                            {
-                                                if (!isWide && slotName.StartsWith("f_"))
-                                                {
-                                                    continue;
-                                                }
-
-                                                if (PowerBase.Application.Search.SearchSlotResolver.IsNumeric(field.TypeCode))
-                                                    slotValues[slotName] = PowerBase.Application.Search.SearchSlotResolver.ParseDouble(val);
-                                                else if (PowerBase.Application.Search.SearchSlotResolver.IsDate(field.TypeCode))
-                                                    slotValues[slotName] = PowerBase.Application.Search.SearchSlotResolver.ParseDateTimeOffset(val);
-                                                else if (PowerBase.Application.Search.SearchSlotResolver.IsBoolean(field.TypeCode))
-                                                    slotValues[slotName] = PowerBase.Application.Search.SearchSlotResolver.ParseBoolean(val);
-                                                else
-                                                    slotValues[slotName] = PowerBase.Application.Search.SearchSlotResolver.ParseString(val);
-                                            }
-                                        }
-                                    }
-
-                                    docsToBatch.Add(new SearchIndexDocument(request.TenantId, app.Id, table.Id, publicId, searchableValues, slotValues, targetIndex));
-                                }
-                                else
-                                {
-                                    _logger.LogWarning("Record missing or invalid PublicId in Table {TableName} (ID: {TableId}).", table.Name, table.Id);
-                                }
-                            }
+                            var docsToBatch = batch
+                                .SelectMany(d => SearchIndexDocumentBuilder.Build(info, d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, null))
+                                .ToList();
 
                             string? batchError = null;
-                            if (docsToBatch.Count > 0)
+                            try
                             {
-                                try
+                                var rejected = await _searchService.BulkIndexRecordsWithResultsAsync(docsToBatch, cancellationToken);
+                                var rejectedRecords = rejected.Select(f => f.Key).Distinct().Count();
+                                failedRecordsCount += rejectedRecords;
+                                totalRecordsIndexed += batch.Count - Math.Min(rejectedRecords, batch.Count);
+                                if (rejectedRecords > 0)
                                 {
-                                    await _searchService.BulkIndexRecordsAsync(docsToBatch, cancellationToken);
-                                    totalRecordsIndexed += docsToBatch.Count;
+                                    copiedAllPages = false;
+                                    batchError = $"{rejectedRecords} record(s) were rejected by the search service.";
+                                    foreach (var f in rejected)
+                                        _logger.LogError("Backfill: document {RecordPublicId} in Table {TableId} was not indexed: status {Status}, error {Error}", f.Key, table.Id, f.Status, f.Error);
                                 }
-                                catch (Exception ex)
-                                {
-                                    failedRecordsCount += docsToBatch.Count;
-                                    batchError = ex.Message;
-                                    _logger.LogError(ex, "Failed to bulk index {Count} records for Table {TableName} (ID: {TableId}).", docsToBatch.Count, table.Name, table.Id);
-                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                copiedAllPages = false;
+                                failedRecordsCount += batch.Count;
+                                batchError = ex.Message;
+                                _logger.LogError(ex, "Failed to bulk index {Count} records for Table {TableName} (ID: {TableId}).", batch.Count, table.Name, table.Id);
                             }
 
                             request.OnProgress?.Invoke(totalApps, totalTables, totalRecordsIndexed, failedRecordsCount, batchError);
 
-                            if (records.Count < 500)
+                            if (batch.Count < SearchWideMigration.PageSize)
                             {
                                 break;
                             }
 
                             recordPage++;
                         }
+
+                        // Only after every page is in the table's own index: switch queries to it and drop the old documents.
+                        if (info.MigratingToWide && copiedAllPages)
+                            await SearchWideMigration.FinalizeAsync(_fieldRepo, _searchService, request.TenantId, table.Id, cancellationToken);
                     }
                     catch (Exception ex)
                     {
