@@ -29,13 +29,27 @@ public static class ViewableRowIds
             .ToHashSet();
         var (physical, formula) = FormulaFilterSorter.SplitFilterTree(access.ViewFilter, formulaFids);
 
-        var rows = await recordRepo.ListAllMatchingAsync(
-            table, fields, physical, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
-        if (formula is not null && rows.Count > 0)
+        // Fast bounded path: if the filter contains only physical fields (or no filter), query only row IDs directly
+        // with a 30-second timeout. Avoids loading 50,000 full entities and decrypting unused columns into memory.
+        if (formula is null)
         {
-            var relational = await relationalProjector.ProjectAsync(table, fields, rows, ct);
-            var computed = formulaProjector.Project(fields, rows, relational, table);
-            rows = FormulaFilterSorter.ApplyFormulaFilters(rows.Zip(computed, (r, c) => (r, c)), formula, fields)
+            return await recordRepo.ListMatchingRowIdsAsync(
+                table, fields, physical, restrictToCreatedBy: access.RestrictToCreatedBy, maxRows: 10000, timeoutSeconds: 30, ct: ct);
+        }
+
+        // Formula conditions require in-memory evaluation: select only fields needed by formula/physical filter.
+        var neededFids = new HashSet<long>();
+        CollectReferencedFids(access.ViewFilter, neededFids);
+        var minimalFields = fields.Where(f => f.Fid.HasValue && (neededFids.Contains(f.Fid.Value) || f.IsSystem)).ToList();
+        if (minimalFields.Count == 0) minimalFields = fields.ToList();
+
+        var rows = await recordRepo.ListAllMatchingAsync(
+            table, minimalFields, physical, restrictToCreatedBy: access.RestrictToCreatedBy, ct: ct);
+        if (rows.Count > 0)
+        {
+            var relational = await relationalProjector.ProjectAsync(table, minimalFields, rows, ct);
+            var computed = formulaProjector.Project(minimalFields, rows, relational, table);
+            rows = FormulaFilterSorter.ApplyFormulaFilters(rows.Zip(computed, (r, c) => (r, c)), formula, minimalFields)
                 .Select(p => p.Row)
                 .ToList();
         }
@@ -45,5 +59,19 @@ public static class ViewableRowIds
             .Where(id => id.HasValue)
             .Select(id => id!.Value)
             .ToList();
+    }
+
+    private static void CollectReferencedFids(PowerBase.Application.Reports.FilterGroup? group, HashSet<long> fids)
+    {
+        if (group?.Nodes == null) return;
+        foreach (var node in group.Nodes)
+        {
+            if (node.Condition != null)
+            {
+                fids.Add(node.Condition.FieldId);
+                if (node.Condition.ValueFieldId.HasValue) fids.Add(node.Condition.ValueFieldId.Value);
+            }
+            if (node.Group != null) CollectReferencedFids(node.Group, fids);
+        }
     }
 }

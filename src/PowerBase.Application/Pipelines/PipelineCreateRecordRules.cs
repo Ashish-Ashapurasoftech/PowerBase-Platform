@@ -17,16 +17,22 @@ internal static class PipelineCreateRecordRules
     /// <summary>Fills the field default for every field the step did not map (a mapping that resolved to blank is not written).
     /// Without this a Required field that has a default would be reported empty although the form would have filled it.</summary>
     public static async Task ApplyDefaultsAsync(
-        IReadOnlyList<AppField> fields, IDictionary<long, object?> values, long currentUserId, IServiceProvider services, CancellationToken ct)
+        AppTable table, IReadOnlyList<AppField> fields, IDictionary<long, object?> values, long currentUserId, IServiceProvider services, CancellationToken ct)
     {
+        // A Snapshot field is filled by the system when the record is created; a step may not map a value into it.
+        SnapshotWriteGuard.EnsureNotSuppliedOnCreate(fields, values);
         foreach (var field in fields)
         {
             if (field.IsSystem || field.IsDeleted || !field.Fid.HasValue || PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
+            if (SnapshotWriteGuard.IsReadOnlySnapshot(field)) continue;
             if (values.ContainsKey(field.Fid.Value)) continue;
             if (string.IsNullOrWhiteSpace(field.DefaultValue)) continue;
             var (apply, value) = await ResolveDefaultAsync(field, currentUserId, services, ct);
             if (apply) values[field.Fid.Value] = value;
         }
+
+        if (services.GetService<ISnapshotCaptureService>() is { } snapshots)
+            await snapshots.ApplyOnCreateAsync(table, fields, values, ct);
     }
 
     /// <summary>Required / Unique / format constraints, then the table's Custom Data Rule. Throws a <c>ValidationException</c> naming

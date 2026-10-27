@@ -78,11 +78,20 @@ public sealed class PhoneSettings
 public sealed class SelectSettingsBase
 {
     public string[]? Options { get; set; }
+    /// <summary>"From another field": the choices are the current values of a Shared-values field (any app), fetched when needed.
+    /// When set, <see cref="Options"/> is empty.</summary>
+    public ChoiceSourceSettings? ChoiceSource { get; set; }
     /// <summary>Max characters override. Meaningful for SingleSelect only.</summary>
     public int? MaxLength { get; set; }
     public bool? DisplayBold { get; set; }
     public bool? NoWrap { get; set; }
     public int? ColumnWidth { get; set; }
+}
+
+public sealed class ChoiceSourceSettings
+{
+    public Guid? TableId { get; set; }
+    public int? Fid { get; set; }
 }
 
 // ── Numeric family: Number / Currency / Percent / Rating ─────────────────────

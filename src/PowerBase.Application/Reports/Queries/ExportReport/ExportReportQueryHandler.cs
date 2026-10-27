@@ -58,6 +58,16 @@ public class ExportReportQueryHandler
             return BuildExport([], [], "export", query.Format);
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+        // Totals/grouping that no longer fit a field whose type was changed are skipped (Change Type).
+        PowerBase.Application.Fields.TypeConversion.ReportDefinitionTypeSanitizer.Apply(definition, allFields);
+
+        // The report's own formulas become virtual fields (see ReportFormulaFields), visible to every viewer.
+        var reportFormulaFields = ReportFormulaFields.Build(definition.ReportFormulas, table.Id);
+        if (reportFormulaFields.Count > 0)
+        {
+            allFields = [.. allFields, .. reportFormulaFields];
+            access = ReportFormulaFields.WithVisible(access, reportFormulaFields);
+        }
 
         var filterTree = definition.FilterTree;
         if (filterTree == null && definition.Filters.Count > 0)

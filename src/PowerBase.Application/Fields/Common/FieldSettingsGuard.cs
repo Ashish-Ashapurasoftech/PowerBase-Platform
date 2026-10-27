@@ -53,6 +53,18 @@ public class FieldSettingsGuard
             throw new ValidationException(autoFillErrors.AsReadOnly());
     }
 
+    /// <summary>Validates the Snapshot configuration (source field exists, type-compatible, and not combined with
+    /// Unique / Encrypted / Auto-fill). Throws ValidationException. A no-op when <paramref name="sourceFid"/> is null.</summary>
+    public void ValidateSnapshot(
+        AppField existing, string label, int? sourceFid, bool editable,
+        bool isRequired, bool isUnique, bool isEncrypted, bool isAutoFill, IReadOnlyList<AppField> tableFields)
+    {
+        var errors = FieldSnapshotCapability.Validate(
+            existing, label, sourceFid, editable, isRequired, isUnique, isEncrypted, isAutoFill, tableFields);
+        if (errors.Count > 0)
+            throw new ValidationException(errors.AsReadOnly());
+    }
+
     /// <summary>A required field with no default value cannot be saved while some role has it set
     /// to None access — those users would never be able to create a record.</summary>
     public async Task ValidateRequiredHasDefaultOrNoRestrictedRolesAsync(

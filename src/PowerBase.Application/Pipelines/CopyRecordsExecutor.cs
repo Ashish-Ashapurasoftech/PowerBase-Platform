@@ -95,6 +95,8 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             throw new UnauthorizedActionException("You cannot copy records into the destination table.");
         var exported = config.SourceFields.Select(f => CopyRecordsDefinition.Field(f, sourceFields)).ToList();
         var imported = config.DestinationFields.Select(f => CopyRecordsDefinition.Field(f, destinationFields)).ToList();
+        // A Snapshot field is filled when a record is created and is read-only afterwards, so a copy may not map into one.
+        PowerBase.Application.Records.SnapshotWriteGuard.EnsureNotWritten(destinationFields, imported.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value));
         if (!sourceAccess.Unrestricted && exported.Any(f => !sourceAccess.VisibleFields.Any(v => v.Fid == f.Fid)))
             throw new UnauthorizedActionException("A source field is not visible to this account.");
         if (!destinationAccess.Unrestricted && imported.Any(f => !f.IsSystem && !destinationAccess.EditableFieldIds.Contains(f.Fid!.Value)))
@@ -583,6 +585,9 @@ public sealed class CopyRecordsExecutor(IServiceProvider services)
             var overrides = await ReferenceWriteValidator.ValidateAsync(destinationFields, values, tableRepo, fieldRepo, records, relRepo, ct);
             foreach (var pair in overrides) values[pair.Key] = pair.Value;
             await UserFieldValueResolver.ResolveAsync(services.GetRequiredService<IUserRepository>(), destinationFields, values, ct);
+            // Snapshot fields of the new record take their source value now, once.
+            if (services.GetService<PowerBase.Application.Records.ISnapshotCaptureService>() is { } snapshotCapture)
+                await snapshotCapture.ApplyOnCreateAsync(destination, destinationFields, values, ct);
             var violations = await RecordConstraintValidator.CollectViolationsAsync(destination, destinationFields, values, records, true, null, ct, transaction: uow.Transaction, isDuplicate: isDuplicate);
             if (violations.Count > 0)
                 // Built (not thrown) so the message reads exactly as the validator's own exception would.

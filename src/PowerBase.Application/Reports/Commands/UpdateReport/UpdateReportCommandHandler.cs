@@ -20,6 +20,7 @@ public class UpdateReportCommandHandler
     private readonly IAuditRepository _auditRepo;
     private readonly ReportConfigValidatorRegistry _configValidatorRegistry;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly PowerBase.Application.Formulas.IFormulaExpressionValidator? _exprValidator;
 
     private static readonly HashSet<string> AllowedVisibilities = ["Personal", "Shared", "MyRole", "SpecificRoles", "RoleScoped", Domain.Enums.ReportVisibility.Hidden];
 
@@ -32,8 +33,10 @@ public class UpdateReportCommandHandler
         IQueryContext queryContext,
         IAuditRepository auditRepo,
         ReportConfigValidatorRegistry configValidatorRegistry,
-        IFieldReferenceIndexer? refIndexer = null)
+        IFieldReferenceIndexer? refIndexer = null,
+        PowerBase.Application.Formulas.IFormulaExpressionValidator? exprValidator = null)
     {
+        _exprValidator = exprValidator;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _reportRepo = reportRepo;
         _fieldRepo = fieldRepo;
@@ -63,7 +66,14 @@ public class UpdateReportCommandHandler
         var existingReport = await _reportRepo.GetByPublicIdAsync(command.ReportPublicId, ct);
         var tableFields = await _fieldRepo.ListByTableAsync(existingReport.AppTableId, ct);
 
-        var configErrors = _configValidatorRegistry.Validate(existingReport.ReportType, ReportConfigValidationInput.FromUpdate(command), tableFields);
+        var reportFormulas = (command.ReportFormulas ?? []).Select(f => new ReportFormula
+        {
+            Id = f.Id, Name = f.Name?.Trim() ?? string.Empty, TypeCode = f.TypeCode, DisplayAs = f.DisplayAs, Expression = f.Expression ?? string.Empty,
+        }).ToList();
+        // The report's own formulas count as fields for the checks below (a column/filter/sort/aggregation may use one).
+        IReadOnlyList<AppField> fieldsWithReportFormulas = [.. tableFields, .. ReportFormulaFields.Build(reportFormulas, tableFields.FirstOrDefault()?.AppTableId ?? 0)];
+        var configErrors = _configValidatorRegistry.Validate(existingReport.ReportType, ReportConfigValidationInput.FromUpdate(command), fieldsWithReportFormulas);
+        ReportFormulaValidator.Validate(existingReport.ReportType, command.ColumnsMode, reportFormulas, tableFields, _exprValidator, configErrors);
         if (configErrors.Count > 0)
             throw new ValidationException(new Dictionary<string, string[]>(configErrors));
 
@@ -79,6 +89,7 @@ public class UpdateReportCommandHandler
                 IsGroup = l.IsGroup,
                 GroupByMode = string.IsNullOrWhiteSpace(l.GroupByMode) ? "EqualValues" : l.GroupByMode,
             }).ToList(),
+            ReportFormulas = reportFormulas,
             RowGroupLevels = (command.RowGroupLevels ?? []).Select(l => new RowGroupLevel
             {
                 FieldId = l.FieldId,

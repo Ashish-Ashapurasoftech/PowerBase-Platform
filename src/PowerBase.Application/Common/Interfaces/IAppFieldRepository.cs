@@ -9,6 +9,20 @@ public interface IAppFieldRepository
 {
     Task<AppField> GetByIdInTableAsync(long fieldId, long tableId, CancellationToken ct = default);
     Task<IReadOnlyList<AppField>> ListByTableAsync(long tableId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Gives every search-eligible field of the table that has no Azure AI Search slot one (see
+    /// <see cref="PowerBase.Application.Search.SearchSlotResolver.AllocateMissingSlots"/>) and stores it. Safe to call
+    /// repeatedly and from several instances at once. Returns how many fields got a slot; 0 when the slot column does
+    /// not exist yet (migration not applied).
+    /// </summary>
+    Task<int> EnsureSearchSlotsAsync(long tableId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Marks the table as wide: its eligible fields get "f_{fid}" slots (and "f_{fid}_e" for ranges), which is what makes the application read and write
+    /// the table's own index. Call it only after the table's documents have been copied there.
+    /// </summary>
+    Task MarkTableWideAsync(long tableId, CancellationToken ct = default);
     /// <summary>Slim, paged, searchable (by Label), sortable, filterable listing for the fields grid.
     /// <paramref name="filter"/> accepts either a dropdown value (e.g. "System Fields", "Required Fields")
     /// or a category name (Text/Numeric/Date/Other/User/Formula/Relationship/Action); null/"All Fields"
@@ -30,6 +44,15 @@ public interface IAppFieldRepository
     Task UpdatePhysicalColumnNameAsync(long id, string physicalColumnName, CancellationToken ct = default);
     /// <summary>Lightweight settings-only update (used when wiring relationship metadata after field creation).</summary>
     Task UpdateSettingsAsync(long id, string? settings, CancellationToken ct = default);
+
+    /// <summary>Sets (or clears, when <paramref name="sourceFid"/> is null) the field's Snapshot configuration.</summary>
+    Task SetSnapshotConfigAsync(long id, int? sourceFid, bool editable, CancellationToken ct = default, IDbTransaction? transaction = null);
+
+    /// <summary>Every non-deleted Shared-values field in the given apps, with its app and table names.</summary>
+    Task<IReadOnlyList<PowerBase.Application.Fields.Queries.SharedValues.SharedFieldDto>> ListSharedValuesFieldsAsync(IReadOnlyCollection<long> appIds, CancellationToken ct = default);
+
+    /// <summary>Sets whether the field's values may be used as another field's choices ("Shared values").</summary>
+    Task SetSharedValuesAsync(long id, bool isSharedValues, CancellationToken ct = default, IDbTransaction? transaction = null);
 
     /// <summary>Changes a field's type (and settings/required) in place, keeping its Fid and physical column.
     /// Used when converting an existing physical field into a relationship Reference field.</summary>

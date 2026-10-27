@@ -119,7 +119,17 @@ using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Host.UseSerilog((ctx, cfg) => cfg.ReadFrom.Configuration(ctx.Configuration));
+builder.Host.UseSerilog((ctx, cfg) =>
+{
+    // Console comes from configuration ("Serilog:WriteTo"). Application Insights is added only when a connection
+    // string is supplied (setting "ApplicationInsights:ConnectionString" or the standard APPLICATIONINSIGHTS_CONNECTION_STRING),
+    // so worker errors, dead-letters and indexing failures reach a place someone can query.
+    cfg.ReadFrom.Configuration(ctx.Configuration);
+    var appInsightsConnection = ctx.Configuration["ApplicationInsights:ConnectionString"]
+        ?? ctx.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
+    if (!string.IsNullOrWhiteSpace(appInsightsConnection) && !appInsightsConnection.StartsWith("<"))
+        cfg.WriteTo.ApplicationInsights(appInsightsConnection, new Serilog.Sinks.ApplicationInsights.TelemetryConverters.TraceTelemetryConverter());
+});
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 
@@ -234,6 +244,13 @@ builder.Services.AddScoped<IRolePermissionEnforcer, RolePermissionEnforcer>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
+// Field Type Conversion ("Change Type") module — PowerBase.Application/Fields/TypeConversion
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.IFieldColumnConversionService, FieldColumnConversionService>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.FieldTypeChangeAnalyzer>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.FieldTypeChangePlanner>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.GetFieldTypeChangeTargetsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.PreviewFieldTypeChangeQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.ChangeFieldTypeCommandHandler>();
 var storageProvider = builder.Configuration["Storage:Provider"] ?? "Local";
 var azureBlobConnStr = builder.Configuration["Storage:AzureBlob:ConnectionString"] ?? builder.Configuration["AzureBlob:ConnectionString"];
 bool hasValidAzureBlobConfig = !string.IsNullOrWhiteSpace(azureBlobConnStr) && 
@@ -248,12 +265,15 @@ else
 {
     builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 }
-// Pipeline search decrypts millions of values in a row, so it uses the DEK-caching service (same cipher and keys as
-// AesEncryptionService, which stays the registered IEncryptionService everywhere else).
+// Records are decrypted value by value — a report page, a summary over every child of its parents, pipeline search — so
+// every reader uses the DEK-caching service: same cipher and keys as AesEncryptionService, which it wraps to generate keys,
+// without unwrapping the DEK again for each value.
+builder.Services.AddSingleton<AesEncryptionService>();
 builder.Services.AddSingleton<PowerBase.Infrastructure.Services.CachedDekEncryptionService>(sp =>
     new PowerBase.Infrastructure.Services.CachedDekEncryptionService(
         sp.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>(),
-        sp.GetRequiredService<PowerBase.Application.Common.Interfaces.IEncryptionService>()));
+        sp.GetRequiredService<AesEncryptionService>()));
+builder.Services.AddSingleton<IEncryptionService>(sp => sp.GetRequiredService<PowerBase.Infrastructure.Services.CachedDekEncryptionService>());
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineRecordSearchService>(sp =>
     new PowerBase.Infrastructure.Services.PipelineRecordSearchService(
         sp.GetRequiredService<PowerBase.Infrastructure.Persistence.ITenantConnectionFactory>(),
@@ -262,6 +282,7 @@ builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineReco
         sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<PowerBase.Application.Common.Configurations.PipelineExecutionOptions>>()));
 builder.Services.AddSingleton<IAzureSearchService, PowerBase.Infrastructure.Services.AzureSearchService>();
 builder.Services.AddScoped<PowerBase.Application.Records.RecordWriteService>();
+builder.Services.AddScoped<PowerBase.Application.Records.ISnapshotCaptureService, PowerBase.Application.Records.SnapshotCaptureService>();
 builder.Services.AddScoped<PowerBase.Application.Records.FileRecordWriteService>();
 builder.Services.AddScoped<PowerBase.Application.Records.IRecordWriteService>(sp => sp.GetRequiredService<PowerBase.Application.Records.FileRecordWriteService>());
 builder.Services.AddScoped<PowerBase.Application.Records.IFileRecordWriteService>(sp => sp.GetRequiredService<PowerBase.Application.Records.FileRecordWriteService>());
@@ -270,7 +291,6 @@ builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineTriggerInterceptor, PowerBase.Infrastructure.Pipelines.PipelineTriggerInterceptor>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector, PowerBase.Infrastructure.Pipelines.PipelineWriteTimeRelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineAuditFormatter, PowerBase.Application.Pipelines.PipelineAuditFormatter>();
-builder.Services.AddSingleton<IEncryptionService, AesEncryptionService>();
 builder.Services.AddSingleton<IMessagePublisher, ServiceBusPublisher>();
 builder.Services.AddScoped<IFieldNameResolver, PowerBase.Application.Common.Services.FieldNameResolver>();
 
@@ -368,6 +388,7 @@ builder.Services.AddScoped<IAppFieldRepository, AppFieldRepository>();
 builder.Services.AddScoped<IFieldVersionRepository, FieldVersionRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
+builder.Services.AddScoped<ISearchOutbox, SearchOutboxRepository>();
 
 // Import (Table-to-Table / file) — see PowerBase.Application/Imports
 builder.Services.AddScoped<PowerBase.Application.Imports.IImportDefinitionRepository, PowerBase.Infrastructure.Imports.ImportDefinitionRepository>();
@@ -570,6 +591,7 @@ builder.Services.AddScoped<CreateRecordCommandHandler>();
 builder.Services.AddScoped<UpdateRecordCommandHandler>();
 builder.Services.AddScoped<DeleteRecordCommandHandler>();
 builder.Services.AddScoped<BulkDeleteRecordsCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Records.Commands.BulkCreateRecords.BulkCreateRecordsCommandHandler>();
 builder.Services.AddScoped<MassUpdateRecordsCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.RecordModifyGuard>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler>();
@@ -579,6 +601,8 @@ builder.Services.AddScoped<PowerBase.Application.Records.Queries.SearchGlobalRec
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.BackfillSearchIndex.BackfillSearchIndexCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Search.Commands.SanitizeEncryptedData.SanitizeEncryptedDataCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetDistinctFieldValues.GetDistinctFieldValuesQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.Queries.SharedValues.ListSharedFieldsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.Queries.SharedValues.GetSharedFieldValuesQueryHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.CreateRelationship.CreateRelationshipCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.DeleteRelationship.DeleteRelationshipCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Relationships.Commands.AddLookupFields.AddLookupFieldsCommandHandler>();
@@ -604,6 +628,10 @@ builder.Services.AddScoped<PowerBase.Application.Reports.Commands.DeleteReportRe
 builder.Services.AddScoped<PowerBase.Application.Reports.DeleteJobs.IRecordDeleteJobRepository, PowerBase.Infrastructure.Repositories.RecordDeleteJobRepository>();
 builder.Services.AddScoped<PowerBase.Application.Reports.DeleteJobs.RecordDeleteJobProcessor>();
 builder.Services.AddHostedService<PowerBase.API.Workers.RecordDeleteJobWorker>();
+builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.IFieldSnapshotJobRepository, PowerBase.Infrastructure.Repositories.FieldSnapshotJobRepository>();
+builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.FieldSnapshotJobProcessor>();
+builder.Services.AddScoped<PowerBase.Application.Fields.SnapshotJobs.FieldSnapshotJobService>();
+builder.Services.AddHostedService<PowerBase.API.Workers.FieldSnapshotJobWorker>();
 builder.Services.AddScoped<DeleteReportCommandHandler>();
 builder.Services.AddScoped<SetDefaultReportCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Reports.Commands.UpdateReportFormOverrides.UpdateReportFormOverridesCommandHandler>();
@@ -685,7 +713,13 @@ builder.Services.AddScoped<PowerBase.Application.Groups.Queries.GetSharedApps.Ge
 if (builder.Configuration.GetValue<bool>("Search:Indexer:Enabled", true))
 {
     builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
+    builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerPriorityWorker>();
 }
+
+// Makes sure no record change is lost on the way to the search index: re-publishes changes the indexer has not confirmed, and checks daily.
+builder.Services.AddSingleton<PowerBase.Infrastructure.Services.SearchPipelineState>();
+builder.Services.AddHostedService<PowerBase.API.Workers.SearchOutboxRelay>();
+builder.Services.AddHealthChecks().AddCheck<PowerBase.API.Services.SearchPipelineHealthCheck>("search-pipeline");
 
 // Connected Tables: a standalone module (its own services, read-only write filter and workers).
 PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesModule(builder.Services, builder.Configuration);
@@ -721,6 +755,19 @@ app.UseStaticFiles(new StaticFileOptions
 app.UseMiddleware<QueryContextMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.MapControllers();
+// Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
+// or Azure Monitor availability test at it.
+app.MapHealthChecks("/health/search", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Name == "search-pipeline",
+    ResponseWriter = PowerBase.API.Services.SearchPipelineHealthCheck.WriteResponseAsync,
+    ResultStatusCodes =
+    {
+        [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Healthy] = StatusCodes.Status200OK,
+        [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Degraded] = StatusCodes.Status200OK,
+        [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable
+    }
+});
 
 app.Run();
 

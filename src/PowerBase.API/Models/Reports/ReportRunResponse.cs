@@ -20,6 +20,13 @@ public class ReportRunResponse
     /// record matching the report's filters — not just this page's rows. Only columns that opted
     /// into a total/average row are present; empty when the report hides totals.</summary>
     public IReadOnlyDictionary<string, ReportColumnTotalDto> Totals { get; init; } = new Dictionary<string, ReportColumnTotalDto>();
+    /// <summary>Set (to 50,000) when the report sorts or filters by a calculated or encrypted field and more records matched
+    /// than that: the order and TotalCount then cover only the first this-many records (by Record ID#). Null when they cover
+    /// every matching record.</summary>
+    public int? InMemoryRowLimit { get; init; }
+    /// <summary>True when a column that opted into a total/average row is missing from Totals because its total couldn't be
+    /// worked out exactly over every matching record — left out rather than shown covering only some.</summary>
+    public bool TotalsIncomplete { get; init; }
 }
 
 public class ReportColumnTotalDto

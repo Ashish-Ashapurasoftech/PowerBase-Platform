@@ -478,4 +478,164 @@ public class ReportHandlerTests
         result.Columns.Should().ContainSingle(c => c.FieldId == 1L); // structure visible
         result.Items.Should().BeEmpty();              // ZERO individual rows — no raw data at all
     }
+
+    // --- What a table report reads and projects ---
+
+    private static AppField Typed(int fid, string typeCode) => new()
+    {
+        Id = fid, Fid = fid, Name = $"F{fid}", TypeCode = typeCode, IsReportable = true,
+    };
+
+    /// <summary>Runs a table report over <paramref name="fields"/> showing <paramref name="columns"/>; returns the field lists
+    /// the relational projector was given.</summary>
+    private async Task<List<IReadOnlyList<AppField>>> RunAndCaptureProjection(
+        List<AppField> fields, List<long> columns, RunReportQuery? query = null)
+    {
+        var table = MakeTable();
+        var report = MakeReport(table.Id, columns);
+        var rows = new List<IReadOnlyDictionary<string, object?>>
+        {
+            new Dictionary<string, object?> { ["Id"] = 1L, ["PublicId"] = Guid.NewGuid(), ["CreatedOn"] = DateTime.UtcNow },
+        };
+        _reportRepo.GetVisibleReportAsync(Arg.Any<Guid>()).Returns(report);
+        _tableRepo.GetByIdAsync(table.Id).Returns(table);
+        _fieldRepo.ListByTableAsync(table.Id).Returns(fields);
+        _recordRepo.ListAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), 1, 20, Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>())
+            .Returns(rows);
+        _recordRepo.ListAllMatchingAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(),
+                Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+            .Returns(rows);
+        _recordRepo.CountAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
+            .Returns(1);
+        _enforcer.GetTableAccessAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => Task.FromResult(new TableAccessContext
+            {
+                Unrestricted = true,
+                VisibleFields = ci.Arg<IReadOnlyList<AppField>>(),
+                EditableFieldIds = new HashSet<long>(),
+            }));
+        var projected = new List<IReadOnlyList<AppField>>();
+        _relationalProjector.ProjectAsync(Arg.Any<AppTable>(), Arg.Do<IReadOnlyList<AppField>>(projected.Add),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(), Arg.Any<CancellationToken>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(2)
+                .Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+        var sut = new RunReportQueryHandler(_reportRepo, _tableRepo, _fieldRepo, _recordRepo, _enforcer, _userRepo, _formulaProjector, _relationalProjector, _searchService, _appUserRepo, _queryContext, Substitute.For<ILogger<RunReportQueryHandler>>());
+
+        await sut.HandleAsync(query ?? new RunReportQuery(report.PublicId, 1, 20));
+        return projected;
+    }
+
+    [Fact]
+    public async Task RunReport_ProjectsOnlyTheSummariesItShowsOrSortsBy()
+    {
+        // Summaries 2 and 3 are each a query per page; only 3 is a column, so 2 is never worked out.
+        var projected = await RunAndCaptureProjection([Typed(1, "Text"), Typed(2, "Summary"), Typed(3, "Summary"), Typed(4, "Lookup")], [1L, 3L]);
+
+        projected.Should().ContainSingle();
+        projected[0].Select(f => f.Fid).Should().Contain([1, 3]).And.NotContain([2, 4]);
+    }
+
+    [Fact]
+    public async Task RunReport_ProjectsTheSummaryAFormulaColumnReads()
+    {
+        _formulaProjector.GetFormulaDependencies(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IEnumerable<long>>())
+            .Returns(new HashSet<long> { 5, 2 });
+
+        var projected = await RunAndCaptureProjection([Typed(1, "Text"), Typed(2, "Summary"), Typed(3, "Summary"), Typed(5, "Formula_Number")], [1L, 5L]);
+
+        projected[0].Select(f => f.Fid).Should().Contain(2).And.NotContain(3);
+    }
+
+    [Fact]
+    public async Task RunReport_ProjectsEverythingWhenAFormulasReadsCannotBeListed()
+    {
+        _formulaProjector.GetFormulaDependencies(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IEnumerable<long>>())
+            .Returns((IReadOnlySet<long>?)null);
+
+        var projected = await RunAndCaptureProjection([Typed(1, "Text"), Typed(2, "Summary"), Typed(5, "Formula_Number")], [1L, 5L]);
+
+        projected[0].Select(f => f.Fid).Should().Contain([1, 2, 5]);
+    }
+
+    [Fact]
+    public async Task RunReport_ReadsOnlyTheColumnsItUses()
+    {
+        // Shown: Name (1), Customer (7, a Reference converted from text: falls back to its original, 8) and a lookup (9)
+        // through Order (10). Notes (6) isn't used anywhere, so its column isn't read or decrypted.
+        var customer = Typed(7, "Reference");
+        customer.Settings = """{"parentTableId":99,"originalFid":8}""";
+        var lookup = Typed(9, "Lookup");
+        lookup.Settings = """{"referenceFid":10,"sourceTableId":98,"sourceFid":5}""";
+        await RunAndCaptureProjection([Typed(1, "Text"), Typed(6, "Text"), customer, Typed(8, "Text"), lookup, Typed(10, "Reference")], [1L, 7L, 9L]);
+
+        await _recordRepo.Received(1).ListAsync(Arg.Any<AppTable>(),
+            Arg.Is<IReadOnlyList<AppField>>(fs => fs.Select(f => f.Fid!.Value).OrderBy(fid => fid).SequenceEqual(new[] { 1, 7, 8, 9, 10 })),
+            1, 20, Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>());
+    }
+
+    [Fact]
+    public async Task RunReport_WithAColumnWhoseReadsAreUnknown_ReadsEveryColumn()
+    {
+        // A Report Link isn't a formula: what it reads from the row can't be listed, so every column is read.
+        await RunAndCaptureProjection([Typed(1, "Text"), Typed(6, "Text"), Typed(11, "ReportLink")], [1L, 11L]);
+
+        await _recordRepo.Received(1).ListAsync(Arg.Any<AppTable>(),
+            Arg.Is<IReadOnlyList<AppField>>(fs => fs.Any(f => f.Fid == 6)), 1, 20, Arg.Any<FilterGroup?>(), Arg.Any<IReadOnlyList<SortSpec>?>());
+    }
+
+    [Fact]
+    public async Task RunReport_SortByASummary_ReadsEveryRecordAndProjectsIt()
+    {
+        var projected = await RunAndCaptureProjection([Typed(1, "Text"), Typed(2, "Summary")], [1L, 2L],
+            query: new RunReportQuery(Guid.NewGuid(), 1, 20, RuntimeSortFieldId: 2));
+
+        await _recordRepo.Received(1).ListAllMatchingAsync(Arg.Any<AppTable>(), Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(),
+            Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
+        projected[0].Select(f => f.Fid).Should().Contain(2);
+    }
+
+    /// <summary>The formula projector as the real one treats the relational values: merged into what it returns.</summary>
+    private void FormulaProjectorReturnsRelational() =>
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(ci => ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(2)
+                ?? ci.ArgAt<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(1).Select(_ => (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?>()).ToList());
+
+    [Fact]
+    public async Task RunReport_SortByASummary_WorksOutTheSummariesItOnlyShowsForThePageAlone()
+    {
+        // Sorting by Total (2) needs it for every record read; Names (3, a Combined Text say) is only shown, so it is
+        // worked out for the page's rows — not for every record, which could be 50,000 of them.
+        FormulaProjectorReturnsRelational();
+
+        var projected = await RunAndCaptureProjection([Typed(1, "Text"), Typed(2, "Summary"), Typed(3, "Summary")], [1L, 2L, 3L],
+            query: new RunReportQuery(Guid.NewGuid(), 1, 20, RuntimeSortFieldId: 2));
+
+        projected.Should().HaveCount(2);
+        projected[0].Select(f => f.Fid).Should().Contain(2).And.NotContain(3);
+        projected[1].Select(f => f.Fid).Should().Equal(3);
+    }
+
+    [Fact]
+    public async Task RunReport_FilterOnASummary_WorksOutOnlyThatSummaryForEveryRecord()
+    {
+        FormulaProjectorReturnsRelational();
+        var filter = new FilterGroup { Logic = "and", Nodes = [new FilterNode { Condition = new FilterCondition { FieldId = 2, Operator = "gt", Value = "0" } }] };
+
+        var projected = await RunAndCaptureProjection([Typed(1, "Text"), Typed(2, "Summary"), Typed(3, "Summary")], [1L, 2L, 3L],
+            query: new RunReportQuery(Guid.NewGuid(), 1, 20, RuntimeFilterTree: filter));
+
+        projected[0].Select(f => f.Fid).Should().Contain(2).And.NotContain(3);
+    }
+
+    [Fact]
+    public async Task RunReport_SortByASummary_WithNothingElseToShow_ProjectsOnce()
+    {
+        FormulaProjectorReturnsRelational();
+
+        var projected = await RunAndCaptureProjection([Typed(1, "Text"), Typed(2, "Summary")], [1L, 2L],
+            query: new RunReportQuery(Guid.NewGuid(), 1, 20, RuntimeSortFieldId: 2));
+
+        projected.Should().ContainSingle();
+    }
 }

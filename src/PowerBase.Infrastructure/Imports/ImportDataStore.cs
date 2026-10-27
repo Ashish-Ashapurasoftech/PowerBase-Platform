@@ -24,12 +24,14 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
     private readonly IEncryptionService _encryption;
     private readonly IMessagePublisher _publisher;
     private readonly ILogger<ImportDataStore> _logger;
+    private readonly ISearchOutbox? _outbox;
     private bool _searchIndexingFailed;
 
     public ImportDataStore(ITenantConnectionFactory connections, IQueryContext context, IEncryptionService encryption,
-        IMessagePublisher publisher, ILogger<ImportDataStore> logger)
+        IMessagePublisher publisher, ILogger<ImportDataStore> logger, ISearchOutbox? outbox = null)
         : base(connections, context)
     {
+        _outbox = outbox;
         _encryption = encryption;
         _publisher = publisher;
         _logger = logger;
@@ -115,10 +117,13 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
             data.Rows.Add(dr);
         }
 
+        var messages = PrepareSearchMessages(table, fields, rows, publicIds);
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
         try
         {
             await BulkCopyAsync(conn, tx, PhysicalNaming.FullTableName(table.Id), data, ct);
+            // Same transaction as the rows: they cannot be saved without their index change being recorded.
+            if (_outbox != null) await _outbox.AddAsync(messages, tx, ct);
             await tx.CommitAsync(ct);
         }
         catch (Exception ex) when (IsRowError(ex))
@@ -127,7 +132,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
             throw new ImportRowRejectedException(Describe(ex));
         }
 
-        await PublishSearchUpdatesAsync(table, fields, rows, publicIds, ct);
+        await PublishSearchUpdatesAsync(table, messages, ct);
         return await RecordIdsAsync(conn, table, publicIds, ct);
     }
 
@@ -193,6 +198,8 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
             """;
 
         IReadOnlyList<(long Id, Guid PublicId)> updated;
+        var byId = rows.ToDictionary(r => r.RecordId, r => r.Values);
+        List<SearchIndexMessage> messages;
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
         try
         {
@@ -200,6 +207,9 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
             await BulkCopyAsync(conn, tx, StageTable, data, ct);
             updated = (await conn.QueryAsync<(long Id, Guid PublicId)>(
                 new CommandDefinition(update, new { modifiedBy }, tx, cancellationToken: ct))).AsList();
+            var changed = updated.Where(u => byId.ContainsKey(u.Id)).ToList();
+            messages = PrepareSearchMessages(table, fields, changed.Select(u => byId[u.Id]).ToList(), changed.Select(u => u.PublicId).ToList());
+            if (_outbox != null) await _outbox.AddAsync(messages, tx, ct);
             await tx.CommitAsync(ct);
         }
         catch (Exception ex) when (IsRowError(ex))
@@ -208,9 +218,7 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
             throw new ImportRowRejectedException(Describe(ex));
         }
 
-        var byId = rows.ToDictionary(r => r.RecordId, r => r.Values);
-        var changed = updated.Where(u => byId.ContainsKey(u.Id)).ToList();
-        await PublishSearchUpdatesAsync(table, fields, changed.Select(u => byId[u.Id]).ToList(), changed.Select(u => u.PublicId).ToList(), ct);
+        await PublishSearchUpdatesAsync(table, messages, ct);
     }
 
     public async IAsyncEnumerable<object> StreamColumnValuesAsync(
@@ -309,17 +317,22 @@ public sealed class ImportDataStore : TenantRepositoryBase, IImportDataStore
     /// <summary>Same index messages a normal record write publishes, in one batch per chunk. Search indexing is
     /// best-effort: the rows are already committed, so an unreachable search/queue service is logged and skipped
     /// (for the rest of the run) instead of failing an import that has otherwise succeeded.</summary>
-    private async Task PublishSearchUpdatesAsync(
-        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows, IReadOnlyList<Guid> publicIds, CancellationToken ct)
+    private List<SearchIndexMessage> PrepareSearchMessages(
+        AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows, IReadOnlyList<Guid> publicIds)
     {
         var searchable = fields.Where(f => f.Fid.HasValue && (f.IsSearchable || f.IsFilterable)).ToList();
-        if (searchable.Count == 0) return;
-        var messages = rows.Select((row, i) => new SearchIndexMessage
+        if (searchable.Count == 0) return [];
+        // One message per record, built once: the outbox row and the published message carry the same version.
+        return rows.Select((row, i) => new SearchIndexMessage
         {
             Action = IndexAction.Upsert, TenantId = QueryContext.TenantId, AppId = table.AppId, TableId = table.Id, RecordPublicId = publicIds[i],
             Payload = searchable.Where(f => row.ContainsKey(f.Fid!.Value))
-                .ToDictionary(f => f.Fid!.Value.ToString(), f => f.IsSearchable ? row[f.Fid!.Value] : null)
+                .ToDictionary(f => f.Fid!.Value.ToString(), f => row[f.Fid!.Value])
         }).Where(m => m.Payload is { Count: > 0 }).ToList();
+    }
+
+    private async Task PublishSearchUpdatesAsync(AppTable table, List<SearchIndexMessage> messages, CancellationToken ct)
+    {
         if (messages.Count == 0) return;
         try 
         { 

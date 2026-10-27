@@ -119,11 +119,12 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
     {
         var idList = ids.Distinct().ToList();
         if (idList.Count == 0) return new Dictionary<long, string>();
+        var parameters = new DynamicParameters();
         await using var connection = ConnectionFactory.Create();
         var rows = await connection.QueryAsync<(long Id, string Name)>(
             new CommandDefinition(
-                "SELECT Id, Name FROM core.[User] WHERE Id IN @ids AND IsDeleted = 0",
-                new { ids = idList }, cancellationToken: ct));
+                $"SELECT Id, Name FROM core.[User] WHERE {SqlInList.Predicate("Id", "ids", idList, parameters)} AND IsDeleted = 0",
+                parameters, cancellationToken: ct));
         return rows.ToDictionary(r => r.Id, r => r.Name);
     }
 
@@ -131,11 +132,12 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
     {
         var idList = ids.Distinct().ToList();
         if (idList.Count == 0) return new Dictionary<long, UserIdentity>();
+        var parameters = new DynamicParameters();
         await using var connection = ConnectionFactory.Create();
         var rows = await connection.QueryAsync<(long Id, string Name, string Email)>(
             new CommandDefinition(
-                "SELECT Id, Name, Email FROM core.[User] WHERE Id IN @ids AND IsDeleted = 0",
-                new { ids = idList }, cancellationToken: ct));
+                $"SELECT Id, Name, Email FROM core.[User] WHERE {SqlInList.Predicate("Id", "ids", idList, parameters)} AND IsDeleted = 0",
+                parameters, cancellationToken: ct));
         return rows.ToDictionary(r => r.Id, r => new UserIdentity(r.Name ?? string.Empty, r.Email ?? string.Empty));
     }
 
@@ -143,11 +145,12 @@ public class UserRepository : ControlRepositoryBase, IUserRepository
     {
         var idList = ids.Distinct().ToList();
         if (idList.Count == 0) return new Dictionary<long, Guid>();
+        var parameters = new DynamicParameters();
         await using var connection = ConnectionFactory.Create();
         var rows = await connection.QueryAsync<(long Id, Guid PublicId)>(
             new CommandDefinition(
-                "SELECT Id, PublicId FROM core.[User] WHERE Id IN @ids AND IsDeleted = 0",
-                new { ids = idList }, cancellationToken: ct));
+                $"SELECT Id, PublicId FROM core.[User] WHERE {SqlInList.Predicate("Id", "ids", idList, parameters)} AND IsDeleted = 0",
+                parameters, cancellationToken: ct));
         return rows.ToDictionary(r => r.Id, r => r.PublicId);
     }
 

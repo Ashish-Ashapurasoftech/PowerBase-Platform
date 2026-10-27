@@ -16,6 +16,8 @@ public class DeleteFieldCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly IMessagePublisher? _publisher;
+    private readonly IQueryContext? _queryContext;
 
     public DeleteFieldCommandHandler(
         IAppTableRepository tableRepo,
@@ -24,8 +26,12 @@ public class DeleteFieldCommandHandler
         IAuditRepository auditRepo,
         ITenantUnitOfWork uow,
         IRelationshipRepository relRepo,
-        IFieldReferenceIndexer? refIndexer = null)
+        IFieldReferenceIndexer? refIndexer = null,
+        IMessagePublisher? publisher = null,
+        IQueryContext? queryContext = null)
     {
+        _publisher = publisher;
+        _queryContext = queryContext;
         _relRepo = relRepo;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
@@ -52,9 +58,15 @@ public class DeleteFieldCommandHandler
         if (field.IsSystem)
             throw new UnauthorizedActionException("System fields cannot be deleted.");
 
+        // The columns the field used in the search index, read now: once it is deleted the table no longer says.
+        var indexCleanup = _queryContext == null
+            ? []
+            : PowerBase.Application.Search.FieldDeleteIndexCleanup.Capture(_queryContext.TenantId, table, await _fieldRepo.ListByTableAsync(table.Id, ct), [field]);
+
         await RelationshipKeyFieldDeleteGuard.EnsureNotRelationshipKeyAsync(table, [field], _relRepo, ct);
-        ReferenceFilterDependencyGuard.EnsureNotControlling(
-            table, await _fieldRepo.ListByTableAsync(table.Id, ct), [field]);
+        var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
+        ReferenceFilterDependencyGuard.EnsureNotControlling(table, tableFields, [field]);
+        Common.SnapshotSourceDependencyGuard.EnsureNotSource(tableFields, [field]);
 
         // Dependency Check: Pipeline Field Lock
         if (field.Fid.HasValue)
@@ -102,6 +114,7 @@ public class DeleteFieldCommandHandler
                 await _auditRepo.LogActivityAsync(
                     AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
                 await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Field, field.PublicId, ct);
+                await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
 
                 return;
             }
@@ -126,5 +139,6 @@ public class DeleteFieldCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, field.PublicId.ToString(), $"Field deleted: {field.Name} From TableName : {table.Name}", appId: table.AppId, ct: ct);
         await _refIndexer.RemoveSourceAsync(FieldReferenceSourceTypes.Field, field.PublicId, ct);
+        await PowerBase.Application.Search.FieldDeleteIndexCleanup.PublishAsync(_publisher, indexCleanup, ct);
     }
 }

@@ -16,7 +16,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         af.Id, af.PublicId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName, af.DefaultValue,
         af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsAutoFill, af.IsHidden, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.IsHidden, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
     private const string GetByIdInTableSql = $"""
@@ -37,6 +37,93 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         ORDER BY af.Id
         """;
 
+    // Same list, plus the stored Azure AI Search slot(s). Which variant runs depends on which columns exist (see GetSlotColumnsAsync),
+    // so the application keeps working, with search answered from SQL, if it is deployed before migrations 084/085 have run.
+    private const string ListByTableWithSlotSql = $"""
+        SELECT {SelectColumns}, af.SearchSlot
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+          AND af.IsDeleted  = 0
+        ORDER BY af.Id
+        """;
+
+    private const string ListByTableWithSlotsSql = $"""
+        SELECT {SelectColumns}, af.SearchSlot, af.SearchSlotEnd
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+          AND af.IsDeleted  = 0
+        ORDER BY af.Id
+        """;
+
+    // Every field of the table, deleted ones included: a slot held by a deleted field must stay reserved.
+    private const string ListAllForSlotSql = """
+        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.IsSearchable, af.IsFilterable, af.SearchSlot, ft.Code AS TypeCode
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+        """;
+
+    private const string ListAllForSlotsSql = """
+        SELECT af.Id, af.AppTableId, af.Fid, af.IsDeleted, af.IsSearchable, af.IsFilterable, af.SearchSlot, af.SearchSlotEnd, ft.Code AS TypeCode
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId
+        """;
+
+    // Compare-and-set: only if the field still holds what the decision was based on.
+    private const string SetSearchSlotSql = """
+        UPDATE meta.AppField SET SearchSlot = @slot
+        WHERE Id = @id AND ISNULL(SearchSlot, '') = ISNULL(@oldSlot, '')
+        """;
+
+    private const string SetSearchSlotsSql = """
+        UPDATE meta.AppField SET SearchSlot = @slot, SearchSlotEnd = @endSlot
+        WHERE Id = @id AND ISNULL(SearchSlot, '') = ISNULL(@oldSlot, '') AND ISNULL(SearchSlotEnd, '') = ISNULL(@oldEndSlot, '')
+        """;
+
+    private const string MarkWideSql = """
+        UPDATE af
+        SET af.SearchSlot = 'f_' + CAST(af.Fid AS VARCHAR(11)),
+            af.SearchSlotEnd = CASE WHEN ft.Code IN ('NumericRange', 'DateRange') THEN 'f_' + CAST(af.Fid AS VARCHAR(11)) + '_e' END
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId AND af.IsDeleted = 0 AND af.Fid IS NOT NULL
+          AND (af.IsFilterable = 1 OR af.IsSearchable = 1) AND ft.Code <> 'Time'
+        """;
+
+    private const string MarkWideNoEndSql = """
+        UPDATE af
+        SET af.SearchSlot = 'f_' + CAST(af.Fid AS VARCHAR(11))
+        FROM meta.AppField af
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.AppTableId = @tableId AND af.IsDeleted = 0 AND af.Fid IS NOT NULL
+          AND (af.IsFilterable = 1 OR af.IsSearchable = 1) AND ft.Code <> 'Time'
+        """;
+
+    private enum SlotColumns { Unknown = 0, None = 1, SlotOnly = 2, Both = 3 }
+
+    // Which slot columns exist. A positive answer is cached for the life of the process; a "missing" answer is re-checked every minute.
+    private static int _slotColumns;
+    private static long _slotColumnsCheckedTicks;
+
+    private static async Task<SlotColumns> GetSlotColumnsAsync(IDbConnection connection, CancellationToken ct, IDbTransaction? tx = null)
+    {
+        var known = (SlotColumns)Volatile.Read(ref _slotColumns);
+        if (known == SlotColumns.Both) return known;
+        if (known != SlotColumns.Unknown && DateTime.UtcNow.Ticks - Interlocked.Read(ref _slotColumnsCheckedTicks) < TimeSpan.FromMinutes(1).Ticks)
+            return known;
+
+        var row = await connection.QuerySingleAsync<(int? Slot, int? End)>(new CommandDefinition(
+            "SELECT COL_LENGTH('meta.AppField', 'SearchSlot') AS Slot, COL_LENGTH('meta.AppField', 'SearchSlotEnd') AS [End]",
+            transaction: tx, cancellationToken: ct));
+        var state = row.Slot is null ? SlotColumns.None : row.End is null ? SlotColumns.SlotOnly : SlotColumns.Both;
+        Interlocked.Exchange(ref _slotColumnsCheckedTicks, DateTime.UtcNow.Ticks);
+        Volatile.Write(ref _slotColumns, (int)state);
+        return state;
+    }
+
     // The three list/count templates below skip fields flagged IsHidden — the hidden "(original)" Text
     // field a relationship conversion creates (see HelperFields).
     // The field still exists everywhere else (ListByTableAsync is unchanged), so reads/projection can use it.
@@ -46,7 +133,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string ListByTablePagedSqlTemplate = """
         SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
                af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-               af.IsUnique, af.IsSystem, af.IsAutoFill, af.Fid, af.CreatedOn
+               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.Fid, af.CreatedOn
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
@@ -62,7 +149,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string ListByTableFilteredSqlTemplate = """
         SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
                af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-               af.IsUnique, af.IsSystem, af.IsAutoFill, af.Fid, af.CreatedOn
+               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.Fid, af.CreatedOn
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
@@ -165,6 +252,30 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         WHERE PublicId = @publicId AND AppTableId = @tableId AND IsDeleted = 0
         """;
 
+    private const string SetSnapshotConfigSql = """
+        UPDATE meta.AppField
+        SET SnapshotSourceFid = @sourceFid, SnapshotEditable = @editable
+        WHERE Id = @id AND IsDeleted = 0
+        """;
+
+    private const string SetSharedValuesSql = """
+        UPDATE meta.AppField
+        SET IsSharedValues = @isSharedValues
+        WHERE Id = @id AND IsDeleted = 0
+        """;
+
+    private const string ListSharedValuesFieldsSql = """
+        SELECT a.PublicId AS AppPublicId, a.Name AS AppName, t.PublicId AS TablePublicId, t.Name AS TableName,
+               af.PublicId AS FieldPublicId, af.Fid, af.Label, af.Name, ft.Code AS TypeCode
+        FROM meta.AppField af
+        JOIN meta.AppTable t ON t.Id = af.AppTableId
+        JOIN meta.App a ON a.Id = t.AppId
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.IsSharedValues = 1 AND af.IsDeleted = 0 AND af.Fid IS NOT NULL
+          AND t.IsDeleted = 0 AND a.IsDeleted = 0 AND t.AppId IN @appIds
+        ORDER BY a.Name, t.Name, af.Label
+        """;
+
     private const string SoftDeleteFieldSql = """
         DECLARE @fid INT = (
                    SELECT Fid FROM meta.AppField
@@ -220,9 +331,66 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     public async Task<IReadOnlyList<AppField>> ListByTableAsync(long tableId, CancellationToken ct = default)
     {
         await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var sql = await GetSlotColumnsAsync(connection, ct) switch
+        {
+            SlotColumns.Both => ListByTableWithSlotsSql,
+            SlotColumns.SlotOnly => ListByTableWithSlotSql,
+            _ => ListByTableSql
+        };
         var results = await connection.QueryAsync<AppField>(
-            new CommandDefinition(ListByTableSql, new { tableId }, cancellationToken: ct));
+            new CommandDefinition(sql, new { tableId }, cancellationToken: ct));
         return results.AsList();
+    }
+
+    public async Task<int> EnsureSearchSlotsAsync(long tableId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.OpenAsync(ct);
+        var columns = await GetSlotColumnsAsync(connection, ct);
+        if (columns is SlotColumns.None or SlotColumns.Unknown) return 0;
+        var supportsEnd = columns == SlotColumns.Both;
+
+        // Allocation runs under a per-table lock held for the transaction: two instances (or the API and a worker) allocating for
+        // the same table at once would otherwise both see the same free slot. The unique indexes stay as a backstop.
+        await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(ct);
+        try
+        {
+            // sp_getapplock reports failure (timeout, deadlock victim) by return code, not by exception.
+            var rc = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                "DECLARE @r INT; EXEC @r = sp_getapplock @Resource = @res, @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 15000; SELECT @r;",
+                new { res = $"pb_search_slots_{tableId}" }, tx, cancellationToken: ct));
+            if (rc < 0) throw new InvalidOperationException($"Could not lock search slot allocation for table {tableId} (sp_getapplock returned {rc}).");
+
+            var all = (await connection.QueryAsync<AppField>(new CommandDefinition(
+                supportsEnd ? ListAllForSlotsSql : ListAllForSlotSql, new { tableId }, tx, cancellationToken: ct))).AsList();
+            var assignments = PowerBase.Application.Search.SearchSlotResolver.AllocateMissingSlots(all, supportsEnd);
+
+            var changed = 0;
+            foreach (var a in assignments)
+            {
+                changed += supportsEnd
+                    ? await connection.ExecuteAsync(new CommandDefinition(SetSearchSlotsSql,
+                        new { id = a.FieldId, slot = a.Slot, endSlot = a.EndSlot, oldSlot = a.OldSlot, oldEndSlot = a.OldEndSlot }, tx, cancellationToken: ct))
+                    : await connection.ExecuteAsync(new CommandDefinition(SetSearchSlotSql,
+                        new { id = a.FieldId, slot = a.Slot, oldSlot = a.OldSlot }, tx, cancellationToken: ct));
+            }
+            await tx.CommitAsync(ct);
+            return changed;
+        }
+        catch
+        {
+            await tx.RollbackAsync(CancellationToken.None);
+            throw;
+        }
+    }
+
+    public async Task MarkTableWideAsync(long tableId, CancellationToken ct = default)
+    {
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var columns = await GetSlotColumnsAsync(connection, ct);
+        if (columns is SlotColumns.None or SlotColumns.Unknown) return;
+        await connection.ExecuteAsync(new CommandDefinition(
+            columns == SlotColumns.Both ? MarkWideSql : MarkWideNoEndSql, new { tableId }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<AppFieldListItemDto>> ListByTablePagedAsync(
@@ -429,6 +597,39 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePhysicalColumnNameSql, new { id, physicalColumnName }, cancellationToken: ct));
+    }
+
+    public async Task SetSnapshotConfigAsync(long id, int? sourceFid, bool editable, CancellationToken ct = default, IDbTransaction? transaction = null)
+    {
+        var command = new CommandDefinition(SetSnapshotConfigSql, new { id, sourceFid, editable }, transaction, cancellationToken: ct);
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(command);
+            return;
+        }
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(command);
+    }
+
+    public async Task<IReadOnlyList<PowerBase.Application.Fields.Queries.SharedValues.SharedFieldDto>> ListSharedValuesFieldsAsync(IReadOnlyCollection<long> appIds, CancellationToken ct = default)
+    {
+        if (appIds.Count == 0) return Array.Empty<PowerBase.Application.Fields.Queries.SharedValues.SharedFieldDto>();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<PowerBase.Application.Fields.Queries.SharedValues.SharedFieldDto>(
+            new CommandDefinition(ListSharedValuesFieldsSql, new { appIds }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task SetSharedValuesAsync(long id, bool isSharedValues, CancellationToken ct = default, IDbTransaction? transaction = null)
+    {
+        var command = new CommandDefinition(SetSharedValuesSql, new { id, isSharedValues }, transaction, cancellationToken: ct);
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(command);
+            return;
+        }
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(command);
     }
 
     public async Task UpdateSettingsAsync(long id, string? settings, CancellationToken ct = default)

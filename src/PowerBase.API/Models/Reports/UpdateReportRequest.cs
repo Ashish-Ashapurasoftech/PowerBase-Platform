@@ -40,4 +40,6 @@ public class UpdateReportRequest
     public ChartConfigRequest? Chart { get; set; }
 
     public ReportOptionsRequest? Options { get; set; }
+
+    public List<ReportFormulaRequest> ReportFormulas { get; set; } = [];
 }

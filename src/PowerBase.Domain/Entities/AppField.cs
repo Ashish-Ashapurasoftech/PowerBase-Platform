@@ -30,8 +30,20 @@ public class AppField
     public bool IsAuditable { get; set; } = true;
     public bool IsEncrypted { get; set; }
     public bool IsAutoFill { get; set; }
+    /// <summary>Snapshot field: the Fid of the field whose value is captured once, when a record is created. Null = not a snapshot field.</summary>
+    public int? SnapshotSourceFid { get; set; }
+    /// <summary>Snapshot field only: when true the captured value may be edited afterwards; otherwise it is read-only.</summary>
+    public bool SnapshotEditable { get; set; }
+    /// <summary>Shared values: the field's record values may be used as the choices of another Single/Multi Select field (also across apps).</summary>
+    public bool IsSharedValues { get; set; }
     /// <summary>Helper field (e.g. a relationship's "(original)" copy) kept out of every user-facing field list.</summary>
     public bool IsHidden { get; set; }
+    /// <summary>The Azure AI Search column this field's value is stored in (e.g. "num_03"). Assigned once, never recomputed, so adding, removing or
+    /// switching other fields never moves it. Null until the field is search-eligible and has been allocated one.</summary>
+    public string? SearchSlot { get; set; }
+    /// <summary>For a range field (NumericRange/DateRange): the column holding its second value. Null for every other field.
+    /// "f_…" values (in SearchSlot and here) mean the table is wide and keeps one column per field in its own index.</summary>
+    public string? SearchSlotEnd { get; set; }
     public int? Fid { get; set; }
     public string? Settings { get; set; }
     public bool IsDeleted { get; set; }

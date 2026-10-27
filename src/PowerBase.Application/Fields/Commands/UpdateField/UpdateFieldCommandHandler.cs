@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Application.Fields.SnapshotJobs;
 using PowerBase.Application.Fields.Versioning;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Relationships;
@@ -30,6 +31,7 @@ public class UpdateFieldCommandHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IAppVariableRepository? _variableRepo;
+    private readonly FieldSnapshotJobService? _snapshotJobs;
 
     /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
     /// "Display As" Behavior Setting is allowed to switch between (see NumericDisplayAs).</summary>
@@ -50,8 +52,10 @@ public class UpdateFieldCommandHandler
         IAzureSearchService searchService,
         IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null,
-        IAppVariableRepository? variableRepo = null)
+        IAppVariableRepository? variableRepo = null,
+        FieldSnapshotJobService? snapshotJobs = null)
     {
+        _snapshotJobs = snapshotJobs;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _variableRepo = variableRepo;
         _tableRepo = tableRepo;
@@ -114,7 +118,10 @@ public class UpdateFieldCommandHandler
         var isEncrypted = existing.IsSystem || PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(existing.TypeCode)
             ? false
             : command.IsEncrypted;
-        var isAutoFill = existing.IsSystem ? false : command.IsAutoFill;
+        var snapshotSourceFid = existing.IsSystem ? null : command.SnapshotSourceFid;
+        var snapshotEditable = snapshotSourceFid.HasValue && command.SnapshotEditable;
+        var isAutoFill = existing.IsSystem || snapshotSourceFid.HasValue ? false : command.IsAutoFill;
+        var isSharedValues = existing.IsSystem ? false : command.IsSharedValues ?? existing.IsSharedValues;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
             // A request that sends no settings leaves them as they are: UpdateFieldSql writes Settings = @settings,
@@ -131,7 +138,10 @@ public class UpdateFieldCommandHandler
             existing.TypeCode, settings, settings ?? existing.Settings, label, isRequired, isUnique, defaultValue, isAutoFill);
 
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
+        var sharedErrors = FieldSharedValuesCapability.Validate(existing.TypeCode, label, existing.IsSystem, isSharedValues && !existing.IsSharedValues);
+        if (sharedErrors.Count > 0) throw new ValidationException(new Dictionary<string, string[]>(sharedErrors));
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
+        _guard.ValidateSnapshot(existing, label, snapshotSourceFid, snapshotEditable, isRequired, isUnique, isEncrypted, command.IsAutoFill && snapshotSourceFid.HasValue, tableFields);
 
         // Formula text is stored by field ID so a rename can't break it (see FormulaCanonicalizer).
         // The label being saved right now is also accepted as a name, so a formula can reference a
@@ -242,7 +252,8 @@ public class UpdateFieldCommandHandler
 
         var after = new FieldSnapshot(
             label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
-            isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, isAutoFill, settings);
+            isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, isAutoFill, settings,
+            snapshotSourceFid, snapshotEditable, isSharedValues);
 
         // The field row itself and its new version are one atomic unit: either both land or
         // neither does, so a version is never created for a field-settings change that didn't
@@ -260,6 +271,12 @@ public class UpdateFieldCommandHandler
 
             if (affected == 0)
                 throw new NotFoundException("Field", command.FieldPublicId);
+
+            if (existing.SnapshotSourceFid != snapshotSourceFid || existing.SnapshotEditable != snapshotEditable)
+                await _fieldRepo.SetSnapshotConfigAsync(existing.Id, snapshotSourceFid, snapshotEditable, ct, _uow.Transaction);
+
+            if (existing.IsSharedValues != isSharedValues)
+                await _fieldRepo.SetSharedValuesAsync(existing.Id, isSharedValues, ct, _uow.Transaction);
 
             await _versionService.CreateVersionIfChangedAsync(
                 existing.Id, before, after, command.CommitMessage,
@@ -297,6 +314,14 @@ public class UpdateFieldCommandHandler
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
             $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
 
+        // "Initialize field for existing records": captures the snapshot for every record that already exists, as a background job.
+        if (command.InitializeSnapshotForExisting && snapshotSourceFid.HasValue && _snapshotJobs is not null)
+        {
+            existing.SnapshotSourceFid = snapshotSourceFid;
+            existing.SnapshotEditable = snapshotEditable;
+            await _snapshotJobs.StartAsync(table, existing, ct);
+        }
+
         // Formulas bind by name or label, so renaming this field can change what OTHER fields' formulas read.
         if (!string.Equals(label, existing.Label, StringComparison.Ordinal))
             await _refIndexer.ReindexTableFieldsAsync(table.Id, ct);
@@ -306,27 +331,17 @@ public class UpdateFieldCommandHandler
 
     private async Task SyncSearchIndexAsync(AppTable table, int fid, bool isNullify, CancellationToken ct)
     {
-        var allFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
-        var isWide = PowerBase.Application.Search.SearchSlotResolver.IsWideTable(allFields);
-        var targetIndex = isWide ? PowerBase.Application.Search.SearchSlotResolver.GetTableIndexName(table.Id) : null;
-        var slotMap = PowerBase.Application.Search.SearchSlotResolver.BuildSlotMap(allFields);
+        var plan = await PowerBase.Application.Search.FieldSlotSync.PlanAsync(_fieldRepo, table.Id, fid, isNullify, ct);
 
         var docs = await _recordRepo.GetFieldBackfillBatchAsync(_queryContext.TenantId, table.AppId, table.Id, fid, isNullify, page: 1, pageSize: 500, ct);
 
-        if (docs.Count > 0)
+        if (docs.Count > 0 && plan.HasTarget)
         {
-            var slottedDocs = docs.Select(d =>
-            {
-                var slotVals = new Dictionary<string, object?>();
-                if (slotMap.TryGetValue(fid, out var slotName) && d.Values.TryGetValue(fid, out var val))
-                {
-                    slotVals[slotName] = isNullify ? null : val;
-                }
-                return new SearchIndexDocument(d.TenantId, d.AppId, d.TableId, d.PublicId, d.Values, slotVals, targetIndex);
-            }).ToList();
-
-            await _searchService.BulkIndexRecordsAsync(slottedDocs, ct);
+            await _searchService.BulkIndexRecordsAsync(PowerBase.Application.Search.FieldSlotSync.ToDocuments(docs, plan), ct);
         }
+
+        // Switching this field on can push the table past what the shared index takes: start moving it to its own index.
+        await PowerBase.Application.Search.SearchWideMigration.StartIfNeededAsync(_fieldRepo, _messagePublisher, _searchService, _queryContext.TenantId, table.AppId, table.Id, ct);
 
         var msg = new PowerBase.Application.Common.Models.SearchIndexMessage
         {
