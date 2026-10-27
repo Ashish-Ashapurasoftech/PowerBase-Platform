@@ -86,6 +86,8 @@ public static class QblToPblConverter
         };
         var tableOrder = QblAppTableMapper.TableOrder(appNode);
         var roleNameByRef = appNode.ChildMap("Roles").ToDictionary(r => r.Key, r => ResolveScalar(r.Value, "Name") ?? r.Key, StringComparer.Ordinal);
+        // Rules name the built-in Administrator role, which the file does not list among the app's own roles.
+        roleNameByRef.TryAdd("$Role_Administrator", "Administrator");
 
         // Pass A.
         var tables = new List<PblTable>();
@@ -351,8 +353,39 @@ public static class QblToPblConverter
                 table.Reports.Add(report);
             }
 
+            // Report-link fields: Quickbase's "File records" lists the Files of a Folder through Files' reference field.
+            // A report link is not converted as a field (PowerBase makes its own per relationship), so the form sees it under a marked name
+            // and the element is then tied to the child table instead of a field name.
+            const string ReportLinkMark = "\u0001ReportLink:";
+            var reportLinks = new Dictionary<string, (string ChildTableRef, string ReferenceFieldName)>(StringComparer.Ordinal);
+            var formFieldNameByRef = fieldNameByRef;
+            foreach (var (linkRef, linkNode) in tableNode.ChildMap("Fields").Where(x => x.Value.Type == "QB::Field::ReportLink"))
+            {
+                var linkTarget = NestedRef(linkNode, "FieldRelationship", "Target");
+                if (linkTarget?["Table"] is { } linkTable && linkTarget["Field"] is { } linkField
+                    && fieldNameByRefPerTable.TryGetValue(linkTable, out var linkTableFields) && linkTableFields.TryGetValue(linkField, out var referenceName))
+                {
+                    if (ReferenceEquals(formFieldNameByRef, fieldNameByRef)) formFieldNameByRef = new Dictionary<string, string>(fieldNameByRef, StringComparer.Ordinal);
+                    var marked = ReportLinkMark + linkRef;
+                    formFieldNameByRef[linkRef] = marked;
+                    reportLinks[marked] = (linkTable, referenceName);
+                }
+            }
+
             foreach (var (formRef, formV2Node) in GetFormV2Nodes(tableNode))
-                forms.Add(ConvertForm(formRef, formV2Node, table.LogicalRef, fieldNameByRef, roleNameByRef, FieldTypesByName(table), FieldHelpByName(table), issues));
+            {
+                var convertedForm = ConvertForm(formRef, formV2Node, table.LogicalRef, formFieldNameByRef, roleNameByRef, FieldTypesByName(table, tables, relationships), FieldHelpByName(table), issues);
+                if (reportLinks.Count > 0)
+                    foreach (var element in convertedForm.Sections.SelectMany(s => s.Blocks).SelectMany(b => b.Elements)
+                                 .Where(e => e.ElementType == "Field" && e.FieldName is not null && reportLinks.ContainsKey(e.FieldName)))
+                    {
+                        var (childTableRef, referenceFieldName) = reportLinks[element.FieldName!];
+                        element.FieldName = null;
+                        element.ReportLinkChildTableRef = childTableRef;
+                        element.ReportLinkReferenceFieldName = referenceFieldName;
+                    }
+                forms.Add(convertedForm);
+            }
 
             formRoleDefaults.AddRange(ConvertFormRoleDefaults(tableNode, table.LogicalRef));
             if (ConvertConnectedTable(tableNode, table, externalResources, fieldNameByRef, issues) is { } connected)
@@ -795,7 +828,7 @@ public static class QblToPblConverter
     private static readonly Regex QuickbaseTableIdRef = new(@"\[_DBID_(?<slug>[A-Za-z0-9_]+)\]", RegexOptions.Compiled);
 
     /// <summary>Applies <paramref name="replace"/> only to the parts of <paramref name="source"/>
-    /// outside double-quoted strings. Real formulas embed <c>[_DBID_X]</c> inside URL string
+    /// outside double-quoted strings and // comments. Real formulas embed <c>[_DBID_X]</c> inside URL string
     /// literals as part of Quickbase's own <c>&lt;!~db~…~db~&gt;</c> markup, where it is text rather
     /// than a reference — substituting there would splice quotes into the middle of a string and
     /// corrupt the formula rather than translate it.</summary>
@@ -807,14 +840,26 @@ public static class QblToPblConverter
 
         while (i < source.Length)
         {
-            if (source[i] != '"')
+            var isComment = source[i] == '/' && i + 1 < source.Length && source[i + 1] == '/';
+            if (source[i] != '"' && !isComment)
             {
                 i++;
                 continue;
             }
 
-            // Code since the last string ends here — rewrite it, then copy the string verbatim.
+            // Code since the last string or comment ends here - rewrite it, then copy the string / comment verbatim.
             result.Append(pattern.Replace(source[segmentStart..i], replace));
+
+            if (isComment)
+            {
+                // A // comment runs to the end of its line; an id such as [16] inside it is commented-out code, not a reference.
+                var lineEnd = source.IndexOf((char)10, i);
+                var end = lineEnd < 0 ? source.Length : lineEnd;
+                result.Append(source[i..end]);
+                i = end;
+                segmentStart = i;
+                continue;
+            }
 
             var stringStart = i;
             i++; // opening quote
@@ -861,17 +906,24 @@ public static class QblToPblConverter
             CanEditFieldProperties = GetBool(perms, "CanEditFieldProperties"),
         };
 
-        // PowerBase has one record filter per role and table, applied to everything the role sees. A modify rule is therefore
-        // only expressible as "modify all you can see" — which is faithful when the source modify rule is Always (it is bounded by
-        // the view filter) or when it is the very same criteria as the view rule. Any other modify rule would be wider than the
-        // source if turned into AllRecords, so it stays at None (least privilege) and is reported.
+        // PowerBase keeps a separate "modify" record filter beside the view filter (what the role may edit or delete, bounded by what it can
+        // see). A modify rule that differs from the view rule is carried as that second filter. If its criteria could not be translated
+        // there is nothing to carry, and modify access stays at None (least privilege) with the reason reported.
         if (modify.Scope == "AllRecords" && modify.IsCustomRule && !string.Equals(modify.CriteriaKey, view.CriteriaKey, StringComparison.Ordinal))
         {
-            issues.Add(Warning(
-                "QBL_ROLE_MODIFY_CRITERIA_DIFFERS",
-                $"Table '{tableName}' role '{roleRefKey}': the modify rule differs from the view rule and PowerBase cannot express two different record filters; modify access was set to none.",
-                roleRefKey));
-            permission.ModifyScope = "None";
+            if (view.Scope != "None" && modify.Filter is not null)
+            {
+                permission.ModifyScope = "AllRecords";
+                permission.ModifyRecordFilter = modify.Filter;
+            }
+            else
+            {
+                issues.Add(Warning(
+                    "QBL_ROLE_MODIFY_CRITERIA_DIFFERS",
+                    $"Table '{tableName}' role '{roleRefKey}': the modify rule differs from the view rule and could not be carried; modify access was set to none.",
+                    roleRefKey));
+                permission.ModifyScope = "None";
+            }
         }
         else if (view.Scope == "None")
         {
@@ -1381,7 +1433,7 @@ public static class QblToPblConverter
         if (QblFieldTypeMap.TryMapFormulaResultType(type, out var resultType))
         {
             var formula = ResolveScalar(fieldNode, "Formula");
-            if (string.IsNullOrWhiteSpace(formula))
+            if (string.IsNullOrWhiteSpace(formula) || HasNoResultLine(formula))
             {
                 // PowerBase will not save a blank expression; a typed constant that evaluates to blank gives the same result as
                 // Quickbase's empty formula, and keeps the field (and everything that points at it).
@@ -1977,6 +2029,7 @@ public static class QblToPblConverter
         // matching qualified ref to store on the PblFormRuleAction.
         var qualifiedSectionRefByRaw = new Dictionary<string, string>(StringComparer.Ordinal);
         var qualifiedBlockRefByRaw = new Dictionary<string, string>(StringComparer.Ordinal);
+        var pageTargetByRaw = new Dictionary<string, PageTarget>(StringComparer.Ordinal);
 
         // QBL's Page tier has no PowerBase equivalent (PowerBase forms are Section→Block→Element,
         // confirmed no Page level) — flatten each Page's Sections into the form in document order.
@@ -2009,6 +2062,8 @@ public static class QblToPblConverter
                 page = new PblFormPage { LogicalRef = Qualify(qualifiedFormRef, pageRef), Heading = NullIfBlank(ResolveScalar(pageNode, "Name")) ?? InferFieldName(pageRef, null), DisplayOrder = pageOrder++ };
                 form.Pages.Add(page);
             }
+            var pageTarget = new PageTarget(page?.LogicalRef, []);
+            pageTargetByRaw[pageRef] = pageTarget;
 
             foreach (var (sectionRef, sectionNode) in pageNode.ChildMap("Sections"))
             {
@@ -2026,6 +2081,7 @@ public static class QblToPblConverter
 
                 form.Sections.Add(section);
                 qualifiedSectionRefByRaw[sectionRef] = section.LogicalRef;
+                pageTarget.SectionRefs.Add(section.LogicalRef);
             }
         }
 
@@ -2047,7 +2103,7 @@ public static class QblToPblConverter
 
         foreach (var (ruleRef, ruleNode) in formNode.ChildMap("Rules"))
         {
-            var rule = ConvertFormRule(ruleRef, ruleNode, qualifiedFormRef, fieldNameByRef, roleNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, issues);
+            var rule = ConvertFormRule(ruleRef, ruleNode, qualifiedFormRef, fieldNameByRef, roleNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, pageTargetByRaw, issues);
             if (rule is not null)
                 form.Rules.Add(rule);
         }
@@ -2295,6 +2351,7 @@ public static class QblToPblConverter
         Dictionary<string, string> elementRefByFieldName,
         Dictionary<string, string> qualifiedSectionRefByRaw,
         Dictionary<string, string> qualifiedBlockRefByRaw,
+        IReadOnlyDictionary<string, PageTarget> pageTargetByRaw,
         List<PblIssue> issues)
     {
         var name = ResolveScalar(ruleNode, "Name") ?? ruleRef;
@@ -2346,8 +2403,9 @@ public static class QblToPblConverter
 
         var flat = TryFlatten(tree, out var leaves);
         var soleFormula = flat && leaves.Count == 1 && IsType(leaves[0], FORMULA_CONDITION);
-        var onlyFieldOrRole = flat && leaves.All(l => IsType(l, FIELD_CONDITION) || IsType(l, ROLE_CONDITION));
-        var hasUnexpressibleLeaf = flat && leaves.Any(l => !IsType(l, FIELD_CONDITION) && !IsType(l, ROLE_CONDITION) && !IsType(l, FORMULA_CONDITION));
+        var onlyFieldOrRole = flat && leaves.All(l => IsType(l, FIELD_CONDITION) || IsType(l, ROLE_CONDITION) || IsType(l, DAYS_AGO_CONDITION) || IsType(l, RELATIVE_CONDITION) || IsType(l, RANGE_CONDITION));
+        var hasUnexpressibleLeaf = flat && leaves.Any(l => !IsType(l, FIELD_CONDITION) && !IsType(l, ROLE_CONDITION) && !IsType(l, FORMULA_CONDITION)
+            && !IsType(l, DAYS_AGO_CONDITION) && !IsType(l, RELATIVE_CONDITION) && !IsType(l, RANGE_CONDITION));
 
         if (soleFormula)
         {
@@ -2382,8 +2440,7 @@ public static class QblToPblConverter
 
             // Comparisons the condition list has no operator for (Before / After / HasTrueValue …) can still be written as the rule's
             // formula. A role condition cannot, so those rules keep the list.
-            if (dropped && !leaves.Any(l => IsType(l, ROLE_CONDITION))
-                && BuildRuleExpression(tree, fieldNameByRef, fieldTypeByName, out _) is { } asFormula)
+            if (dropped && BuildRuleExpression(tree, fieldNameByRef, roleNameByRef, fieldTypeByName, out _) is { } asFormula)
             {
                 issues.RemoveRange(issuesBefore, issues.Count - issuesBefore);
                 rule.Conditions.Clear();
@@ -2398,7 +2455,7 @@ public static class QblToPblConverter
         }
         else
         {
-            var expression = BuildRuleExpression(tree, fieldNameByRef, fieldTypeByName, out var problem);
+            var expression = BuildRuleExpression(tree, fieldNameByRef, roleNameByRef, fieldTypeByName, out var problem);
             if (expression is null)
             {
                 issues.Add(Warning("QBL_UNSUPPORTED_FORM_RULE_CONDITION_STRUCTURE", $"Form rule '{name}' has a condition structure with no PowerBase equivalent ({problem}); skipped.", ruleRef));
@@ -2415,6 +2472,18 @@ public static class QblToPblConverter
         {
             if (actionRaw is not QblResourceNode actionNode)
                 continue;
+
+            // A page target: the page itself on a multi-page form, otherwise (PowerBase has no page tier on a single-page form) each
+            // section of that page.
+            if (PageTargetActions(actionNode, pageTargetByRaw) is { } pageActions)
+            {
+                foreach (var pageAction in pageActions)
+                {
+                    pageAction.DisplayOrder = actionOrder++;
+                    rule.Actions.Add(pageAction);
+                }
+                continue;
+            }
 
             var action = ConvertFormRuleAction(actionNode, fieldNameByRef, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, actionOrder, name, ruleRef, issues);
             if (action is null)
@@ -2437,6 +2506,9 @@ public static class QblToPblConverter
     private const string FIELD_CONDITION = "QB::FormV2::Rule::Condition::Field";
     private const string ROLE_CONDITION = "QB::FormV2::Rule::Condition::Role";
     private const string FORMULA_CONDITION = "QB::FormV2::Rule::Condition::FormulaIsTrue";
+    private const string DAYS_AGO_CONDITION = "QB::FormV2::Rule::Condition::DaysAgo";
+    private const string RELATIVE_CONDITION = "QB::FormV2::Rule::Condition::Relative";
+    private const string RANGE_CONDITION = "QB::FormV2::Rule::Condition::Range";
 
     /// <summary>Quickbase's type names are compared without regard to case: the file spells "MakeReadonly" where the documentation says "MakeReadOnly".</summary>
     private static bool IsType(QblResourceNode node, string type) => string.Equals(node.Type, type, StringComparison.OrdinalIgnoreCase);
@@ -2494,7 +2566,7 @@ public static class QblToPblConverter
     private static IReadOnlyDictionary<string, string> FieldHelpByName(PblTable table) =>
         table.Fields.Where(f => !string.IsNullOrWhiteSpace(f.HelpText)).ToDictionary(f => f.Name, f => f.HelpText!, StringComparer.OrdinalIgnoreCase);
 
-    private static IReadOnlyDictionary<string, string> FieldTypesByName(PblTable table)
+    private static IReadOnlyDictionary<string, string> FieldTypesByName(PblTable table, IReadOnlyList<PblTable> tables, IReadOnlyList<PblRelationship> relationships)
     {
         var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var f in table.Fields)
@@ -2502,12 +2574,61 @@ public static class QblToPblConverter
             var type = string.Equals(f.TypeCode, "Formula", StringComparison.OrdinalIgnoreCase) ? f.ResultType ?? "Text" : f.TypeCode;
             map[f.Name] = type;
         }
+
+        // The reference, lookup and summary fields a relationship adds to this table: a rule's condition on one is written for the type it shows.
+        foreach (var rel in relationships.Where(r => r.ChildTableRef == table.LogicalRef))
+        {
+            map[rel.ReferenceFieldName] = "Reference";
+            foreach (var lookup in rel.Lookups)
+                if (TypeOfFieldIn(rel.ParentTableRef, lookup.SourceFieldName, tables, relationships, 0) is { } lookupType)
+                    map[lookup.Name] = lookupType;
+        }
+        foreach (var rel in relationships.Where(r => r.ParentTableRef == table.LogicalRef))
+            foreach (var summary in rel.Summaries)
+            {
+                var summaryType = summary.Function switch
+                {
+                    "Count" or "DistinctCount" => "Number",
+                    "Exists" => "Boolean",
+                    "CombinedText" => "Text",
+                    _ => summary.TargetFieldName is null ? null : TypeOfFieldIn(rel.ChildTableRef, summary.TargetFieldName, tables, relationships, 0),
+                };
+                if (summaryType is not null) map[summary.Name] = summaryType == "Reference" ? "Number" : summaryType;
+            }
         return map;
+    }
+
+    /// <summary>The type of a field on a table as a rule condition sees it, following lookups of lookups; null when unknown.</summary>
+    private static string? TypeOfFieldIn(string tableRef, string fieldName, IReadOnlyList<PblTable> tables, IReadOnlyList<PblRelationship> relationships, int depth)
+    {
+        if (depth > 6) return null;
+        var table = tables.FirstOrDefault(t => t.LogicalRef == tableRef);
+        if (table is null) return null;
+        if (table.Fields.FirstOrDefault(f => string.Equals(f.Name, fieldName, StringComparison.OrdinalIgnoreCase)) is { } field)
+            return string.Equals(field.TypeCode, "Formula", StringComparison.OrdinalIgnoreCase) ? field.ResultType ?? "Text" : field.TypeCode;
+        foreach (var rel in relationships)
+        {
+            if (rel.ChildTableRef == tableRef)
+            {
+                if (string.Equals(rel.ReferenceFieldName, fieldName, StringComparison.OrdinalIgnoreCase)) return "Reference";
+                if (rel.Lookups.FirstOrDefault(l => string.Equals(l.Name, fieldName, StringComparison.OrdinalIgnoreCase)) is { } lookup)
+                    return TypeOfFieldIn(rel.ParentTableRef, lookup.SourceFieldName, tables, relationships, depth + 1);
+            }
+            if (rel.ParentTableRef == tableRef && rel.Summaries.FirstOrDefault(s => string.Equals(s.Name, fieldName, StringComparison.OrdinalIgnoreCase)) is { } summary)
+                return summary.Function switch
+                {
+                    "Count" or "DistinctCount" => "Number",
+                    "Exists" => "Boolean",
+                    "CombinedText" => "Text",
+                    _ => summary.TargetFieldName is null ? null : TypeOfFieldIn(rel.ChildTableRef, summary.TargetFieldName, tables, relationships, depth + 1) is { } t ? (t == "Reference" ? "Number" : t) : null,
+                };
+        }
+        return null;
     }
 
     /// <summary>The whole condition tree as one PowerBase formula (expression mode). Returns null, with the reason, when a part of it has no
     /// formula form — a role condition, an unknown comparison, a value that cannot be written as a literal for the field's type.</summary>
-    private static string? BuildRuleExpression(RuleGroup group, Dictionary<string, string> fieldNameByRef, IReadOnlyDictionary<string, string> fieldTypeByName, out string? problem)
+    private static string? BuildRuleExpression(RuleGroup group, Dictionary<string, string> fieldNameByRef, Dictionary<string, string> roleNameByRef, IReadOnlyDictionary<string, string> fieldTypeByName, out string? problem)
     {
         problem = null;
         var parts = new List<string>();
@@ -2517,13 +2638,13 @@ public static class QblToPblConverter
             if (item is RuleGroup sub)
             {
                 if (sub.Items.Count == 0) continue;
-                part = BuildRuleExpression(sub, fieldNameByRef, fieldTypeByName, out problem);
+                part = BuildRuleExpression(sub, fieldNameByRef, roleNameByRef, fieldTypeByName, out problem);
                 if (part is null) return null;
                 part = "(" + part + ")";
             }
             else
             {
-                part = RuleLeafExpression((QblResourceNode)item, fieldNameByRef, fieldTypeByName, out problem);
+                part = RuleLeafExpression((QblResourceNode)item, fieldNameByRef, roleNameByRef, fieldTypeByName, out problem);
                 if (part is null) return null;
             }
             parts.Add(part);
@@ -2533,7 +2654,7 @@ public static class QblToPblConverter
         return string.Join(group.Logic == "any" ? " or " : " and ", parts);
     }
 
-    private static string? RuleLeafExpression(QblResourceNode node, Dictionary<string, string> fieldNameByRef, IReadOnlyDictionary<string, string> fieldTypeByName, out string? problem)
+    private static string? RuleLeafExpression(QblResourceNode node, Dictionary<string, string> fieldNameByRef, Dictionary<string, string> roleNameByRef, IReadOnlyDictionary<string, string> fieldTypeByName, out string? problem)
     {
         problem = null;
         if (IsType(node, FORMULA_CONDITION))
@@ -2542,7 +2663,22 @@ public static class QblToPblConverter
             if (string.IsNullOrWhiteSpace(formula)) { problem = "an empty formula condition"; return null; }
             return "(" + formula.Trim() + ")";
         }
-        if (IsType(node, ROLE_CONDITION)) { problem = "a role condition cannot be part of a formula"; return null; }
+        if (IsType(node, ROLE_CONDITION))
+        {
+            // The current user's roles joined with ";" on both ends, so "Admin" cannot match inside "Administrator".
+            var roleRef = node.PropertyRef("Role")?["Role"];
+            var roleComparison = ResolveScalar(node, "Comparison");
+            if (roleRef is null || !roleNameByRef.TryGetValue(roleRef, out var roleName) || roleComparison is not ("IsInRole" or "IsNotInRole"))
+            {
+                problem = "a role that was not imported";
+                return null;
+            }
+            if (roleName.Contains('"') || roleName.Contains(';')) { problem = "a role name with a quote or semicolon"; return null; }
+            var hasRole = $"Contains(\";\" & Join(UserRoles(\"Name\"), \";\") & \";\", \";{roleName};\")";
+            return roleComparison == "IsInRole" ? $"({hasRole})" : $"(not {hasRole})";
+        }
+        if (IsType(node, DAYS_AGO_CONDITION) || IsType(node, RELATIVE_CONDITION) || IsType(node, RANGE_CONDITION))
+            return DateConditionExpression(node, fieldNameByRef, fieldTypeByName, out problem);
         if (!IsType(node, FIELD_CONDITION)) { problem = $"condition type '{node.Type}'"; return null; }
 
         var fieldRef = node.PropertyRef("Field")?["Field"];
@@ -2579,28 +2715,36 @@ public static class QblToPblConverter
             }
         }
 
-        // For anything but a known number/date/checkbox field the comparison is made on the text of the value, which compiles for every type.
-        var lhs = kind == "other" ? $"ToText({f})" : f;
+        // For anything but a known number/date/checkbox field the comparison is made on the text of the value, which compiles for every type —
+        // except against another field, whose own type the comparison needs.
+        var comparesWithField = node.PropertyRef("Value")?["Field"] is not null;
+        var lhs = kind == "other" && !comparesWithField ? $"ToText({f})" : f;
+
+        // Compared with another field: its value, not a literal.
+        var otherFieldRef = node.PropertyRef("Value")?["Field"];
+        var otherField = otherFieldRef is not null && fieldNameByRef.TryGetValue(otherFieldRef, out var otherName) ? $"[{otherName}]" : null;
 
         string Compare(string symbol)
         {
-            var lit = Literal();
+            var lit = otherField ?? Literal();
             return lit is null ? "" : $"{lhs} {symbol} {lit}";
         }
 
         var isTextLike = kind is "text" or "other";
         string? result = comparison.ToLowerInvariant() switch
         {
-            "isequalto" => value.Length == 0 && isTextLike ? $"ToText({f}) = \"\"" : Compare("="),
-            "isnotequalto" => value.Length == 0 && isTextLike ? $"ToText({f}) <> \"\"" : Compare("<>"),
+            // No value to compare with: the test is whether the field is blank (for a checkbox, "no value" is not a blank).
+            "isequalto" => value.Length == 0 && !comparesWithField && kind != "bool" ? $"ToText({f}) = \"\"" : Compare("="),
+            "isnotequalto" => value.Length == 0 && !comparesWithField && kind != "bool" ? $"ToText({f}) <> \"\"" : Compare("<>"),
             "contains" or "includes" => $"Contains(ToText({f}), \"{value}\")",
             "doesnotcontain" or "doesnotinclude" => $"not Contains(ToText({f}), \"{value}\")",
             "isgreaterthan" or "after" => Compare(">"),
             "isgreaterthanorequalto" or "onorafter" => Compare(">="),
             "islessthan" or "before" => Compare("<"),
             "islessthanorequalto" or "onorbefore" => Compare("<="),
-            "hastruevalue" => kind == "bool" ? $"{f} = true" : null,
-            "doesnothavetruevalue" => kind == "bool" ? $"{f} = false" : null,
+            // A checkbox is tested as it is; any other field "has a true value" when it holds something.
+            "hastruevalue" => kind == "bool" ? $"{f} = true" : $"ToText({f}) <> \"\"",
+            "doesnothavetruevalue" => kind == "bool" ? $"{f} = false" : $"ToText({f}) = \"\"",
             "isempty" => $"ToText({f}) = \"\"",
             "isnotempty" => $"ToText({f}) <> \"\"",
             _ => null,
@@ -2612,6 +2756,66 @@ public static class QblToPblConverter
             return null;
         }
         return "(" + result + ")";
+    }
+
+    /// <summary>A days-ago / relative-to-today / during-this-period condition as part of a rule formula (used when the rule also holds
+    /// a condition the list cannot take).</summary>
+    private static string? DateConditionExpression(QblResourceNode node, Dictionary<string, string> fieldNameByRef, IReadOnlyDictionary<string, string> fieldTypeByName, out string? problem)
+    {
+        problem = null;
+        var fieldRef = node.PropertyRef("Field")?["Field"];
+        if (fieldRef is null || !fieldNameByRef.TryGetValue(fieldRef, out var fieldName)) { problem = "a field that was not created"; return null; }
+        fieldTypeByName.TryGetValue(fieldName, out var type);
+        var date = type == "Date" ? $"[{fieldName}]" : $"ToDate([{fieldName}])";
+        var comparison = ResolveScalar(node, "Comparison") ?? "";
+
+        if (IsType(node, RANGE_CONDITION))
+        {
+            var (first, last) = ResolveScalar(node, "TimeFrame")?.ToLowerInvariant() switch
+            {
+                "week" => ("FirstDayOfWeek(Today())", "LastDayOfWeek(Today())"),
+                "month" => ("FirstDayOfMonth(Today())", "LastDayOfMonth(Today())"),
+                "year" => ("FirstDayOfYear(Today())", "LastDayOfYear(Today())"),
+                "day" => ("Today()", "Today()"),
+                _ => ((string?)null, (string?)null),
+            };
+            if (first is null || !string.Equals(ResolveScalar(node, "RelativeTo"), "This", StringComparison.OrdinalIgnoreCase)
+                || comparison is not ("IsDuring" or "IsNotDuring"))
+            {
+                problem = $"comparison '{comparison}' on field '{fieldName}'";
+                return null;
+            }
+            var inRange = $"({date} >= {first} and {date} <= {last})";
+            return comparison == "IsDuring" ? inRange : $"(not {inRange})";
+        }
+
+        string? anchor;
+        if (IsType(node, DAYS_AGO_CONDITION))
+        {
+            anchor = int.TryParse(ResolveScalar(node, "DaysAgo"), out var days)
+                ? $"DateAdd(Today(), \"days\", {(-days).ToString(System.Globalization.CultureInfo.InvariantCulture)})"
+                : null;
+        }
+        else
+        {
+            anchor = ResolveScalar(node, "RelativeTo")?.ToLowerInvariant() switch
+            {
+                "today" => "Today()",
+                "yesterday" => "DateAdd(Today(), \"days\", -1)",
+                "tomorrow" => "DateAdd(Today(), \"days\", 1)",
+                _ => null,
+            };
+        }
+        var symbol = comparison.ToLowerInvariant() switch
+        {
+            "before" => "<", "after" => ">", "onorbefore" => "<=", "onorafter" => ">=", "isequalto" => "=", "isnotequalto" => "<>", _ => null,
+        };
+        if (anchor is null || symbol is null)
+        {
+            problem = $"comparison '{comparison}' on field '{fieldName}'";
+            return null;
+        }
+        return $"({date} {symbol} {anchor})";
     }
 
     /// <summary>Only <c>QB::FormV2::Rule::Condition::Field</c> maps to PowerBase — confirmed
@@ -2634,7 +2838,7 @@ public static class QblToPblConverter
             return new PblFormRuleCondition { Kind = "role", Operator = comparison == "IsInRole" ? "includes" : "notIncludes", Value = roleName, DisplayOrder = order };
         }
 
-        if (!IsType(conditionNode, FIELD_CONDITION))
+        if (!IsType(conditionNode, FIELD_CONDITION) && !IsType(conditionNode, DAYS_AGO_CONDITION) && !IsType(conditionNode, RELATIVE_CONDITION) && !IsType(conditionNode, RANGE_CONDITION))
         {
             issues.Add(Warning("QBL_UNSUPPORTED_FORM_RULE_CONDITION", $"Form rule '{ruleName}' uses condition type '{conditionNode.Type}', which has no PowerBase equivalent.", ruleRef));
             return null;
@@ -2648,7 +2852,55 @@ public static class QblToPblConverter
         }
 
         var qblComparison = ResolveScalar(conditionNode, "Comparison");
-        var op = MapComparisonOperator(qblComparison);
+        var value = ResolveScalar(conditionNode, "Value");
+        string? valueType = null, valueFieldName = null;
+        string? op;
+
+        if (IsType(conditionNode, DAYS_AGO_CONDITION))
+        {
+            // "Before 365 days ago": PowerBase compares with the date that many days back (or ahead, for a negative count).
+            op = DateComparisonOperators.GetValueOrDefault(qblComparison ?? "");
+            if (op is not null && int.TryParse(ResolveScalar(conditionNode, "DaysAgo"), out var daysAgo))
+            {
+                valueType = daysAgo >= 0 ? "pastDays" : "futureDays";
+                value = Math.Abs(daysAgo).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            else op = null;
+        }
+        else if (IsType(conditionNode, RELATIVE_CONDITION))
+        {
+            op = DateComparisonOperators.GetValueOrDefault(qblComparison ?? "") ?? (string.Equals(qblComparison, "IsEqualTo", StringComparison.OrdinalIgnoreCase) ? "eq" : null);
+            valueType = ResolveScalar(conditionNode, "RelativeTo")?.ToLowerInvariant() switch { "today" => "today", "yesterday" => "yesterday", "tomorrow" => "tomorrow", _ => null };
+            value = null;
+            if (valueType is null) op = null;
+        }
+        else if (IsType(conditionNode, RANGE_CONDITION))
+        {
+            // "is during this week / month": PowerBase's own "during" comparison, counted from the current period.
+            op = qblComparison switch { "IsDuring" => "during", "IsNotDuring" => "notDuring", _ => null };
+            var unit = ResolveScalar(conditionNode, "TimeFrame")?.ToLowerInvariant();
+            if (op is not null && string.Equals(ResolveScalar(conditionNode, "RelativeTo"), "This", StringComparison.OrdinalIgnoreCase) && unit is "day" or "week" or "month" or "quarter" or "year")
+            {
+                valueType = "duringCurrent";
+                value = "1:" + unit;
+            }
+            else op = null;
+        }
+        else
+        {
+            // Compared with another field's live value (a reference, not a literal).
+            if (conditionNode.PropertyRef("Value")?["Field"] is { } valueFieldRef && fieldNameByRef.TryGetValue(valueFieldRef, out var otherName))
+            {
+                valueType = "field";
+                valueFieldName = otherName;
+                value = null;
+            }
+            op = MapComparisonOperator(qblComparison);
+            // Before / After / On or after… need a field to compare with here; against a literal date they are written as the rule's formula.
+            if (op is null && valueFieldName is not null)
+                op = DateComparisonOperators.GetValueOrDefault(qblComparison ?? "");
+        }
+
         if (op is null)
         {
             issues.Add(Warning("QBL_UNSUPPORTED_FORM_RULE_OPERATOR", $"Form rule '{ruleName}' uses comparison '{qblComparison}', which has no PowerBase equivalent.", ruleRef));
@@ -2659,10 +2911,20 @@ public static class QblToPblConverter
         {
             FieldName = fieldName,
             Operator = op,
-            Value = ResolveScalar(conditionNode, "Value"),
+            Value = value,
+            ValueType = valueType,
+            ValueFieldName = valueFieldName,
             DisplayOrder = order,
         };
     }
+
+    private static readonly Dictionary<string, string> DateComparisonOperators = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Before"] = "lt",
+        ["After"] = "gt",
+        ["OnOrBefore"] = "lte",
+        ["OnOrAfter"] = "gte",
+    };
 
     /// <summary>Confirmed real values: IsEqualTo, IsNotEqualTo, Contains (a second real export
     /// uses "Contains", not "Includes" - both accepted since neither sample contradicts the
@@ -2687,6 +2949,24 @@ public static class QblToPblConverter
         ["IsLessThan"] = "lt",
         ["IsLessThanOrEqualTo"] = "lte",
     };
+
+    /// <summary>The form's pages as rule actions see them: the page's own ref on a multi-page form (null on a single-page one), and the
+    /// sections on it.</summary>
+    private sealed record PageTarget(string? PageRef, List<string> SectionRefs);
+
+    /// <summary>The actions for a rule action aimed at a form page, or null when the action does not target a page (or the page is unknown).</summary>
+    private static List<PblFormRuleAction>? PageTargetActions(QblResourceNode actionNode, IReadOnlyDictionary<string, PageTarget> pageTargetByRaw)
+    {
+        var actionType = MapActionType(actionNode.Type);
+        if (actionType is null or "DisplayMessage" or "PreventSave") return null;
+        var target = actionNode.PropertyRef(actionType == "ChangeValue" ? "Field" : "Target");
+        if (target?["FormV2Page"] is not { } pageRef || !pageTargetByRaw.TryGetValue(pageRef, out var page)) return null;
+
+        var value = ResolveScalar(actionNode, "Value");
+        if (page.PageRef is not null)
+            return [new PblFormRuleAction { ActionType = actionType, TargetType = "Page", TargetPageRef = page.PageRef, ActionValue = value }];
+        return page.SectionRefs.Select(s => new PblFormRuleAction { ActionType = actionType, TargetType = "Section", TargetSectionRef = s, ActionValue = value }).ToList();
+    }
 
     /// <summary>Confirmed real action types: Show, Require, and Change all map cleanly. Change
     /// sets a field's value — PowerBase's <c>FormRuleActionType.ChangeValue</c> covers the same
@@ -2876,6 +3156,19 @@ public static class QblToPblConverter
     /// (<c>PblValidator</c> checks this with one shared set for every construct). Qualifying by
     /// the already-qualified parent ref at each level guarantees that.</summary>
     /// <summary>An expression of the given result type that evaluates to blank; null when no such constant exists.</summary>
+    /// <summary>True for a formula that is only comment lines, or only "var ...;" declarations with nothing after them:
+    /// Quickbase evaluates these to blank, and they cannot compile.</summary>
+    public static bool HasNoResultLine(string formula)
+    {
+        var lines = formula.Split((char)10)
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0 && !l.StartsWith("//", StringComparison.Ordinal))
+            .ToList();
+        if (lines.Count == 0) return true;
+        var code = string.Join(" ", lines);
+        return code.StartsWith("var ", StringComparison.OrdinalIgnoreCase) && code.EndsWith(';');
+    }
+
     internal static string? BlankFormulaFor(string resultType) => resultType switch
     {
         "Text" => "\"\"",
@@ -2883,6 +3176,7 @@ public static class QblToPblConverter
         "Bool" => "false",
         "Date" => "ToDate(\"\")",
         "Time" => "ToTimeOfDay(\"\")",
+        "DateTime" => "ToTimestamp(\"\")",
         "User" => "ToUser(\"\")",
         _ => null,
     };

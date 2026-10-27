@@ -156,11 +156,11 @@ public class CreateRelationshipSummaryGuardTests
     [Fact]
     public async Task Handle_NumberFieldSummedByAnotherRelationship_ThrowsConflictAndWritesNothing()
     {
-        ClientHasSummaryOverAmount("Sum");
+        ClientHasSummaryOverAmount("Avg");
 
         var act = () => _handler.HandleAsync(ReuseAmountAsReference());
 
-        (await act.Should().ThrowAsync<ConflictException>()).Which.Message.Should().Contain("Client › Sum of Amount (Sum)");
+        (await act.Should().ThrowAsync<ConflictException>()).Which.Message.Should().Contain("Client › Avg of Amount (Average)");
         await _fieldRepo.DidNotReceiveWithAnyArgs().UpdateFieldTypeAsync(default, default, default, default, default);
         await _relRepo.DidNotReceiveWithAnyArgs().CreateAsync(default!, default);
     }

@@ -255,9 +255,9 @@ public class CreateRelationshipCommandHandler
                     ReferenceFid = refField.Fid!.Value,
                     Function = spec.Function,
                     TargetFid = spec.TargetFid,
-                    TargetTypeCode = target is null ? null : ReferenceKeys.KeyTypeCode(target, referenceKeys) ?? target.TypeCode,
+                    TargetTypeCode = target is null ? null : TargetKeyType(target, referenceKeys, lookupSources, spec.Function) ?? target.TypeCode,
                     ResultTypeCode = FieldValueTypes.ForSummary(spec.Function,
-                        target is null ? null : ReferenceKeys.KeyTypeCode(target, referenceKeys) ?? FieldValueTypes.Of(target), spec.TargetSubField),
+                        target is null ? null : TargetKeyType(target, referenceKeys, lookupSources, spec.Function) ?? FieldValueTypes.Of(target), spec.TargetSubField),
                     TargetSubField = spec.TargetSubField,
                 }, ct);
             createdFields.Add(new(summary.PublicId, summary.Fid!.Value, summary.Name, "summary"));
@@ -434,6 +434,10 @@ public class CreateRelationshipCommandHandler
 
     /// <summary>A stored/computed value as the culture-independent text used to look up the parent key. A
     /// Text - Multiple Choice holding a single choice (a JSON array of one) is unwrapped to that choice.</summary>
+    /// <summary>The type a Reference target is summarized as: its key's, or Number (the Record ID# it holds) for Sum / Min / Max.</summary>
+    private static string? TargetKeyType(AppField target, IReadOnlyDictionary<long, AppField>? referenceKeys, IReadOnlyDictionary<long, AppField>? lookupSources, string function) =>
+        ReferenceKeys.ReadsRecordId(target, lookupSources, function) ? "Number" : ReferenceKeys.KeyTypeCode(target, referenceKeys, function);
+
     private static string? KeyText(object? value, string typeCode)
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;

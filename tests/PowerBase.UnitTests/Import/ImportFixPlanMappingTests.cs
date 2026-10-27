@@ -99,6 +99,20 @@ public class ImportFixPlanMappingTests
         result.Issues.Should().Contain(i => i.Code == "QBL_EMPTY_FORMULA" && i.Message.Contains("skipped"));
     }
 
+    [Theory]
+    [InlineData("//only a comment\n//and another")]
+    [InlineData("//[16] old\n\n")]
+    [InlineData("var text a = \"x\";\nvar text b = $a & \"y\";")]
+    public void FormulaWithoutAResultLine_IsAFormulaWithoutAnExpression(string formula) =>
+        QblToPblConverter.HasNoResultLine(formula).Should().BeTrue();
+
+    [Theory]
+    [InlineData("[Qty] * 2")]
+    [InlineData("//old\n[Qty]")]
+    [InlineData("var number a = 1;\n$a + 1")]
+    public void FormulaWithAResultLine_IsKept(string formula) =>
+        QblToPblConverter.HasNoResultLine(formula).Should().BeFalse();
+
     private const string TwoFormsApp = """
         Version: '0.12'
         Resources:
@@ -157,5 +171,43 @@ public class ImportFixPlanMappingTests
         var clerk = defaults.Single(d => d.RoleRef == "$Role_Clerk");
         clerk.EditFormRef.Should().Be("$Table_Files::$FormV2_Short");
         clerk.AddFormRef.Should().BeNull();
+    }
+
+    private const string CommentedIdApp = """
+        Version: '0.12'
+        Resources:
+          $App_Test:
+            Type: QB::Application
+            Properties:
+              Name: Test App
+            Tables:
+              $Table_Files:
+                Type: QB::Table
+                Properties:
+                  Name: Files
+                Fields:
+                  $Field_Qty:
+                    Type: QB::Field::Number
+                    Id: 7
+                    Properties:
+                      Label: Qty
+                  $Field_Total:
+                    Type: QB::Field::Numeric::Formula
+                    Id: 8
+                    Properties:
+                      Label: Total
+                      Formula: |-
+                        //[16] old test, now unused
+                        [7] * 2
+        """;
+
+    [Fact]
+    public void FieldIdInsideAComment_IsNotTreatedAsAReference()
+    {
+        var result = QblToPblConverter.Convert(QblSerializer.Deserialize(CommentedIdApp));
+
+        result.Issues.Should().NotContain(i => i.Code == "QBL_FORMULA_UNKNOWN_FIELD_ID");
+        var total = result.Document.Tables.Single().Fields.Single(f => f.Label == "Total");
+        total.FormulaExpression.Should().Contain("//[16] old test").And.Contain("[Qty] * 2");
     }
 }

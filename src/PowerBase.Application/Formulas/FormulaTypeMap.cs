@@ -24,6 +24,8 @@ internal static class FormulaTypeMap
     {
         "Text" or "TextMultiLine" or "RichText" or "SingleSelect" or "MultiSelect"
             or "Email" or "Phone" or "Url" => FormulaType.Text,
+        // A File field reads as the file name(s) and an Address as the whole address: both text (StructuredValueContext and AddressParts read them).
+        "File" or "Address" => FormulaType.Text,
         "Time" => FormulaType.Time,
         "Number" or "Currency" or "Percent" or "Rating" => FormulaType.Number,
         "Date" => FormulaType.Date,
@@ -80,6 +82,9 @@ internal static class FormulaTypeMap
     private static FormulaType? LookupResultType(string? settingsJson)
     {
         var s = ParseLookupSettings(settingsJson);
+        // The value type the lookup shows (a lookup of an "Exists" summary shows a checkbox; the source type alone would read as a number).
+        if (!string.IsNullOrWhiteSpace(s?.ResultTypeCode) && FieldType(s!.ResultTypeCode!, null) is { } shown)
+            return shown;
         return string.IsNullOrWhiteSpace(s?.SourceTypeCode) ? FormulaType.Text : FieldType(s!.SourceTypeCode!, null);
     }
 

@@ -6,7 +6,7 @@ namespace PowerBase.Formula.Binding;
 /// A resolved field reference: the field's stable id (Fid), its display name, and
 /// the <see cref="FormulaType"/> its values present to a formula.
 /// </summary>
-public sealed record FieldRef(long Fid, string Name, FormulaType Type);
+public sealed record FieldRef(long Fid, string Name, FormulaType Type, bool IsAddress = false);
 
 /// <summary>
 /// Resolves <c>[Field Name]</c> references during binding. Name matching is
