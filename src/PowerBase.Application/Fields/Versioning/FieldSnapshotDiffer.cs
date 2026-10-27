@@ -33,6 +33,7 @@ public static class FieldSnapshotDiffer
         Compare(nameof(FieldSnapshot.IsAutoFill), before.IsAutoFill, after.IsAutoFill);
         Compare(nameof(FieldSnapshot.SnapshotSourceFid), before.SnapshotSourceFid, after.SnapshotSourceFid);
         Compare(nameof(FieldSnapshot.SnapshotEditable), before.SnapshotEditable, after.SnapshotEditable);
+        Compare(nameof(FieldSnapshot.IsSharedValues), before.IsSharedValues, after.IsSharedValues);
 
         changes.AddRange(DiffSettings(before.Settings, after.Settings));
 

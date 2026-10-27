@@ -23,4 +23,6 @@ public record UpdateFieldRequest(
     /// <summary>Snapshot: allow the captured value to be edited afterwards.</summary>
     bool SnapshotEditable = false,
     /// <summary>Snapshot: also capture the value for every existing record (queues the background Reinitialize job).</summary>
-    bool InitializeSnapshotForExisting = false);
+    bool InitializeSnapshotForExisting = false,
+    /// <summary>Shared values: this field's record values may be the source of another field's choices. Null = unchanged.</summary>
+    bool? IsSharedValues = null);

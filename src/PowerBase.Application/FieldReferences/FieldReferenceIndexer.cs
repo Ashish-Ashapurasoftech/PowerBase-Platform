@@ -161,7 +161,7 @@ public sealed class FieldReferenceIndexer : IFieldReferenceIndexer
     private async Task IndexReportAsync(Report report, TableFieldIndex table, CancellationToken ct)
     {
         var collector = new FieldReferenceCollector(FieldReferenceSourceTypes.Report, report.Id, report.AppTableId);
-        ReportReferenceExtractor.Extract(report.Definition, table, collector);
+        ReportReferenceExtractor.Extract(report.Definition, table, collector, _engine);
         await _references.ReplaceForSourceAsync(FieldReferenceSourceTypes.Report, report.Id, collector.Rows, ct);
     }
 

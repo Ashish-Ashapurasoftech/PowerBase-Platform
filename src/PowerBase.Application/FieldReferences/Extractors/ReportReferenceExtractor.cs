@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PowerBase.Application.Reports;
+using PowerBase.Formula;
 
 namespace PowerBase.Application.FieldReferences.Extractors;
 
@@ -10,12 +11,17 @@ public static class ReportReferenceExtractor
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
-    public static void Extract(string? definitionJson, TableFieldIndex table, FieldReferenceCollector collector)
+    public static void Extract(string? definitionJson, TableFieldIndex table, FieldReferenceCollector collector, FormulaEngine? engine = null)
     {
         var definition = Parse(definitionJson);
         if (definition is null) return;
 
         void Add(long? fid, string usage) => collector.Add(table.IdOfFid(fid), usage);
+
+        // The fields the report's own formulas read — deleting one of them would break the report.
+        if (engine is not null)
+            foreach (var formula in definition.ReportFormulas)
+                collector.AddAll(table.FieldsReadBy(engine, formula.Expression), FieldReferenceUsages.Formula);
 
         // Columns — empty means "all reportable fields", which isn't an explicit reference.
         foreach (var fid in definition.Columns) Add(fid, FieldReferenceUsages.Column);

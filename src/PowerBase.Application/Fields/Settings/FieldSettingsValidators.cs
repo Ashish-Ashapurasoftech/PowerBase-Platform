@@ -91,6 +91,9 @@ public sealed class SelectSettingsValidator : FieldSettingsValidatorBase<SelectS
 
         ValidateColumnWidth(s.ColumnWidth, errors);
 
+        if (s.ChoiceSource is not null && (s.ChoiceSource.TableId is null || s.ChoiceSource.Fid is null))
+            AddError(errors, "Settings.ChoiceSource", "Choose the field the choices come from.");
+
         return errors;
     }
 }

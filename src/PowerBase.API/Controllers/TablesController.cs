@@ -340,6 +340,7 @@ public class TablesController : ControllerBase
         IsAutoFill = f.IsAutoFill,
         SnapshotSourceFid = f.SnapshotSourceFid,
         SnapshotEditable = f.SnapshotEditable,
+        IsSharedValues = f.IsSharedValues,
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,

@@ -16,7 +16,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         af.Id, af.PublicId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName, af.DefaultValue,
         af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsHidden, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.IsHidden, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
     private const string GetByIdInTableSql = $"""
@@ -133,7 +133,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string ListByTablePagedSqlTemplate = """
         SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
                af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.Fid, af.CreatedOn
+               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.Fid, af.CreatedOn
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
@@ -149,7 +149,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string ListByTableFilteredSqlTemplate = """
         SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
                af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.Fid, af.CreatedOn
+               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsSharedValues, af.Fid, af.CreatedOn
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
@@ -256,6 +256,24 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         UPDATE meta.AppField
         SET SnapshotSourceFid = @sourceFid, SnapshotEditable = @editable
         WHERE Id = @id AND IsDeleted = 0
+        """;
+
+    private const string SetSharedValuesSql = """
+        UPDATE meta.AppField
+        SET IsSharedValues = @isSharedValues
+        WHERE Id = @id AND IsDeleted = 0
+        """;
+
+    private const string ListSharedValuesFieldsSql = """
+        SELECT a.PublicId AS AppPublicId, a.Name AS AppName, t.PublicId AS TablePublicId, t.Name AS TableName,
+               af.PublicId AS FieldPublicId, af.Fid, af.Label, af.Name, ft.Code AS TypeCode
+        FROM meta.AppField af
+        JOIN meta.AppTable t ON t.Id = af.AppTableId
+        JOIN meta.App a ON a.Id = t.AppId
+        JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
+        WHERE af.IsSharedValues = 1 AND af.IsDeleted = 0 AND af.Fid IS NOT NULL
+          AND t.IsDeleted = 0 AND a.IsDeleted = 0 AND t.AppId IN @appIds
+        ORDER BY a.Name, t.Name, af.Label
         """;
 
     private const string SoftDeleteFieldSql = """
@@ -584,6 +602,27 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     public async Task SetSnapshotConfigAsync(long id, int? sourceFid, bool editable, CancellationToken ct = default, IDbTransaction? transaction = null)
     {
         var command = new CommandDefinition(SetSnapshotConfigSql, new { id, sourceFid, editable }, transaction, cancellationToken: ct);
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(command);
+            return;
+        }
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(command);
+    }
+
+    public async Task<IReadOnlyList<PowerBase.Application.Fields.Queries.SharedValues.SharedFieldDto>> ListSharedValuesFieldsAsync(IReadOnlyCollection<long> appIds, CancellationToken ct = default)
+    {
+        if (appIds.Count == 0) return Array.Empty<PowerBase.Application.Fields.Queries.SharedValues.SharedFieldDto>();
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        var rows = await connection.QueryAsync<PowerBase.Application.Fields.Queries.SharedValues.SharedFieldDto>(
+            new CommandDefinition(ListSharedValuesFieldsSql, new { appIds }, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task SetSharedValuesAsync(long id, bool isSharedValues, CancellationToken ct = default, IDbTransaction? transaction = null)
+    {
+        var command = new CommandDefinition(SetSharedValuesSql, new { id, isSharedValues }, transaction, cancellationToken: ct);
         if (transaction is not null)
         {
             await transaction.Connection!.ExecuteAsync(command);

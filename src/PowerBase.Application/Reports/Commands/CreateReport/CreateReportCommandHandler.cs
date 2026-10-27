@@ -22,6 +22,7 @@ public class CreateReportCommandHandler
     private readonly ReportConfigValidatorRegistry _configValidatorRegistry;
     private readonly CreateReportCommandValidator _validator;
     private readonly IFieldReferenceIndexer _refIndexer;
+    private readonly PowerBase.Application.Formulas.IFormulaExpressionValidator? _exprValidator;
 
     public CreateReportCommandHandler(
         IAppTableRepository tableRepo,
@@ -32,8 +33,10 @@ public class CreateReportCommandHandler
         IQueryContext queryContext,
         IAuditRepository auditRepo,
         ReportConfigValidatorRegistry configValidatorRegistry,
-        IFieldReferenceIndexer? refIndexer = null)
+        IFieldReferenceIndexer? refIndexer = null,
+        PowerBase.Application.Formulas.IFormulaExpressionValidator? exprValidator = null)
     {
+        _exprValidator = exprValidator;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
@@ -71,7 +74,14 @@ public class CreateReportCommandHandler
         // it needs the full field list regardless of what the client happened to send.
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 
-        var configErrors = _configValidatorRegistry.Validate(command.ReportType, ReportConfigValidationInput.FromCreate(command), tableFields);
+        var reportFormulas = (command.ReportFormulas ?? []).Select(f => new ReportFormula
+        {
+            Id = f.Id, Name = f.Name?.Trim() ?? string.Empty, TypeCode = f.TypeCode, DisplayAs = f.DisplayAs, Expression = f.Expression ?? string.Empty,
+        }).ToList();
+        // The report's own formulas count as fields for the checks below (a column/filter/sort/aggregation may use one).
+        IReadOnlyList<AppField> fieldsWithReportFormulas = [.. tableFields, .. ReportFormulaFields.Build(reportFormulas, tableFields.FirstOrDefault()?.AppTableId ?? 0)];
+        var configErrors = _configValidatorRegistry.Validate(command.ReportType, ReportConfigValidationInput.FromCreate(command), fieldsWithReportFormulas);
+        ReportFormulaValidator.Validate(command.ReportType, command.ColumnsMode, reportFormulas, tableFields, _exprValidator, configErrors);
         if (configErrors.Count > 0)
             throw new ValidationException(new Dictionary<string, string[]>(configErrors));
 
@@ -87,6 +97,7 @@ public class CreateReportCommandHandler
                 IsGroup = l.IsGroup,
                 GroupByMode = string.IsNullOrWhiteSpace(l.GroupByMode) ? "EqualValues" : l.GroupByMode,
             }).ToList(),
+            ReportFormulas = reportFormulas,
             RowGroupLevels = (command.RowGroupLevels ?? []).Select(l => new RowGroupLevel
             {
                 FieldId = l.FieldId,

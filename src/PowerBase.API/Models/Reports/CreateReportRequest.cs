@@ -15,6 +15,9 @@ public class CreateReportRequest
     /// so the report is removed together with the relationship.</summary>
     public Guid? RelationshipId { get; set; }
 
+    /// <summary>Up to 3 report-only calculated columns (see ReportFormulaFields). Table reports: custom columns only.</summary>
+    public List<ReportFormulaRequest> ReportFormulas { get; set; } = [];
+
     /// <summary>Legacy — never actually applied to Summary/Chart reports (RunSummaryAsync never
     /// receives it). Kept only so old JSON deserializes without data loss; Summary's real sort is
     /// SummarySortFields below.</summary>
@@ -59,6 +62,16 @@ public class SortGroupLevelRequest
     public bool Desc { get; set; }
     public bool IsGroup { get; set; }
     public string GroupByMode { get; set; } = "EqualValues";
+}
+
+public class ReportFormulaRequest
+{
+    /// <summary>Reserved id (2000000001 to 2000000003) that columns, filters, sorts, group-bys and aggregations use to refer to this formula.</summary>
+    public long Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string TypeCode { get; set; } = "Formula_Text";
+    public string? DisplayAs { get; set; }
+    public string Expression { get; set; } = string.Empty;
 }
 
 public class RowGroupLevelRequest

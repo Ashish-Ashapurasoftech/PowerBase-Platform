@@ -22,7 +22,8 @@ public record FieldSnapshot(
     bool IsAutoFill,
     string? Settings,
     int? SnapshotSourceFid = null,
-    bool SnapshotEditable = false)
+    bool SnapshotEditable = false,
+    bool IsSharedValues = false)
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
@@ -30,7 +31,7 @@ public record FieldSnapshot(
         field.Label, field.Description, field.IsRequired, field.DefaultValue,
         field.IsSearchable, field.IsSortable, field.IsFilterable, field.IsReportable,
         field.IsAuditable, field.IsUnique, field.IsEncrypted, field.IsAutoFill, field.Settings,
-        field.SnapshotSourceFid, field.SnapshotEditable);
+        field.SnapshotSourceFid, field.SnapshotEditable, field.IsSharedValues);
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
 

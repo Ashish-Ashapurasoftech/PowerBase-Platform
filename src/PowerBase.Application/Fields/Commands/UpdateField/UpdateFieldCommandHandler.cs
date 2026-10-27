@@ -121,6 +121,7 @@ public class UpdateFieldCommandHandler
         var snapshotSourceFid = existing.IsSystem ? null : command.SnapshotSourceFid;
         var snapshotEditable = snapshotSourceFid.HasValue && command.SnapshotEditable;
         var isAutoFill = existing.IsSystem || snapshotSourceFid.HasValue ? false : command.IsAutoFill;
+        var isSharedValues = existing.IsSystem ? false : command.IsSharedValues ?? existing.IsSharedValues;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
             // A request that sends no settings leaves them as they are: UpdateFieldSql writes Settings = @settings,
@@ -137,6 +138,8 @@ public class UpdateFieldCommandHandler
             existing.TypeCode, settings, settings ?? existing.Settings, label, isRequired, isUnique, defaultValue, isAutoFill);
 
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
+        var sharedErrors = FieldSharedValuesCapability.Validate(existing.TypeCode, label, existing.IsSystem, isSharedValues && !existing.IsSharedValues);
+        if (sharedErrors.Count > 0) throw new ValidationException(new Dictionary<string, string[]>(sharedErrors));
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
         _guard.ValidateSnapshot(existing, label, snapshotSourceFid, snapshotEditable, isRequired, isUnique, isEncrypted, command.IsAutoFill && snapshotSourceFid.HasValue, tableFields);
 
@@ -250,7 +253,7 @@ public class UpdateFieldCommandHandler
         var after = new FieldSnapshot(
             label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
             isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, isAutoFill, settings,
-            snapshotSourceFid, snapshotEditable);
+            snapshotSourceFid, snapshotEditable, isSharedValues);
 
         // The field row itself and its new version are one atomic unit: either both land or
         // neither does, so a version is never created for a field-settings change that didn't
@@ -271,6 +274,9 @@ public class UpdateFieldCommandHandler
 
             if (existing.SnapshotSourceFid != snapshotSourceFid || existing.SnapshotEditable != snapshotEditable)
                 await _fieldRepo.SetSnapshotConfigAsync(existing.Id, snapshotSourceFid, snapshotEditable, ct, _uow.Transaction);
+
+            if (existing.IsSharedValues != isSharedValues)
+                await _fieldRepo.SetSharedValuesAsync(existing.Id, isSharedValues, ct, _uow.Transaction);
 
             await _versionService.CreateVersionIfChangedAsync(
                 existing.Id, before, after, command.CommitMessage,

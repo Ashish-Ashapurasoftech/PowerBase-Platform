@@ -93,7 +93,7 @@ public class RestoreFieldVersionCommandHandler
         var target = FieldSnapshot.FromJson(targetRow.SnapshotJson);
         // The Snapshot configuration is not restored: re-pointing it from an old version could capture the wrong source
         // field for new records without anyone choosing that, so the current configuration is kept.
-        target = target with { SnapshotSourceFid = existing.SnapshotSourceFid, SnapshotEditable = existing.SnapshotEditable };
+        target = target with { SnapshotSourceFid = existing.SnapshotSourceFid, SnapshotEditable = existing.SnapshotEditable, IsSharedValues = existing.IsSharedValues };
         var before = FieldSnapshot.From(existing);
 
         // System fields' Label never changes (same rule UpdateFieldCommandHandler enforces) — fall

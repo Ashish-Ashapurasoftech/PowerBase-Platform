@@ -182,7 +182,8 @@ public class FieldsController : ControllerBase
             request.IsSearchable, request.IsSortable,
             request.IsFilterable, request.IsReportable, request.IsAuditable,
             request.IsUnique, request.IsEncrypted, request.IsAutoFill, request.Settings, request.CommitMessage,
-            request.SnapshotSourceFid, request.SnapshotEditable, request.InitializeSnapshotForExisting), ct);
+            request.SnapshotSourceFid, request.SnapshotEditable, IsSharedValues: request.IsSharedValues,
+            InitializeSnapshotForExisting: request.InitializeSnapshotForExisting), ct);
         return NoContent();
     }
 
@@ -403,6 +404,7 @@ public class FieldsController : ControllerBase
         IsAutoFill = f.IsAutoFill,
         SnapshotSourceFid = f.SnapshotSourceFid,
         SnapshotEditable = f.SnapshotEditable,
+        IsSharedValues = f.IsSharedValues,
         Fid = f.Fid,
         CreatedOn = f.CreatedOn,
         IsKeyField = f.IsKeyField,
@@ -429,6 +431,7 @@ public class FieldsController : ControllerBase
         IsAutoFill = f.IsAutoFill,
         SnapshotSourceFid = f.SnapshotSourceFid,
         SnapshotEditable = f.SnapshotEditable,
+        IsSharedValues = f.IsSharedValues,
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,
