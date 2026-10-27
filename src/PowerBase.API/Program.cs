@@ -265,12 +265,15 @@ else
 {
     builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 }
-// Pipeline search decrypts millions of values in a row, so it uses the DEK-caching service (same cipher and keys as
-// AesEncryptionService, which stays the registered IEncryptionService everywhere else).
+// Records are decrypted value by value — a report page, a summary over every child of its parents, pipeline search — so
+// every reader uses the DEK-caching service: same cipher and keys as AesEncryptionService, which it wraps to generate keys,
+// without unwrapping the DEK again for each value.
+builder.Services.AddSingleton<AesEncryptionService>();
 builder.Services.AddSingleton<PowerBase.Infrastructure.Services.CachedDekEncryptionService>(sp =>
     new PowerBase.Infrastructure.Services.CachedDekEncryptionService(
         sp.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>(),
-        sp.GetRequiredService<PowerBase.Application.Common.Interfaces.IEncryptionService>()));
+        sp.GetRequiredService<AesEncryptionService>()));
+builder.Services.AddSingleton<IEncryptionService>(sp => sp.GetRequiredService<PowerBase.Infrastructure.Services.CachedDekEncryptionService>());
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineRecordSearchService>(sp =>
     new PowerBase.Infrastructure.Services.PipelineRecordSearchService(
         sp.GetRequiredService<PowerBase.Infrastructure.Persistence.ITenantConnectionFactory>(),
@@ -288,7 +291,6 @@ builder.Services.AddScoped<IAppSeeder, AppSeeder>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineTriggerInterceptor, PowerBase.Infrastructure.Pipelines.PipelineTriggerInterceptor>();
 builder.Services.AddScoped<PowerBase.Application.Pipelines.IPipelineWriteTimeRelationalProjector, PowerBase.Infrastructure.Pipelines.PipelineWriteTimeRelationalProjector>();
 builder.Services.AddScoped<PowerBase.Application.Common.Interfaces.IPipelineAuditFormatter, PowerBase.Application.Pipelines.PipelineAuditFormatter>();
-builder.Services.AddSingleton<IEncryptionService, AesEncryptionService>();
 builder.Services.AddSingleton<IMessagePublisher, ServiceBusPublisher>();
 builder.Services.AddScoped<IFieldNameResolver, PowerBase.Application.Common.Services.FieldNameResolver>();
 
