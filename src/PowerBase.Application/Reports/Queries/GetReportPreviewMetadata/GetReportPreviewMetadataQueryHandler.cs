@@ -36,6 +36,8 @@ public class GetReportPreviewMetadataQueryHandler
         var runResult = await _runHandler.HandleAsync(new RunReportQuery(query.ReportPublicId, Page: 1, PageSize: 1), ct);
 
         var definition = JsonSerializer.Deserialize<ReportDefinition>(report.Definition) ?? new ReportDefinition();
+        // Totals/grouping that no longer fit a field whose type was changed are skipped (Change Type).
+        PowerBase.Application.Fields.TypeConversion.ReportDefinitionTypeSanitizer.Apply(definition, allFields);
         var aggregations = new List<ReportAggregationPreviewDto>();
 
         foreach (var agg in definition.Aggregations)

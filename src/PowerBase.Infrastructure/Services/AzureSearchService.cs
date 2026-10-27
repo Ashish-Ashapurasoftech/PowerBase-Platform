@@ -12,6 +12,7 @@ using Azure.Search.Documents.Indexes;
 using Azure.Search.Documents.Indexes.Models;
 using Azure.Search.Documents.Models;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Search;
 
@@ -22,36 +23,35 @@ public class AzureSearchService : IAzureSearchService
     private readonly SearchIndexClient? _searchIndexClient;
     private readonly ConcurrentDictionary<string, SearchClient> _searchClients = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, HashSet<string>> _knownFieldsPerIndex = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<long, string> _tableCustomIndexes = new();
-    private readonly ConcurrentBag<string> _knownShards = new();
+    // Index names that exist on the service (for the wide-table index budget); refreshed at most once a minute.
+    private IReadOnlyList<string> _indexNamesCache = [];
+    private DateTime _indexNamesLoadedUtc = DateTime.MinValue;
+    private readonly ConcurrentDictionary<long, DateTime> _wideBudgetWarned = new();
     private readonly SemaphoreSlim _indexCreationLock = new(1, 1);
     
     private readonly string _endpoint;
     private readonly AzureKeyCredential? _credential;
+    private readonly TokenCredential? _tokenCredential;
+    private readonly bool _useManagedIdentity;
+    private readonly SearchResourceEncryptionKey? _encryptionKey;
     private readonly string _defaultIndexName;
     private readonly bool _isMultipleIndex;
     private readonly bool _isEnabled;
-    private readonly long _maxDocsPerShard;
     private readonly HashSet<long> _dedicatedTenantIndexes = new();
-    private readonly int _maxTenantIndexes;
+    private readonly int _shardCount;
+    private readonly int _wideIndexBudget;
+    private readonly ILogger<AzureSearchService>? _logger;
+    private const int MaxThrottleRetries = 3;
 
-    private volatile string _currentActiveShard;
-    private DateTime _lastDocCountCheck = DateTime.MinValue;
-    private long _cachedActiveShardDocCount = 0;
-
-    public AzureSearchService(IConfiguration configuration)
+    public AzureSearchService(IConfiguration configuration, ILogger<AzureSearchService>? logger = null)
     {
+        _logger = logger;
         _endpoint = configuration["AzureAiSearch:Endpoint"] ?? string.Empty;
         var apiKey = configuration["AzureAiSearch:ApiKey"] ?? string.Empty;
         _defaultIndexName = configuration["AzureAiSearch:IndexName"] ?? "powerbase-records-index";
-        _currentActiveShard = _defaultIndexName;
-        _knownShards.Add(_defaultIndexName);
 
         var isMultiStr = configuration["AzureAiSearch:IsMultipleIndex"];
         _isMultipleIndex = bool.TryParse(isMultiStr, out var multi) && multi;
-
-        var maxDocsStr = configuration["AzureAiSearch:MaxDocumentsPerShard"];
-        _maxDocsPerShard = long.TryParse(maxDocsStr, out var m) && m > 0 ? m : 15_000_000L;
 
         var tenantRoutes = configuration["AzureAiSearch:DedicatedTenantIds"] ?? "";
         if (!string.IsNullOrWhiteSpace(tenantRoutes))
@@ -61,13 +61,33 @@ public class AzureSearchService : IAzureSearchService
                 if (long.TryParse(tId, out var id)) _dedicatedTenantIndexes.Add(id);
             }
         }
-        _maxTenantIndexes = int.TryParse(configuration["AzureAiSearch:MaxTenantIndexes"], out var mti) ? mti : 50;
 
-        _isEnabled = !string.IsNullOrEmpty(_endpoint) && !string.IsNullOrEmpty(apiKey) && !string.IsNullOrEmpty(_defaultIndexName);
+        // Tenant -> index is a pure function of configuration (see SearchIndexRouting), so every instance and every restart agrees.
+        // 1 (default) keeps everything in the configured index; N > 1 spreads tenants over pb-shard-001..N by tenant id. A tenant's data is
+        // never split across indexes, so a query never pages across indexes. Changing N later moves tenants and needs a full reindex.
+        _shardCount = int.TryParse(configuration["AzureAiSearch:ShardCount"], out var shards) && shards > 1 ? shards : 1;
+
+        // How many tables may have their own "pb-tbl-{id}" index. Each one counts against the service's index limit (15 Basic, 50 S1).
+        _wideIndexBudget = int.TryParse(configuration["AzureAiSearch:WideTableIndexBudget"], out var budget) && budget >= 0 ? budget : 10;
+
+        // AzureAiSearch:UseManagedIdentity=true signs in as the app's identity (roles "Search Service Contributor" and "Search Index Data
+        // Contributor"), so no admin key is stored or can leak. The key stays the default.
+        _useManagedIdentity = bool.TryParse(configuration["AzureAiSearch:UseManagedIdentity"], out var mi) && mi;
+
+        // Optional customer-managed key for index encryption (AzureAiSearch:EncryptionKey:VaultUri / KeyName / KeyVersion). The search service
+        // reaches the vault with its own managed identity. Azure applies it only when an index is CREATED; an existing index must be rebuilt.
+        var vaultUri = configuration["AzureAiSearch:EncryptionKey:VaultUri"];
+        var keyName = configuration["AzureAiSearch:EncryptionKey:KeyName"];
+        var keyVersion = configuration["AzureAiSearch:EncryptionKey:KeyVersion"];
+        if (!string.IsNullOrWhiteSpace(vaultUri) && !vaultUri.StartsWith("<") && !string.IsNullOrWhiteSpace(keyName) && !string.IsNullOrWhiteSpace(keyVersion))
+            _encryptionKey = new SearchResourceEncryptionKey(new Uri(vaultUri), keyName, keyVersion);
+
+        _isEnabled = !string.IsNullOrEmpty(_endpoint) && (!string.IsNullOrEmpty(apiKey) || _useManagedIdentity) && !string.IsNullOrEmpty(_defaultIndexName);
 
         if (_isEnabled)
         {
-            _credential = new AzureKeyCredential(apiKey);
+            _credential = _useManagedIdentity ? null : new AzureKeyCredential(apiKey);
+            _tokenCredential = _useManagedIdentity ? new Azure.Identity.DefaultAzureCredential() : null;
             var clientOptions = new SearchClientOptions
             {
                 Retry =
@@ -77,11 +97,14 @@ public class AzureSearchService : IAzureSearchService
                     Delay = TimeSpan.FromMilliseconds(500)
                 }
             };
-            _searchIndexClient = new SearchIndexClient(new Uri(_endpoint), _credential, clientOptions);
+            _searchIndexClient = _tokenCredential != null
+                ? new SearchIndexClient(new Uri(_endpoint), _tokenCredential, clientOptions)
+                : new SearchIndexClient(new Uri(_endpoint), _credential!, clientOptions);
         }
         else
         {
             _credential = null;
+            _tokenCredential = null;
             _searchIndexClient = null;
         }
         
@@ -130,79 +153,57 @@ public class AzureSearchService : IAzureSearchService
         }
     }
 
-    private string GetWriteIndexNameForDocument(SearchIndexDocument doc)
+    private string TenantIndex(long tenantId) =>
+        SearchIndexRouting.TenantIndex(tenantId, _defaultIndexName, _shardCount, _isMultipleIndex, _dedicatedTenantIndexes);
+
+    private string GetWriteIndexNameForDocument(SearchIndexDocument doc) =>
+        !string.IsNullOrWhiteSpace(doc.CustomIndexName) ? doc.CustomIndexName : TenantIndex(doc.TenantId);
+
+    private string GetWriteIndexNameForTenant(long tenantId) => TenantIndex(tenantId);
+
+    /// <summary>The (single) index holding all of a tenant's shared-index documents.</summary>
+    private IReadOnlyList<string> GetShardsForTenant(long tenantId) => [TenantIndex(tenantId)];
+
+    /// <summary>The index to query for a table: the one the caller names (a table with its own index), otherwise the tenant's. Always exactly
+    /// one, so results never need merging or paging across indexes.</summary>
+    private IReadOnlyList<string> GetShardsForTable(long tenantId, long tableId, string? overrideIndex = null) =>
+        !string.IsNullOrWhiteSpace(overrideIndex) ? [overrideIndex] : GetShardsForTenant(tenantId);
+
+    private async Task<IReadOnlyList<string>> GetIndexNamesAsync(CancellationToken ct)
     {
-        if (!string.IsNullOrWhiteSpace(doc.CustomIndexName))
-        {
-            _knownShards.Add(doc.CustomIndexName);
-            _tableCustomIndexes[doc.TableId] = doc.CustomIndexName;
-            return doc.CustomIndexName;
-        }
-        return GetWriteIndexNameForTenant(doc.TenantId);
+        if (_searchIndexClient == null) return [];
+        if (DateTime.UtcNow - _indexNamesLoadedUtc < TimeSpan.FromMinutes(1)) return _indexNamesCache;
+
+        var names = new List<string>();
+        await foreach (var name in _searchIndexClient.GetIndexNamesAsync(ct)) names.Add(name);
+        _indexNamesCache = names;
+        _indexNamesLoadedUtc = DateTime.UtcNow;
+        return names;
     }
 
-    private string GetWriteIndexNameForTenant(long tenantId)
+    public async Task<bool> CanUseWideIndexAsync(long tableId, CancellationToken ct = default)
     {
-        if (_isMultipleIndex && tenantId > 0)
-        {
-            // D22: Guard against unbounded runtime index creation exceeding tier limits
-            if (_dedicatedTenantIndexes.Contains(tenantId) || (_dedicatedTenantIndexes.Count == 0 && _knownShards.Count < _maxTenantIndexes))
-            {
-                var tenantIdx = $"pb-tenant-{tenantId}";
-                _knownShards.Add(tenantIdx);
-                return tenantIdx;
-            }
-        }
-        return _currentActiveShard;
-    }
-
-    private IReadOnlyList<string> GetShardsForTenant(long tenantId)
-    {
-        if (_isMultipleIndex && tenantId > 0)
-        {
-            var tenantIdx = $"pb-tenant-{tenantId}";
-            if (_dedicatedTenantIndexes.Contains(tenantId) || _knownShards.Contains(tenantIdx))
-            {
-                return [tenantIdx];
-            }
-        }
-        var shards = _knownShards.Distinct().ToList();
-        return shards.Count > 0 ? shards : [_defaultIndexName];
-    }
-
-    private IReadOnlyList<string> GetShardsForTable(long tenantId, long tableId, string? overrideIndex = null)
-    {
-        if (!string.IsNullOrWhiteSpace(overrideIndex))
-        {
-            return [overrideIndex];
-        }
-
-        if (_tableCustomIndexes.TryGetValue(tableId, out var customIdx))
-        {
-            return [customIdx];
-        }
-
-        var dedicatedName = $"pb-tbl-{tableId}";
-        if (_knownShards.Contains(dedicatedName))
-        {
-            _tableCustomIndexes[tableId] = dedicatedName;
-            return [dedicatedName];
-        }
-
-        return GetShardsForTenant(tenantId);
+        if (!_isEnabled) return false;
+        return SearchIndexRouting.WithinWideIndexBudget(await GetIndexNamesAsync(ct), SearchSlotResolver.GetTableIndexName(tableId), _wideIndexBudget);
     }
 
     private SearchClient GetSearchClient(string indexName)
     {
-        return _searchClients.GetOrAdd(indexName, name => new SearchClient(new Uri(_endpoint), name, _credential, new SearchClientOptions
+        return _searchClients.GetOrAdd(indexName, name =>
         {
-            Retry =
+            var options = new SearchClientOptions
             {
-                Mode = RetryMode.Exponential,
-                MaxRetries = 5,
-                Delay = TimeSpan.FromMilliseconds(500)
-            }
-        }));
+                Retry =
+                {
+                    Mode = RetryMode.Exponential,
+                    MaxRetries = 5,
+                    Delay = TimeSpan.FromMilliseconds(500)
+                }
+            };
+            return _tokenCredential != null
+                ? new SearchClient(new Uri(_endpoint), name, _tokenCredential, options)
+                : new SearchClient(new Uri(_endpoint), name, _credential!, options);
+        });
     }
 
     /// <summary>
@@ -219,6 +220,8 @@ public class AzureSearchService : IAzureSearchService
             new SimpleField("appId", SearchFieldDataType.Int64) { IsFilterable = true },
             new SimpleField("tableId", SearchFieldDataType.Int64) { IsFilterable = true },
             new SimpleField("publicId", SearchFieldDataType.String) { IsFilterable = true },
+            // The source version last applied to the record (see SearchIndexMessage.Version): lets the indexer recognise a stale message.
+            new SimpleField("src_version", SearchFieldDataType.Int64),
             new SearchableField("search_content") { IsFilterable = false }
         };
 
@@ -245,50 +248,6 @@ public class AzureSearchService : IAzureSearchService
         return fields;
     }
 
-    private async Task CheckShardCapacityAndRotateAsync(CancellationToken ct)
-    {
-        if (!_isEnabled || _searchIndexClient == null || _isMultipleIndex) return;
-
-        if ((DateTime.UtcNow - _lastDocCountCheck).TotalSeconds < 60) return;
-
-        try
-        {
-            var stats = await _searchIndexClient.GetIndexStatisticsAsync(_currentActiveShard, ct);
-            _cachedActiveShardDocCount = stats?.Value?.DocumentCount ?? 0;
-            _lastDocCountCheck = DateTime.UtcNow;
-
-            if (_cachedActiveShardDocCount >= _maxDocsPerShard)
-            {
-                await _indexCreationLock.WaitAsync(ct);
-                try
-                {
-                    if (_cachedActiveShardDocCount >= _maxDocsPerShard)
-                    {
-                        var nextShardNum = _knownShards.Count + 1;
-                        var newShardName = $"pb-shard-{nextShardNum:D3}";
-                        var newIndex = new SearchIndex(newShardName);
-                        foreach (var f in CreateShardTemplateFields())
-                        {
-                            newIndex.Fields.Add(f);
-                        }
-                        await _searchIndexClient.CreateIndexAsync(newIndex, ct);
-                        _knownShards.Add(newShardName);
-                        _currentActiveShard = newShardName;
-                        _cachedActiveShardDocCount = 0;
-                    }
-                }
-                finally
-                {
-                    _indexCreationLock.Release();
-                }
-            }
-        }
-        catch
-        {
-            // Transient check failure should not block indexing
-        }
-    }
-
     private async Task EnsureIndexAndFieldsExistAsync(string indexName, IEnumerable<string> fieldNames, CancellationToken ct)
     {
         if (!_isEnabled || _searchIndexClient == null) return;
@@ -313,7 +272,7 @@ public class AzureSearchService : IAzureSearchService
             }
             catch (RequestFailedException ex) when (ex.Status == 404)
             {
-                index = new SearchIndex(indexName);
+                index = new SearchIndex(indexName) { EncryptionKey = _encryptionKey };
                 foreach (var baseField in CreateShardTemplateFields())
                     index.Fields.Add(baseField);
                 await _searchIndexClient.CreateIndexAsync(index, ct);
@@ -383,7 +342,9 @@ public class AzureSearchService : IAzureSearchService
         var knownFields = _knownFieldsPerIndex.GetOrAdd(indexName, _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase));
 
         // D21 Fast path: if all required slot fields are already known, avoid locking and remote calls
-        var neededFields = docs.SelectMany(d => d.SlotValues?.Keys ?? Enumerable.Empty<string>()).Distinct().ToList();
+        var neededFields = docs.SelectMany(d => d.SlotValues?.Keys ?? Enumerable.Empty<string>())
+            .Concat(docs.Any(d => d.SourceVersion.HasValue) ? new[] { "src_version" } : Array.Empty<string>())
+            .Distinct().ToList();
         if (knownFields.Count > 0 && neededFields.All(f => knownFields.Contains(f)))
         {
             return;
@@ -400,13 +361,14 @@ public class AzureSearchService : IAzureSearchService
             }
             catch (RequestFailedException ex) when (ex.Status == 404)
             {
-                index = new SearchIndex(indexName);
+                index = new SearchIndex(indexName) { EncryptionKey = _encryptionKey };
                 index.Fields.Add(new SimpleField("id", SearchFieldDataType.String) { IsKey = true, IsFilterable = true });
                 index.Fields.Add(new SimpleField("tenantId", SearchFieldDataType.String) { IsFilterable = true });
                 index.Fields.Add(new SimpleField("appId", SearchFieldDataType.Int64) { IsFilterable = true });
                 index.Fields.Add(new SimpleField("tableId", SearchFieldDataType.Int64) { IsFilterable = true });
                 index.Fields.Add(new SimpleField("publicId", SearchFieldDataType.String) { IsFilterable = true });
                 index.Fields.Add(new SearchableField("search_content") { IsFilterable = false });
+                index.Fields.Add(new SimpleField("src_version", SearchFieldDataType.Int64));
                 await _searchIndexClient.CreateIndexAsync(index, ct);
             }
 
@@ -417,6 +379,12 @@ public class AzureSearchService : IAzureSearchService
 
             var updated = false;
             var newlyAddedWideFields = new List<string>();
+            if (!knownFields.Contains("src_version") && !index.Fields.Any(f => f.Name.Equals("src_version", StringComparison.OrdinalIgnoreCase)))
+            {
+                index.Fields.Add(new SimpleField("src_version", SearchFieldDataType.Int64));
+                newlyAddedWideFields.Add("src_version");
+                updated = true;
+            }
             foreach (var doc in docs)
             {
                 if (doc.SlotValues != null)
@@ -427,6 +395,7 @@ public class AzureSearchService : IAzureSearchService
                         if (!knownFields.Contains(fieldName) && !newlyAddedWideFields.Contains(fieldName) && !index.Fields.Any(f => f.Name.Equals(fieldName, StringComparison.OrdinalIgnoreCase)))
                         {
                             var val = kvp.Value;
+                            if (val == null) continue; // the column's type is taken from a real value; a null cannot decide it
                             SearchField newField = val switch
                             {
                                 double or float or decimal or int or long =>
@@ -472,12 +441,20 @@ public class AzureSearchService : IAzureSearchService
 
     public async Task BulkIndexRecordsAsync(IEnumerable<SearchIndexDocument> documents, CancellationToken ct = default)
     {
-        if (!_isEnabled) return;
+        // Callers that do not track individual documents keep their behavior (a request-level failure throws); documents
+        // the service rejected are no longer silent: they are logged with their key and status.
+        var failures = await BulkIndexRecordsWithResultsAsync(documents, ct);
+        foreach (var f in failures)
+            _logger?.LogError("Azure AI Search did not index document {DocumentKey}: status {Status}, retryable {Retryable}, error {Error}", f.Key, f.Status, f.Retryable, f.Error);
+    }
+
+    public async Task<IReadOnlyList<SearchIndexFailure>> BulkIndexRecordsWithResultsAsync(IEnumerable<SearchIndexDocument> documents, CancellationToken ct = default)
+    {
+        var allFailures = new List<SearchIndexFailure>();
+        if (!_isEnabled) return allFailures;
 
         var docList = documents.ToList();
-        if (docList.Count == 0) return;
-
-        await CheckShardCapacityAndRotateAsync(ct);
+        if (docList.Count == 0) return allFailures;
 
         var groups = docList.GroupBy(GetWriteIndexNameForDocument);
 
@@ -485,6 +462,20 @@ public class AzureSearchService : IAzureSearchService
         {
             var indexName = group.Key;
             var groupDocs = group.ToList();
+
+            // A table's own index is only used while the service has room for it (see WideTableIndexBudget). Over budget, its documents
+            // stay in the shared index (which the table's fields still use) instead of creating one more index.
+            if (SearchIndexRouting.IsWideIndexName(indexName)
+                && !await CanUseWideIndexAsync(groupDocs[0].TableId, ct))
+            {
+                var tableId = groupDocs[0].TableId;
+                if (!_wideBudgetWarned.TryGetValue(tableId, out var warned) || DateTime.UtcNow - warned > TimeSpan.FromMinutes(10))
+                {
+                    _wideBudgetWarned[tableId] = DateTime.UtcNow;
+                    _logger?.LogError("Table {TableId} cannot get its own search index {Index}: AzureAiSearch:WideTableIndexBudget ({Budget}) is used up. Its documents stay in the shared index.", tableId, indexName, _wideIndexBudget);
+                }
+                continue;
+            }
 
             if (indexName.StartsWith("pb-tbl-", StringComparison.OrdinalIgnoreCase))
             {
@@ -495,7 +486,9 @@ public class AzureSearchService : IAzureSearchService
                 var dynamicFields = groupDocs
                     .Where(d => d.SlotValues != null)
                     .SelectMany(d => d.SlotValues!.Keys)
-                    .Concat(groupDocs.SelectMany(d => d.Values.Keys.Select(k => $"f_{k}")))
+                    // Legacy f_{fid} columns only for documents sent without slot values; a slotted document must not
+                    // add one column per field to the shared index.
+                    .Concat(groupDocs.Where(d => d.SlotValues == null).SelectMany(d => d.Values.Keys.Select(k => $"f_{k}")))
                     .Where(f => f.StartsWith("f_"))
                     .Distinct();
                 await EnsureIndexAndFieldsExistAsync(indexName, dynamicFields, ct);
@@ -514,27 +507,42 @@ public class AzureSearchService : IAzureSearchService
 
                 var textParts = new List<string>();
 
-                // Populate typed slot values if provided (for both standard shard slots and wide table native fields)
-                if (doc.SlotValues != null && doc.SlotValues.Count > 0)
+                // Only into an index that has the column (an index created before it existed gets it added by the ensure step above).
+                if (doc.SourceVersion.HasValue
+                    && _knownFieldsPerIndex.TryGetValue(indexName, out var knownForVersion) && knownForVersion.Contains("src_version"))
                 {
+                    searchDoc["src_version"] = doc.SourceVersion.Value;
+                }
+
+                // Populate typed slot values if provided (for both standard shard slots and wide table native fields)
+                if (doc.SlotValues != null)
+                {
+                    _knownFieldsPerIndex.TryGetValue(indexName, out var knownInIndex);
+                    var isWideIndex = indexName.StartsWith("pb-tbl-", StringComparison.OrdinalIgnoreCase);
                     foreach (var kvp in doc.SlotValues)
                     {
-                        if (kvp.Value != null)
-                        {
-                            // In standard shard, guard against phantom fields not in index
-                            if (!indexName.StartsWith("pb-tbl-", StringComparison.OrdinalIgnoreCase) && 
-                                kvp.Key.StartsWith("f_") && 
-                                (!_knownFieldsPerIndex.TryGetValue(indexName, out var known) || !known.Contains(kvp.Key)))
-                            {
-                                continue;
-                            }
+                        var isKnown = knownInIndex != null && knownInIndex.Contains(kvp.Key);
 
-                            searchDoc[kvp.Key] = kvp.Value;
-                            if (kvp.Key.StartsWith("str_") || kvp.Key.StartsWith("f_"))
-                            {
-                                var s = kvp.Value.ToString();
-                                if (!string.IsNullOrWhiteSpace(s)) textParts.Add(s);
-                            }
+                        // In standard shard, guard against phantom fields not in index
+                        if (!isWideIndex && kvp.Key.StartsWith("f_") && !isKnown) continue;
+
+                        if (kvp.Value == null)
+                        {
+                            // A cleared value must reach the column (an explicit null in a merge clears it). Without this a
+                            // number/date/boolean that is emptied, or switched off by NullifyField, keeps its old value in
+                            // the index. Only for columns the index really has: naming an unknown one fails the request.
+                            if (isKnown) searchDoc[kvp.Key] = null!;
+                            continue;
+                        }
+
+                        searchDoc[kvp.Key] = kvp.Value;
+                        // Only text the field owner marked searchable goes into the free-text field; a filterable-only
+                        // field keeps its value for filters but must not become findable by typing it.
+                        if ((kvp.Key.StartsWith("str_") || kvp.Key.StartsWith("f_"))
+                            && (doc.SearchTextSlots == null || doc.SearchTextSlots.Contains(kvp.Key)))
+                        {
+                            var s = kvp.Value.ToString();
+                            if (!string.IsNullOrWhiteSpace(s)) textParts.Add(s);
                         }
                     }
                 }
@@ -566,39 +574,7 @@ public class AzureSearchService : IAzureSearchService
             {
                 foreach (var batchList in batches)
                 {
-                    var batch = IndexDocumentsBatch.MergeOrUpload(batchList);
-                    var response = await searchClient.IndexDocumentsAsync(batch, cancellationToken: ct);
-
-                    // Inspect HTTP 207 Multi-Status for throttled (429/503) items and log permanent errors (D07)
-                    var failedResults = response.Value.Results.Where(r => !r.Succeeded).ToList();
-                    if (failedResults.Count > 0)
-                    {
-                        var throttledKeys = failedResults
-                            .Where(r => r.Status == 429 || r.Status == 503)
-                            .Select(r => r.Key)
-                            .ToHashSet();
-
-                        // Log non-throttled permanent errors (400 Bad Request, oversized terms, etc.)
-                        foreach (var failed in failedResults.Where(r => r.Status != 429 && r.Status != 503))
-                        {
-                            Console.WriteLine($"[AzureSearch] Document {failed.Key} indexing failed with permanent status {failed.Status}: {failed.ErrorMessage}");
-                        }
-
-                        if (throttledKeys.Count > 0)
-                        {
-                            await Task.Delay(1000, ct);
-                            var retryDocs = batchList.Where(d => throttledKeys.Contains(d["id"].ToString()!)).ToList();
-                            if (retryDocs.Count > 0)
-                            {
-                                var retryBatch = IndexDocumentsBatch.MergeOrUpload(retryDocs);
-                                var retryResponse = await searchClient.IndexDocumentsAsync(retryBatch, cancellationToken: ct);
-                                foreach (var failedRetry in retryResponse.Value.Results.Where(r => !r.Succeeded))
-                                {
-                                    Console.WriteLine($"[AzureSearch] Document {failedRetry.Key} indexing retry failed with status {failedRetry.Status}: {failedRetry.ErrorMessage}");
-                                }
-                            }
-                        }
-                    }
+                    allFailures.AddRange(await UploadBatchWithRetryAsync(searchClient, indexName, batchList, ct));
                 }
             }
             catch (RequestFailedException ex)
@@ -606,6 +582,41 @@ public class AzureSearchService : IAzureSearchService
                 throw new InvalidOperationException($"Failed to bulk index records in Azure AI Search (Index: {indexName}).", ex);
             }
         }
+
+        return allFailures;
+    }
+
+    /// <summary>
+    /// Uploads one batch and reads the per-document answers. Throttled documents (429/503) are retried a few times with
+    /// growing pauses; whatever still has not been accepted is returned so the caller can dead-letter or redeliver it.
+    /// </summary>
+    private async Task<IReadOnlyList<SearchIndexFailure>> UploadBatchWithRetryAsync(
+        SearchClient searchClient, string indexName, List<Dictionary<string, object>> docs, CancellationToken ct)
+    {
+        var pending = docs;
+        var permanent = new List<SearchIndexFailure>();
+        IReadOnlyList<SearchIndexFailure> lastFailures = [];
+
+        for (var attempt = 0; attempt <= MaxThrottleRetries; attempt++)
+        {
+            var response = await searchClient.IndexDocumentsAsync(IndexDocumentsBatch.MergeOrUpload(pending), cancellationToken: ct);
+            lastFailures = IndexingResultClassifier.Classify(response.Value.Results);
+            if (lastFailures.Count == 0) return permanent;
+
+            var throttled = lastFailures.Where(f => IndexingResultClassifier.IsThrottle(f.Status)).Select(f => f.Key).ToHashSet();
+            permanent.AddRange(lastFailures.Where(f => !IndexingResultClassifier.IsThrottle(f.Status)));
+            if (throttled.Count == 0) return permanent;
+            if (attempt == MaxThrottleRetries) break;
+
+            pending = pending.Where(d => throttled.Contains(d["id"].ToString()!)).ToList();
+            var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt)) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 250));
+            _logger?.LogWarning("Azure AI Search throttled {Count} documents in index {Index}; retrying in {Delay} (attempt {Attempt}/{Max}).", throttled.Count, indexName, delay, attempt + 1, MaxThrottleRetries);
+            await Task.Delay(delay, ct);
+        }
+
+        // Still throttled after the last attempt: report them as outstanding.
+        permanent.AddRange(lastFailures.Where(f => IndexingResultClassifier.IsThrottle(f.Status)));
+        return permanent;
     }
 
     private static List<List<Dictionary<string, object>>> ChunkByCountAndBytes(
@@ -648,7 +659,9 @@ public class AzureSearchService : IAzureSearchService
     {
         if (!_isEnabled || publicIds.Count == 0) return;
         
-        var shardNames = GetShardsForTable(tenantId, tableId);
+        var shardNames = GetShardsForTable(tenantId, tableId).ToList();
+        var dedicated = SearchSlotResolver.GetTableIndexName(tableId);
+        if (!shardNames.Contains(dedicated, StringComparer.OrdinalIgnoreCase)) shardNames.Add(dedicated); // 404 below if the table has none
         var idList = publicIds.Select(id => id.ToString()).ToList();
 
         foreach (var indexName in shardNames)
@@ -672,14 +685,14 @@ public class AzureSearchService : IAzureSearchService
 
         // D13: If table had a dedicated index, delete that entire index
         var dedicatedName = $"pb-tbl-{tableId}";
-        if (_searchIndexClient != null && (_knownShards.Contains(dedicatedName) || _tableCustomIndexes.ContainsKey(tableId)))
+        if (_searchIndexClient != null)
         {
             try
             {
                 await _searchIndexClient.DeleteIndexAsync(dedicatedName, ct);
+                _indexNamesLoadedUtc = DateTime.MinValue; // the budget count changed
             }
             catch (RequestFailedException ex) when (ex.Status == 404) { }
-            _tableCustomIndexes.TryRemove(tableId, out _);
         }
 
         // Also purge any documents for this table from shared tenant / shard indexes
@@ -763,6 +776,79 @@ public class AzureSearchService : IAzureSearchService
         }
     }
 
+    public async Task<IReadOnlyDictionary<Guid, long>> GetSourceVersionsAsync(
+        long tenantId, long tableId, string? indexName, IReadOnlyList<Guid> publicIds, CancellationToken ct = default)
+    {
+        var versions = new Dictionary<Guid, long>();
+        if (!_isEnabled || publicIds.Count == 0) return versions;
+
+        foreach (var idx in GetShardsForTable(tenantId, tableId, indexName))
+        {
+            var searchClient = GetSearchClient(idx);
+            foreach (var chunk in publicIds.Distinct().Chunk(500))
+            {
+                var options = new SearchOptions
+                {
+                    Filter = $"tenantId eq '{tenantId}' and search.in(id, '{string.Join(",", chunk)}', ',')",
+                    Size = chunk.Length
+                };
+                options.Select.Add("id");
+                options.Select.Add("src_version");
+                try
+                {
+                    var response = await searchClient.SearchAsync<SearchDocument>("*", options, cancellationToken: ct);
+                    await foreach (var result in response.Value.GetResultsAsync().WithCancellation(ct))
+                    {
+                        if (!Guid.TryParse(result.Document["id"]?.ToString(), out var id)) continue;
+                        if (result.Document.TryGetValue("src_version", out var v) && v != null)
+                            versions[id] = Math.Max(versions.TryGetValue(id, out var cur) ? cur : long.MinValue, Convert.ToInt64(v));
+                    }
+                }
+                catch (RequestFailedException ex) when (ex.Status is 404 or 400)
+                {
+                    // 404: the index does not exist yet. 400: it predates the src_version column. Either way nothing is known, so
+                    // the indexer reads the database instead of trusting a message.
+                    break;
+                }
+            }
+        }
+        return versions;
+    }
+
+    public async Task PurgeTableFromSharedIndexesAsync(long tenantId, long tableId, CancellationToken ct = default)
+    {
+        if (!_isEnabled) return;
+        var dedicated = SearchSlotResolver.GetTableIndexName(tableId);
+        foreach (var indexName in GetShardsForTenant(tenantId).Where(i => !i.Equals(dedicated, StringComparison.OrdinalIgnoreCase)))
+        {
+            var searchClient = GetSearchClient(indexName);
+            while (!ct.IsCancellationRequested)
+            {
+                var options = new SearchOptions { Filter = $"tenantId eq '{tenantId}' and tableId eq {tableId}", Size = 500 };
+                options.Select.Add("id");
+
+                var idsToDelete = new List<string>();
+                try
+                {
+                    var resp = await searchClient.SearchAsync<SearchDocument>("*", options, ct);
+                    await foreach (var item in resp.Value.GetResultsAsync().WithCancellation(ct))
+                    {
+                        var idStr = item.Document["id"]?.ToString();
+                        if (!string.IsNullOrEmpty(idStr)) idsToDelete.Add(idStr);
+                    }
+                }
+                catch (RequestFailedException ex) when (ex.Status == 404)
+                {
+                    break;
+                }
+
+                if (idsToDelete.Count == 0) break;
+                await searchClient.IndexDocumentsAsync(IndexDocumentsBatch.Delete("id", idsToDelete), cancellationToken: ct);
+                if (idsToDelete.Count < 500) break;
+            }
+        }
+    }
+
     public async Task<bool> CreateIndexAsync(string? indexName = null, bool force = false, CancellationToken ct = default)
     {
         if (!_isEnabled || _searchIndexClient == null) return false;
@@ -797,7 +883,7 @@ public class AzureSearchService : IAzureSearchService
         _knownFieldsPerIndex.TryRemove(targetIndex, out _);
         _searchClients.TryRemove(targetIndex, out _);
 
-        var newIndex = new SearchIndex(targetIndex);
+        var newIndex = new SearchIndex(targetIndex) { EncryptionKey = _encryptionKey };
         foreach (var baseField in CreateShardTemplateFields())
         {
             newIndex.Fields.Add(baseField);
@@ -1008,71 +1094,124 @@ public class AzureSearchService : IAzureSearchService
     {
         if (!_isEnabled || string.IsNullOrWhiteSpace(searchText)) return ([], 0);
 
-        var shardNames = GetShardsForTenant(tenantId);
         var query = FormatSearchQuery(searchText);
-        var allResults = new List<GlobalSearchResult>();
-        long? totalCount = 0;
-
         var filter = $"tenantId eq '{tenantId}'";
         if (appId.HasValue)
         {
             filter += $" and appId eq {appId.Value}";
         }
 
-        foreach (var indexName in shardNames)
-        {
-            var searchClient = GetSearchClient(indexName);
-            var options = new SearchOptions
-            {
-                Filter = filter,
-                Skip = (page - 1) * pageSize,
-                Size = pageSize,
-                IncludeTotalCount = true,
-                QueryType = SearchQueryType.Full
-            };
-            options.Select.Add("id");
-            options.Select.Add("appId");
-            options.Select.Add("tableId");
-            options.Select.Add("publicId");
-            options.Select.Add("search_content");
+        // The tenant's shared index, plus every table-owned index (a table that outgrew the shared index lives in its own; each holds
+        // documents of any tenant, so the tenant filter above is what keeps results to this tenant).
+        var indexes = new List<string>(GetShardsForTenant(tenantId));
+        indexes.AddRange((await GetIndexNamesAsync(ct)).Where(SearchIndexRouting.IsWideIndexName));
 
+        if (indexes.Count == 1)
+        {
+            var (items, total) = await SearchGlobalInIndexAsync(indexes[0], query, filter, tenantId, (page - 1) * pageSize, pageSize, ct);
+            return (items.Select(i => i.Item).ToList(), total);
+        }
+
+        // Several indexes: take the best (skip + size) of each, merge by relevance, then cut the requested page. The service pages one index
+        // at a time, so a page cannot be asked of each index separately (deep pages are capped at the service's 1,000-result window).
+        var window = Math.Min(1000, Math.Max(1, page * pageSize));
+        var perIndex = new List<IReadOnlyList<(double Score, GlobalSearchResult Item)>>();
+        long grandTotal = 0;
+        foreach (var indexName in indexes)
+        {
+            var (items, total) = await SearchGlobalInIndexAsync(indexName, query, filter, tenantId, 0, window, ct);
+            perIndex.Add(items);
+            grandTotal += total ?? 0;
+        }
+        return (SearchResultMerger.MergeByScore(perIndex, (page - 1) * pageSize, pageSize), grandTotal);
+    }
+
+    private async Task<(IReadOnlyList<(double Score, GlobalSearchResult Item)> Items, long? Total)> SearchGlobalInIndexAsync(
+        string indexName, string query, string filter, long tenantId, int skip, int size, CancellationToken ct)
+    {
+        var results = new List<(double, GlobalSearchResult)>();
+        var options = new SearchOptions
+        {
+            Filter = filter,
+            Skip = skip,
+            Size = size,
+            IncludeTotalCount = true,
+            QueryType = SearchQueryType.Full
+        };
+        // Only the free-text field: a filterable-only text field has its value in a searchable column too, and must not be findable by typing it.
+        options.SearchFields.Add("search_content");
+        options.Select.Add("id");
+        options.Select.Add("appId");
+        options.Select.Add("tableId");
+        options.Select.Add("publicId");
+        options.Select.Add("search_content");
+
+        try
+        {
+            var response = await GetSearchClient(indexName).SearchAsync<SearchDocument>(query, options, cancellationToken: ct);
+            await foreach (var result in response.Value.GetResultsAsync().WithCancellation(ct))
+            {
+                if (!Guid.TryParse(result.Document["id"]?.ToString(), out var id)) continue;
+                var docAppId = Convert.ToInt64(result.Document["appId"]);
+                var docTableId = Convert.ToInt64(result.Document["tableId"]);
+
+                var fields = new Dictionary<string, string>();
+                foreach (var kvp in result.Document)
+                {
+                    if ((kvp.Key.StartsWith("f_") || kvp.Key == "search_content") && kvp.Value != null)
+                        fields[kvp.Key] = kvp.Value.ToString() ?? string.Empty;
+                }
+                results.Add((result.Score ?? 0, new GlobalSearchResult(id, docAppId, docTableId, fields)));
+            }
+            return (results, response.Value.TotalCount);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return (results, 0);
+        }
+        catch (RequestFailedException ex)
+        {
+            throw new InvalidOperationException($"Failed to search global records for tenant {tenantId} in Azure AI Search (Index: {indexName}).", ex);
+        }
+    }
+
+    public async Task PurgeTenantRecordsAsync(long tenantId, CancellationToken ct = default)
+    {
+        if (!_isEnabled) return;
+        // The tenant's shared index, and the tenant's documents inside every table-owned index (those hold other tenants' tables too).
+        var indexes = new List<string>(GetShardsForTenant(tenantId));
+        indexes.AddRange((await GetIndexNamesAsync(ct)).Where(SearchIndexRouting.IsWideIndexName));
+        foreach (var indexName in indexes.Distinct(StringComparer.OrdinalIgnoreCase))
+            await PurgeByFilterAsync(indexName, $"tenantId eq '{tenantId}'", ct);
+    }
+
+    private async Task PurgeByFilterAsync(string indexName, string filter, CancellationToken ct)
+    {
+        var searchClient = GetSearchClient(indexName);
+        while (!ct.IsCancellationRequested)
+        {
+            var options = new SearchOptions { Filter = filter, Size = 500 };
+            options.Select.Add("id");
+
+            var idsToDelete = new List<string>();
             try
             {
-                var response = await searchClient.SearchAsync<SearchDocument>(query, options, cancellationToken: ct);
-                if (response.Value.TotalCount.HasValue)
-                    totalCount = (totalCount ?? 0) + response.Value.TotalCount.Value;
-
-                await foreach (var result in response.Value.GetResultsAsync().WithCancellation(ct))
+                var resp = await searchClient.SearchAsync<SearchDocument>("*", options, ct);
+                await foreach (var item in resp.Value.GetResultsAsync().WithCancellation(ct))
                 {
-                    if (Guid.TryParse(result.Document["id"]?.ToString(), out var id))
-                    {
-                        var docAppId = Convert.ToInt64(result.Document["appId"]);
-                        var docTableId = Convert.ToInt64(result.Document["tableId"]);
-                        
-                        var fields = new Dictionary<string, string>();
-                        foreach (var kvp in result.Document)
-                        {
-                            if ((kvp.Key.StartsWith("f_") || kvp.Key == "search_content") && kvp.Value != null)
-                            {
-                                fields[kvp.Key] = kvp.Value.ToString() ?? string.Empty;
-                            }
-                        }
-                        
-                        allResults.Add(new GlobalSearchResult(id, docAppId, docTableId, fields));
-                    }
+                    var idStr = item.Document["id"]?.ToString();
+                    if (!string.IsNullOrEmpty(idStr)) idsToDelete.Add(idStr);
                 }
             }
             catch (RequestFailedException ex) when (ex.Status == 404)
             {
-                continue;
+                return;
             }
-            catch (RequestFailedException ex)
-            {
-                throw new InvalidOperationException($"Failed to search global records for tenant {tenantId} in Azure AI Search (Index: {indexName}).", ex);
-            }
-        }
 
-        return (allResults.Take(pageSize).ToList(), totalCount);
+            if (idsToDelete.Count == 0) return;
+            await searchClient.IndexDocumentsAsync(IndexDocumentsBatch.Delete("id", idsToDelete), cancellationToken: ct);
+            if (idsToDelete.Count < 500) return;
+        }
     }
 
     private static string FormatSearchQuery(string searchText)

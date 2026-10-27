@@ -23,6 +23,8 @@ public class CreateRelationshipCommandHandler
     private readonly IRecordRepository _recordRepo;
     private readonly PowerBase.Application.Formulas.IFormulaProjector _formulaProjector;
     private readonly IRelationalProjector _relationalProjector;
+    private readonly IMessagePublisher? _publisher;
+    private readonly IQueryContext? _queryContext;
 
     public CreateRelationshipCommandHandler(
         IAppTableRepository tableRepo,
@@ -35,8 +37,12 @@ public class CreateRelationshipCommandHandler
         ISchemaEngineService schemaEngine,
         IRecordRepository recordRepo,
         PowerBase.Application.Formulas.IFormulaProjector formulaProjector,
-        IRelationalProjector relationalProjector)
+        IRelationalProjector relationalProjector,
+        IMessagePublisher? publisher = null,
+        IQueryContext? queryContext = null)
     {
+        _publisher = publisher;
+        _queryContext = queryContext;
         _schemaEngine = schemaEngine;
         _recordRepo = recordRepo;
         _formulaProjector = formulaProjector;
@@ -70,6 +76,8 @@ public class CreateRelationshipCommandHandler
         // are normalized to their canonical casing here, and that normalized list is what's stored.
         var summaries = new List<CreateSummarySpec>(command.Summaries.Count);
         App? app = command.Summaries.Count > 0 ? await _appRepo.GetByIdAsync(parent.AppId, ct) : null;
+        // A summary may read a child's lookup through its source field; without the map a lookup target is always refused.
+        var lookupSources = command.Summaries.Count > 0 ? await SummaryLookupSources.LoadAsync(childFields, _fieldRepo, ct) : null;
         // A child Reference summarized is read as the key its parent shows (ReferenceKeys).
         var referenceKeys = command.Summaries.Count > 0
             ? await ReferenceKeys.LoadAsync(child.Id, childFields, _relRepo, _tableRepo, _fieldRepo, ct)
@@ -79,7 +87,7 @@ public class CreateRelationshipCommandHandler
             var function = SummaryFunctions.Normalize(spec.Function)
                 ?? throw new ValidationException(new Dictionary<string, string[]> { ["summaries"] = [$"Unknown summary function '{spec.Function}'."] });
             var target = spec.TargetFid.HasValue ? childFields.FirstOrDefault(f => f.Fid == spec.TargetFid) : null;
-            SummaryTargetValidator.Validate(function, spec.TargetFid, target, spec.TargetSubField, referenceKeys: referenceKeys);
+            SummaryTargetValidator.Validate(function, spec.TargetFid, target, spec.TargetSubField, lookupSources: lookupSources, referenceKeys: referenceKeys);
 
             // An existing field reused as the reference keeps its own encryption flag; a brand-new
             // reference is encrypted exactly when the app is (covered by the app check).
@@ -427,6 +435,9 @@ public class CreateRelationshipCommandHandler
             if (originalField is not null) await _fieldRepo.DeleteAsync(originalField.PublicId, child.Id, CancellationToken.None);
             throw;
         }
+
+        // The conversion rewrote the column's values with a set-based UPDATE, which no record write saw: push the field to the index again.
+        await PowerBase.Application.Search.SearchFieldReindex.RequestAsync(_publisher, _queryContext, child, existing, ct);
         return (warning, originalField?.Fid);
     }
 

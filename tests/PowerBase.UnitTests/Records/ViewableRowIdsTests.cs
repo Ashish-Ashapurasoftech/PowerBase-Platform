@@ -45,6 +45,9 @@ public class ViewableRowIdsTests
 
     public ViewableRowIdsTests()
     {
+        _recordRepo.ListMatchingRowIdsAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(),
+                Arg.Any<long?>(), Arg.Any<int>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(new[] { 1L, 2L });
         _recordRepo.ListAllMatchingAsync(_table, Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<FilterGroup?>(),
                 Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>())
             .Returns(Rows);
@@ -78,9 +81,9 @@ public class ViewableRowIdsTests
         var rule = Rule(DeptFid, "IT");
 
         (await Resolve(Access(rule))).Should().BeEquivalentTo(new[] { 1L, 2L });
-        await _recordRepo.Received().ListAllMatchingAsync(_table, _fields,
+        await _recordRepo.Received().ListMatchingRowIdsAsync(_table, _fields,
             Arg.Is<FilterGroup?>(g => g != null && g.Nodes.Single().Condition!.FieldId == DeptFid),
-            Arg.Any<IReadOnlyList<SortSpec>?>(), Arg.Any<long?>(), Arg.Any<CancellationToken>());
+            Arg.Any<long?>(), Arg.Any<int>(), 30, Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -96,8 +99,8 @@ public class ViewableRowIdsTests
 
         await Resolve(access);
 
-        await _recordRepo.Received().ListAllMatchingAsync(_table, _fields, Arg.Any<FilterGroup?>(),
-            Arg.Any<IReadOnlyList<SortSpec>?>(), 77, Arg.Any<CancellationToken>());
+        await _recordRepo.Received().ListMatchingRowIdsAsync(_table, _fields, Arg.Any<FilterGroup?>(),
+            77, Arg.Any<int>(), 30, Arg.Any<CancellationToken>());
     }
 
     [Fact]

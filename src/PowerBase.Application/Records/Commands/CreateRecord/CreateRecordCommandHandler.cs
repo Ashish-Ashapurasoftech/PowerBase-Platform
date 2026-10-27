@@ -1,10 +1,6 @@
-using System.Text.Json;
 using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.Relationships;
 using PowerBase.Domain.Constants;
-using PowerBase.Domain.Entities;
-using PowerBase.Domain.Exceptions;
-using PowerBase.Domain.ValueObjects;
 using PowerBase.Formula;
 
 namespace PowerBase.Application.Records.Commands.CreateRecord;
@@ -14,22 +10,14 @@ public class CreateRecordCommandHandler
     private readonly IAppTableRepository _tableRepo;
     private readonly IAppFieldRepository _fieldRepo;
     private readonly IRecordRepository _recordRepo;
-    private readonly IRelationshipRepository _relRepo;
-    private readonly IRolePermissionEnforcer _enforcer;
     private readonly IAuditRepository _auditRepo;
     //private readonly IFormulaDefaultResolver _formulaDefaults;
     private readonly IPipelineTriggerInterceptor _triggerInterceptor;
     private readonly ITenantUnitOfWork _uow;
     private readonly IQueryContext _queryContext;
-    private readonly IUserRepository _userRepo;
     private readonly IMessagePublisher _messagePublisher;
-    private readonly FormulaEngine _engine;
-    private readonly IAppRepository _appRepo;
-    private readonly IFormRuleRepository _formRuleRepo;
-    private readonly IFormRepository _formRepo;
-    private readonly IAppUserRepository _appUserRepo;
     private readonly IReferenceRelinkService? _relink;
-    private readonly ISnapshotCaptureService? _snapshots;
+    private readonly RecordCreatePreparer _preparer;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -52,25 +40,19 @@ public class CreateRecordCommandHandler
         IReferenceRelinkService? relink = null,
         ISnapshotCaptureService? snapshots = null)
     {
-        _snapshots = snapshots;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
-        _relRepo = relRepo;
-        _enforcer = enforcer;
         _auditRepo = auditRepo;
         //_formulaDefaults = formulaDefaults;
         _triggerInterceptor = triggerInterceptor;
         _uow = uow;
         _queryContext = queryContext;
-        _userRepo = userRepo;
         _messagePublisher = messagePublisher;
-        _engine = engine;
-        _appRepo = appRepo;
-        _formRuleRepo = formRuleRepo;
-        _formRepo = formRepo;
-        _appUserRepo = appUserRepo;
         _relink = relink;
+        _preparer = new RecordCreatePreparer(
+            tableRepo, fieldRepo, recordRepo, relRepo, enforcer, queryContext, userRepo, appRepo, engine, formRuleRepo, formRepo, appUserRepo,
+            snapshots: snapshots);
     }
 
     public async Task<RecordResult> HandleAsync(CreateRecordCommand command, CancellationToken ct = default)
@@ -78,86 +60,12 @@ public class CreateRecordCommandHandler
         var table = await _tableRepo.GetByPublicIdAsync(command.TablePublicId, ct);
         var fields = await _fieldRepo.ListByTableAsync(table.Id, ct);
 
-        var tableFieldIds = new HashSet<long>(fields.Where(f => f.Fid.HasValue).Select(f => (long)f.Fid!.Value));
-        var unknownIds = command.FieldValues.Keys.Where(k => !tableFieldIds.Contains(k)).ToList();
-        if (unknownIds.Count > 0)
-            throw new ValidationException(
-                new Dictionary<string, string[]> { ["fields"] = [$"Unknown field IDs: {string.Join(", ", unknownIds)}"] });
-
-        var computedIds = command.FieldValues.Keys
-            .Where(k => fields.Any(f => f.Fid.HasValue && (long)f.Fid.Value == k && PhysicalNaming.IsComputedTypeCode(f.TypeCode)))
-            .ToList();
-        if (computedIds.Count > 0)
-            throw new ValidationException(
-                new Dictionary<string, string[]> { ["fields"] = [$"Formula fields are read-only and cannot be set: {string.Join(", ", computedIds)}"] });
-
-        var access = await _enforcer.GetTableAccessAsync(table, fields, ct);
-        if (!access.Unrestricted)
-        {
-            if (!access.CanAdd)
-                throw new UnauthorizedActionException("You do not have permission to add records to this table.");
-            var blocked = command.FieldValues.Keys.Where(k => !access.EditableFieldIds.Contains(k)).ToList();
-            if (blocked.Count > 0)
-                throw new UnauthorizedActionException("You do not have permission to write to one or more of the specified fields.");
-        }
-
-        // Reference fields must point at an existing parent record; a value submitted as a
-        // human key is resolved to the parent row Id here.
-        var refOverrides = await ReferenceWriteValidator.ValidateAsync(fields, command.FieldValues, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct);
-
-        // Inject default values for fields that were not submitted (e.g. hidden None-access fields).
-        // This ensures required fields with defaults are always populated regardless of role restrictions.
-        var effectiveValues = new Dictionary<long, object?>(command.FieldValues);
-
-        // Apply translations from the validator (e.g. swapping custom keys for the physical Record ID#).
-        foreach (var kvp in refOverrides)
-            effectiveValues[kvp.Key] = kvp.Value;
-
-        // Snapshot fields are filled by the system when the record is created; a client may not supply them
-        // (unless editable after the snapshot). Checked before defaults, so a default can't masquerade as a supplied value.
-        SnapshotWriteGuard.EnsureNotSuppliedOnCreate(fields, effectiveValues);
-        foreach (var field in fields)
-        {
-            if (field.IsSystem || field.IsDeleted || !field.Fid.HasValue || PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
-            if (SnapshotWriteGuard.IsReadOnlySnapshot(field)) continue;
-            if (effectiveValues.ContainsKey((long)field.Fid.Value)) continue;
-            if (string.IsNullOrWhiteSpace(field.DefaultValue)) continue;
-
-            var (apply, value) = await ResolveDefaultValueAsync(field, ct);
-            if (apply)
-                effectiveValues[(long)field.Fid.Value] = value;
-        }
-
-        // User/MultiUser values submitted from the record form's picker arrive as userPublicId
-        // Guid(s) — resolve to the long id the column actually stores. See
-        // UserFieldValueResolver's doc comment for why.
-        await UserFieldValueResolver.ResolveAsync(_userRepo, fields, effectiveValues, ct);
-
-        // Snapshot: capture each snapshot field's source value now, once — it stays as it is afterwards.
-        if (_snapshots is not null)
-            await _snapshots.ApplyOnCreateAsync(table, fields, effectiveValues, ct);
-
-        // Field-level Required / Unique / Format constraints (Quickbase-style) — checked against
-        // the final values about to be persisted, after defaults and reference-override
-        // resolution. The app's configured Date Formatting is looked up here (not hard-coded) so
-        // Date/DateTime text values sent by a client that bypasses the UI are validated against
-        // this specific app's format, not an arbitrary default.
-        var app = await _appRepo.GetByIdAsync(table.AppId, ct);
-        var dateFormat = AppFormattingSettings.GetDateFormatString(app.Formatting);
-        await RecordConstraintValidator.ValidateAsync(table, fields, effectiveValues, _recordRepo, isCreate: true, excludeRecordId: null, ct, appDateFormat: dateFormat);
-
-        // Custom Data Rule — the table's own formula-based save gate (Add/Update only, never
-        // Delete or other tables' writes). Runs after the built-in constraints above so a plain
-        // Required/Unique violation is reported first.
-        await CustomDataRuleValidator.ValidateAsync(table, fields, effectiveValues, _tableRepo, _fieldRepo, _recordRepo, _engine, ct);
-
-        // Form Rules — server-side mirror of the Add/Edit Record form's client-side rule
-        // evaluation, so a client that bypasses the UI and calls this API directly still can't
-        // violate a Require/Prevent Save form rule. No "before" values exist yet on create, so
-        // 'changed'/'notChanged' conditions never match here.
-        await FormRuleServerValidator.ValidateAsync(
-            table, fields, effectiveValues, oldValuesByFid: null, _queryContext.UserId,
-            _formRuleRepo, _formRepo, _tableRepo, _fieldRepo, _recordRepo, _userRepo, _appUserRepo, _engine, ct);
+        // Field ids, permissions, Reference resolution, defaults, User ids, then Required / Unique /
+        // format, the Custom Data Rule and Form Rules — the same preparation Grid Edit's bulk create runs.
+        await _preparer.EnsureWritableAsync(table, fields, command.FieldValues.Keys.ToList(), ct);
+        var effectiveValues = await _preparer.BuildEffectiveValuesAsync(table, fields, command.FieldValues, ct);
+        var dateFormat = await _preparer.GetAppDateFormatAsync(table, ct);
+        await _preparer.ValidateAsync(table, fields, effectiveValues, dateFormat, ct);
 
         Guid publicId;
         PowerBase.Application.Common.Models.SearchIndexMessage? indexMessage = null;
@@ -202,7 +110,7 @@ public class CreateRecordCommandHandler
 
         if (indexMessage != null)
         {
-            _ = _messagePublisher.PublishAsync(indexMessage, default).ContinueWith(
+            _ = _messagePublisher.PublishPriorityAsync(indexMessage, default).ContinueWith(
                 t => { /* Observed fire-and-forget: failure logged if faulted */ },
                 TaskContinuationOptions.OnlyOnFaulted);
         }
@@ -218,70 +126,5 @@ public class CreateRecordCommandHandler
             ModifiedOn = null,
             Fields = fieldData,
         };
-    }
-
-    /// <summary>Interprets a field's stored DefaultValue against its type — most types are a literal
-    /// string copied verbatim, but Boolean/Range/User/MultiUser carry a structured encoding (see
-    /// <see cref="PowerBase.Application.Fields.FieldGeneralSettingsCapability"/> for the shapes) that
-    /// needs coercion/resolution before it can be written. Returns Apply=false when no default should be
-    /// applied (malformed JSON, or a User/MultiUser default whose mode is "None").</summary>
-    private async Task<(bool Apply, object? Value)> ResolveDefaultValueAsync(AppField field, CancellationToken ct)
-    {
-        var raw = field.DefaultValue!;
-        switch (field.TypeCode)
-        {
-            case "Boolean":
-                return (true, string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase));
-
-            case "NumericRange":
-            case "DateRange":
-                try
-                {
-                    using var doc = JsonDocument.Parse(raw);
-                    return (true, doc.RootElement.Clone());
-                }
-                catch (JsonException) { return (false, null); }
-
-            case "User":
-                return await ResolveUserDefaultAsync(raw, isMulti: false, ct);
-
-            case "MultiUser":
-                return await ResolveUserDefaultAsync(raw, isMulti: true, ct);
-
-            default:
-                return (true, raw);
-        }
-    }
-
-    private async Task<(bool Apply, object? Value)> ResolveUserDefaultAsync(string raw, bool isMulti, CancellationToken ct)
-    {
-        string? mode = null;
-        string? userPublicId = null;
-        try
-        {
-            using var doc = JsonDocument.Parse(raw);
-            if (doc.RootElement.TryGetProperty("mode", out var m) && m.ValueKind == JsonValueKind.String)
-                mode = m.GetString();
-            if (doc.RootElement.TryGetProperty("userPublicId", out var u) && u.ValueKind == JsonValueKind.String)
-                userPublicId = u.GetString();
-        }
-        catch (JsonException) { return (false, null); }
-
-        // User/MultiUser columns store the plain long core.[User].Id, never a Guid PublicId —
-        // confirmed against every read/filter path (see RunReportQueryHandler.
-        // ResolveUserFieldValuesAsync's doc comment for the full chain of evidence). This
-        // previously wrote .PublicId.ToString() for "CurrentUser" (a live bug — _queryContext.
-        // UserId already IS that long id, no lookup needed) and the raw settings-configured Guid
-        // as-is for "SpecificUser" (needs resolving via GetByPublicIdAsync first).
-        string? resolvedId = mode switch
-        {
-            "CurrentUser" => _queryContext.UserId.ToString(),
-            "SpecificUser" when Guid.TryParse(userPublicId, out var specificGuid) =>
-                (await UserFieldValueResolver.TryResolveLongIdAsync(_userRepo, specificGuid, ct))?.ToString(),
-            _ => null, // "None" or an unrecognized mode — apply no default.
-        };
-
-        if (resolvedId is null) return (false, null);
-        return (true, isMulti ? JsonSerializer.Serialize(new[] { resolvedId }) : resolvedId);
     }
 }

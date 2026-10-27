@@ -1,19 +1,22 @@
 using PowerBase.Application.Reports;
+using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
 namespace PowerBase.Application.Relationships;
 
 /// <summary>
 /// Summaries over encrypted data. An encrypted column holds ciphertext, so SQL can't aggregate,
-/// match or sort it (and in an encrypted app the reference column is ciphertext too). A summary
-/// that reads any encrypted column is therefore computed in memory instead
-/// (<see cref="EncryptedSummaryAggregator"/>): the child rows are decrypted and filtered, grouped
-/// and aggregated here. That path covers the child table's own stored fields, its lookups and its
-/// calculated fields (and lookups of them, worked out per record); what it can't do is refused at
-/// creation (and shown blank when read) by FindProblem.
+/// match or sort it. A summary that reads any encrypted column is therefore computed in memory
+/// instead (<see cref="EncryptedSummaryAggregator"/>): the child rows are decrypted and filtered,
+/// grouped and aggregated here. That path covers the child table's own stored fields, its lookups
+/// and its calculated fields (and lookups of them, worked out per record); what it can't do is
+/// refused at creation (and shown blank when read) by FindProblem.
 ///
-/// "Encrypted" follows the encryption context's own rule (FieldEncryptionContext): every
-/// non-system field of an encrypted app, plus any non-system field marked IsEncrypted.
+/// "Encrypted" follows the encryption context's own rule (FieldEncryptionContext.StoresCiphertext):
+/// every non-system field of an encrypted app except the types that are never encrypted
+/// (<see cref="PhysicalNaming.IsEncryptionExemptTypeCode"/> — Reference, numbers, dates, Boolean,
+/// users), plus any non-system field marked IsEncrypted. So a Count, or a Sum of a Number, in an
+/// encrypted app stays a SQL aggregate: the reference and the number are plain columns.
 /// </summary>
 public static class SummaryEncryptionGuard
 {
@@ -27,8 +30,12 @@ public static class SummaryEncryptionGuard
         "isCurrentUser", "isNotCurrentUser", "during", "notDuring", "date_eq",
     };
 
+    /// <summary>Whether <paramref name="field"/>'s column may hold ciphertext. A field marked IsEncrypted counts whatever its
+    /// type: an exempt-type column encrypted before the exemption existed holds ciphertext until
+    /// ExemptFieldEncryptionCleanupService converts it and clears the flag.</summary>
     public static bool IsEncrypted(App app, AppField? field) =>
-        field is not null && !field.IsSystem && (app.IsEncrypted || field.IsEncrypted);
+        field is not null && !field.IsSystem
+        && (field.IsEncrypted || (app.IsEncrypted && !PhysicalNaming.IsEncryptionExemptTypeCode(field.TypeCode)));
 
     /// <summary>True when the summary reads an encrypted column — its reference column, target,
     /// Combined Text sort or a matching-criteria field — and so must be computed in memory.</summary>
@@ -37,7 +44,6 @@ public static class SummaryEncryptionGuard
         int? targetFid, int? sortFid, FilterGroup? matchingCriteria,
         IReadOnlyList<AppField>? parentFields = null)
     {
-        if (app.IsEncrypted) return true;
         if (referenceFid.HasValue && IsEncrypted(app, childFields.FirstOrDefault(f => f.Fid == referenceFid))) return true;
         var readFids = new List<long>();
         if (targetFid.HasValue) readFids.Add(targetFid.Value);

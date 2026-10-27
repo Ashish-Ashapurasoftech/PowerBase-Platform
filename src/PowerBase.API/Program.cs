@@ -119,7 +119,17 @@ using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Host.UseSerilog((ctx, cfg) => cfg.ReadFrom.Configuration(ctx.Configuration));
+builder.Host.UseSerilog((ctx, cfg) =>
+{
+    // Console comes from configuration ("Serilog:WriteTo"). Application Insights is added only when a connection
+    // string is supplied (setting "ApplicationInsights:ConnectionString" or the standard APPLICATIONINSIGHTS_CONNECTION_STRING),
+    // so worker errors, dead-letters and indexing failures reach a place someone can query.
+    cfg.ReadFrom.Configuration(ctx.Configuration);
+    var appInsightsConnection = ctx.Configuration["ApplicationInsights:ConnectionString"]
+        ?? ctx.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
+    if (!string.IsNullOrWhiteSpace(appInsightsConnection) && !appInsightsConnection.StartsWith("<"))
+        cfg.WriteTo.ApplicationInsights(appInsightsConnection, new Serilog.Sinks.ApplicationInsights.TelemetryConverters.TraceTelemetryConverter());
+});
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 
@@ -234,6 +244,13 @@ builder.Services.AddScoped<IRolePermissionEnforcer, RolePermissionEnforcer>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IPasswordService, PasswordService>();
 builder.Services.AddScoped<ISchemaEngineService, SchemaEngineService>();
+// Field Type Conversion ("Change Type") module — PowerBase.Application/Fields/TypeConversion
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.IFieldColumnConversionService, FieldColumnConversionService>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.FieldTypeChangeAnalyzer>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.FieldTypeChangePlanner>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.GetFieldTypeChangeTargetsQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.PreviewFieldTypeChangeQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Fields.TypeConversion.ChangeFieldTypeCommandHandler>();
 var storageProvider = builder.Configuration["Storage:Provider"] ?? "Local";
 var azureBlobConnStr = builder.Configuration["Storage:AzureBlob:ConnectionString"] ?? builder.Configuration["AzureBlob:ConnectionString"];
 bool hasValidAzureBlobConfig = !string.IsNullOrWhiteSpace(azureBlobConnStr) && 
@@ -347,6 +364,16 @@ builder.Services.AddScoped<PowerBase.Application.Pages.Queries.ListNavPages.List
 // Repositories
 builder.Services.AddScoped<IAppRepository, AppRepository>();
 builder.Services.AddScoped<IAppVariableRepository, AppVariableRepository>();
+builder.Services.AddScoped<IImportSourceRefRepository, ImportSourceRefRepository>();
+builder.Services.AddScoped<IAppImportJobRepository, AppImportJobRepository>();
+builder.Services.AddScoped<IEmailTemplateRepository, EmailTemplateRepository>();
+builder.Services.AddSingleton<PowerBase.Application.Import.Jobs.AppImportJobQueue>();
+PowerBase.Application.Import.Jobs.ImportRuntime.ConfiguredCommandTimeoutSeconds =
+    builder.Configuration.GetValue("Import:SqlCommandTimeoutSeconds", PowerBase.Application.Import.Jobs.ImportRuntime.DEFAULT_COMMAND_TIMEOUT_SECONDS);
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.AppImportJobService>();
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.EmailTemplateService>();
+builder.Services.AddScoped<PowerBase.Application.Import.Jobs.AppImportJobRunner>();
+builder.Services.AddHostedService<PowerBase.API.Workers.AppImportJobWorker>();
 builder.Services.AddScoped<IAppRoleRepository, AppRoleRepository>();
 builder.Services.AddScoped<IAppRolePermissionRepository, AppRolePermissionRepository>();
 builder.Services.AddScoped<IAppUserRepository, AppUserRepository>();
@@ -359,6 +386,7 @@ builder.Services.AddScoped<IAppFieldRepository, AppFieldRepository>();
 builder.Services.AddScoped<IFieldVersionRepository, FieldVersionRepository>();
 builder.Services.AddScoped<IFieldTypeRepository, FieldTypeRepository>();
 builder.Services.AddScoped<IRecordRepository, RecordRepository>();
+builder.Services.AddScoped<ISearchOutbox, SearchOutboxRepository>();
 
 // Import (Table-to-Table / file) — see PowerBase.Application/Imports
 builder.Services.AddScoped<PowerBase.Application.Imports.IImportDefinitionRepository, PowerBase.Infrastructure.Imports.ImportDefinitionRepository>();
@@ -491,6 +519,16 @@ builder.Services.AddScoped<CreateAppCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Import.Pbl.PblValidator>();
 builder.Services.AddScoped<PowerBase.Application.Import.FormulaTranslation.FormulaTranslator>();
 builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportPreview.ImportPreviewQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblExtrasImporter>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblDeferredResolver>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportFieldSanitizer>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblSettingsApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblPermissionsApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.PblConnectedTablesApplier>();
+builder.Services.AddScoped<PowerBase.Application.Import.Diff.ImportDiffBuilder>();
+builder.Services.AddScoped<PowerBase.Application.Import.Queries.ImportDiff.ImportDiffQueryHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Commands.UpdateAppFromPbl.UpdateAppFromPblCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Import.Services.ImportSourceRefRecorder>();
 builder.Services.AddScoped<PowerBase.Application.Import.Commands.ImportAppFromPbl.ImportAppFromPblCommandHandler>();
 builder.Services.AddScoped<UpdateAppCommandHandler>();
 builder.Services.AddScoped<ListAppUsersQueryHandler>();
@@ -551,6 +589,7 @@ builder.Services.AddScoped<CreateRecordCommandHandler>();
 builder.Services.AddScoped<UpdateRecordCommandHandler>();
 builder.Services.AddScoped<DeleteRecordCommandHandler>();
 builder.Services.AddScoped<BulkDeleteRecordsCommandHandler>();
+builder.Services.AddScoped<PowerBase.Application.Records.Commands.BulkCreateRecords.BulkCreateRecordsCommandHandler>();
 builder.Services.AddScoped<MassUpdateRecordsCommandHandler>();
 builder.Services.AddScoped<PowerBase.Application.Records.RecordModifyGuard>();
 builder.Services.AddScoped<PowerBase.Application.Records.Queries.GetModifiableRecordIds.GetModifiableRecordIdsQueryHandler>();
@@ -670,7 +709,16 @@ builder.Services.AddScoped<PowerBase.Application.Groups.Queries.GetSharedApps.Ge
 if (builder.Configuration.GetValue<bool>("Search:Indexer:Enabled", true))
 {
     builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerWorker>();
+    builder.Services.AddHostedService<PowerBase.API.Workers.SearchIndexerPriorityWorker>();
 }
+
+// Makes sure no record change is lost on the way to the search index: re-publishes changes the indexer has not confirmed, and checks daily.
+builder.Services.AddSingleton<PowerBase.Infrastructure.Services.SearchPipelineState>();
+builder.Services.AddHostedService<PowerBase.API.Workers.SearchOutboxRelay>();
+builder.Services.AddHealthChecks().AddCheck<PowerBase.API.Services.SearchPipelineHealthCheck>("search-pipeline");
+
+// Connected Tables: a standalone module (its own services, read-only write filter and workers).
+PowerBase.API.ConnectedTables.ConnectedTablesApiExtensions.AddConnectedTablesModule(builder.Services, builder.Configuration);
 
 var app = builder.Build();
 
@@ -703,6 +751,19 @@ app.UseStaticFiles(new StaticFileOptions
 app.UseMiddleware<QueryContextMiddleware>();
 app.UseMiddleware<JwtMiddleware>();
 app.MapControllers();
+// Liveness of the search pipeline (workers, outbox backlog, search service): counts and times only, no record data. Point an uptime probe
+// or Azure Monitor availability test at it.
+app.MapHealthChecks("/health/search", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Name == "search-pipeline",
+    ResponseWriter = PowerBase.API.Services.SearchPipelineHealthCheck.WriteResponseAsync,
+    ResultStatusCodes =
+    {
+        [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Healthy] = StatusCodes.Status200OK,
+        [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Degraded] = StatusCodes.Status200OK,
+        [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable
+    }
+});
 
 app.Run();
 

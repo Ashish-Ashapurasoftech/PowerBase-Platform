@@ -27,10 +27,61 @@ public class SummaryEncryptionGuardTests
     };
 
     [Fact]
-    public void EncryptedApp_Count_IsSupported_InMemory()
+    public void EncryptedApp_Count_UsesSql_TheReferenceIsAPlainColumn()
     {
         SummaryEncryptionGuard.FindProblem(EncryptedApp, ChildFields(), referenceFid: 10, targetFid: null, sortFid: null, matchingCriteria: null).Should().BeNull();
-        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(), 10, null, null, null).Should().BeTrue();
+        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(), 10, null, null, null).Should().BeFalse();
+    }
+
+    [Fact]
+    public void EncryptedApp_SumOfANumber_UsesSql() =>
+        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(), 10, targetFid: 11, sortFid: null, Where(11)).Should().BeFalse();
+
+    [Fact]
+    public void EncryptedApp_TextTargetSortOrCriteria_RunsInMemory()
+    {
+        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(), 10, targetFid: 12, null, null).Should().BeTrue();
+        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(), 10, targetFid: 11, sortFid: 12, null).Should().BeTrue();
+        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(), 10, targetFid: 11, null, Where(12, "contains")).Should().BeTrue();
+    }
+
+    // The types FieldEncryptionContext never encrypts (PhysicalNaming.IsEncryptionExemptTypeCode) hold plain values even in an
+    // encrypted app; a Lookup is judged as encrypted there (its source may be), as before.
+    [Theory]
+    [InlineData("Reference", false)]
+    [InlineData("Number", false)]
+    [InlineData("Currency", false)]
+    [InlineData("Date", false)]
+    [InlineData("DateTime", false)]
+    [InlineData("DateRange", false)]
+    [InlineData("Boolean", false)]
+    [InlineData("User", false)]
+    [InlineData("Formula_Number", false)]
+    [InlineData("Text", true)]
+    [InlineData("Email", true)]
+    [InlineData("Lookup", true)]
+    public void EncryptedApp_OnlyTypesThatAreEncryptedCount(string typeCode, bool encrypted)
+    {
+        SummaryEncryptionGuard.IsEncrypted(EncryptedApp, new AppField { Id = 50, Fid = 50, Name = "F", TypeCode = typeCode }).Should().Be(encrypted);
+        SummaryEncryptionGuard.IsEncrypted(PlainApp, new AppField { Id = 50, Fid = 50, Name = "F", TypeCode = typeCode }).Should().BeFalse();
+    }
+
+    [Fact]
+    public void ExemptTypeMarkedEncrypted_StillRunsInMemory()
+    {
+        // Encrypted before the exemption existed: the column holds ciphertext until the exempt-field cleanup converts it.
+        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(amountEncrypted: true), 10, targetFid: 11, null, null).Should().BeTrue();
+        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(referenceEncrypted: true), 10, null, null, null).Should().BeTrue();
+    }
+
+    [Fact]
+    public void EncryptedApp_ParentFieldComparison_ToAPlainColumn_UsesSql()
+    {
+        List<AppField> parentDate = [new() { Id = 6, Fid = 6, Name = "Start Date", TypeCode = "Date" }];
+        List<AppField> parentText = [new() { Id = 6, Fid = 6, Name = "Region", TypeCode = "Text" }];
+
+        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(), 10, null, null, Compare(1, "parentField", 6), parentDate).Should().BeFalse();
+        SummaryEncryptionGuard.ReadsEncrypted(EncryptedApp, ChildFields(), 10, null, null, Compare(1, "parentField", 6), parentText).Should().BeTrue();
     }
 
     [Fact]

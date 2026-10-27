@@ -17,7 +17,6 @@ public class DeleteRecordCommandHandler
     private readonly ITenantUnitOfWork _uow;
     private readonly IMessagePublisher _messagePublisher;
     private readonly RecordModifyGuard? _modifyGuard;
-
     public DeleteRecordCommandHandler(
         IAppTableRepository tableRepo,
         IAppFieldRepository fieldRepo,
@@ -103,7 +102,7 @@ public class DeleteRecordCommandHandler
 
         if (indexMessage != null)
         {
-            _ = _messagePublisher.PublishAsync(indexMessage, default);
+            _ = _messagePublisher.PublishPriorityAsync(indexMessage, default);
         }
     }
 }

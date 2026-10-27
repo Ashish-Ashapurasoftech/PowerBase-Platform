@@ -52,7 +52,20 @@ public interface IRecordRepository
         AppTable parentTable, IReadOnlyList<AppField> labelFields, string? search, int take,
         AppField? primaryLabelField = null, CancellationToken ct = default,
         IReadOnlyList<ReferenceFilterClause>? filters = null,
-        IReadOnlyCollection<long>? onlyRowIds = null);
+        IReadOnlyCollection<long>? onlyRowIds = null,
+        FilterGroup? roleFilter = null,
+        long? restrictToCreatedBy = null,
+        int timeoutSeconds = 30,
+        IReadOnlyList<AppField>? allParentFields = null);
+
+    /// <summary>Fast lookup of matching row Ids only (1 column, bounded, with timeout) for security filtering.</summary>
+    Task<IReadOnlyList<long>> ListMatchingRowIdsAsync(
+        AppTable table, IReadOnlyList<AppField> fields,
+        FilterGroup? filterTree = null,
+        long? restrictToCreatedBy = null,
+        int maxRows = 10000,
+        int timeoutSeconds = 30,
+        CancellationToken ct = default);
 
     /// <summary>True when the parent row satisfies every dependent-dropdown clause (used to reject a
     /// Reference value the picker would not have offered).</summary>
@@ -113,9 +126,10 @@ public interface IRecordRepository
         int? sortFid, bool sortDescending, IReadOnlyDictionary<long, AppField>? fieldLookup = null,
         ParentFieldScope? parentScope = null, CancellationToken ct = default);
 
-    /// <summary>Every child row (stored columns of <paramref name="fields"/>, plus Id) of the given
+    /// <summary>Every child row (stored columns of <paramref name="fields"/>, plus Id), decrypted, of the given
     /// parents that matches <paramref name="filterTree"/>, ordered by Id. Feeds a summary over a
-    /// Formula field, whose value has no column to aggregate in SQL and is computed per row instead.
+    /// Formula field, whose value has no column to aggregate in SQL and is computed per row instead, and
+    /// (with no <paramref name="filterTree"/>) a summary over encrypted data, whose criteria are judged in memory.
     /// <paramref name="fieldLookup"/> and <paramref name="parentScope"/> are as for
     /// <see cref="AggregateByReferenceAsync"/>.</summary>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListRowsByReferenceAsync(
@@ -125,8 +139,9 @@ public interface IRecordRepository
         CancellationToken ct = default);
 
     /// <summary>Every live row of the table (stored columns of <paramref name="fields"/>, plus Id and
-    /// the system columns), decrypted, ordered by Id. Feeds a summary over encrypted data, which SQL
-    /// can't match, group or aggregate and so is computed in memory.</summary>
+    /// the system columns), decrypted, ordered by Id. Reads the whole table: a summary over encrypted data
+    /// uses it only when its reference column is marked encrypted, so it can't pick out the page's children
+    /// with <see cref="ListRowsByReferenceAsync"/>.</summary>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllRowsDecryptedAsync(
         AppTable table, IReadOnlyList<AppField> fields, CancellationToken ct = default);
 
@@ -150,12 +165,16 @@ public interface IRecordRepository
         AppTable child, AppField reference, AppField original, IReadOnlyDictionary<long, long> parentIdByRowId,
         System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
 
+    /// <param name="sqlLookupFids">Lookups (by Fid) the filter and sort read in SQL — the parent column each pulls down, through
+    /// the row's reference. Only Lookups of a stored, unencrypted parent field (the caller checks); any other calculated
+    /// field in <paramref name="filterTree"/> or <paramref name="sortFields"/> is skipped, as without it.</param>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAsync(
         AppTable table, IReadOnlyList<AppField> fields, int page, int pageSize,
         FilterGroup? filterTree = null,
         IReadOnlyList<SortSpec>? sortFields = null,
         long? restrictToCreatedBy = null,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null);
 
     /// <summary>
     /// Fetches the live records matching the provided PublicIds, decrypted, preserving the exact order of <paramref name="publicIds"/>.
@@ -164,15 +183,17 @@ public interface IRecordRepository
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListByPublicIdsAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<Guid> publicIds, CancellationToken ct = default);
 
-    /// <summary>Every live row matching <paramref name="filterTree"/> in ONE query — no paging, no row cap and
-    /// no command timeout (the request's cancellation token still aborts it). Rows are decrypted. For reports
-    /// that must see every matching record to filter, sort or total computed (Formula) fields in memory.</summary>
+    /// <summary>The live rows matching <paramref name="filterTree"/> in ONE query — no paging and no command timeout (the
+    /// request's cancellation token still aborts it), but at most <see cref="Records.InMemoryReadLimit.Rows"/> of them, in
+    /// <paramref name="sortFields"/> order. Rows are decrypted. For reports that filter, sort or total computed (Formula)
+    /// fields in memory. <paramref name="sqlLookupFids"/> is as for <see cref="ListAsync"/>.</summary>
     Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListAllMatchingAsync(
         AppTable table, IReadOnlyList<AppField> fields,
         FilterGroup? filterTree = null,
         IReadOnlyList<SortSpec>? sortFields = null,
         long? restrictToCreatedBy = null,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null);
 
     /// <summary>The next <paramref name="batchSize"/> live rows with Id greater than <paramref name="afterId"/>,
     /// ordered by Id (keyset paging), decrypted, with no command timeout. Call repeatedly with the last Id
@@ -200,7 +221,9 @@ public interface IRecordRepository
         System.Data.IDbTransaction? transaction = null, CancellationToken ct = default,
         Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
 
-    Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
+    /// <param name="sqlLookupFids">As for <see cref="ListAsync"/>.</param>
+    Task<int> CountAsync(AppTable table, IReadOnlyList<AppField> fields, FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null);
 
     /// <summary>
     /// Sum / non-blank count / row count of the given physical numeric (or checkbox) columns across
@@ -209,9 +232,11 @@ public interface IRecordRepository
     /// grid's own filtering. Only for non-computed, non-encrypted columns (callers route formula and
     /// encrypted columns through an in-memory pass instead). Keyed by the field's Fid.
     /// </summary>
+    /// <param name="sqlLookupFids">As for <see cref="ListAsync"/>.</param>
     Task<IReadOnlyDictionary<long, Records.ColumnTotal>> AggregateColumnsAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<AppField> columns,
-        FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default);
+        FilterGroup? filterTree = null, long? restrictToCreatedBy = null, CancellationToken ct = default,
+        IReadOnlySet<long>? sqlLookupFids = null);
 
     /// <summary>Returns true if the table has at least one non-deleted row — an EXISTS check, not a
     /// COUNT, so it stays cheap on tables with millions of records. Used to gate whether a field's
@@ -223,6 +248,12 @@ public interface IRecordRepository
 
     Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(long tableId, Guid recordPublicId, CancellationToken ct = default);
     Task<IReadOnlyDictionary<long, object?>> GetSearchableFieldsAsync(Guid recordPublicId, CancellationToken ct = default);
+
+    /// <summary>Current (decrypted) values of the search-eligible fields for these records, read from the database in one query. A record that is deleted or missing is absent from the result.</summary>
+    Task<IReadOnlyDictionary<Guid, IReadOnlyDictionary<long, object?>>> GetSearchableFieldsBatchAsync(long tableId, IReadOnlyList<Guid> recordPublicIds, CancellationToken ct = default);
+
+    /// <summary>One page of the table's live records with all their search-eligible values, in a stable order. Used to reindex a whole table.</summary>
+    Task<IReadOnlyList<SearchIndexDocument>> GetTableIndexBatchAsync(long tenantId, long tableId, int page, int pageSize, CancellationToken ct = default);
     Task<long> GetRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<IReadOnlyDictionary<Guid, long>> GetRecordIdsByPublicIdsAsync(AppTable table, IReadOnlyCollection<Guid> publicIds, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
     Task<long> GetActiveRecordIdByPublicIdAsync(AppTable table, Guid publicId, System.Data.IDbTransaction? transaction = null, CancellationToken ct = default);
@@ -238,7 +269,8 @@ public interface IRecordRepository
     Task<IReadOnlyList<Guid>> CreateManyAsync(
         AppTable table, IReadOnlyList<AppField> fields, IReadOnlyList<IReadOnlyDictionary<long, object?>> rows,
         System.Data.IDbTransaction transaction, CancellationToken ct = default,
-        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null);
+        Action<PowerBase.Application.Common.Models.SearchIndexMessage>? onIndexMessageCreated = null,
+        bool isPriority = false);
 
     /// <summary>For each requested key, the live records whose (plain, unencrypted Text or Number) <paramref name="field"/> equals
     /// it: (value as stored, PublicId). Keys are looked up in chunks, so the number of keys is not limited.</summary>

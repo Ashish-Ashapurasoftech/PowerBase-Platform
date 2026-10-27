@@ -44,15 +44,47 @@ public class SchemaEngineService : ISchemaEngineService
                 CREATE NONCLUSTERED INDEX IX_{PhysicalNaming.TableName(table.Id)}_ModifiedOn
                     ON {physicalName}(ModifiedOn)
                     WHERE IsDeleted = 0 AND ModifiedOn IS NOT NULL;
+                -- Seeks for role-based ownership filtering (RestrictToCreatedBy)
+                CREATE NONCLUSTERED INDEX IX_{PhysicalNaming.TableName(table.Id)}_CreatedBy
+                    ON {physicalName}(CreatedBy)
+                    WHERE IsDeleted = 0;
+                -- Seeks for recent record detection and created-date ordering
+                CREATE NONCLUSTERED INDEX IX_{PhysicalNaming.TableName(table.Id)}_CreatedOn
+                    ON {physicalName}(CreatedOn)
+                    WHERE IsDeleted = 0;
             END
             """;
 
-        await using var connection = await _connectionFactory.CreateAsync(ct);
-        await connection.OpenAsync(ct);
-        await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+        await RetryOnTimeoutAsync(async () =>
+        {
+            await using var connection = await _connectionFactory.CreateAsync(ct);
+            await connection.OpenAsync(ct);
+            await connection.ExecuteAsync(new CommandDefinition(sql, cancellationToken: ct));
+        }, ct);
     }
 
-    public async Task AddColumnAsync(AppTable table, AppField field, CancellationToken ct = default)
+    /// <summary>Every statement the schema engine issues is guarded by IF NOT EXISTS, so running it again after a SQL timeout
+    /// or a deadlock is safe. Two more attempts, with a short pause, instead of failing a 74-table import on one slow command.</summary>
+    private static async Task RetryOnTimeoutAsync(Func<Task> action, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await action();
+                return;
+            }
+            catch (Microsoft.Data.SqlClient.SqlException ex) when (attempt < 3 && (ex.Number is -2 or 1205))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2 * attempt), ct);
+            }
+        }
+    }
+
+    public Task AddColumnAsync(AppTable table, AppField field, CancellationToken ct = default) =>
+        RetryOnTimeoutAsync(() => AddColumnCoreAsync(table, field, ct), ct);
+
+    private async Task AddColumnCoreAsync(AppTable table, AppField field, CancellationToken ct)
     {
         // Computed fields (Formula) are evaluated at read time and have no physical column.
         if (PhysicalNaming.IsComputedTypeCode(field.TypeCode))

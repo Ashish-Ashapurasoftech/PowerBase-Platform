@@ -14,6 +14,18 @@ public sealed class PblRole
     public string? Description { get; set; }
     public bool IsDefault { get; set; }
 
+    /// <summary>Source "Manage users" — maps to users:manage + users:invite.</summary>
+    public bool ManageUsers { get; set; }
+
+    /// <summary>Source "Edit app" — maps to the app-design permission bundle.</summary>
+    public bool EditApp { get; set; }
+
+    /// <summary>Source "Disable access" — the role gets no permissions at all.</summary>
+    public bool DisableAccess { get; set; }
+
+    /// <summary>Source "Restrict access to new tables" — tables created later default to no access for this role.</summary>
+    public bool RestrictAccessToNewTables { get; set; }
+
     public List<PblTablePermission> TablePermissions { get; set; } = [];
 }
 
@@ -32,6 +44,9 @@ public sealed class PblTablePermission
 
     /// <summary>FullAccess or CustomAccess — gates whether FieldPermissions is consulted.</summary>
     public string FieldAccessLevel { get; set; } = "FullAccess";
+
+    /// <summary>Which records the role sees (translated source criteria). Null = no row filter.</summary>
+    public PblFilterGroup? RecordFilter { get; set; }
 
     /// <summary>Real QBL exports carry no field-level permission data (confirmed against a
     /// real sample — every RolePermissions block found was on a Table or Report, never a

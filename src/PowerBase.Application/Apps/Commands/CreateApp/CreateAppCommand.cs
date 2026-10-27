@@ -11,7 +11,14 @@ public record TableSpec(
     /// <summary>False when the caller will create this table's own forms/reports afterwards, so
     /// the seeded "Main Form"/"List All"/"List Changes" would only be duplicates. Defaults to
     /// true — normal app creation is unaffected. See <c>IAppSeeder</c>.</summary>
-    bool SeedDefaultViews = true
+    bool SeedDefaultViews = true,
+    /// <summary>Internal-only (QBL/PBL import): keep this exact <c>_DBID_*</c> alias instead of generating one from the name,
+    /// so formulas that name the table by its source alias keep resolving. Ignored when blank or already taken.</summary>
+    string? Alias = null,
+    /// <summary>With <see cref="SeedDefaultViews"/> true: false skips only "List All"/"List Changes" (the import brings reports for this table).</summary>
+    bool SeedDefaultReports = true,
+    /// <summary>With <see cref="SeedDefaultViews"/> true: false skips only the "Main Form" (the import brings forms for this table).</summary>
+    bool SeedDefaultForm = true
 );
 
 public record AppFieldSpec(
@@ -22,7 +29,17 @@ public record AppFieldSpec(
     /// <summary>Internal-only escape hatch — never populated from the public Create App request.
     /// Used exclusively by PBL/QBL app import to preserve a field's exact original Name. Null
     /// (the normal case) auto-generates Name from Label.</summary>
-    string? Name = null
+    string? Name = null,
+    /// <summary>Internal-only (QBL/PBL import): initial values carried over from the source field. Null = PowerBase default.</summary>
+    string? Description = null,
+    string? HelpText = null,
+    bool IsRequired = false,
+    string? DefaultValue = null,
+    bool IsAuditable = false,
+    bool? IsSearchable = null,
+    bool? IsReportable = null,
+    /// <summary>Internal-only (QBL/PBL import): keep this Fid (the source field's Quickbase id).</summary>
+    int? Fid = null
 );
 
 public record CreateAppCommand(

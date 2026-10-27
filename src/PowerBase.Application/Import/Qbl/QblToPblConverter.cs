@@ -1,10 +1,12 @@
 using System.Text.RegularExpressions;
+using PowerBase.Application.Apps.Commands;
 using PowerBase.Application.Import.Pbl;
 
 namespace PowerBase.Application.Import.Qbl;
 
 public sealed class QblConversionResult
 {
+    public string AppRef { get; init; } = string.Empty;
     public PblDocument Document { get; init; } = new();
     public List<PblIssue> Issues { get; init; } = [];
 }
@@ -34,32 +36,56 @@ public sealed class QblConversionResult
 /// </summary>
 public static class QblToPblConverter
 {
-    public static QblConversionResult Convert(QblDocument qbl)
-    {
-        var issues = new List<PblIssue>();
+    /// <summary>Converts a document expected to hold exactly one application (first one wins when the caller has
+    /// already ruled out several). Multi-application files go through <see cref="ConvertAll"/>.</summary>
+    public static QblConversionResult Convert(QblDocument qbl) => ConvertAll(qbl)[0];
 
-        var appEntry = qbl.Resources.FirstOrDefault(kv => kv.Value.Type == "QB::Application");
-        if (appEntry.Value is null)
+    /// <summary>Converts every <c>QB::Application</c> in the file, in file order, each independently. A file with no
+    /// application yields a single result carrying <c>QBL_MISSING_APPLICATION</c>.</summary>
+    public static IReadOnlyList<QblConversionResult> ConvertAll(QblDocument qbl)
+    {
+        var apps = qbl.Resources.Where(kv => kv.Value.Type == "QB::Application").ToList();
+        if (apps.Count == 0)
         {
-            issues.Add(new PblIssue
+            return [new QblConversionResult
             {
-                Severity = PblIssueSeverity.Error,
-                Code = "QBL_MISSING_APPLICATION",
-                Message = "QBL document has no QB::Application resource.",
-            });
-            return new QblConversionResult { Document = new PblDocument(), Issues = issues };
+                Document = new PblDocument(),
+                Issues =
+                [
+                    new PblIssue
+                    {
+                        Severity = PblIssueSeverity.Error,
+                        Code = "QBL_MISSING_APPLICATION",
+                        Message = "QBL document has no QB::Application resource.",
+                    },
+                ],
+            }];
         }
 
-        var (appRef, appNode) = (appEntry.Key, appEntry.Value);
+        return apps.Select(a => ConvertApplication(a.Key, a.Value, qbl.ExternalResources)).ToList();
+    }
+
+    /// <summary>The applications in a document as (ref, name), in file order.</summary>
+    public static IReadOnlyList<(string Ref, string Name)> ListApplications(QblDocument qbl) =>
+        qbl.Resources.Where(kv => kv.Value.Type == "QB::Application")
+            .Select(kv => (kv.Key, ResolveScalar(kv.Value, "Name") ?? kv.Key)).ToList();
+
+    private static QblConversionResult ConvertApplication(string appRef, QblResourceNode appNode, IReadOnlyDictionary<string, QblResourceNode>? externalResources = null)
+    {
+        var issues = new List<PblIssue>();
 
         var pblApp = new PblApp
         {
             LogicalRef = appRef,
             Name = ResolveScalar(appNode, "Name") ?? "",
             Description = NullIfBlank(ResolveScalar(appNode, "Description")),
-            Icon = NullIfBlank(ResolveScalar(appNode, "AppIcon")),
+            Icon = QblIconMapper.MapApp(ResolveScalar(appNode, "AppIcon")),
             Color = NullIfBlank(ResolveScalar(appNode, "AppColor")),
+            Formatting = QblAppTableMapper.Formatting(appNode, issues, appRef),
+            Security = QblAppTableMapper.Security(appNode, issues, appRef),
         };
+        var tableOrder = QblAppTableMapper.TableOrder(appNode);
+        var roleNameByRef = appNode.ChildMap("Roles").ToDictionary(r => r.Key, r => ResolveScalar(r.Value, "Name") ?? r.Key, StringComparer.Ordinal);
 
         // Pass A.
         var tables = new List<PblTable>();
@@ -81,6 +107,7 @@ public static class QblToPblConverter
             var fieldNameByRef = new Dictionary<string, string>(StringComparer.Ordinal);
             var relFields = new RelationshipFieldCollector();
             var seenFieldNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var seenFieldLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             // Address composite fields explicitly link to their own sub-component shadow fields
             // via Street1/Street2/City/State/PostalCode/Country !Ref properties (confirmed real
@@ -112,8 +139,12 @@ public static class QblToPblConverter
                 Name = ResolveScalar(tableNode, "Name") ?? "",
                 SingularLabel = NullIfBlank(ResolveScalar(tableNode, "RecordNameSingular")),
                 PluralLabel = NullIfBlank(ResolveScalar(tableNode, "RecordNamePlural")),
-                Icon = NullIfBlank(ResolveScalar(tableNode, "TableIconName")),
+                Icon = QblIconMapper.MapTable(ResolveScalar(tableNode, "TableIconName")),
                 Description = NullIfBlank(ResolveScalar(tableNode, "Description")),
+                AliasHint = QblAppTableMapper.AliasHint(tableNode),
+                IsShowInBar = QblAppTableMapper.IsShowInBar(tableNode),
+                AutoSaveOnLeave = QblAppTableMapper.AutoSaveOnLeave(tableNode),
+                DisplayOrder = tableOrder is not null && tableOrder.IndexOf(tableRef) is var orderIndex && orderIndex >= 0 ? orderIndex : int.MaxValue,
             };
 
             foreach (var (fieldRef, fieldNode) in tableNode.ChildMap("Fields"))
@@ -137,10 +168,26 @@ public static class QblToPblConverter
                 if (field is null)
                     continue;
 
-                if (!seenFieldNames.Add(field.Name))
+                // Two fields of one table can share a name in a real export; PowerBase needs unique names, so the later one is kept
+                // under a numbered name (and label) instead of being dropped with its data, form elements and report columns.
+                var uniqueFieldName = NumberedName(seenFieldNames, field.Name);
+                if (!string.Equals(uniqueFieldName, field.Name, StringComparison.Ordinal))
                 {
-                    issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Field '{field.Name}' is already used on table '{table.Name}'; only the first is imported.", fieldRef));
-                    continue;
+                    issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Field '{field.Name}' is already used on table '{table.Name}'; imported as '{uniqueFieldName}'.", fieldRef));
+                    field.Label = (field.Label ?? field.Name) + uniqueFieldName[field.Name.Length..];
+                    field.Name = uniqueFieldName;
+                }
+
+                // PowerBase also needs labels unique per table. Two fields can share a label in a
+                // real export; keep both, numbering the later one, and say so.
+                var wantedLabel = (field.Label ?? field.Name).Trim();
+                var uniqueLabel = wantedLabel;
+                for (var n = 2; !seenFieldLabels.Add(uniqueLabel); n++)
+                    uniqueLabel = $"{wantedLabel} ({n})";
+                if (!string.Equals(uniqueLabel, wantedLabel, StringComparison.Ordinal))
+                {
+                    field.Label = uniqueLabel;
+                    issues.Add(Warning("QBL_DUPLICATE_FIELD_LABEL", $"Field label '{wantedLabel}' is already used on table '{table.Name}'; imported as '{uniqueLabel}'.", fieldRef));
                 }
 
                 table.Fields.Add(field);
@@ -175,7 +222,10 @@ public static class QblToPblConverter
 
                 var skeleton = BuildRelationshipSkeleton(relRef, relNode, childTableRef, relFieldsPerTable, fieldNameByRefPerTable, issues);
                 if (skeleton is not null)
+                {
+                    EnsureUniqueReferenceName(skeleton, relRef, relFieldsPerTable[childTableRef].References[relRef].FieldRef, fieldNameByRefPerTable[childTableRef], seenFieldNamesByTableRef[childTableRef], tables, issues);
                     relationships.Add(skeleton);
+                }
             }
         }
 
@@ -187,6 +237,25 @@ public static class QblToPblConverter
         // makes no further progress, then flag whatever's still unresolved.
         var tableNameByRef = tables.ToDictionary(t => t.LogicalRef, t => t.Name, StringComparer.Ordinal);
         ResolveRelationshipLookupsAndSummaries(relationships, relFieldsPerTable, fieldNameByRefPerTable, seenFieldNamesByTableRef, tableNameByRef, addressSubComponentOwnerByTableRef, issues);
+
+        // Dependent dropdowns, now that every field of both tables has a name.
+        foreach (var rel in relationships)
+        {
+            if (relFieldsPerTable.TryGetValue(rel.ChildTableRef, out var ownFields) && ownFields.References.TryGetValue(rel.LogicalRef, out var ownReference))
+                rel.ReferenceFieldDescription = ownReference.Description;
+            if (!relFieldsPerTable.TryGetValue(rel.ChildTableRef, out var childFields)
+                || !childFields.References.TryGetValue(rel.LogicalRef, out var referenceInfo)
+                || referenceInfo.FilterFieldRef is null || referenceInfo.MatchFieldRef is null)
+                continue;
+            if (fieldNameByRefPerTable[rel.ChildTableRef].TryGetValue(referenceInfo.FilterFieldRef, out var formFieldName)
+                && fieldNameByRefPerTable[rel.ParentTableRef].TryGetValue(referenceInfo.MatchFieldRef, out var parentFieldName))
+            {
+                rel.ReferenceFilterFormFieldName = formFieldName;
+                rel.ReferenceFilterParentFieldName = parentFieldName;
+            }
+            else
+                issues.Add(Warning("QBL_REFERENCE_FILTER_FIELD_UNAVAILABLE", $"The choices of reference '{rel.ReferenceFieldName}' depend on a field that was not converted; the dependent dropdown was not set up.", rel.LogicalRef));
+        }
 
         // Relationship/Lookup/Summary refs are QBL keys scoped to their owning table's own
         // Fields/Relationships map, not globally unique — Quickbase auto-names them from the
@@ -206,8 +275,52 @@ public static class QblToPblConverter
             rel.LogicalRef = Qualify(rel.ChildTableRef, rel.LogicalRef);
         }
 
+        // Source field Id → field name, per table. Every QBL field node carries a numeric Id, and the things that
+        // point at fields by number (record filters, key/picker/title settings, formulas) need it resolved.
+        var fieldNameBySourceId = new Dictionary<string, Dictionary<int, string>>(StringComparer.Ordinal);
+        foreach (var (tableRef, tableNode) in tableNodeByRef)
+        {
+            var byId = new Dictionary<int, string>();
+            var namesByRef = fieldNameByRefPerTable[tableRef];
+            foreach (var (fieldRef, fieldNode) in tableNode.ChildMap("Fields"))
+                if (fieldNode.SourceId is { } sourceId && namesByRef.TryGetValue(fieldRef, out var resolvedName))
+                    byId[sourceId] = resolvedName;
+            fieldNameBySourceId[tableRef] = byId;
+        }
+
+        // A bracketed number can also be an app variable that happens to be named with digits (Quickbase files have variables "1202", "1226"…).
+        // The formula engine binds a variable before a field, so such a token must stay as written and is not a field id at all.
+        var variableNames = ConvertVariables(appNode, []).Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
+        RewriteNumericFieldRefs(tables, fieldNameBySourceId, variableNames, issues);
+
+        foreach (var table in tables)
+            ApplyTableFieldSettings(table, tableNodeByRef[table.LogicalRef], fieldNameByRefPerTable[table.LogicalRef], issues);
+
+        // Summary "only where…" queries refer to the CHILD table's fields. A query that cannot be translated would make the
+        // summary count/sum every child record — a wrong number — so that summary is left out and reported instead.
+        foreach (var rel in relationships)
+        {
+            var childFields = fieldNameBySourceId.GetValueOrDefault(rel.ChildTableRef) ?? [];
+            foreach (var summary in rel.Summaries.ToList().Where(sm => !string.IsNullOrWhiteSpace(sm.QueryCriteria)))
+            {
+                var result = QblCriteriaTranslator.Translate(summary.QueryCriteria, id => childFields.GetValueOrDefault(id), allowRelativeDates: true);
+                if (result.Succeeded)
+                {
+                    summary.Filter = result.Filter;
+                    continue;
+                }
+                summary.SkipReason = $"its filter query cannot be translated ({result.Problem}); creating it would count every related record";
+                issues.Add(Warning("QBL_SUMMARY_QUERY_UNTRANSLATABLE", $"Summary '{summary.Name}': {summary.SkipReason}; it was not created.", summary.LogicalRef));
+            }
+        }
+
+        // Create tables in the source app's own order so PowerBase's table order matches.
+        tables = tables.Select((t, i) => (Table: t, Index: i)).OrderBy(x => x.Table.DisplayOrder).ThenBy(x => x.Index).Select(x => x.Table).ToList();
+
         // Pass C.
         var forms = new List<PblForm>();
+        var formRoleDefaults = new List<PblFormRoleDefault>();
+        var connectedTables = new List<PblConnectedTable>();
         foreach (var table in tables)
         {
             var tableNode = tableNodeByRef[table.LogicalRef];
@@ -220,24 +333,33 @@ public static class QblToPblConverter
             // import over a report Quickbase itself doesn't treat as load-bearing. Flag and skip
             // the repeat instead, same as any other unsupported-construct gap.
             var seenReportNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var (reportRef, reportNode) in tableNode.ChildMap("Reports"))
+            // Pie / stacked-bar / gauge charts sit under the table's own "Charts" key, beside "Reports".
+            foreach (var (reportRef, reportNode) in tableNode.ChildMap("Reports").Concat(tableNode.ChildMap("Charts")))
             {
-                var report = ConvertReport(table.LogicalRef, reportRef, reportNode, fieldNameByRef, issues);
+                var report = ConvertReport(table.LogicalRef, reportRef, reportNode, fieldNameByRef, fieldNameBySourceId.GetValueOrDefault(table.LogicalRef) ?? [], issues);
                 if (report is null)
                     continue;
 
-                if (!seenReportNames.Add(report.Name))
+                // Report names are unique per table in PowerBase: a repeat (Quickbase has many auto-named "Embedded for X") is kept, numbered.
+                var uniqueReportName = NumberedName(seenReportNames, report.Name);
+                if (!string.Equals(uniqueReportName, report.Name, StringComparison.Ordinal))
                 {
-                    issues.Add(Warning("QBL_DUPLICATE_REPORT_NAME", $"Report '{report.Name}' is already used on table '{table.Name}'; only the first is imported.", reportRef));
-                    continue;
+                    issues.Add(Warning("QBL_DUPLICATE_REPORT_NAME", $"Report '{report.Name}' is already used on table '{table.Name}'; imported as '{uniqueReportName}'.", reportRef));
+                    report.Name = uniqueReportName;
                 }
 
                 table.Reports.Add(report);
             }
 
             foreach (var (formRef, formV2Node) in GetFormV2Nodes(tableNode))
-                forms.Add(ConvertForm(formRef, formV2Node, table.LogicalRef, fieldNameByRef, issues));
+                forms.Add(ConvertForm(formRef, formV2Node, table.LogicalRef, fieldNameByRef, roleNameByRef, FieldTypesByName(table), FieldHelpByName(table), issues));
+
+            formRoleDefaults.AddRange(ConvertFormRoleDefaults(tableNode, table.LogicalRef));
+            if (ConvertConnectedTable(tableNode, table, externalResources, fieldNameByRef, issues) is { } connected)
+                connectedTables.Add(connected);
         }
+
+        RewriteRuleFormulas(forms, fieldNameBySourceId, variableNames, issues);
 
         // Pass D.
         var roles = new List<PblRole>();
@@ -249,6 +371,10 @@ public static class QblToPblConverter
                 Name = ResolveScalar(roleNode, "Name") ?? roleRef,
                 Description = NullIfBlank(ResolveScalar(roleNode, "Description")),
                 IsDefault = roleNode.PropertyBool("Default"),
+                ManageUsers = roleNode.PropertyBool("ManageUsers"),
+                EditApp = roleNode.PropertyBool("EditApp"),
+                DisableAccess = roleNode.PropertyBool("DisableAccess"),
+                RestrictAccessToNewTables = roleNode.PropertyBool("RestrictAccessToNewTablesForThisRole"),
             });
         }
 
@@ -264,7 +390,7 @@ public static class QblToPblConverter
                 if (permsRaw is not Dictionary<string, object?> perms)
                     continue;
 
-                var permission = ConvertTablePermission(table.LogicalRef, table.Name, roleRefKey, perms, issues);
+                var permission = ConvertTablePermission(table.LogicalRef, table.Name, roleRefKey, perms, fieldNameBySourceId.GetValueOrDefault(table.LogicalRef) ?? [], issues);
                 if (!tablePermissionsByRoleRef.TryGetValue(roleRefKey, out var list))
                     tablePermissionsByRoleRef[roleRefKey] = list = [];
                 list.Add(permission);
@@ -277,9 +403,286 @@ public static class QblToPblConverter
                 role.TablePermissions = perms;
         }
 
-        var document = new PblDocument { App = pblApp, Tables = tables, Relationships = relationships, Forms = forms, Roles = roles };
-        return new QblConversionResult { Document = document, Issues = issues };
+        ApplyFieldPermissions(tables, tableNodeByRef, fieldNameByRefPerTable, roles, issues);
+
+        // "Disable access" means the role may do nothing: every table permission is cut to none.
+        foreach (var role in roles.Where(r => r.DisableAccess))
+        {
+            foreach (var permission in role.TablePermissions)
+            {
+                permission.ViewScope = "None";
+                permission.ModifyScope = "None";
+                permission.CanAdd = false;
+                permission.CanDelete = false;
+                permission.CanSaveSharedReports = false;
+                permission.CanEditFieldProperties = false;
+                permission.RecordFilter = null;
+            }
+        }
+
+        var variables = ConvertVariables(appNode, issues);
+        var pages = ConvertCodePages(appNode, issues);
+        var dashboards = ConvertDashboards(appNode, issues);
+
+        var document = new PblDocument { App = pblApp, Tables = tables, Relationships = relationships, Forms = forms, Roles = roles, Variables = variables, Pages = pages, FormRoleDefaults = formRoleDefaults, ConnectedTables = connectedTables, Dashboards = dashboards };
+        return new QblConversionResult { AppRef = appRef, Document = document, Issues = issues };
     }
+
+    /// <summary>Table settings that name fields — key field, record title, record picker, custom data rule. Resolved once every
+    /// field name is known. A reference that does not resolve is reported and left at the PowerBase default.</summary>
+    private static void ApplyTableFieldSettings(PblTable table, QblResourceNode tableNode, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues)
+    {
+        string? NameOf(QblRef? r) => r?["Field"] is { } fieldRef && fieldNameByRef.TryGetValue(fieldRef, out var n) ? n : null;
+
+        // Record ID# is PowerBase's built-in key; only a different key field needs recording.
+        var keyName = NameOf(tableNode.PropertyRef("KeyField"));
+        if (keyName is not null && !string.Equals(keyName, "Record ID#", StringComparison.OrdinalIgnoreCase))
+            table.KeyFieldName = keyName;
+        else if (keyName is null && tableNode.PropertyRef("KeyField") is not null)
+            issues.Add(Warning("QBL_TABLE_KEY_FIELD_UNRESOLVED", $"Table '{table.Name}': key field not found; Record ID# is used.", table.LogicalRef));
+
+        if (tableNode.PropertyBool("UseCustomRecordTitleField"))
+        {
+            var titleName = NameOf(tableNode.PropertyRef("RecordTitleField"));
+            if (titleName is not null) table.RecordTitleFieldName = titleName;
+            else issues.Add(Warning("QBL_TABLE_TITLE_FIELD_UNRESOLVED", $"Table '{table.Name}': record title field not found.", table.LogicalRef));
+        }
+
+        if (tableNode.Properties.TryGetValue("DefaultRecordPicker", out var picker) && picker is IEnumerable<object?> pickerList && picker is not string)
+        {
+            foreach (var item in pickerList)
+            {
+                var pickerName = NameOf(item as QblRef);
+                if (pickerName is not null && table.RecordPickerFieldNames.Count < 3 && !table.RecordPickerFieldNames.Contains(pickerName))
+                    table.RecordPickerFieldNames.Add(pickerName);
+            }
+        }
+
+        if (tableNode.Properties.TryGetValue("CustomDataRules", out var rulesRaw) && rulesRaw is IReadOnlyDictionary<string, object?> rules)
+        {
+            var formula = rules.TryGetValue("Formula", out var f) ? f?.ToString() : null;
+            var on = rules.TryGetValue("TurnedOn", out var t) && (t is true || string.Equals(t?.ToString(), "true", StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(formula))
+            {
+                table.CustomDataRule = formula;
+                table.CustomDataRuleEnabled = on;
+            }
+        }
+    }
+
+    /// <summary>QBL <c>QB::Application::Variable</c> nodes (under the app's <c>Variables</c> map)
+    /// map 1:1 to PowerBase app variables. A name PowerBase can't accept (bracket characters, or an
+    /// id-looking name like <c>var_5</c>) or a value over the column limit is flagged, not altered.</summary>
+    private static List<PblVariable> ConvertVariables(QblResourceNode appNode, List<PblIssue> issues)
+    {
+        var result = new List<PblVariable>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (varRef, varNode) in appNode.ChildMap("Variables"))
+        {
+            if (varNode.Type != "QB::Application::Variable")
+                continue;
+
+            var name = ResolveScalar(varNode, "Name")?.Trim();
+            var value = ResolveScalar(varNode, "Value") ?? "";
+
+            if (string.IsNullOrEmpty(name))
+            {
+                issues.Add(Warning("QBL_VARIABLE_NO_NAME", $"Variable '{varRef}' has no name; skipped.", varRef));
+                continue;
+            }
+            if (name.Length > MAX_VARIABLE_NAME_LENGTH)
+            {
+                issues.Add(Warning("QBL_VARIABLE_NAME_TOO_LONG", $"Variable '{name}' name exceeds {MAX_VARIABLE_NAME_LENGTH} characters; skipped.", varRef));
+                continue;
+            }
+            if (!AppVariableNameRules.HasNoBracketCharacters(name) || AppVariableNameRules.IsReserved(name))
+            {
+                issues.Add(Warning("QBL_VARIABLE_INVALID_NAME", $"Variable '{name}' has a name PowerBase cannot accept (brackets or a reserved id-style name); skipped.", varRef));
+                continue;
+            }
+            if (value.Length > MAX_VARIABLE_VALUE_LENGTH)
+            {
+                issues.Add(Warning("QBL_VARIABLE_VALUE_TOO_LONG", $"Variable '{name}' value exceeds {MAX_VARIABLE_VALUE_LENGTH} characters; skipped.", varRef));
+                continue;
+            }
+            if (!seen.Add(name))
+            {
+                issues.Add(Warning("QBL_DUPLICATE_VARIABLE_NAME", $"Variable '{name}' is already defined; only the first is imported.", varRef));
+                continue;
+            }
+
+            result.Add(new PblVariable { LogicalRef = varRef, Name = name, Value = value, Description = NullIfBlank(ResolveScalar(varNode, "Description")) });
+        }
+
+        return result;
+    }
+
+    /// <summary>QBL <c>QB::CodePage</c> nodes (under the app's <c>Pages</c> map) carry one
+    /// <c>RawCode</c> blob. Any other page type (homepages, rich-text pages) has no PowerBase
+    /// equivalent and is flagged.</summary>
+    private static List<PblPage> ConvertCodePages(QblResourceNode appNode, List<PblIssue> issues)
+    {
+        var result = new List<PblPage>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (pageRef, pageNode) in PageNodes(appNode))
+        {
+            if (pageNode.Type == "QB::Dashboard")
+                continue; // converted by ConvertDashboards
+
+            if (pageNode.Type != "QB::CodePage")
+            {
+                issues.Add(Warning("QBL_UNSUPPORTED_PAGE_TYPE", $"Page '{pageRef}' of type '{pageNode.Type}' has no PowerBase equivalent; skipped.", pageRef));
+                continue;
+            }
+
+            var name = ResolveScalar(pageNode, "Name")?.Trim();
+            if (string.IsNullOrEmpty(name))
+                name = pageRef;
+            if (name.Length > MAX_PAGE_NAME_LENGTH)
+                name = name[..MAX_PAGE_NAME_LENGTH];
+
+            if (!seen.Add(name))
+            {
+                issues.Add(Warning("QBL_DUPLICATE_PAGE_NAME", $"Code page '{name}' is already defined; only the first is imported.", pageRef));
+                continue;
+            }
+
+            result.Add(new PblPage { LogicalRef = pageRef, Name = name, Code = ResolveScalar(pageNode, "RawCode") ?? "" });
+        }
+
+        return result;
+    }
+
+    /// <summary>Quickbase dashboards → PowerBase dashboard pages. Report, summary and chart widgets point at reports by (table, report); buttons
+    /// become one-button button bars. A search or KPI widget has no PowerBase widget and is reported.</summary>
+    private static List<PblDashboard> ConvertDashboards(QblResourceNode appNode, List<PblIssue> issues)
+    {
+        var result = new List<PblDashboard>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (pageRef, pageNode) in PageNodes(appNode))
+        {
+            if (pageNode.Type != "QB::Dashboard") continue;
+
+            var name = ResolveScalar(pageNode, "Name")?.Trim();
+            if (string.IsNullOrEmpty(name)) name = pageRef;
+            if (name.Length > MAX_PAGE_NAME_LENGTH) name = name[..MAX_PAGE_NAME_LENGTH];
+            var unique = NumberedName(seen, name);
+            if (!string.Equals(unique, name, StringComparison.Ordinal))
+                issues.Add(Warning("QBL_DUPLICATE_PAGE_NAME", $"Dashboard '{name}' is already defined; imported as '{unique}'.", pageRef));
+
+            var dashboard = new PblDashboard { LogicalRef = pageRef, Name = unique };
+            foreach (var (_, tabNode) in pageNode.ChildMap("Tabs"))
+            {
+                var tab = new PblDashboardTab { Name = ResolveScalar(tabNode, "Name")?.Trim() is { Length: > 0 } tabName ? tabName : $"Tab {dashboard.Tabs.Count + 1}" };
+                foreach (var (widgetRef, widgetNode) in tabNode.ChildMap("Widgets"))
+                {
+                    var widget = ConvertDashboardWidget(widgetNode);
+                    if (widget is null)
+                    {
+                        issues.Add(Warning("QBL_UNSUPPORTED_DASHBOARD_WIDGET", $"Dashboard '{unique}': widget '{widgetRef}' of type '{widgetNode.Type}' has no PowerBase widget; skipped.", pageRef));
+                        continue;
+                    }
+                    tab.Widgets.Add(widget);
+                }
+                dashboard.Tabs.Add(tab);
+            }
+
+            if (dashboard.Tabs.Count == 0)
+                dashboard.Tabs.Add(new PblDashboardTab { Name = "Tab 1" });
+            result.Add(dashboard);
+        }
+
+        return result;
+    }
+
+    private static PblDashboardWidget? ConvertDashboardWidget(QblResourceNode node)
+    {
+        int Number(string key, int fallback) => int.TryParse(ResolveScalar(node, key), out var n) ? n : fallback;
+        // Quickbase counts its canvas in small rows; PowerBase's dashboard grid has 12 columns of taller rows.
+        var widget = new PblDashboardWidget
+        {
+            Title = ResolveScalar(node, "Title")?.Trim() ?? "",
+            ShowTitle = !string.Equals(ResolveScalar(node, "ShowTitle"), "false", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(ResolveScalar(node, "Title")),
+            X = Math.Clamp(Number("X", 0), 0, 11),
+            Y = Math.Max(0, Number("Y", 0) / 6),
+            W = Math.Clamp(Number("Width", 4), 1, 12),
+            H = Math.Max(2, (int)Math.Ceiling(Number("Height", 12) / 6.0)),
+        };
+        widget.X = Math.Min(widget.X, 12 - widget.W);
+
+        string? ReportRef()
+        {
+            var reference = node.PropertyRef("Report");
+            var table = reference?["Table"];
+            var report = reference?["Report"] ?? reference?["Chart"];
+            return table is null || report is null ? null : Qualify(table, report);
+        }
+
+        switch (node.Type)
+        {
+            case "QB::Dashboard::Widget::Table" or "QB::Dashboard::Widget::Summary" or "QB::Dashboard::Widget::Chart":
+                widget.WidgetType = "Report";
+                widget.ReportRef = ReportRef();
+                return widget.ReportRef is null ? null : widget;
+            case "QB::Dashboard::Widget::Spacer":
+                widget.WidgetType = "Spacer";
+                return widget;
+            case "QB::Dashboard::Widget::RichText":
+                widget.WidgetType = "Text";
+                widget.Content = ResolveScalar(node, "Content") ?? "";
+                return widget;
+            case "QB::Dashboard::Widget::WebPage":
+                widget.WidgetType = "WebPage";
+                widget.Url = ResolveScalar(node, "Url");
+                return string.IsNullOrWhiteSpace(widget.Url) ? null : widget;
+            case "QB::Dashboard::Widget::Button::OpenLink":
+                widget.WidgetType = "ButtonBar";
+                widget.ButtonLabel = ResolveScalar(node, "Text") ?? "Open";
+                widget.Url = ResolveScalar(node, "Link");
+                widget.ButtonColor = NullIfBlank(ResolveScalar(node, "Color"));
+                widget.OpenInNewTab = string.Equals(ResolveScalar(node, "OpenInNewWindow"), "true", StringComparison.OrdinalIgnoreCase);
+                return string.IsNullOrWhiteSpace(widget.Url) ? null : widget;
+            case "QB::Dashboard::Widget::Button::OpenReport":
+                widget.WidgetType = "ButtonBar";
+                widget.ButtonLabel = ResolveScalar(node, "Text") ?? "Open report";
+                widget.ReportRef = ReportRef();
+                widget.ButtonColor = NullIfBlank(ResolveScalar(node, "Color"));
+                widget.OpenInNewTab = string.Equals(ResolveScalar(node, "OpenInNewWindow"), "true", StringComparison.OrdinalIgnoreCase);
+                return widget.ReportRef is null ? null : widget;
+            default:
+                return null; // Search, KPI …
+        }
+    }
+
+    /// <summary>The app's pages. A real export wraps them like it wraps forms — <c>Pages: { Resources: { $Page_X: … } }</c> — while a
+    /// hand-written one may list them directly under <c>Pages</c>; both are read.</summary>
+    private static IReadOnlyDictionary<string, QblResourceNode> PageNodes(QblResourceNode appNode)
+    {
+        var result = new Dictionary<string, QblResourceNode>(StringComparer.Ordinal);
+
+        if (appNode.Children.TryGetValue("Pages", out var raw) && raw is IReadOnlyDictionary<string, object?> wrapper)
+        {
+            if (wrapper.TryGetValue("Resources", out var resourcesRaw) && resourcesRaw is IReadOnlyDictionary<string, object?> resources)
+            {
+                foreach (var (key, value) in resources)
+                    if (value is QblResourceNode node) result[key] = node;
+            }
+            else
+            {
+                foreach (var (key, value) in wrapper)
+                    if (value is QblResourceNode node) result[key] = node;
+            }
+        }
+
+        return result;
+    }
+
+    private const int MAX_VARIABLE_NAME_LENGTH = 100;
+    private const int MAX_VARIABLE_VALUE_LENGTH = 500;
+    private const int MAX_PAGE_NAME_LENGTH = 200;
 
     /// <summary>Quickbase writes another table's id as the pseudo-field <c>[_DBID_TABLE_NAME]</c>
     /// (the table's name upper-cased, non-alphanumerics collapsed to underscores). PowerBase
@@ -296,6 +699,9 @@ public static class QblToPblConverter
         foreach (var t in tables)
             tableNameBySlug[QuickbaseTableSlug(t.Name)] = t.Name;
 
+        // Tables keep their source alias (see PblTable.AliasHint), so [_DBID_X] naming one of them already resolves as written.
+        var aliasSlugs = tables.Where(t => t.AliasHint is not null).Select(t => t.AliasHint!["_DBID_".Length..]).ToHashSet(StringComparer.Ordinal);
+
         foreach (var table in tables)
         {
             foreach (var field in table.Fields)
@@ -308,6 +714,8 @@ public static class QblToPblConverter
                 field.FormulaExpression = ReplaceOutsideStringLiterals(field.FormulaExpression, QuickbaseTableIdRef, m =>
                 {
                     var slug = m.Groups["slug"].Value;
+                    if (aliasSlugs.Contains(slug))
+                        return m.Value;
                     if (tableNameBySlug.TryGetValue(slug, out var tableName))
                         return $"Dbid(\"{tableName}\")";
 
@@ -325,6 +733,64 @@ public static class QblToPblConverter
             }
         }
     }
+
+    /// <summary>Quickbase formulas can name a field by its numeric id — <c>[1226]</c>. Each is rewritten to the field's name through the table's
+    /// source-id map; an id that does not resolve is left as written and reported (the formula then needs manual review).</summary>
+    private static void RewriteNumericFieldRefs(List<PblTable> tables, Dictionary<string, Dictionary<int, string>> fieldNameBySourceId, HashSet<string> variableNames, List<PblIssue> issues)
+    {
+        foreach (var table in tables)
+        {
+            var byId = fieldNameBySourceId.GetValueOrDefault(table.LogicalRef);
+            if (byId is null) continue;
+
+            foreach (var field in table.Fields.Where(f => string.Equals(f.TypeCode, "Formula", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(f.FormulaExpression)))
+            {
+                var unresolved = new List<string>();
+                field.FormulaExpression = ReplaceOutsideStringLiterals(field.FormulaExpression!, NumericFieldRef, m =>
+                {
+                    if (variableNames.Contains(m.Groups["id"].Value))
+                        return m.Value;
+                    if (int.TryParse(m.Groups["id"].Value, out var id) && byId.TryGetValue(id, out var name))
+                        return $"[{name}]";
+                    unresolved.Add(m.Groups["id"].Value);
+                    return m.Value;
+                });
+
+                foreach (var id in unresolved.Distinct())
+                    issues.Add(Warning("QBL_FORMULA_UNKNOWN_FIELD_ID", $"Formula field '{field.Name}' refers to field id {id}, which is not on its table; left as written for manual review.", field.LogicalRef));
+            }
+        }
+    }
+
+    /// <summary>The formulas inside form rules (a "formula is true" condition, or a mixed condition tree turned into a formula) name fields the same
+    /// way table formulas do, so they get the same numeric-id rewrite.</summary>
+    private static void RewriteRuleFormulas(List<PblForm> forms, Dictionary<string, Dictionary<int, string>> fieldNameBySourceId, HashSet<string> variableNames, List<PblIssue> issues)
+    {
+        foreach (var form in forms)
+        {
+            var byId = fieldNameBySourceId.GetValueOrDefault(form.TableRef);
+            if (byId is null) continue;
+
+            foreach (var rule in form.Rules.Where(r => r.IsExpressionMode && !string.IsNullOrWhiteSpace(r.ExpressionText)))
+            {
+                var unresolved = new List<string>();
+                rule.ExpressionText = ReplaceOutsideStringLiterals(rule.ExpressionText!, NumericFieldRef, m =>
+                {
+                    if (variableNames.Contains(m.Groups["id"].Value))
+                        return m.Value;
+                    if (int.TryParse(m.Groups["id"].Value, out var id) && byId.TryGetValue(id, out var name))
+                        return $"[{name}]";
+                    unresolved.Add(m.Groups["id"].Value);
+                    return m.Value;
+                });
+
+                foreach (var id in unresolved.Distinct())
+                    issues.Add(Warning("QBL_FORMULA_UNKNOWN_FIELD_ID", $"Form rule '{rule.Name}' refers to field id {id}, which is not on its table; left as written for manual review.", rule.LogicalRef));
+            }
+        }
+    }
+
+    private static readonly Regex NumericFieldRef = new(@"\[(?:_fid_)?(?<id>\d+)\]", RegexOptions.Compiled);
 
     private static readonly Regex QuickbaseTableIdRef = new(@"\[_DBID_(?<slug>[A-Za-z0-9_]+)\]", RegexOptions.Compiled);
 
@@ -378,42 +844,128 @@ public static class QblToPblConverter
     /// (Quickbase's own query-criteria mini-language, a different syntax entirely from
     /// PowerBase.Formula) has no translation and is flagged rather than guessed at.</summary>
     private static PblTablePermission ConvertTablePermission(
-        string tableRef, string tableName, string roleRefKey, Dictionary<string, object?> perms, List<PblIssue> issues)
+        string tableRef, string tableName, string roleRefKey, Dictionary<string, object?> perms,
+        Dictionary<int, string> fieldNameBySourceId, List<PblIssue> issues)
     {
-        return new PblTablePermission
+        var view = ParseRecordAccess(perms, "CanViewRecords", tableName, roleRefKey, fieldNameBySourceId, issues);
+        var modify = ParseRecordAccess(perms, "CanModifyRecords", tableName, roleRefKey, fieldNameBySourceId, issues);
+
+        var permission = new PblTablePermission
         {
             TableRef = tableRef,
-            ViewScope = ParseRecordAccess(perms, "CanViewRecords", tableName, roleRefKey, issues),
-            ModifyScope = ParseRecordAccess(perms, "CanModifyRecords", tableName, roleRefKey, issues),
+            ViewScope = view.Scope,
+            RecordFilter = view.Filter,
             CanAdd = GetBool(perms, "CanAddRecords"),
             CanDelete = GetBool(perms, "CanDeleteRecords"),
             CanSaveSharedReports = GetBool(perms, "CanSaveCommonReports"),
             CanEditFieldProperties = GetBool(perms, "CanEditFieldProperties"),
         };
-    }
 
-    private static string ParseRecordAccess(Dictionary<string, object?> perms, string key, string tableName, string roleRefKey, List<PblIssue> issues)
-    {
-        if (!perms.TryGetValue(key, out var raw) || raw is not Dictionary<string, object?> access)
-            return "None";
-
-        var when = access.TryGetValue("When", out var w) ? w?.ToString() : null;
-        var hasCriteria = access.TryGetValue("CustomAccessCriteria", out var crit) && crit is string s && !string.IsNullOrWhiteSpace(s);
-
-        if (hasCriteria)
+        // PowerBase has one record filter per role and table, applied to everything the role sees. A modify rule is therefore
+        // only expressible as "modify all you can see" — which is faithful when the source modify rule is Always (it is bounded by
+        // the view filter) or when it is the very same criteria as the view rule. Any other modify rule would be wider than the
+        // source if turned into AllRecords, so it stays at None (least privilege) and is reported.
+        if (modify.Scope == "AllRecords" && modify.IsCustomRule && !string.Equals(modify.CriteriaKey, view.CriteriaKey, StringComparison.Ordinal))
         {
             issues.Add(Warning(
-                "QBL_ROLE_ACCESS_CRITERIA_UNSUPPORTED",
-                $"Table '{tableName}' has a custom access filter for role '{roleRefKey}' with no PowerBase translation (Quickbase's own query-criteria syntax); importing without the filter.",
+                "QBL_ROLE_MODIFY_CRITERIA_DIFFERS",
+                $"Table '{tableName}' role '{roleRefKey}': the modify rule differs from the view rule and PowerBase cannot express two different record filters; modify access was set to none.",
                 roleRefKey));
+            permission.ModifyScope = "None";
+        }
+        else if (view.Scope == "None")
+        {
+            permission.ModifyScope = "None"; // cannot modify what you cannot see
+        }
+        else
+        {
+            permission.ModifyScope = modify.Scope;
         }
 
-        return when switch
+        return permission;
+    }
+
+    private sealed record RecordAccess(string Scope, PblFilterGroup? Filter, bool IsCustomRule, string? CriteriaKey);
+
+    /// <summary>
+    /// Quickbase's <c>When</c> is Always / Never / CustomRule; the criteria text only counts for CustomRule (every role carries
+    /// stale placeholder criteria next to Always/Never — in cares, 2,500 of them — which must be ignored, not applied). A CustomRule
+    /// that cannot be translated into a PowerBase filter becomes "no access": an access rule is never silently widened.
+    /// </summary>
+    private static RecordAccess ParseRecordAccess(
+        Dictionary<string, object?> perms, string key, string tableName, string roleRefKey,
+        Dictionary<int, string> fieldNameBySourceId, List<PblIssue> issues)
+    {
+        if (!perms.TryGetValue(key, out var raw) || raw is not Dictionary<string, object?> access)
+            return new RecordAccess("None", null, false, null);
+
+        var when = access.TryGetValue("When", out var w) ? w?.ToString() : null;
+
+        switch (when)
         {
-            "Always" => "AllRecords",
-            "Never" => "None",
-            _ => WarnUnknownAccessWhen(when, key, tableName, roleRefKey, issues),
-        };
+            case "Always":
+                return new RecordAccess("AllRecords", null, false, null);
+            case "Never":
+                return new RecordAccess("None", null, false, null);
+            case "CustomRule":
+            {
+                var criteria = access.TryGetValue("CustomAccessCriteria", out var crit) ? crit?.ToString() : null;
+                var result = QblCriteriaTranslator.Translate(criteria, id => fieldNameBySourceId.GetValueOrDefault(id));
+                if (result.Succeeded)
+                    return new RecordAccess("AllRecords", result.Filter, true, string.Concat((criteria ?? "").Where(c => !char.IsWhiteSpace(c))));
+
+                issues.Add(Warning(
+                    "QBL_ROLE_CUSTOM_RULE_UNTRANSLATABLE",
+                    $"Table '{tableName}' role '{roleRefKey}': {key} uses a custom rule that cannot be translated ({result.Problem}); the role has no record access on this table.",
+                    roleRefKey));
+                return new RecordAccess("None", null, true, null);
+            }
+            default:
+                return new RecordAccess(WarnUnknownAccessWhen(when, key, tableName, roleRefKey, issues), null, false, null);
+        }
+    }
+
+    /// <summary>Field-level <c>RolePermissions</c> (role → View/Modify/None) onto the owning role's table permission. Only fields a role is
+    /// restricted on are listed — anything not listed keeps PowerBase's default (Modify), the same as in the source.</summary>
+    private static void ApplyFieldPermissions(
+        List<PblTable> tables, Dictionary<string, QblResourceNode> tableNodeByRef,
+        Dictionary<string, Dictionary<string, string>> fieldNameByRefPerTable, List<PblRole> roles, List<PblIssue> issues)
+    {
+        var roleByRef = roles.ToDictionary(r => r.LogicalRef, StringComparer.Ordinal);
+
+        foreach (var table in tables)
+        {
+            var names = fieldNameByRefPerTable[table.LogicalRef];
+            foreach (var (fieldRef, fieldNode) in tableNodeByRef[table.LogicalRef].ChildMap("Fields"))
+            {
+                if (!fieldNode.Properties.TryGetValue("RolePermissions", out var rpRaw) || rpRaw is not Dictionary<string, object?> byRole)
+                    continue;
+                if (!names.TryGetValue(fieldRef, out var fieldName))
+                    continue;
+
+                foreach (var (roleRef, accessRaw) in byRole)
+                {
+                    var access = accessRaw?.ToString();
+                    if (access is not ("View" or "Modify" or "None"))
+                    {
+                        issues.Add(Warning("QBL_FIELD_PERMISSION_UNKNOWN", $"Field '{fieldName}' role '{roleRef}': access '{access}' is not View/Modify/None; not applied.", fieldRef));
+                        continue;
+                    }
+                    if (access == "Modify")
+                        continue;
+
+                    var permission = roleByRef.GetValueOrDefault(roleRef)?.TablePermissions.FirstOrDefault(p => p.TableRef == table.LogicalRef);
+                    if (permission is null)
+                    {
+                        issues.Add(Warning("QBL_FIELD_PERMISSION_ROLE_UNRESOLVED", $"Field '{fieldName}': role '{roleRef}' has no permission entry for table '{table.Name}'; field restriction not applied.", fieldRef));
+                        continue;
+                    }
+
+                    permission.FieldAccessLevel = "CustomAccess";
+                    permission.FieldPermissions.Add(new PblFieldPermission { FieldName = fieldName, Access = access });
+                }
+            }
+        }
     }
 
     private static string WarnUnknownAccessWhen(string? when, string key, string tableName, string roleRefKey, List<PblIssue> issues)
@@ -448,9 +1000,9 @@ public static class QblToPblConverter
         public Dictionary<string, List<SummaryFieldInfo>> SummariesByReferenceFieldRef { get; } = new(StringComparer.Ordinal);
     }
 
-    private sealed record ReferenceFieldInfo(string FieldRef, string Name, string? Label, bool IsRequired);
-    private sealed record LookupFieldInfo(string FieldRef, string Name, string? Label, string? TargetFieldRef);
-    private sealed record SummaryFieldInfo(string FieldRef, string Name, string? Label, string Function, string? TargetFieldRef);
+    private sealed record ReferenceFieldInfo(string FieldRef, string Name, string? Label, bool IsRequired, int? SourceId = null, string? FilterFieldRef = null, string? MatchFieldRef = null, string? Description = null);
+    private sealed record LookupFieldInfo(string FieldRef, string Name, string? Label, string? TargetFieldRef, int? SourceId = null, string? Description = null);
+    private sealed record SummaryFieldInfo(string FieldRef, string Name, string? Label, string Function, string? TargetFieldRef, string? Query = null, int? SourceId = null, string? Description = null);
 
     /// <summary>If the raw target ref is one of <paramref name="tableRef"/>'s Address shadow
     /// sub-component fields (see the per-table maps built in <see cref="Convert"/>), redirects it
@@ -486,7 +1038,15 @@ public static class QblToPblConverter
                     issues.Add(Warning("QBL_REFERENCE_MISSING_RELATIONSHIP", $"Reference field '{name}' has no resolvable relationship; skipped.", fieldRef));
                     return;
                 }
-                collector.References[relRef] = new ReferenceFieldInfo(fieldRef, name, NullIfBlank(label), fieldNode.PropertyBool("IsRequired"));
+                // "Conditional values": only parent records whose MatchField equals this record's FilterField are offered.
+                string? filterFieldRef = null, matchFieldRef = null;
+                if (fieldNode.Properties.TryGetValue("Reference", out var referenceBag) && referenceBag is Dictionary<string, object?> referenceMap
+                    && referenceMap.TryGetValue("ConditionalValues", out var conditional) && conditional is Dictionary<string, object?> conditionalMap)
+                {
+                    filterFieldRef = (conditionalMap.GetValueOrDefault("FilterField") as QblRef)?["Field"];
+                    matchFieldRef = (conditionalMap.GetValueOrDefault("MatchField") as QblRef)?["Field"];
+                }
+                collector.References[relRef] = new ReferenceFieldInfo(fieldRef, name, NullIfBlank(label), fieldNode.PropertyBool("IsRequired"), fieldNode.SourceId, filterFieldRef, matchFieldRef, NullIfBlank(ResolveScalar(fieldNode, "Comments")));
                 return;
             }
             case "QB::Field::Lookup":
@@ -500,7 +1060,7 @@ public static class QblToPblConverter
                 var targetFieldRef = NestedRef(fieldNode, "Lookup", "TargetField")?["Field"];
                 if (!collector.Lookups.TryGetValue(relRef, out var list))
                     collector.Lookups[relRef] = list = [];
-                list.Add(new LookupFieldInfo(fieldRef, name, NullIfBlank(label), targetFieldRef));
+                list.Add(new LookupFieldInfo(fieldRef, name, NullIfBlank(label), targetFieldRef, fieldNode.SourceId, NullIfBlank(ResolveScalar(fieldNode, "Comments"))));
                 return;
             }
             case "QB::Field::Summary":
@@ -537,7 +1097,8 @@ public static class QblToPblConverter
                 var referenceFieldKey = Qualify(referenceFieldTableRef, referenceFieldRef);
                 if (!collector.SummariesByReferenceFieldRef.TryGetValue(referenceFieldKey, out var slist))
                     collector.SummariesByReferenceFieldRef[referenceFieldKey] = slist = [];
-                slist.Add(new SummaryFieldInfo(fieldRef, name, NullIfBlank(label), function, targetFieldRef));
+                var query = summaryProps?.TryGetValue("Query", out var q) == true ? NullIfBlank(q?.ToString()) : null;
+                slist.Add(new SummaryFieldInfo(fieldRef, name, NullIfBlank(label), function, targetFieldRef, query, fieldNode.SourceId, NullIfBlank(ResolveScalar(fieldNode, "Comments"))));
                 return;
             }
             default:
@@ -564,6 +1125,34 @@ public static class QblToPblConverter
         "CombinedText" => "CombinedText",
         _ => null,
     };
+
+    /// <summary>A Reference field can share its name with a PowerBase system field ("Last Modified By" is a common one, pointing
+    /// at a users table) or with another field on the child table. PowerBase needs names and labels unique per table, so the
+    /// reference field is renamed with a number — same treatment as a repeated field label — instead of blocking the import.</summary>
+    private static void EnsureUniqueReferenceName(
+        PblRelationship relationship, string relRef, string referenceFieldRef, Dictionary<string, string> fieldNameByRef, HashSet<string> seenFieldNames,
+        List<PblTable> tables, List<PblIssue> issues)
+    {
+        var systemNames = QblFieldTypeMap.SystemFieldNames.Values;
+        bool Taken(string name) => seenFieldNames.Contains(name) || systemNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+
+        var original = relationship.ReferenceFieldName;
+        var unique = original;
+        for (var n = 2; Taken(unique); n++)
+            unique = $"{original} ({n})";
+
+        seenFieldNames.Add(unique);
+        if (string.Equals(unique, original, StringComparison.Ordinal))
+            return;
+
+        var suffix = unique[original.Length..];
+        relationship.ReferenceFieldName = unique;
+        relationship.ReferenceFieldLabel = (relationship.ReferenceFieldLabel ?? original) + suffix;
+        fieldNameByRef[referenceFieldRef] = unique;
+
+        var tableName = tables.FirstOrDefault(t => t.LogicalRef == relationship.ChildTableRef)?.Name ?? relationship.ChildTableRef;
+        issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Reference field '{original}' clashes with another field on table '{tableName}'; imported as '{unique}'.", relRef));
+    }
 
     /// <summary>Builds a relationship's Reference-field identity only — this part never depends
     /// on another relationship, so it's always resolvable in one pass. Lookups/Summaries are
@@ -598,6 +1187,7 @@ public static class QblToPblConverter
             ReferenceFieldName = referenceInfo.Name,
             ReferenceFieldLabel = referenceInfo.Label,
             IsReferenceRequired = referenceInfo.IsRequired,
+            ReferenceFieldSourceId = referenceInfo.SourceId,
         };
 
         // Enrich Pass A's field-name maps so Pass C (Reports) — and other relationships'
@@ -668,15 +1258,17 @@ public static class QblToPblConverter
                     continue;
 
                 var childSeenNames = seenFieldNamesByTableRef.GetValueOrDefault(rel.ChildTableRef);
-                if (childSeenNames is not null && !childSeenNames.Add(lookup.Name))
+                if (childSeenNames is not null)
                 {
-                    issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Lookup field '{lookup.Name}' is already used on table '{tableNameByRef.GetValueOrDefault(rel.ChildTableRef, rel.ChildTableRef)}'; skipped.", lookup.FieldRef));
-                    pendingLookups.RemoveAt(i);
-                    progress = true;
-                    continue;
+                    var uniqueLookupName = NumberedName(childSeenNames, lookup.Name);
+                    if (!string.Equals(uniqueLookupName, lookup.Name, StringComparison.Ordinal))
+                    {
+                        issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Lookup field '{lookup.Name}' is already used on table '{tableNameByRef.GetValueOrDefault(rel.ChildTableRef, rel.ChildTableRef)}'; imported as '{uniqueLookupName}'.", lookup.FieldRef));
+                        lookup = lookup with { Label = (lookup.Label ?? lookup.Name) + uniqueLookupName[lookup.Name.Length..], Name = uniqueLookupName };
+                    }
                 }
 
-                rel.Lookups.Add(new PblLookupField { LogicalRef = lookup.FieldRef, Name = lookup.Name, Label = lookup.Label, SourceFieldName = sourceFieldName, SourceSubField = lookupTargetSubField });
+                rel.Lookups.Add(new PblLookupField { LogicalRef = lookup.FieldRef, Name = lookup.Name, Label = lookup.Label, SourceFieldName = sourceFieldName, SourceSubField = lookupTargetSubField, SourceId = lookup.SourceId, Description = lookup.Description });
                 fieldNameByRefPerTable[rel.ChildTableRef][lookup.FieldRef] = lookup.Name;
                 pendingLookups.RemoveAt(i);
                 progress = true;
@@ -701,15 +1293,17 @@ public static class QblToPblConverter
                     continue;
 
                 var parentSeenNames = seenFieldNamesByTableRef.GetValueOrDefault(rel.ParentTableRef);
-                if (parentSeenNames is not null && !parentSeenNames.Add(summary.Name))
+                if (parentSeenNames is not null)
                 {
-                    issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Summary field '{summary.Name}' is already used on table '{tableNameByRef.GetValueOrDefault(rel.ParentTableRef, rel.ParentTableRef)}'; skipped.", summary.FieldRef));
-                    pendingSummaries.RemoveAt(i);
-                    progress = true;
-                    continue;
+                    var uniqueSummaryName = NumberedName(parentSeenNames, summary.Name);
+                    if (!string.Equals(uniqueSummaryName, summary.Name, StringComparison.Ordinal))
+                    {
+                        issues.Add(Warning("QBL_DUPLICATE_FIELD_NAME", $"Summary field '{summary.Name}' is already used on table '{tableNameByRef.GetValueOrDefault(rel.ParentTableRef, rel.ParentTableRef)}'; imported as '{uniqueSummaryName}'.", summary.FieldRef));
+                        summary = summary with { Label = (summary.Label ?? summary.Name) + uniqueSummaryName[summary.Name.Length..], Name = uniqueSummaryName };
+                    }
                 }
 
-                rel.Summaries.Add(new PblSummaryField { LogicalRef = summary.FieldRef, Name = summary.Name, Label = summary.Label, Function = summary.Function, TargetFieldName = targetFieldName, TargetSubField = summaryTargetSubField });
+                rel.Summaries.Add(new PblSummaryField { LogicalRef = summary.FieldRef, Name = summary.Name, Label = summary.Label, Function = summary.Function, TargetFieldName = targetFieldName, TargetSubField = summaryTargetSubField, QueryCriteria = summary.Query, SourceId = summary.SourceId, Description = summary.Description });
                 fieldNameByRefPerTable[rel.ParentTableRef][summary.FieldRef] = summary.Name;
                 pendingSummaries.RemoveAt(i);
                 progress = true;
@@ -721,6 +1315,15 @@ public static class QblToPblConverter
 
         foreach (var (_, summary, _) in pendingSummaries)
             issues.Add(Warning("QBL_SUMMARY_FIELD_UNRESOLVED", $"Summary field '{summary.Name}' references a child field not available in this import phase; skipped.", summary.FieldRef));
+    }
+
+    /// <summary><paramref name="name"/>, or "name (2)", "name (3)"… when it is already in <paramref name="seen"/>; the returned name is added to the set.</summary>
+    private static string NumberedName(HashSet<string> seen, string name)
+    {
+        var candidate = name;
+        for (var n = 2; !seen.Add(candidate); n++)
+            candidate = $"{name} ({n})";
+        return candidate;
     }
 
     private static QblRef? NestedRef(QblResourceNode node, string propertyName, string refPropertyName)
@@ -752,13 +1355,26 @@ public static class QblToPblConverter
 
         if (QblFieldTypeMap.TryMapScalar(type, out var scalarTypeCode))
         {
+            var mapped = QblFieldMapper.Map(fieldNode, scalarTypeCode);
+            foreach (var note in mapped.Notes)
+                issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {note}", fieldRef));
+
             return new PblField
             {
                 LogicalRef = Qualify(tableRef, fieldRef),
                 Name = name,
                 Label = NullIfBlank(label),
                 TypeCode = scalarTypeCode,
-                IsRequired = fieldNode.PropertyBool("IsRequired"),
+                SourceId = fieldNode.SourceId,
+                IsRequired = mapped.IsRequired,
+                Settings = mapped.SettingsJson,
+                DefaultValue = mapped.DefaultValue,
+                Description = mapped.Description,
+                HelpText = mapped.HelpText,
+                IsUnique = mapped.IsUnique,
+                IsAuditable = mapped.IsAuditable,
+                IsSearchable = mapped.IsSearchable,
+                IsReportable = mapped.IsReportable,
             };
         }
 
@@ -767,9 +1383,30 @@ public static class QblToPblConverter
             var formula = ResolveScalar(fieldNode, "Formula");
             if (string.IsNullOrWhiteSpace(formula))
             {
-                issues.Add(Warning("QBL_EMPTY_FORMULA", $"Formula field '{name}' has no expression; skipped.", fieldRef));
-                return null;
+                // PowerBase will not save a blank expression; a typed constant that evaluates to blank gives the same result as
+                // Quickbase's empty formula, and keeps the field (and everything that points at it).
+                formula = BlankFormulaFor(resultType);
+                if (formula is null)
+                {
+                    issues.Add(Warning("QBL_EMPTY_FORMULA", $"Formula field '{name}' has no expression; skipped.", fieldRef));
+                    return null;
+                }
+                issues.Add(Warning("QBL_EMPTY_FORMULA", $"Formula field '{name}' has no expression in the source; imported with a blank result ({formula}).", fieldRef));
             }
+
+            // The source type, not only the compiled result, picks Formula_Url / _Email / _Phone / _RichText.
+            var variant = type switch
+            {
+                "QB::Field::URL::Formula" => "Url",
+                "QB::Field::Email::Formula" => "Email",
+                "QB::Field::PhoneNumber::Formula" => "Phone",
+                "QB::Field::RichText::Formula" => "RichText",
+                _ => null,
+            };
+            var mapperVariant = variant ?? resultType switch { "TextList" => "MultiSelect", _ => resultType };
+            var mappedFormula = QblFieldMapper.Map(fieldNode, "Formula_" + mapperVariant);
+            foreach (var note in mappedFormula.Notes)
+                issues.Add(Warning("QBL_FIELD_SETTING_NOT_CARRIED", $"Field '{name}': {note}", fieldRef));
 
             return new PblField
             {
@@ -779,6 +1416,14 @@ public static class QblToPblConverter
                 TypeCode = "Formula",
                 ResultType = resultType,
                 FormulaExpression = formula,
+                FormulaVariant = variant,
+                SourceId = fieldNode.SourceId,
+                Settings = mappedFormula.SettingsJson,
+                Description = mappedFormula.Description,
+                HelpText = mappedFormula.HelpText,
+                IsAuditable = mappedFormula.IsAuditable,
+                IsSearchable = mappedFormula.IsSearchable,
+                IsReportable = mappedFormula.IsReportable,
             };
         }
 
@@ -812,6 +1457,7 @@ public static class QblToPblConverter
         string reportRef,
         QblResourceNode reportNode,
         Dictionary<string, string> fieldNameByRef,
+        Dictionary<int, string> fieldNameBySourceId,
         List<PblIssue> issues)
     {
         var reportType = reportNode.Type switch
@@ -822,6 +1468,7 @@ public static class QblToPblConverter
             // client-side view toggle on Table reports) — a QuickBase grid-edit report imports
             // as a plain Table report.
             "QB::Report::GridEdit" => "Table",
+            "QB::Chart::Pie" or "QB::Chart::StackedBar" or "QB::Chart::Gauge" => "Chart",
             _ => null,
         };
 
@@ -842,7 +1489,15 @@ public static class QblToPblConverter
         var name = ResolveScalar(reportNode, "Name") ?? reportRef;
         var report = new PblReport { LogicalRef = Qualify(tableRef, reportRef), Name = name, ReportType = reportType };
 
-        report.Columns.AddRange(ResolveReportColumns(reportNode, fieldNameByRef, reportRef, issues));
+        if (reportType == "Chart")
+        {
+            if (!ApplyChartReport(report, reportNode, fieldNameByRef, issues, reportRef))
+                return null;
+        }
+        else if (reportType == "Summary")
+            ApplySummaryReport(report, reportNode, fieldNameByRef, issues, reportRef);
+        else
+            report.Columns.AddRange(ResolveReportColumns(reportNode, fieldNameByRef, reportRef, issues));
 
         var sortKey = reportNode.Properties.ContainsKey("SortAndGroup") ? "SortAndGroup" : "Sort";
         if (reportNode.Properties.TryGetValue(sortKey, out var sortRaw) && sortRaw is List<object?> sortList)
@@ -857,12 +1512,80 @@ public static class QblToPblConverter
                     continue;
 
                 var descending = string.Equals(sortItem.TryGetValue("SortOrder", out var so) ? so?.ToString() : null, "Descending", StringComparison.OrdinalIgnoreCase);
-                report.SortFields.Add(new PblSortSpec { FieldName = fieldName, Desc = descending });
+                // "Unknown"/"None" = sort only; Value/Month/… = also group, combining values that way.
+                var groupBy = sortItem.TryGetValue("GroupBy", out var gb) ? gb?.ToString() : null;
+                var isGroup = !string.IsNullOrWhiteSpace(groupBy) && !string.Equals(groupBy, "Unknown", StringComparison.OrdinalIgnoreCase) && !string.Equals(groupBy, "None", StringComparison.OrdinalIgnoreCase);
+                report.SortFields.Add(new PblSortSpec { FieldName = fieldName, Desc = descending, IsGroup = isGroup, GroupMode = isGroup ? GroupMode(groupBy) : null });
             }
         }
 
+        ApplyReportOptions(report, reportNode, fieldNameByRef, fieldNameBySourceId, issues, reportRef);
         return report;
     }
+
+    /// <summary>Quickbase "group by" value → PowerBase combine mode; anything else groups by equal values.</summary>
+    private static string GroupMode(string? qb) => qb switch
+    {
+        "Month" => "Month", "Day" => "Day", "Week" => "Week", "Quarter" => "Quarter", "Year" => "Year", "Decade" => "Decade",
+        "FirstWord" => "FirstWord", "FirstLetter" => "FirstLetter",
+        _ => "EqualValues",
+    };
+
+    /// <summary>Report filters, totals, grouping display, column header text, grid options, dynamic filters and role visibility.
+    /// A filter that cannot be translated is reported and the report is imported without it (never with a wrong one).</summary>
+    private static void ApplyReportOptions(PblReport report, QblResourceNode node, Dictionary<string, string> fieldNameByRef, Dictionary<int, string> fieldNameBySourceId, List<PblIssue> issues, string reportRef)
+    {
+        report.Description = NullIfBlank(ResolveScalar(node, "Description"));
+        report.ShowDescription = node.PropertyBool("ShowDescription");
+
+        if (node.Properties.TryGetValue("Filters", out var filtersRaw) && filtersRaw is IReadOnlyDictionary<string, object?> filters)
+        {
+            var criteria = filters.TryGetValue("Criteria", out var c) ? c?.ToString() : null;
+            if (!string.IsNullOrWhiteSpace(criteria) && !string.Equals(criteria.Trim(), "Default", StringComparison.OrdinalIgnoreCase))
+            {
+                var result = QblCriteriaTranslator.Translate(criteria, id => fieldNameBySourceId.GetValueOrDefault(id), allowPrompts: true, allowRelativeDates: true);
+                if (result.Succeeded) report.Filter = result.Filter;
+                else issues.Add(Warning("QBL_REPORT_FILTER_UNTRANSLATABLE", $"Report '{report.Name}': its filter could not be translated ({result.Problem}); imported without the filter.", reportRef));
+            }
+
+            if (filters.TryGetValue("AllowQuickSearch", out var qs) && qs is bool quick) report.AllowQuickSearch = quick;
+
+            if (filters.TryGetValue("DynamicFields", out var dyn))
+            {
+                if (dyn is IEnumerable<object?> list && dyn is not string)
+                {
+                    foreach (var item in list)
+                        if ((item as QblRef)?["Field"] is { } dynRef && fieldNameByRef.TryGetValue(dynRef, out var dynName))
+                            report.DynamicFilterFieldNames.Add(dynName);
+                    if (report.DynamicFilterFieldNames.Count > 0) report.DynamicFilterType = "Custom";
+                }
+                else if (string.Equals(dyn?.ToString(), "None", StringComparison.OrdinalIgnoreCase))
+                {
+                    report.DynamicFilterType = "None";
+                }
+            }
+        }
+
+        if (node.PropertyBool("HideTotals")) report.HideTotals = true;
+
+        report.GroupDefaultCollapsed = ResolveScalar(node, "GroupDisplay") switch { "Collapsed" => true, "Expanded" => false, _ => null };
+
+        var header = ResolveScalar(node, "ColumnHeaderText");
+        if (header is "Wrap" or "Truncate") report.ColumnHeaderText = header;
+
+        if (node.Properties.ContainsKey("AllowEditingRecords") && !node.PropertyBool("AllowEditingRecords", true)) report.ShowEditIcon = false;
+        if (node.Properties.ContainsKey("AllowViewingRecords") && !node.PropertyBool("AllowViewingRecords", true)) report.ShowViewIcon = false;
+        if (node.PropertyBool("DisableDeleteCheckbox")) report.DisableBulkDelete = true;
+        if (ResolveScalar(node, "InlineEditing") is "false" or "Off" or "No" or "Disabled") report.DisableGridEdit = true;
+
+        if (node.Properties.TryGetValue("RolePermissions", out var rpRaw) && rpRaw is IReadOnlyDictionary<string, object?> byRole)
+        {
+            report.VisibleToRoleRefs = byRole
+                .Where(kv => kv.Value is true || string.Equals(kv.Value?.ToString(), "true", StringComparison.OrdinalIgnoreCase))
+                .Select(kv => kv.Key).ToList();
+        }
+    }
+
 
     /// <summary>QBL's <c>Columns</c> property is either an explicit list of field <c>!Ref</c>s,
     /// or the literal string <c>"Default"</c> meaning "show every field in the table's own order".
@@ -872,6 +1595,181 @@ public static class QblToPblConverter
     /// sturdier one: enumerating every field instead would make the table's main view depend on
     /// all of them importing successfully, so one formula that failed to translate would take
     /// "List All" down with it.</summary>
+    /// <summary>A Quickbase summary report's grouping (<c>GroupingAndCrosstabs.Rows</c> and the crosstab column) and its summarize columns
+    /// (<c>Summary::Column</c>: a function over a field, or the record count). PowerBase needs at least one group; when the source has none
+    /// that can be created the importer groups by Record ID# so the report still exists and can be repaired.</summary>
+    private static void ApplySummaryReport(PblReport report, QblResourceNode node, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues, string reportRef)
+    {
+        if (node.Properties.TryGetValue("GroupingAndCrosstabs", out var gcRaw) && gcRaw is IReadOnlyDictionary<string, object?> gc)
+        {
+            if (gc.TryGetValue("Rows", out var rowsRaw) && rowsRaw is IEnumerable<object?> rows && rowsRaw is not string)
+            {
+                foreach (var row in rows)
+                {
+                    if (row is not IReadOnlyDictionary<string, object?> r) continue;
+                    var group = SummaryGroup(r, fieldNameByRef, report.Name, issues, reportRef);
+                    if (group is not null) report.SummaryRows.Add(group);
+                }
+            }
+
+            if (gc.TryGetValue("Crosstabs", out var ctRaw) && ctRaw is IReadOnlyDictionary<string, object?> ct)
+                report.SummaryCrosstab = SummaryGroup(ct, fieldNameByRef, report.Name, issues, reportRef);
+        }
+
+        foreach (var (_, column) in node.ChildMap("Columns"))
+        {
+            if (!string.Equals(column.Type, "QB::Report::Summary::Column", StringComparison.OrdinalIgnoreCase)) continue;
+
+            // "CountOfRecords" is the record count PowerBase always shows; anything else is a field reference.
+            var fieldRef = column.PropertyRef("Source")?["Field"];
+            if (fieldRef is null) continue;
+            if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
+            {
+                issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Summary report '{report.Name}': a summarize column uses a field not available in this import phase; skipped.", reportRef));
+                continue;
+            }
+
+            var function = ResolveScalar(column, "SummarizeBy") switch
+            {
+                "Total" => "Sum", "Average" => "Avg", "Maximum" => "Max", "Minimum" => "Min", _ => null,
+            };
+            if (function is null)
+            {
+                issues.Add(Warning("QBL_UNSUPPORTED_SUMMARY_REPORT_FUNCTION", $"Summary report '{report.Name}': summarize function '{ResolveScalar(column, "SummarizeBy")}' has no PowerBase equivalent; column skipped.", reportRef));
+                continue;
+            }
+
+            var displayAs = string.Equals(ResolveScalar(column, "DisplayAs"), "PercentOfColumnTotal", StringComparison.OrdinalIgnoreCase) ? "PercentOfColumnTotal" : "Normal";
+            report.Aggregations.Add(new PblSummaryAggregation { FieldName = fieldName, Function = function, DisplayAs = displayAs });
+        }
+    }
+
+    private static IReadOnlyDictionary<string, object?>? AsMap(object? value) => value as IReadOnlyDictionary<string, object?>;
+
+    private static IReadOnlyDictionary<string, object?>? Prop(QblResourceNode node, string name) =>
+        node.Properties.TryGetValue(name, out var v) ? AsMap(v) : null;
+
+    /// <summary>Pie, StackedBar and Gauge charts → a PowerBase chart report. Returns false (with the reason reported) when the chart cannot be
+    /// expressed: it is grouped by a report formula, or it is a gauge that counts records (PowerBase's gauge measures a field).</summary>
+    private static bool ApplyChartReport(PblReport report, QblResourceNode node, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues, string reportRef)
+    {
+        var chart = new PblChart();
+        var details = Prop(node, "DataDetails");
+
+        PblSummaryGroup? Group(IReadOnlyDictionary<string, object?>? item, string what)
+        {
+            if (item is null) return null;
+            var source = item.TryGetValue("Source", out var s) ? s as QblRef : null;
+            if (source is null) return null;
+            var fieldRef = source["Field"];
+            if (fieldRef is null)
+            {
+                issues.Add(Warning("QBL_UNSUPPORTED_CHART_GROUPING", $"Chart '{report.Name}': its {what} is a report formula, which PowerBase charts cannot group by; chart skipped.", reportRef));
+                return new PblSummaryGroup { FieldName = "" };
+            }
+            if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
+            {
+                issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Chart '{report.Name}': its {what} uses a field not available in this import phase; chart skipped.", reportRef));
+                return new PblSummaryGroup { FieldName = "" };
+            }
+            var groupBy = item.TryGetValue("GroupBy", out var gb) ? gb?.ToString() : null;
+            return new PblSummaryGroup { FieldName = fieldName, GroupMode = GroupMode(groupBy) };
+        }
+
+        void Aggregate(object? source, string? summarizeBy)
+        {
+            var fieldRef = (source as QblRef)?["Field"];
+            if (fieldRef is null || !fieldNameByRef.TryGetValue(fieldRef, out var fieldName)) return; // CountOfRecords (the default) or unavailable
+            var function = summarizeBy switch { "Total" or "Sum" => "Sum", "Average" => "Avg", "Maximum" => "Max", "Minimum" => "Min", _ => null };
+            if (function is not null)
+                report.Aggregations.Add(new PblSummaryAggregation { FieldName = fieldName, Function = function });
+        }
+
+        switch (node.Type)
+        {
+            case "QB::Chart::Pie":
+            {
+                chart.ChartType = "Pie";
+                chart.Category = Group(AsMap(details?.GetValueOrDefault("Series")), "slices");
+                var summarize = details?.GetValueOrDefault("SummarizeBy")?.ToString();
+                if (details is not null && details.TryGetValue("DataSource", out var ds)) Aggregate(ds, summarize);
+                chart.DataLabelsVisible = !string.Equals(details?.GetValueOrDefault("DataLabels")?.ToString(), "None", StringComparison.OrdinalIgnoreCase) && details?.GetValueOrDefault("DataLabels") is not null;
+                var sorting = Prop(node, "Sorting");
+                chart.SortBy = string.Equals(sorting?.GetValueOrDefault("SortBy")?.ToString(), "Category", StringComparison.OrdinalIgnoreCase) ? "Labels" : "Values";
+                chart.SortDirection = string.Equals(sorting?.GetValueOrDefault("Order")?.ToString(), "Descending", StringComparison.OrdinalIgnoreCase) ? "Desc" : "Asc";
+                break;
+            }
+            case "QB::Chart::StackedBar":
+            {
+                chart.ChartType = "StackedBar";
+                chart.Category = Group(AsMap(details?.GetValueOrDefault("CategoryAxis")), "category axis");
+                chart.Series = Group(AsMap(details?.GetValueOrDefault("Series")), "series");
+                var dataAxis = AsMap(details?.GetValueOrDefault("DataAxis"));
+                if (dataAxis?.GetValueOrDefault("Data") is IEnumerable<object?> data && dataAxis.GetValueOrDefault("Data") is not string)
+                    foreach (var d in data)
+                        if (AsMap(d) is { } dm) Aggregate(dm.GetValueOrDefault("Source"), dm.GetValueOrDefault("SummarizeBy")?.ToString());
+                var goal = AsMap(details?.GetValueOrDefault("GoalLine"));
+                if (goal is not null && decimal.TryParse(goal.GetValueOrDefault("Goal")?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var goalValue) && goalValue != 0)
+                {
+                    chart.GoalValue = goalValue;
+                    chart.GoalLabel = NullIfBlank(goal.GetValueOrDefault("Label")?.ToString());
+                }
+                chart.DataLabelsVisible = !string.Equals(details?.GetValueOrDefault("DataLabels")?.ToString(), "None", StringComparison.OrdinalIgnoreCase) && details?.GetValueOrDefault("DataLabels") is not null;
+                var sorting = AsMap(details?.GetValueOrDefault("Sorting"));
+                chart.SortBy = string.Equals(sorting?.GetValueOrDefault("SortBy")?.ToString(), "Category", StringComparison.OrdinalIgnoreCase) ? "Labels" : "Values";
+                chart.SortDirection = string.Equals(sorting?.GetValueOrDefault("Direction")?.ToString(), "Descending", StringComparison.OrdinalIgnoreCase) ? "Desc" : "Asc";
+                break;
+            }
+            default: // Gauge
+            {
+                chart.ChartType = "Gauge";
+                var data = Prop(node, "Data");
+                var fieldRef = (data?.GetValueOrDefault("Source") as QblRef)?["Field"];
+                if (fieldRef is null)
+                {
+                    issues.Add(Warning("QBL_UNSUPPORTED_GAUGE_COUNT", $"Gauge '{report.Name}' counts records; PowerBase's gauge measures a field (sum, average, max or min), so it was not created.", reportRef));
+                    return false;
+                }
+                if (!fieldNameByRef.TryGetValue(fieldRef, out var gaugeField))
+                {
+                    issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Gauge '{report.Name}' measures a field not available in this import phase; skipped.", reportRef));
+                    return false;
+                }
+                chart.GaugeFieldName = gaugeField;
+                chart.GaugeFunction = data?.GetValueOrDefault("SummarizeBy")?.ToString() switch { "Average" => "Avg", "Maximum" => "Max", "Minimum" => "Min", _ => "Sum" };
+                var limits = Prop(node, "GaugeLimits");
+                if (decimal.TryParse(limits?.GetValueOrDefault("Goal")?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var gaugeGoal) && gaugeGoal > 0)
+                    chart.GoalValue = gaugeGoal;
+                break;
+            }
+        }
+
+        if (chart.ChartType != "Gauge" && (chart.Category is null || string.IsNullOrEmpty(chart.Category.FieldName)))
+        {
+            if (chart.Category is null)
+                issues.Add(Warning("QBL_CHART_WITHOUT_CATEGORY", $"Chart '{report.Name}' has no field to group by; chart skipped.", reportRef));
+            return false;
+        }
+        if (chart.Series is { FieldName: "" }) return false;
+
+        report.Chart = chart;
+        return true;
+    }
+
+    private static PblSummaryGroup? SummaryGroup(IReadOnlyDictionary<string, object?> item, Dictionary<string, string> fieldNameByRef, string reportName, List<PblIssue> issues, string reportRef)
+    {
+        var fieldRef = (item.TryGetValue("Source", out var s) ? s as QblRef : null)?["Field"];
+        if (fieldRef is null) return null; // "None" crosstab, or a count source
+        if (!fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
+        {
+            issues.Add(Warning("QBL_REPORT_FIELD_UNAVAILABLE", $"Summary report '{reportName}': a group uses a field not available in this import phase; skipped.", reportRef));
+            return null;
+        }
+
+        var groupBy = item.TryGetValue("GroupBy", out var gb) ? gb?.ToString() : null;
+        return new PblSummaryGroup { FieldName = fieldName, GroupMode = GroupMode(groupBy) };
+    }
+
     private static List<string> ResolveReportColumns(
         QblResourceNode reportNode,
         Dictionary<string, string> fieldNameByRef,
@@ -914,6 +1812,130 @@ public static class QblToPblConverter
     /// imported) and a <c>Resources</c> child holding the actual form nodes. Only
     /// <c>QB::FormV2</c> nodes are returned — the legacy <c>QB::Form</c> representation
     /// (confirmed to describe the same form, just older) is intentionally skipped.</summary>
+    /// <summary>The table's <c>Forms.Properties.RoleDefaults</c>: for Everyone and for each role, the form to edit and to add with. "Default" and
+    /// "UseRoleSettings" are not choices and are left out.</summary>
+    private static IEnumerable<PblFormRoleDefault> ConvertFormRoleDefaults(QblResourceNode tableNode, string tableRef)
+    {
+        if (!tableNode.Children.TryGetValue("Forms", out var formsRaw) || formsRaw is not Dictionary<string, object?> wrapper
+            || !wrapper.TryGetValue("Properties", out var propsRaw) || propsRaw is not Dictionary<string, object?> props
+            || !props.TryGetValue("RoleDefaults", out var defaultsRaw) || defaultsRaw is not Dictionary<string, object?> defaults)
+            yield break;
+
+        foreach (var (roleKey, value) in defaults)
+        {
+            if (value is not Dictionary<string, object?> choice) continue;
+            string? FormRef(string key) => choice.GetValueOrDefault(key) is QblRef r && r["FormV2"] is { } formRef ? Qualify(tableRef, formRef) : null;
+            var edit = FormRef("EditForm");
+            var add = FormRef("AddForm");
+            if (edit is null && add is null) continue;
+            yield return new PblFormRoleDefault
+            {
+                TableRef = tableRef,
+                RoleRef = string.Equals(roleKey, "Everyone", StringComparison.Ordinal) ? null : roleKey,
+                EditFormRef = edit,
+                AddFormRef = add,
+            };
+        }
+    }
+
+    /// <summary>A table's <c>ConnectedData</c>: where its records come from (another Quickbase application's table), how often they are
+    /// refreshed, and which of this table's fields hold which source column.</summary>
+    private static PblConnectedTable? ConvertConnectedTable(
+        QblResourceNode tableNode, PblTable table, IReadOnlyDictionary<string, QblResourceNode>? external, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues)
+    {
+        if (!tableNode.Properties.TryGetValue("ConnectedData", out var raw) || raw is not Dictionary<string, object?> data)
+            return null;
+        if (!string.Equals(data.GetValueOrDefault("Connected")?.ToString(), "true", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var source = data.GetValueOrDefault("DataSource") as QblRef;
+        var dataSourceRef = source?["DataSource"];
+        var recordSetRef = source?["RecordSet"];
+        QblResourceNode? recordSet = null;
+        if (dataSourceRef is not null && recordSetRef is not null && external is not null && external.TryGetValue(dataSourceRef, out var dataSource))
+            dataSource.ChildMap("RecordSets").TryGetValue(recordSetRef, out recordSet);
+        if (dataSourceRef is null || recordSet is null)
+        {
+            issues.Add(Warning("QBL_CONNECTED_TABLE_SOURCE_MISSING", $"Table '{table.Name}' is a connected table whose source definition is not in the file; it is imported as an ordinary table.", table.LogicalRef));
+            return null;
+        }
+
+        var columns = recordSet.ChildMap("Columns");
+        var connected = new PblConnectedTable
+        {
+            TableRef = table.LogicalRef,
+            TableName = table.Name,
+            SourceAppName = dataSourceRef.Replace("$DataSource_", "").Replace('_', ' ').Trim(),
+            SourceTableName = ResolveScalar(recordSet, "Name") ?? recordSetRef,
+            UpdateMode = data.GetValueOrDefault("UpdateMode")?.ToString() ?? "Destructive",
+        };
+
+        if (data.GetValueOrDefault("Schedule") is Dictionary<string, object?> schedule)
+        {
+            connected.CronTab = NullIfBlank(schedule.GetValueOrDefault("CronTab")?.ToString());
+            connected.NotifyOnFailure = !string.Equals(schedule.GetValueOrDefault("NotifyOnFailure")?.ToString(), "false", StringComparison.OrdinalIgnoreCase);
+        }
+
+        var filter = data.GetValueOrDefault("DataFilter");
+        if (filter is Dictionary<string, object?> filterMap)
+        {
+            var anyOf = filterMap.GetValueOrDefault("AnyOf") is List<object?>;
+            connected.FilterLogic = anyOf ? "any" : "all";
+            var listed = (filterMap.GetValueOrDefault("AllOf") ?? filterMap.GetValueOrDefault("AnyOf")) as List<object?> ?? [];
+            foreach (var item in listed.OfType<Dictionary<string, object?>>())
+            {
+                var columnRef = (item.GetValueOrDefault("Source") as QblRef)?["ConnectedColumn"];
+                var op = item.GetValueOrDefault("Operator")?.ToString();
+                var value = item.GetValueOrDefault("Value")?.ToString();
+                if (columnRef is null || !columns.TryGetValue(columnRef, out var column))
+                {
+                    issues.Add(Warning("QBL_CONNECTED_FILTER_UNRESOLVED", $"Connected table '{table.Name}': a filter condition names a column that is not in the source; the filter was not carried.", table.LogicalRef));
+                    continue;
+                }
+                var mapped = op switch
+                {
+                    "Equals" or "Is" => "eq",
+                    "IsTrue" => "eq",
+                    "IsNot" or "NotEquals" => "ne",
+                    "Contains" => "contains",
+                    "DoesNotContain" => "notContains",
+                    _ => null,
+                };
+                if (mapped is null)
+                {
+                    issues.Add(Warning("QBL_CONNECTED_FILTER_OPERATOR", $"Connected table '{table.Name}': filter operator '{op}' has no PowerBase equivalent; that condition was not carried.", table.LogicalRef));
+                    continue;
+                }
+                connected.FilterConditions.Add(new PblConnectedFilter
+                {
+                    SourceColumnName = ResolveScalar(column, "Name") ?? columnRef,
+                    SourceFid = column.SourceId,
+                    Operator = mapped,
+                    Value = op == "IsTrue" ? "true" : value,
+                });
+            }
+            connected.DataFilter = string.Join(connected.FilterLogic == "any" ? " or " : " and ", connected.FilterConditions.Select(c => $"{c.SourceColumnName} {c.Operator} {c.Value}"));
+        }
+
+        if (data.GetValueOrDefault("FieldMap") is Dictionary<string, object?> fieldMap)
+        {
+            foreach (var (fieldRef, mapped) in fieldMap)
+            {
+                var columnRef = (mapped as QblRef)?["ConnectedColumn"];
+                if (columnRef is null || !fieldNameByRef.TryGetValue(fieldRef, out var fieldName) || !columns.TryGetValue(columnRef, out var column))
+                    continue;
+                connected.Fields.Add(new PblConnectedField
+                {
+                    FieldName = fieldName,
+                    SourceColumnName = ResolveScalar(column, "Name") ?? columnRef,
+                    SourceFid = column.SourceId,
+                });
+            }
+        }
+
+        return connected;
+    }
+
     private static IReadOnlyDictionary<string, QblResourceNode> GetFormV2Nodes(QblResourceNode tableNode)
     {
         var result = new Dictionary<string, QblResourceNode>(StringComparer.Ordinal);
@@ -931,7 +1953,7 @@ public static class QblToPblConverter
         return result;
     }
 
-    private static PblForm ConvertForm(string formRef, QblResourceNode formNode, string tableRef, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues)
+    private static PblForm ConvertForm(string formRef, QblResourceNode formNode, string tableRef, Dictionary<string, string> fieldNameByRef, Dictionary<string, string> roleNameByRef, IReadOnlyDictionary<string, string> fieldTypeByName, IReadOnlyDictionary<string, string> fieldHelpByName, List<PblIssue> issues)
     {
         var qualifiedFormRef = Qualify(tableRef, formRef);
         var form = new PblForm
@@ -939,6 +1961,11 @@ public static class QblToPblConverter
             LogicalRef = qualifiedFormRef,
             TableRef = tableRef,
             Name = ResolveScalar(formNode, "Name") ?? formRef,
+            AutoAddNewFields = formNode.Properties.ContainsKey("ShouldAutoAddFields") ? formNode.PropertyBool("ShouldAutoAddFields") : null,
+            ShowBuiltInFields = formNode.Properties.ContainsKey("ShouldShowBuiltInFieldsFooter") ? formNode.PropertyBool("ShouldShowBuiltInFieldsFooter") : null,
+            AlwaysTabsOnView = formNode.Properties.ContainsKey("AlwaysTabsForViewRecord") ? formNode.PropertyBool("AlwaysTabsForViewRecord") : null,
+            PageNavMode = string.Equals(ResolveScalar(formNode, "DisplayPagesAs"), "Steps", StringComparison.OrdinalIgnoreCase) ? "steps" : "tabs",
+            SaveOptions = MapSaveOptions(formNode),
         };
 
         // Section/Block LogicalRefs are QBL keys scoped to their own owning Sections/Columns
@@ -959,18 +1986,42 @@ public static class QblToPblConverter
         // does. Same class of issue as duplicate report/field names above - skip and flag rather
         // than hard-blocking the whole import.
         var seenSectionNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (_, pageNode) in formNode.ChildMap("Pages"))
+
+        // Pinned section(s) first, then each page's sections. Pages become real pages when there is more than one.
+        foreach (var (pinnedRef, pinnedNode) in formNode.ChildMap("PinnedSection"))
         {
+            var pinned = ConvertFormSection(pinnedRef, pinnedNode, qualifiedFormRef, fieldNameByRef, qualifiedBlockRefByRaw, issues);
+            if (pinned is null) continue;
+            pinned.IsPinned = true;
+            seenSectionNames.Add(pinned.Name);
+            form.Sections.Add(pinned);
+            qualifiedSectionRefByRaw[pinnedRef] = pinned.LogicalRef;
+        }
+
+        var pageNodes = formNode.ChildMap("Pages").ToList();
+        var multiPage = pageNodes.Count > 1;
+        var pageOrder = 0;
+        foreach (var (pageRef, pageNode) in pageNodes)
+        {
+            PblFormPage? page = null;
+            if (multiPage)
+            {
+                page = new PblFormPage { LogicalRef = Qualify(qualifiedFormRef, pageRef), Heading = NullIfBlank(ResolveScalar(pageNode, "Name")) ?? InferFieldName(pageRef, null), DisplayOrder = pageOrder++ };
+                form.Pages.Add(page);
+            }
+
             foreach (var (sectionRef, sectionNode) in pageNode.ChildMap("Sections"))
             {
                 var section = ConvertFormSection(sectionRef, sectionNode, qualifiedFormRef, fieldNameByRef, qualifiedBlockRefByRaw, issues);
                 if (section is null)
                     continue;
+                section.PageRef = page?.LogicalRef;
 
-                if (!seenSectionNames.Add(section.Name))
+                var uniqueSectionName = NumberedName(seenSectionNames, section.Name);
+                if (!string.Equals(uniqueSectionName, section.Name, StringComparison.Ordinal))
                 {
-                    issues.Add(Warning("QBL_DUPLICATE_FORM_SECTION_NAME", $"Section '{section.Name}' is already used on form '{form.Name}'; only the first is imported.", sectionRef));
-                    continue;
+                    issues.Add(Warning("QBL_DUPLICATE_FORM_SECTION_NAME", $"Section '{section.Name}' is already used on form '{form.Name}'; imported as '{uniqueSectionName}'.", sectionRef));
+                    section.Name = uniqueSectionName;
                 }
 
                 form.Sections.Add(section);
@@ -996,10 +2047,16 @@ public static class QblToPblConverter
 
         foreach (var (ruleRef, ruleNode) in formNode.ChildMap("Rules"))
         {
-            var rule = ConvertFormRule(ruleRef, ruleNode, qualifiedFormRef, fieldNameByRef, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, issues);
+            var rule = ConvertFormRule(ruleRef, ruleNode, qualifiedFormRef, fieldNameByRef, roleNameByRef, fieldTypeByName, elementRefByFieldName, qualifiedSectionRefByRaw, qualifiedBlockRefByRaw, issues);
             if (rule is not null)
                 form.Rules.Add(rule);
         }
+
+        // A field's own help text shows on every form unless the form's element overrides it; PowerBase keeps the form-level text only,
+        // so the field's text becomes the element's text where the element has none.
+        foreach (var element in form.Sections.SelectMany(sec => sec.Blocks).SelectMany(b => b.Elements))
+            if (element.HelpTextOverride is null && element.FieldName is { } fn && fieldHelpByName.TryGetValue(fn, out var help))
+                element.HelpTextOverride = help;
 
         return form;
     }
@@ -1022,6 +2079,7 @@ public static class QblToPblConverter
             LogicalRef = qualifiedSectionRef,
             Name = string.IsNullOrWhiteSpace(title) ? InferFieldName(sectionRef, null) : title,
             IsCollapsed = sectionNode.PropertyBool("IsCollapsedByDefault"),
+            ShowDividers = sectionNode.Properties.ContainsKey("ShowColumnDividers") ? sectionNode.PropertyBool("ShowColumnDividers") : null,
         };
 
         foreach (var (columnRef, columnNode) in sectionNode.ChildMap("Columns"))
@@ -1081,7 +2139,7 @@ public static class QblToPblConverter
     /// (confirmed real shape: a Group carries no Properties of its own, only child Elements) —
     /// PowerBase has no grouping construct, so a Group's children are flattened into the
     /// containing block (every field still imports, only the visual grouping is lost).</summary>
-    private static List<PblFormElement> ConvertFormElements(string elementRef, QblResourceNode elementNode, string qualifiedParentRef, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues)
+    private static List<PblFormElement> ConvertFormElements(string elementRef, QblResourceNode elementNode, string qualifiedParentRef, Dictionary<string, string> fieldNameByRef, List<PblIssue> issues, string? groupRef = null)
     {
         var qualifiedElementRef = Qualify(qualifiedParentRef, elementRef);
         var result = new List<PblFormElement>();
@@ -1093,7 +2151,7 @@ public static class QblToPblConverter
                 var fieldRef = elementNode.PropertyRef("Field")?["Field"];
                 if (fieldRef is null || !fieldNameByRef.TryGetValue(fieldRef, out var fieldName))
                 {
-                    issues.Add(Warning("QBL_FORM_ELEMENT_FIELD_UNAVAILABLE", $"Form element '{elementRef}' references a field not available in this import phase; skipped.", elementRef));
+                    issues.Add(Warning("QBL_FORM_ELEMENT_FIELD_UNAVAILABLE", $"Form element '{elementRef}' references a field ('{fieldRef}') that has no PowerBase field (unsupported, deleted or not convertible); skipped.", elementRef));
                     return result;
                 }
 
@@ -1115,6 +2173,8 @@ public static class QblToPblConverter
                     HelpTextOverride = NullIfBlank(ResolveScalar(elementNode, "HelpText")),
                     IsReadOnly = elementNode.PropertyBool("ForceReadOnlyOnForm"),
                     IsRequired = elementNode.PropertyBool("ForceRequireOnForm"),
+                    DisplayAs = NullIfBlank(ResolveScalar(elementNode, "MultipleChoiceDisplayAs")),
+                    GroupRef = groupRef,
                 });
                 return result;
             }
@@ -1132,20 +2192,63 @@ public static class QblToPblConverter
             }
             case "QB::FormV2::Element::Group":
             {
-                issues.Add(Warning("QBL_FORM_ELEMENT_GROUP_FLATTENED", $"Form element group '{elementRef}' has no PowerBase equivalent; its fields were imported individually, ungrouped.", elementRef));
+                // PowerBase keeps grouped elements together through a shared group id.
                 foreach (var (childRef, childNode) in elementNode.ChildMap("Elements"))
-                    result.AddRange(ConvertFormElements(childRef, childNode, qualifiedElementRef, fieldNameByRef, issues));
+                    result.AddRange(ConvertFormElements(childRef, childNode, qualifiedElementRef, fieldNameByRef, issues, qualifiedElementRef));
                 return result;
             }
             case "QB::FormV2::Element::Report":
             {
-                issues.Add(Warning("QBL_UNSUPPORTED_FORM_ELEMENT", $"Embedded report form element '{elementRef}' is not yet supported.", elementRef));
+                var reportRefNode = elementNode.PropertyRef("Report");
+                var reportTableRef = reportRefNode?["Table"];
+                var reportRef = reportRefNode?["Report"];
+                if (reportTableRef is null || reportRef is null)
+                {
+                    issues.Add(Warning("QBL_FORM_REPORT_ELEMENT_UNRESOLVED", $"Embedded report element '{elementRef}' has no resolvable report; skipped.", elementRef));
+                    return result;
+                }
+
+                var (reportShowOnAdd, reportShowOnEdit, reportShowOnView) = ParseModesToShowIn(elementNode);
+                result.Add(new PblFormElement
+                {
+                    LogicalRef = qualifiedElementRef,
+                    ElementType = "Report",
+                    EmbeddedReportRef = Qualify(reportTableRef, reportRef),
+                    EmbeddedReportTableRef = reportTableRef,
+                    LabelMode = MapLabelMode(ResolveScalar(elementNode, "LabelMode")),
+                    CustomLabel = NullIfBlank(ResolveScalar(elementNode, "LabelOverride")),
+                    ShowOnAdd = reportShowOnAdd,
+                    ShowOnEdit = reportShowOnEdit,
+                    ShowOnView = reportShowOnView,
+                    ShowToolbar = !elementNode.PropertyBool("HideToolbar"),
+                    AllowCreateRecords = elementNode.PropertyBool("AllowCreateRecords", true),
+                    OpenInSubForm = elementNode.PropertyBool("ShouldOpenInEmbedded", true),
+                    GroupRef = groupRef,
+                });
                 return result;
             }
             default:
                 issues.Add(Warning("QBL_UNKNOWN_FORM_ELEMENT_TYPE", $"Form element type '{elementNode.Type}' is not recognized by this import phase.", elementRef));
                 return result;
         }
+    }
+
+    /// <summary>Quickbase save actions → PowerBase's save buttons. An empty list leaves PowerBase's default (all four) — never "no buttons".</summary>
+    private static string? MapSaveOptions(QblResourceNode formNode)
+    {
+        if (!formNode.Properties.TryGetValue("AllowedSaveActions", out var raw) || raw is not IEnumerable<object?> list || raw is string)
+            return null;
+
+        var mapped = list.Select(x => x?.ToString() switch
+        {
+            "SaveAndNew" => "SaveNew",
+            "SaveAndNext" => "SaveNext",
+            "SaveAndKeepWorking" => "SaveKeepWorking",
+            "SaveAndView" => "SaveView",
+            _ => null,
+        }).Where(x => x is not null).Distinct().ToList();
+
+        return mapped.Count == 0 ? null : string.Join(",", mapped);
     }
 
     private static (string WidthMode, int? WidthValue) ParseElementWidth(QblResourceNode elementNode)
@@ -1187,6 +2290,8 @@ public static class QblToPblConverter
         QblResourceNode ruleNode,
         string qualifiedFormRef,
         Dictionary<string, string> fieldNameByRef,
+        Dictionary<string, string> roleNameByRef,
+        IReadOnlyDictionary<string, string> fieldTypeByName,
         Dictionary<string, string> elementRefByFieldName,
         Dictionary<string, string> qualifiedSectionRefByRaw,
         Dictionary<string, string> qualifiedBlockRefByRaw,
@@ -1216,26 +2321,37 @@ public static class QblToPblConverter
             return null;
         }
 
-        // A rule with more than one top-level condition, or a top-level condition that isn't a
-        // Group, has no confirmed real-world shape and no clean PowerBase mapping — flagged
-        // rather than guessed at.
-        if (whenList.Count != 1 || whenList[0] is not QblResourceNode topGroup || topGroup.Type != "QB::FormV2::Rule::Condition::Group")
+        // The usual shape is one top-level Group. A rule can also list its conditions directly (a single formula condition is the common
+        // case — the "Prevent Save" / "Warning" rules); several listed conditions must all hold, so they are an All group.
+        RuleGroup tree;
+        if (whenList.Count == 1 && whenList[0] is QblResourceNode topGroup && IsType(topGroup, GROUP_CONDITION))
+            tree = ReadRuleGroup(topGroup);
+        else if (whenList.All(w => w is QblResourceNode))
+        {
+            tree = new RuleGroup { Logic = "all" };
+            foreach (var item in whenList.Cast<QblResourceNode>())
+                tree.Items.Add(IsType(item, GROUP_CONDITION) ? ReadRuleGroup(item) : item);
+        }
+        else
         {
             issues.Add(Warning("QBL_UNSUPPORTED_FORM_RULE_CONDITION_STRUCTURE", $"Form rule '{name}' has a condition structure with no PowerBase equivalent; skipped.", ruleRef));
             return null;
         }
 
-        rule.ConditionLogic = string.Equals(ResolveScalar(topGroup, "TrueWhen"), "Any", StringComparison.OrdinalIgnoreCase) ? "any" : "all";
+        // The conditions are a tree: nested groups with their own All/Any. A nested group with the same logic as its parent (or a single
+        // member) is the same thing as listing its conditions in the parent, so it is flattened. A genuinely mixed tree (an OR inside an AND…)
+        // and a formula condition next to other conditions cannot be written as PowerBase's flat list, so they become the rule's
+        // formula (PowerBase's expression mode), built from the same conditions.
+        rule.ConditionLogic = tree.Logic;
 
-        var innerConditions = topGroup.Children.TryGetValue("When", out var innerRaw) && innerRaw is List<object?> innerList ? innerList : [];
+        var flat = TryFlatten(tree, out var leaves);
+        var soleFormula = flat && leaves.Count == 1 && IsType(leaves[0], FORMULA_CONDITION);
+        var onlyFieldOrRole = flat && leaves.All(l => IsType(l, FIELD_CONDITION) || IsType(l, ROLE_CONDITION));
+        var hasUnexpressibleLeaf = flat && leaves.Any(l => !IsType(l, FIELD_CONDITION) && !IsType(l, ROLE_CONDITION) && !IsType(l, FORMULA_CONDITION));
 
-        // "Formula is true" escape hatch: PowerBase's own IsExpressionMode/ExpressionText is a
-        // real, confirmed mapping target for this — not an approximation — but only when it's
-        // the rule's *sole* condition, since PowerBase can't mix expression-mode with discrete
-        // Field conditions in the same rule.
-        if (innerConditions.Count == 1 && innerConditions[0] is QblResourceNode soleCondition && soleCondition.Type == "QB::FormV2::Rule::Condition::FormulaIsTrue")
+        if (soleFormula)
         {
-            var formula = ResolveScalar(soleCondition, "Formula");
+            var formula = ResolveScalar(leaves[0], "Formula");
             if (string.IsNullOrWhiteSpace(formula))
             {
                 issues.Add(Warning("QBL_FORM_RULE_EMPTY_FORMULA_CONDITION", $"Form rule '{name}' has an empty formula condition; skipped.", ruleRef));
@@ -1245,27 +2361,52 @@ public static class QblToPblConverter
             rule.IsExpressionMode = true;
             rule.ExpressionText = formula;
         }
-        else
+        else if (flat && (onlyFieldOrRole || hasUnexpressibleLeaf))
         {
+            // A flat list: convert each condition; one with no PowerBase operator (days ago, relative date, range…) is reported.
             var order = 0;
-            foreach (var conditionRaw in innerConditions)
+            var issuesBefore = issues.Count;
+            var dropped = false;
+            foreach (var conditionNode in leaves)
             {
-                if (conditionRaw is not QblResourceNode conditionNode)
-                    continue;
-
-                var condition = ConvertFormRuleCondition(conditionNode, fieldNameByRef, order, name, ruleRef, issues);
+                var condition = ConvertFormRuleCondition(conditionNode, fieldNameByRef, roleNameByRef, order, name, ruleRef, issues);
                 if (condition is null)
+                {
+                    dropped = true;
                     continue;
+                }
 
                 rule.Conditions.Add(condition);
                 order++;
             }
 
-            if (rule.Conditions.Count == 0)
+            // Comparisons the condition list has no operator for (Before / After / HasTrueValue …) can still be written as the rule's
+            // formula. A role condition cannot, so those rules keep the list.
+            if (dropped && !leaves.Any(l => IsType(l, ROLE_CONDITION))
+                && BuildRuleExpression(tree, fieldNameByRef, fieldTypeByName, out _) is { } asFormula)
+            {
+                issues.RemoveRange(issuesBefore, issues.Count - issuesBefore);
+                rule.Conditions.Clear();
+                rule.IsExpressionMode = true;
+                rule.ExpressionText = asFormula;
+            }
+            else if (rule.Conditions.Count == 0)
             {
                 issues.Add(Warning("QBL_FORM_RULE_NO_SUPPORTED_CONDITIONS", $"Form rule '{name}' has no conditions PowerBase can represent; skipped.", ruleRef));
                 return null;
             }
+        }
+        else
+        {
+            var expression = BuildRuleExpression(tree, fieldNameByRef, fieldTypeByName, out var problem);
+            if (expression is null)
+            {
+                issues.Add(Warning("QBL_UNSUPPORTED_FORM_RULE_CONDITION_STRUCTURE", $"Form rule '{name}' has a condition structure with no PowerBase equivalent ({problem}); skipped.", ruleRef));
+                return null;
+            }
+
+            rule.IsExpressionMode = true;
+            rule.ExpressionText = expression;
         }
 
         var actionsRaw = ruleNode.Children.TryGetValue("Actions", out var a) && a is List<object?> actionsList ? actionsList : [];
@@ -1292,23 +2433,208 @@ public static class QblToPblConverter
         return rule;
     }
 
-    private static string? MapRunTrigger(string? qblRunOn) => qblRunOn switch
+    private const string GROUP_CONDITION = "QB::FormV2::Rule::Condition::Group";
+    private const string FIELD_CONDITION = "QB::FormV2::Rule::Condition::Field";
+    private const string ROLE_CONDITION = "QB::FormV2::Rule::Condition::Role";
+    private const string FORMULA_CONDITION = "QB::FormV2::Rule::Condition::FormulaIsTrue";
+
+    /// <summary>Quickbase's type names are compared without regard to case: the file spells "MakeReadonly" where the documentation says "MakeReadOnly".</summary>
+    private static bool IsType(QblResourceNode node, string type) => string.Equals(node.Type, type, StringComparison.OrdinalIgnoreCase);
+
+    private static string? MapRunTrigger(string? qblRunOn) => RunTriggers.GetValueOrDefault(qblRunOn ?? "");
+
+    private static readonly Dictionary<string, string> RunTriggers = new(StringComparer.OrdinalIgnoreCase)
     {
-        "RecordOpenForEdit" => "EditOrAdd",
-        "RecordSave" => "Save",
-        "RecordSaveAfterValidating" => "SaveAfterValidating",
-        "RecordOpenSaveOrChange" => "AnyChange",
-        _ => null,
+        ["RecordOpenForEdit"] = "EditOrAdd",
+        ["RecordSave"] = "Save",
+        ["RecordSaveAfterValidating"] = "SaveAfterValidating",
+        ["RecordOpenSaveOrChange"] = "AnyChange",
     };
+
+    // ── Rule condition tree ─────────────────────────────────────────────────
+
+    private sealed class RuleGroup
+    {
+        public string Logic { get; init; } = "all";
+        public List<object> Items { get; } = [];   // RuleGroup | QblResourceNode (a leaf condition)
+    }
+
+    private static RuleGroup ReadRuleGroup(QblResourceNode group)
+    {
+        var result = new RuleGroup { Logic = string.Equals(ResolveScalar(group, "TrueWhen"), "Any", StringComparison.OrdinalIgnoreCase) ? "any" : "all" };
+        if (!group.Children.TryGetValue("When", out var raw) || raw is not List<object?> list)
+            return result;
+
+        foreach (var item in list)
+        {
+            if (item is not QblResourceNode node) continue;
+            if (IsType(node, GROUP_CONDITION)) result.Items.Add(ReadRuleGroup(node));
+            else result.Items.Add(node);
+        }
+        return result;
+    }
+
+    /// <summary>True when every nested group can be merged into its parent (same All/Any, or a single member).</summary>
+    private static bool TryFlatten(RuleGroup group, out List<QblResourceNode> leaves)
+    {
+        leaves = [];
+        foreach (var item in group.Items)
+        {
+            if (item is QblResourceNode leaf) { leaves.Add(leaf); continue; }
+
+            var sub = (RuleGroup)item;
+            if (sub.Items.Count == 0) continue;
+            if (sub.Items.Count > 1 && sub.Logic != group.Logic) return false;
+            if (!TryFlatten(sub, out var inner)) return false;
+            leaves.AddRange(inner);
+        }
+        return true;
+    }
+
+    private static IReadOnlyDictionary<string, string> FieldHelpByName(PblTable table) =>
+        table.Fields.Where(f => !string.IsNullOrWhiteSpace(f.HelpText)).ToDictionary(f => f.Name, f => f.HelpText!, StringComparer.OrdinalIgnoreCase);
+
+    private static IReadOnlyDictionary<string, string> FieldTypesByName(PblTable table)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in table.Fields)
+        {
+            var type = string.Equals(f.TypeCode, "Formula", StringComparison.OrdinalIgnoreCase) ? f.ResultType ?? "Text" : f.TypeCode;
+            map[f.Name] = type;
+        }
+        return map;
+    }
+
+    /// <summary>The whole condition tree as one PowerBase formula (expression mode). Returns null, with the reason, when a part of it has no
+    /// formula form — a role condition, an unknown comparison, a value that cannot be written as a literal for the field's type.</summary>
+    private static string? BuildRuleExpression(RuleGroup group, Dictionary<string, string> fieldNameByRef, IReadOnlyDictionary<string, string> fieldTypeByName, out string? problem)
+    {
+        problem = null;
+        var parts = new List<string>();
+        foreach (var item in group.Items)
+        {
+            string? part;
+            if (item is RuleGroup sub)
+            {
+                if (sub.Items.Count == 0) continue;
+                part = BuildRuleExpression(sub, fieldNameByRef, fieldTypeByName, out problem);
+                if (part is null) return null;
+                part = "(" + part + ")";
+            }
+            else
+            {
+                part = RuleLeafExpression((QblResourceNode)item, fieldNameByRef, fieldTypeByName, out problem);
+                if (part is null) return null;
+            }
+            parts.Add(part);
+        }
+
+        if (parts.Count == 0) { problem = "no conditions"; return null; }
+        return string.Join(group.Logic == "any" ? " or " : " and ", parts);
+    }
+
+    private static string? RuleLeafExpression(QblResourceNode node, Dictionary<string, string> fieldNameByRef, IReadOnlyDictionary<string, string> fieldTypeByName, out string? problem)
+    {
+        problem = null;
+        if (IsType(node, FORMULA_CONDITION))
+        {
+            var formula = ResolveScalar(node, "Formula");
+            if (string.IsNullOrWhiteSpace(formula)) { problem = "an empty formula condition"; return null; }
+            return "(" + formula.Trim() + ")";
+        }
+        if (IsType(node, ROLE_CONDITION)) { problem = "a role condition cannot be part of a formula"; return null; }
+        if (!IsType(node, FIELD_CONDITION)) { problem = $"condition type '{node.Type}'"; return null; }
+
+        var fieldRef = node.PropertyRef("Field")?["Field"];
+        if (fieldRef is null || !fieldNameByRef.TryGetValue(fieldRef, out var fieldName)) { problem = "a field that was not created"; return null; }
+        var comparison = ResolveScalar(node, "Comparison") ?? "";
+        var value = ResolveScalar(node, "Value") ?? "";
+        if (value.Contains('"')) { problem = "a value containing a double quote"; return null; }
+
+        fieldTypeByName.TryGetValue(fieldName, out var type);
+        var f = $"[{fieldName}]";
+        var kind = type switch
+        {
+            "Number" or "Currency" or "Percent" or "Rating" => "number",
+            "Boolean" or "Bool" => "bool",
+            "Date" => "date",
+            "Text" or "TextMultiLine" or "RichText" or "SingleSelect" or "Email" or "Phone" or "Url" => "text",
+            _ => "other",
+        };
+
+        string? Literal()
+        {
+            switch (kind)
+            {
+                case "number":
+                    return double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _) ? value : null;
+                case "bool":
+                    return value.ToLowerInvariant() switch { "true" or "1" or "checked" => "true", "false" or "0" or "unchecked" or "" => "false", _ => null };
+                case "date":
+                    return DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d)
+                        ? $"ToDate(\"{d:yyyy-MM-dd}\")"
+                        : null;
+                default:
+                    return $"\"{value}\"";
+            }
+        }
+
+        // For anything but a known number/date/checkbox field the comparison is made on the text of the value, which compiles for every type.
+        var lhs = kind == "other" ? $"ToText({f})" : f;
+
+        string Compare(string symbol)
+        {
+            var lit = Literal();
+            return lit is null ? "" : $"{lhs} {symbol} {lit}";
+        }
+
+        var isTextLike = kind is "text" or "other";
+        string? result = comparison.ToLowerInvariant() switch
+        {
+            "isequalto" => value.Length == 0 && isTextLike ? $"ToText({f}) = \"\"" : Compare("="),
+            "isnotequalto" => value.Length == 0 && isTextLike ? $"ToText({f}) <> \"\"" : Compare("<>"),
+            "contains" or "includes" => $"Contains(ToText({f}), \"{value}\")",
+            "doesnotcontain" or "doesnotinclude" => $"not Contains(ToText({f}), \"{value}\")",
+            "isgreaterthan" or "after" => Compare(">"),
+            "isgreaterthanorequalto" or "onorafter" => Compare(">="),
+            "islessthan" or "before" => Compare("<"),
+            "islessthanorequalto" or "onorbefore" => Compare("<="),
+            "hastruevalue" => kind == "bool" ? $"{f} = true" : null,
+            "doesnothavetruevalue" => kind == "bool" ? $"{f} = false" : null,
+            "isempty" => $"ToText({f}) = \"\"",
+            "isnotempty" => $"ToText({f}) <> \"\"",
+            _ => null,
+        };
+
+        if (string.IsNullOrEmpty(result))
+        {
+            problem = $"comparison '{comparison}' on field '{fieldName}'";
+            return null;
+        }
+        return "(" + result + ")";
+    }
 
     /// <summary>Only <c>QB::FormV2::Rule::Condition::Field</c> maps to PowerBase — confirmed
     /// real occurrences of <c>Condition::Role</c> (e.g. "IsInRole") have no equivalent, since
     /// PowerBase's real operator vocabulary (below) has no role-membership or date-relative
     /// operators at all.</summary>
     private static PblFormRuleCondition? ConvertFormRuleCondition(
-        QblResourceNode conditionNode, Dictionary<string, string> fieldNameByRef, int order, string ruleName, string ruleRef, List<PblIssue> issues)
+        QblResourceNode conditionNode, Dictionary<string, string> fieldNameByRef, Dictionary<string, string> roleNameByRef, int order, string ruleName, string ruleRef, List<PblIssue> issues)
     {
-        if (conditionNode.Type != "QB::FormV2::Rule::Condition::Field")
+        if (IsType(conditionNode, ROLE_CONDITION))
+        {
+            var roleRef = conditionNode.PropertyRef("Role")?["Role"];
+            var comparison = ResolveScalar(conditionNode, "Comparison");
+            if (roleRef is null || !roleNameByRef.TryGetValue(roleRef, out var roleName) || comparison is not ("IsInRole" or "IsNotInRole"))
+            {
+                issues.Add(Warning("QBL_FORM_RULE_ROLE_CONDITION_UNRESOLVED", $"Form rule '{ruleName}' has a role condition that cannot be resolved; skipped.", ruleRef));
+                return null;
+            }
+
+            return new PblFormRuleCondition { Kind = "role", Operator = comparison == "IsInRole" ? "includes" : "notIncludes", Value = roleName, DisplayOrder = order };
+        }
+
+        if (!IsType(conditionNode, FIELD_CONDITION))
         {
             issues.Add(Warning("QBL_UNSUPPORTED_FORM_RULE_CONDITION", $"Form rule '{ruleName}' uses condition type '{conditionNode.Type}', which has no PowerBase equivalent.", ruleRef));
             return null;
@@ -1342,21 +2668,24 @@ public static class QblToPblConverter
     /// uses "Contains", not "Includes" - both accepted since neither sample contradicts the
     /// other). The rest of Quickbase's documented comparison vocabulary is mapped defensively but
     /// unverified against a real sample.</summary>
-    private static string? MapComparisonOperator(string? qblComparison) => qblComparison switch
+    private static string? MapComparisonOperator(string? qblComparison) => ComparisonOperators.GetValueOrDefault(qblComparison ?? "");
+
+    private static readonly Dictionary<string, string> ComparisonOperators = new(StringComparer.OrdinalIgnoreCase)
     {
-        "IsEqualTo" => "eq",
-        "IsNotEqualTo" => "ne",
-        "Includes" or "Contains" => "contains",
-        "DoesNotInclude" or "DoesNotContain" => "notContains",
-        "StartsWith" => "startsWith",
-        "EndsWith" => "endsWith",
-        "IsEmpty" => "isEmpty",
-        "IsNotEmpty" => "isNotEmpty",
-        "IsGreaterThan" => "gt",
-        "IsGreaterThanOrEqualTo" => "gte",
-        "IsLessThan" => "lt",
-        "IsLessThanOrEqualTo" => "lte",
-        _ => null,
+        ["IsEqualTo"] = "eq",
+        ["IsNotEqualTo"] = "ne",
+        ["Includes"] = "contains",
+        ["Contains"] = "contains",
+        ["DoesNotInclude"] = "notContains",
+        ["DoesNotContain"] = "notContains",
+        ["StartsWith"] = "startsWith",
+        ["EndsWith"] = "endsWith",
+        ["IsEmpty"] = "isEmpty",
+        ["IsNotEmpty"] = "isNotEmpty",
+        ["IsGreaterThan"] = "gt",
+        ["IsGreaterThanOrEqualTo"] = "gte",
+        ["IsLessThan"] = "lt",
+        ["IsLessThanOrEqualTo"] = "lte",
     };
 
     /// <summary>Confirmed real action types: Show, Require, and Change all map cleanly. Change
@@ -1365,20 +2694,22 @@ public static class QblToPblConverter
     /// applied at evaluation time); see <see cref="ConvertFormRuleAction"/> for the one real
     /// Change case that can't be represented (its value pointing at another field, not a
     /// literal). The rest of PowerBase's <c>FormRuleActionType</c> enum is mapped defensively.</summary>
-    private static string? MapActionType(string qblActionType) => qblActionType switch
+    private static string? MapActionType(string qblActionType) => ActionTypes.GetValueOrDefault(qblActionType);
+
+    // Compared without regard to case: the file spells it "MakeReadonly", the documentation "MakeReadOnly".
+    private static readonly Dictionary<string, string> ActionTypes = new(StringComparer.OrdinalIgnoreCase)
     {
-        "QB::FormV2::Rule::Action::Show" => "Show",
-        "QB::FormV2::Rule::Action::Hide" => "Hide",
-        "QB::FormV2::Rule::Action::MakeEditable" => "Enable",
-        "QB::FormV2::Rule::Action::MakeReadOnly" => "Disable",
-        "QB::FormV2::Rule::Action::Require" => "Require",
-        "QB::FormV2::Rule::Action::Unrequire" => "NotRequired",
-        "QB::FormV2::Rule::Action::SetLabel" => "ChangeLabel",
-        "QB::FormV2::Rule::Action::Change" => "ChangeValue",
-        "QB::FormV2::Rule::Action::SetColor" => "SetColor",
-        "QB::FormV2::Rule::Action::DisplayMessage" => "DisplayMessage",
-        "QB::FormV2::Rule::Action::AbortSave" => "PreventSave",
-        _ => null,
+        ["QB::FormV2::Rule::Action::Show"] = "Show",
+        ["QB::FormV2::Rule::Action::Hide"] = "Hide",
+        ["QB::FormV2::Rule::Action::MakeEditable"] = "Enable",
+        ["QB::FormV2::Rule::Action::MakeReadOnly"] = "Disable",
+        ["QB::FormV2::Rule::Action::Require"] = "Require",
+        ["QB::FormV2::Rule::Action::Unrequire"] = "NotRequired",
+        ["QB::FormV2::Rule::Action::SetLabel"] = "ChangeLabel",
+        ["QB::FormV2::Rule::Action::Change"] = "ChangeValue",
+        ["QB::FormV2::Rule::Action::SetColor"] = "SetColor",
+        ["QB::FormV2::Rule::Action::DisplayMessage"] = "DisplayMessage",
+        ["QB::FormV2::Rule::Action::AbortSave"] = "PreventSave",
     };
 
     /// <summary>Real actions target via <c>Target: !Ref{...}</c> with varying scope keys
@@ -1414,10 +2745,43 @@ public static class QblToPblConverter
 
         var isChangeValue = actionType == "ChangeValue";
 
-        if (isChangeValue && actionNode.Properties.TryGetValue("Value", out var rawChangeValue) && rawChangeValue is QblRef)
+        // Messages and "block the save" need no target: the message is the point.
+        if (actionType is "DisplayMessage" or "PreventSave")
         {
-            issues.Add(Warning("QBL_FORM_RULE_ACTION_VALUE_UNRESOLVABLE", $"Form rule '{ruleName}' action sets a field's value to another field's live value, which PowerBase's static action value can't represent; skipped.", ruleRef));
-            return null;
+            var message = ResolveScalar(actionNode, "Message");
+            var messageAction = new PblFormRuleAction { ActionType = actionType, TargetType = "Field", ActionValue = message, DisplayOrder = order };
+            if (actionType == "DisplayMessage")
+            {
+                messageAction.MessageType = ResolveScalar(actionNode, "MessageType") switch { "Modal" => "modal", "Field" => "field", _ => "notification" };
+                messageAction.MessageSeverity = ResolveScalar(actionNode, "MessageLevel") switch { "Success" => "success", "Warning" => "warning", "Error" => "error", _ => "info" };
+
+                if (messageAction.MessageType == "field")
+                {
+                    var fieldTarget = actionNode.PropertyRef("FieldTarget")?["Field"];
+                    if (fieldTarget is not null && fieldNameByRef.TryGetValue(fieldTarget, out var targetName) && elementRefByFieldName.TryGetValue(targetName, out var targetElement))
+                    {
+                        messageAction.TargetElementRef = targetElement;
+                    }
+                    else
+                    {
+                        messageAction.MessageType = "notification";
+                        issues.Add(Warning("QBL_FORM_RULE_MESSAGE_FIELD_UNAVAILABLE", $"Form rule '{ruleName}': the message's field is not on this form; shown as a notification instead.", ruleRef));
+                    }
+                }
+            }
+            return messageAction;
+        }
+
+        // "Set field to another field's live value" — PowerBase copies it at run time.
+        string? sourceFieldName = null;
+        if (isChangeValue && actionNode.Properties.TryGetValue("Value", out var rawChangeValue) && rawChangeValue is QblRef changeValueRef)
+        {
+            var sourceRef = changeValueRef["Field"];
+            if (sourceRef is null || !fieldNameByRef.TryGetValue(sourceRef, out sourceFieldName))
+            {
+                issues.Add(Warning("QBL_FORM_RULE_ACTION_VALUE_UNRESOLVABLE", $"Form rule '{ruleName}' action copies another field's value, but that field is not available; skipped.", ruleRef));
+                return null;
+            }
         }
 
         var target = actionNode.PropertyRef(isChangeValue ? "Field" : "Target");
@@ -1471,7 +2835,9 @@ public static class QblToPblConverter
             TargetElementRef = targetElementRef,
             TargetSectionRef = targetSectionRef,
             TargetBlockRef = targetBlockRef,
-            ActionValue = ResolveScalar(actionNode, "Value"),
+            ActionValue = sourceFieldName is null ? ResolveScalar(actionNode, "Value") : null,
+            ValueSource = sourceFieldName is null ? null : "field",
+            SourceFieldName = sourceFieldName,
             DisplayOrder = order,
         };
     }
@@ -1509,6 +2875,18 @@ public static class QblToPblConverter
     /// tables). PBL's LogicalRef, by contrast, must be unique across the *entire* document
     /// (<c>PblValidator</c> checks this with one shared set for every construct). Qualifying by
     /// the already-qualified parent ref at each level guarantees that.</summary>
+    /// <summary>An expression of the given result type that evaluates to blank; null when no such constant exists.</summary>
+    internal static string? BlankFormulaFor(string resultType) => resultType switch
+    {
+        "Text" => "\"\"",
+        "Number" => "ToNumber(\"\")",
+        "Bool" => "false",
+        "Date" => "ToDate(\"\")",
+        "Time" => "ToTimeOfDay(\"\")",
+        "User" => "ToUser(\"\")",
+        _ => null,
+    };
+
     private static string Qualify(string parentRef, string localRef) => $"{parentRef}::{localRef}";
 
     private static PblIssue Warning(string code, string message, string? elementRef) =>
