@@ -65,6 +65,25 @@ public class RelationalProjectorTests
         result[1][11].Should().BeNull();           // unlinked → null
     }
 
+    [Fact]
+    public async Task Lookup_reads_only_the_parent_columns_it_pulls_down()
+    {
+        var childFields = new List<AppField>
+        {
+            Field(10, "Product", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}"),
+            Field(11, "Product - Name", "Lookup", "{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":99,\"sourceFid\":5,\"sourceTypeCode\":\"Text\"}"),
+        };
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 99 });
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>())
+            .Returns(new List<AppField> { Field(5, "Name", "Text"), Field(6, "Description", "Text"), Field(7, "Notes", "Text") });
+
+        await NewProjector().ProjectAsync(new AppTable { Id = 7 }, childFields, ChildRowLinkedTo42);
+
+        await _recordRepo.Received(1).GetRowsByIdsAsync(Arg.Is<AppTable>(t => t.Id == 99),
+            Arg.Is<IReadOnlyList<AppField>>(fs => fs.Select(f => f.Fid!.Value).SequenceEqual(new[] { 5 })),
+            Arg.Any<IReadOnlyCollection<long>>(), Arg.Any<CancellationToken>());
+    }
+
     // ── Lookups of computed fields (Formula / Lookup) ─────────────────────────────────────────
 
     private static IReadOnlyDictionary<long, IReadOnlyDictionary<string, object?>> RowsById(params (long Id, Dictionary<string, object?> Row)[] rows) =>
@@ -710,6 +729,8 @@ public class RelationalProjectorTests
 
         result[0][20].Should().Be("Alpha, Beta");
         result[1][20].Should().BeNull();
+        // The lookup has no column of its own: the children's Project reference (11) is read for it.
+        ChildColumnReads().Should().BeEquivalentTo(new[] { new[] { 10, 11 } });
         // Only the projects these children point to are read — not the whole project table.
         await _recordRepo.Received(1).GetRowsByIdsAsync(Arg.Is<AppTable>(t => t.Id == 99), Arg.Any<IReadOnlyList<AppField>>(),
             Arg.Is<IReadOnlyCollection<long>>(ids => ids.OrderBy(i => i).SequenceEqual(new long[] { 100, 101 })), Arg.Any<CancellationToken>());
@@ -771,6 +792,110 @@ public class RelationalProjectorTests
         result[0][20].Should().Be("alpha|beta");
         result[1][20].Should().BeNull();
         await _recordRepo.DidNotReceiveWithAnyArgs().ListValuesByReferenceAsync(default!, default, default, default, default!, default, default, default, default, default);
+    }
+
+    // ── Which child columns a summary computed in memory reads (each is decrypted for every child) ─────────
+
+    private static AppField EncryptedField(int fid, string name, string typeCode = "Text") => new()
+    {
+        Id = fid, Fid = fid, Name = name, TypeCode = typeCode, IsEncrypted = true,
+    };
+
+    /// <summary>The Fids of the fields whose columns each read of children by reference asked for, in order.</summary>
+    private List<int[]> ChildColumnReads() => _recordRepo.ReceivedCalls()
+        .Where(c => c.GetMethodInfo().Name == nameof(IRecordRepository.ListRowsByReferenceAsync))
+        .Select(c => ((IReadOnlyList<AppField>)c.GetArguments()[1]!).Select(f => f.Fid!.Value).Order().ToArray())
+        .ToList();
+
+    [Fact]
+    public async Task Combined_text_in_memory_reads_and_decrypts_only_the_reference_and_the_target()
+    {
+        // Employees hold a name, an email and a phone, all encrypted: joining the names needs no email or phone, which
+        // would otherwise be decrypted for every employee of the page's departments.
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            Field(10, "Department", "Reference"), EncryptedField(31, "Name"), EncryptedField(32, "Email"), EncryptedField(33, "Phone"),
+        });
+        ChildRowsByReference(77, Rows(
+            new Dictionary<string, object?> { ["Id"] = 1L, ["f_10"] = 1L, ["f_31"] = "Asha" },
+            new Dictionary<string, object?> { ["Id"] = 2L, ["f_10"] = 1L, ["f_31"] = "Ravi" }));
+
+        var result = await ProjectOneSummary("{\"childTableId\":77,\"referenceFid\":10,\"function\":\"CombinedText\",\"targetFid\":31}");
+
+        result[0][20].Should().Be("Asha, Ravi");
+        ChildColumnReads().Should().BeEquivalentTo(new[] { new[] { 10, 31 } });
+    }
+
+    [Fact]
+    public async Task Combined_text_in_memory_also_reads_the_columns_it_sorts_and_matches_on()
+    {
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            Field(10, "Department", "Reference"), EncryptedField(31, "Name"), EncryptedField(32, "Email"), EncryptedField(33, "Phone"),
+            Field(34, "Joined", "Date"),
+        });
+        ChildRowsByReference(77, Rows(
+            new Dictionary<string, object?> { ["Id"] = 1L, ["f_10"] = 1L, ["f_31"] = "Asha", ["f_32"] = "a@x.com", ["f_34"] = new DateTime(2026, 2, 1) },
+            new Dictionary<string, object?> { ["Id"] = 2L, ["f_10"] = 1L, ["f_31"] = "Ravi", ["f_32"] = "r@x.com", ["f_34"] = new DateTime(2026, 1, 1) }));
+
+        await ProjectOneSummary(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            childTableId = 77, referenceFid = 10, function = "CombinedText", targetFid = 31, sortFid = 34,
+            filterTree = """{"logic":"and","nodes":[{"condition":{"fieldId":32,"operator":"eq","value":"a@x.com"}}]}""",
+        }));
+
+        ChildColumnReads().Should().BeEquivalentTo(new[] { new[] { 10, 31, 32, 34 } });
+    }
+
+    [Fact]
+    public async Task Summary_in_memory_over_a_formula_still_reads_every_column_the_formula_might()
+    {
+        // The criteria compare a formula, worked out per child from whatever fields it reads: every column is read.
+        const int formulaFid = 32;
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            Field(10, "Item", "Reference"), Field(formulaFid, "F", "Formula_Number"), Field(33, "Qty", "Number"),
+        });
+        ChildRowsByReference(77, Rows(new Dictionary<string, object?> { ["Id"] = 1L, ["f_10"] = 1L, ["f_33"] = 2m }));
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Any<AppTable?>())
+            .Returns(ci => ((IReadOnlyList<IReadOnlyDictionary<string, object?>>)ci[1]).Select(r =>
+                (IReadOnlyDictionary<long, object?>)new Dictionary<long, object?> { [formulaFid] = 20m }).ToList());
+
+        await ProjectOneSummary(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            childTableId = 77, referenceFid = 10, function = "Count",
+            filterTree = """{"logic":"and","nodes":[{"condition":{"fieldId":32,"operator":"gt","value":"15"}}]}""",
+        }));
+
+        ChildColumnReads().Should().BeEquivalentTo(new[] { new[] { 10, 33 } });   // the formula has no column of its own
+    }
+
+    [Fact]
+    public async Task A_later_summary_needing_another_column_reads_again_with_both_and_the_rest_share_it()
+    {
+        _appRepo.GetByIdAsync(3, Arg.Any<CancellationToken>()).Returns(new App { Id = 3, IsEncrypted = true });
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77, AppId = 3 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>())
+            .Returns(new List<AppField> { Field(10, "Item", "Reference"), Field(31, "Status", "Text"), Field(32, "Name", "Text") });
+        ChildRowsByReference(77, Rows(
+            new Dictionary<string, object?> { ["Id"] = 1L, ["f_10"] = 1L, ["f_31"] = "Open", ["f_32"] = "Alpha" },
+            new Dictionary<string, object?> { ["Id"] = 2L, ["f_10"] = 1L, ["f_31"] = "Closed", ["f_32"] = "Beta" }));
+        var summaries = new List<AppField>
+        {
+            Field(20, "Open", "Summary", CountWhereStatusIs("Open")),
+            Field(21, "Names", "Summary", "{\"childTableId\":77,\"referenceFid\":10,\"function\":\"CombinedText\",\"targetFid\":32}"),
+            Field(22, "Closed", "Summary", CountWhereStatusIs("Closed")),
+        };
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 5, AppId = 3 }, summaries,
+            Rows(new Dictionary<string, object?> { ["Id"] = 1L }));
+
+        result[0][20].Should().Be(1); result[0][21].Should().Be("Alpha, Beta"); result[0][22].Should().Be(1);
+        ChildColumnReads().Should().BeEquivalentTo(new[] { new[] { 10, 31 }, new[] { 10, 31, 32 } }, o => o.WithStrictOrdering());
     }
 
     [Theory]
@@ -959,6 +1084,73 @@ public class RelationalProjectorTests
 
         result[0][20].Should().Be("$40,000.00, $52,000.50");
         await _recordRepo.DidNotReceiveWithAnyArgs().ListValuesByReferenceAsync(default!, default, default, default, default!, default, default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Summary_over_a_child_summary_works_out_only_that_child_summary()
+    {
+        // Departments (5) › Projects (77) › Tasks (88): "Total Task" sums each project's own Count of tasks. The projects'
+        // Combined Text of task names is another summary of theirs — not read for it.
+        _tableRepo.GetByIdAsync(77, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 77 });
+        _tableRepo.GetByIdAsync(88, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 88 });
+        _fieldRepo.ListByTableAsync(77, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            Field(10, "Department", "Reference"),
+            Field(16, "Task count", "Summary", "{\"childTableId\":88,\"referenceFid\":12,\"function\":\"Count\"}"),
+            Field(17, "Task names", "Summary", "{\"childTableId\":88,\"referenceFid\":12,\"function\":\"CombinedText\",\"targetFid\":31}"),
+        });
+        _fieldRepo.ListByTableAsync(88, Arg.Any<CancellationToken>()).Returns(new List<AppField> { Field(12, "Project", "Reference"), Field(31, "Name", "Text") });
+        _recordRepo.ListRowsByReferenceAsync(Arg.Is<AppTable>(t => t.Id == 77), Arg.Any<IReadOnlyList<AppField>>(), 10,
+                Arg.Any<IReadOnlyCollection<object>>(), Arg.Any<Application.Reports.FilterGroup?>(),
+                Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
+            .Returns(Rows(
+                new Dictionary<string, object?> { ["Id"] = 100L, [PhysicalNaming.ColumnName(10)] = 1L },
+                new Dictionary<string, object?> { ["Id"] = 101L, [PhysicalNaming.ColumnName(10)] = 1L }));
+        _recordRepo.AggregateByReferenceAsync(Arg.Is<AppTable>(t => t.Id == 88), 12, "Count", Arg.Any<int?>(), Arg.Any<IReadOnlyCollection<object>>(),
+                Arg.Any<Application.Reports.FilterGroup?>(), Arg.Any<string?>(), Arg.Any<IReadOnlyDictionary<long, AppField>?>(), Arg.Any<ParentFieldScope?>(), Arg.Any<CancellationToken>())
+            .Returns(new Dictionary<object, object?> { [100L] = 3, [101L] = 2 });
+        FormulaProjectorReturnsSeed();
+
+        var result = await ProjectOneSummary("{\"childTableId\":77,\"referenceFid\":10,\"function\":\"Sum\",\"targetFid\":16}");
+
+        Convert.ToDecimal(result[0][20]).Should().Be(5m);
+        await _recordRepo.DidNotReceiveWithAnyArgs().ListValuesByReferenceAsync(default!, default, default, default, default!, default, default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Lookup_of_a_parent_formula_works_out_only_what_the_formula_reads()
+    {
+        // "Department Code" is Name & "-" & Record ID#: the department's summaries play no part in it, so none is computed.
+        var childFields = new List<AppField>
+        {
+            Field(10, "Department", "Reference", "{\"relationshipId\":1,\"parentTableId\":99}"),
+            Field(11, "Department - Code", "Lookup", "{\"relationshipId\":1,\"referenceFid\":10,\"sourceTableId\":99,\"sourceFid\":5,\"sourceTypeCode\":\"Formula\"}"),
+        };
+        _tableRepo.GetByIdAsync(99, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 99 });
+        _tableRepo.GetByIdAsync(7, Arg.Any<CancellationToken>()).Returns(new AppTable { Id = 7 });
+        _fieldRepo.ListByTableAsync(7, Arg.Any<CancellationToken>()).Returns(childFields);
+        _fieldRepo.ListByTableAsync(99, Arg.Any<CancellationToken>()).Returns(new List<AppField>
+        {
+            Field(5, "Code", "Formula"),
+            Field(6, "Name", "Text"),
+            Field(8, "# Employees", "Summary", "{\"childTableId\":7,\"referenceFid\":10,\"function\":\"Count\"}"),
+        });
+        _formulaProjector.GetFormulaDependencies(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IEnumerable<long>>()).Returns(new HashSet<long> { 5, 6, 3 });
+        ParentRowsFor(99, RowsById((42L, new Dictionary<string, object?> { ["Id"] = 42L, [PhysicalNaming.ColumnName(6)] = "Sales" })));
+        IReadOnlyList<AppField>? projectedForParent = null;
+        _formulaProjector.Project(Arg.Any<IReadOnlyList<AppField>>(), Arg.Any<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(),
+                Arg.Any<IReadOnlyList<IReadOnlyDictionary<long, object?>>?>(), Arg.Is<AppTable?>(t => t != null && t.Id == 99))
+            .Returns(ci =>
+            {
+                projectedForParent = ci.ArgAt<IReadOnlyList<AppField>>(0);
+                return new List<IReadOnlyDictionary<long, object?>> { new Dictionary<long, object?> { [5] = "Sales-42" } };
+            });
+
+        var result = await NewProjector().ProjectAsync(new AppTable { Id = 7 }, childFields, ChildRowLinkedTo42);
+
+        result[0][11].Should().Be("Sales-42");
+        projectedForParent!.Select(f => f.Fid).Should().BeEquivalentTo(new int?[] { 5, 6 });
+        await _recordRepo.DidNotReceiveWithAnyArgs().AggregateByReferenceAsync(default!, default, default!, default, default!, default, default, default, default);
     }
 
     [Fact]

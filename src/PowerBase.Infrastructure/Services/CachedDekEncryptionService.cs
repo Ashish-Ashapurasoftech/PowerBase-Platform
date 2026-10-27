@@ -12,8 +12,8 @@ namespace PowerBase.Infrastructure.Services;
 /// Same cipher format and keys as <see cref="AesEncryptionService"/> (nonce | tag | ciphertext, DEK wrapped under an
 /// HKDF-derived KEK), but the unwrapped DEK is cached. <see cref="AesEncryptionService"/> re-derives the KEK and re-decrypts
 /// the wrapped DEK for every value it touches; reading millions of encrypted rows spends most of its time there.
-/// Used where many values are decrypted in a row (pipeline record search). The existing service is left as it is, and
-/// DEK generation is delegated to it so there is one place that creates keys.
+/// Registered as the API's IEncryptionService, wrapping <see cref="AesEncryptionService"/>: DEK generation is delegated
+/// to it so there is one place that creates keys.
 /// </summary>
 public sealed class CachedDekEncryptionService : IEncryptionService
 {
