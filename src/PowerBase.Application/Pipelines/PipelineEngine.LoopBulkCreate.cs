@@ -194,7 +194,7 @@ public partial class PipelineEngine
                 foreach (var (fid, value) in await PowerBase.Application.Relationships.ReferenceWriteValidator.ValidateAsync(
                     fields, values, _tableRepo, _fieldRepo, _recordRepo, _relRepo, ct))
                     values[fid] = value;
-                await PipelineCreateRecordRules.ApplyDefaultsAsync(fields, values, StepActingUserId, CurrentStepServices, ct);
+                await PipelineCreateRecordRules.ApplyDefaultsAsync(table, fields, values, StepActingUserId, CurrentStepServices, ct);
                 records.Add(new BulkCreateRecord(i, values, mappings, startedOn));
             }
         }

@@ -338,6 +338,8 @@ public class TablesController : ControllerBase
         IsSystem = f.IsSystem,
         IsEncrypted = f.IsEncrypted,
         IsAutoFill = f.IsAutoFill,
+        SnapshotSourceFid = f.SnapshotSourceFid,
+        SnapshotEditable = f.SnapshotEditable,
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,

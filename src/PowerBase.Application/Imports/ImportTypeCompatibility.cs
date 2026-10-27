@@ -20,7 +20,9 @@ public static class ImportTypeCompatibility
 
     public static bool IsWritable(AppField f) =>
         f.Fid.HasValue && !f.IsDeleted && !f.IsHidden && !PhysicalNaming.IsComputedTypeCode(f.TypeCode)
-        && (!f.IsSystem || IsRecordId(f)) && !UnsupportedDestination.Contains(f.TypeCode);
+        && (!f.IsSystem || IsRecordId(f)) && !UnsupportedDestination.Contains(f.TypeCode)
+        // A Snapshot field is filled when the record is created and is read-only afterwards (unless editable).
+        && !PowerBase.Application.Records.SnapshotWriteGuard.IsReadOnlySnapshot(f);
 
     /// <summary>A User field is filled with one chosen user, the same for every row: only a fixed value can write it (the source cannot name a user).</summary>
     public static bool IsUserDestination(AppField f) =>

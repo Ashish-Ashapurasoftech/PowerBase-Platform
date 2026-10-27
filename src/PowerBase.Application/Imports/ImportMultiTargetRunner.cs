@@ -27,7 +27,8 @@ public sealed class ImportMultiTargetRunner(
     IFileStorageService storage,
     IImportFileAccess fileAccess,
     ILogger<ImportMultiTargetRunner> logger,
-    IReferenceOriginalFields? originals = null)
+    IReferenceOriginalFields? originals = null,
+    PowerBase.Application.Records.ISnapshotCaptureService? snapshots = null)
 {
     private const int IssueCap = 5000;
 
@@ -197,7 +198,7 @@ public sealed class ImportMultiTargetRunner(
             var group = groups[g];
             var (from, to) = GroupRange(progressFrom, progressTo, g, groups.Count);
             var writers = group.Targets.Select(t => new ImportChunkWriter(t.Plan, store, records, null, formulaEngine, run.TriggeredByUserId,
-                ImportPassMode.Validate, trackers[t.TableIndex], t.Label, originals)).ToList();
+                ImportPassMode.Validate, trackers[t.TableIndex], t.Label, originals, snapshots)).ToList();
             await using var source = await OpenSourceAsync(group, ct);
             long cursor = 0;
             while (true)
@@ -231,7 +232,7 @@ public sealed class ImportMultiTargetRunner(
                 var group = groups[g];
                 var (from, to) = GroupRange(progressFrom, progressTo, g, groups.Count);
                 var writers = group.Targets.Select(t => new ImportChunkWriter(t.Plan, store, records, t.Gate, formulaEngine, run.TriggeredByUserId, mode,
-                    trackers[t.TableIndex], t.Label, originals)).ToList();
+                    trackers[t.TableIndex], t.Label, originals, snapshots)).ToList();
                 foreach (var writer in writers) await writer.PrepareAsync(ct);
                 await using var source = await OpenSourceAsync(group, ct);
                 pass.Cursor = 0;

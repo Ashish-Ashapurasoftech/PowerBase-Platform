@@ -16,7 +16,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         af.Id, af.PublicId, af.AppTableId, af.FieldTypeId, ft.Code AS TypeCode,
         af.Name, af.Label, af.Description, af.PhysicalColumnName, af.DefaultValue,
         af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsAutoFill, af.IsHidden, af.IsDeleted, af.CreatedOn, af.CreatedBy
+        af.IsUnique, af.IsSystem, af.Fid, af.Settings, af.IsEncrypted, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.IsHidden, af.IsDeleted, af.CreatedOn, af.CreatedBy
         """;
 
     private const string GetByIdInTableSql = $"""
@@ -46,7 +46,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string ListByTablePagedSqlTemplate = """
         SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
                af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-               af.IsUnique, af.IsSystem, af.IsAutoFill, af.Fid, af.CreatedOn
+               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.Fid, af.CreatedOn
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
@@ -62,7 +62,7 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
     private const string ListByTableFilteredSqlTemplate = """
         SELECT af.Id, af.PublicId, af.Name, af.Label, af.Description, ft.Code AS TypeCode,
                af.IsRequired, af.IsSearchable, af.IsSortable, af.IsFilterable, af.IsReportable, af.IsAuditable,
-               af.IsUnique, af.IsSystem, af.IsAutoFill, af.Fid, af.CreatedOn
+               af.IsUnique, af.IsSystem, af.IsAutoFill, af.SnapshotSourceFid, af.SnapshotEditable, af.Fid, af.CreatedOn
         FROM meta.AppField af
         JOIN core.FieldType ft ON ft.Id = af.FieldTypeId
         WHERE af.AppTableId = @tableId
@@ -163,6 +163,12 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
             Settings = @settings,
             ModifiedOn = SYSUTCDATETIME(), ModifiedBy = @modifiedBy
         WHERE PublicId = @publicId AND AppTableId = @tableId AND IsDeleted = 0
+        """;
+
+    private const string SetSnapshotConfigSql = """
+        UPDATE meta.AppField
+        SET SnapshotSourceFid = @sourceFid, SnapshotEditable = @editable
+        WHERE Id = @id AND IsDeleted = 0
         """;
 
     private const string SoftDeleteFieldSql = """
@@ -425,6 +431,18 @@ public class AppFieldRepository : TenantRepositoryBase, IAppFieldRepository
         await using var connection = await ConnectionFactory.CreateAsync(ct);
         await connection.ExecuteAsync(
             new CommandDefinition(UpdatePhysicalColumnNameSql, new { id, physicalColumnName }, cancellationToken: ct));
+    }
+
+    public async Task SetSnapshotConfigAsync(long id, int? sourceFid, bool editable, CancellationToken ct = default, IDbTransaction? transaction = null)
+    {
+        var command = new CommandDefinition(SetSnapshotConfigSql, new { id, sourceFid, editable }, transaction, cancellationToken: ct);
+        if (transaction is not null)
+        {
+            await transaction.Connection!.ExecuteAsync(command);
+            return;
+        }
+        await using var connection = await ConnectionFactory.CreateAsync(ct);
+        await connection.ExecuteAsync(command);
     }
 
     public async Task UpdateSettingsAsync(long id, string? settings, CancellationToken ct = default)

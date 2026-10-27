@@ -3,6 +3,7 @@ using PowerBase.Application.Common.Interfaces;
 using PowerBase.Application.FieldReferences;
 using PowerBase.Application.Fields.Common;
 using PowerBase.Application.Fields.Settings;
+using PowerBase.Application.Fields.SnapshotJobs;
 using PowerBase.Application.Fields.Versioning;
 using PowerBase.Application.Formulas;
 using PowerBase.Application.Relationships;
@@ -30,6 +31,7 @@ public class UpdateFieldCommandHandler
     private readonly IRelationshipRepository _relRepo;
     private readonly IFieldReferenceIndexer _refIndexer;
     private readonly IAppVariableRepository? _variableRepo;
+    private readonly FieldSnapshotJobService? _snapshotJobs;
 
     /// <summary>The Number/Currency/Percent/Rating family — the only TypeCodes a field's
     /// "Display As" Behavior Setting is allowed to switch between (see NumericDisplayAs).</summary>
@@ -50,8 +52,10 @@ public class UpdateFieldCommandHandler
         IAzureSearchService searchService,
         IRelationshipRepository relRepo,
         IFieldReferenceIndexer? refIndexer = null,
-        IAppVariableRepository? variableRepo = null)
+        IAppVariableRepository? variableRepo = null,
+        FieldSnapshotJobService? snapshotJobs = null)
     {
+        _snapshotJobs = snapshotJobs;
         _refIndexer = refIndexer ?? NullFieldReferenceIndexer.Instance;
         _variableRepo = variableRepo;
         _tableRepo = tableRepo;
@@ -114,7 +118,9 @@ public class UpdateFieldCommandHandler
         var isEncrypted = existing.IsSystem || PowerBase.Domain.Constants.PhysicalNaming.IsEncryptionExemptTypeCode(existing.TypeCode)
             ? false
             : command.IsEncrypted;
-        var isAutoFill = existing.IsSystem ? false : command.IsAutoFill;
+        var snapshotSourceFid = existing.IsSystem ? null : command.SnapshotSourceFid;
+        var snapshotEditable = snapshotSourceFid.HasValue && command.SnapshotEditable;
+        var isAutoFill = existing.IsSystem || snapshotSourceFid.HasValue ? false : command.IsAutoFill;
         var settings = existing.IsSystem
             ? SystemFieldSettingsPolicy.RestrictSettingsJson(existing.TypeCode, command.Settings)
             // A request that sends no settings leaves them as they are: UpdateFieldSql writes Settings = @settings,
@@ -132,6 +138,7 @@ public class UpdateFieldCommandHandler
 
         var tableFields = await _fieldRepo.ListByTableAsync(table.Id, ct) ?? Array.Empty<AppField>();
         _guard.ValidateActionButtonTargets(existing.TypeCode, settings, tableFields, existing.Id);
+        _guard.ValidateSnapshot(existing, label, snapshotSourceFid, snapshotEditable, isRequired, isUnique, isEncrypted, command.IsAutoFill && snapshotSourceFid.HasValue, tableFields);
 
         // Formula text is stored by field ID so a rename can't break it (see FormulaCanonicalizer).
         // The label being saved right now is also accepted as a name, so a formula can reference a
@@ -242,7 +249,8 @@ public class UpdateFieldCommandHandler
 
         var after = new FieldSnapshot(
             label, description, isRequired, defaultValue, command.IsSearchable, isSortable,
-            isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, isAutoFill, settings);
+            isFilterable, command.IsReportable, isAuditable, isUnique, isEncrypted, isAutoFill, settings,
+            snapshotSourceFid, snapshotEditable);
 
         // The field row itself and its new version are one atomic unit: either both land or
         // neither does, so a version is never created for a field-settings change that didn't
@@ -260,6 +268,9 @@ public class UpdateFieldCommandHandler
 
             if (affected == 0)
                 throw new NotFoundException("Field", command.FieldPublicId);
+
+            if (existing.SnapshotSourceFid != snapshotSourceFid || existing.SnapshotEditable != snapshotEditable)
+                await _fieldRepo.SetSnapshotConfigAsync(existing.Id, snapshotSourceFid, snapshotEditable, ct, _uow.Transaction);
 
             await _versionService.CreateVersionIfChangedAsync(
                 existing.Id, before, after, command.CommitMessage,
@@ -296,6 +307,14 @@ public class UpdateFieldCommandHandler
         await _auditRepo.LogActivityAsync(
             AuditActions.SchemaChanged, AuditEntityTypes.AppField, existing.PublicId.ToString(),
             $"Field modified: {label} In TableName : {table.Name}", appId: table.AppId, ct: ct);
+
+        // "Initialize field for existing records": captures the snapshot for every record that already exists, as a background job.
+        if (command.InitializeSnapshotForExisting && snapshotSourceFid.HasValue && _snapshotJobs is not null)
+        {
+            existing.SnapshotSourceFid = snapshotSourceFid;
+            existing.SnapshotEditable = snapshotEditable;
+            await _snapshotJobs.StartAsync(table, existing, ct);
+        }
 
         // Formulas bind by name or label, so renaming this field can change what OTHER fields' formulas read.
         if (!string.Equals(label, existing.Label, StringComparison.Ordinal))

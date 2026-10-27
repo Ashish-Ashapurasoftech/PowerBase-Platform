@@ -29,6 +29,7 @@ public class CreateRecordCommandHandler
     private readonly IFormRepository _formRepo;
     private readonly IAppUserRepository _appUserRepo;
     private readonly IReferenceRelinkService? _relink;
+    private readonly ISnapshotCaptureService? _snapshots;
 
     public CreateRecordCommandHandler(
         IAppTableRepository tableRepo,
@@ -48,8 +49,10 @@ public class CreateRecordCommandHandler
         IFormRuleRepository formRuleRepo,
         IFormRepository formRepo,
         IAppUserRepository appUserRepo,
-        IReferenceRelinkService? relink = null)
+        IReferenceRelinkService? relink = null,
+        ISnapshotCaptureService? snapshots = null)
     {
+        _snapshots = snapshots;
         _tableRepo = tableRepo;
         _fieldRepo = fieldRepo;
         _recordRepo = recordRepo;
@@ -109,9 +112,14 @@ public class CreateRecordCommandHandler
         // Apply translations from the validator (e.g. swapping custom keys for the physical Record ID#).
         foreach (var kvp in refOverrides)
             effectiveValues[kvp.Key] = kvp.Value;
+
+        // Snapshot fields are filled by the system when the record is created; a client may not supply them
+        // (unless editable after the snapshot). Checked before defaults, so a default can't masquerade as a supplied value.
+        SnapshotWriteGuard.EnsureNotSuppliedOnCreate(fields, effectiveValues);
         foreach (var field in fields)
         {
             if (field.IsSystem || field.IsDeleted || !field.Fid.HasValue || PhysicalNaming.IsComputedTypeCode(field.TypeCode)) continue;
+            if (SnapshotWriteGuard.IsReadOnlySnapshot(field)) continue;
             if (effectiveValues.ContainsKey((long)field.Fid.Value)) continue;
             if (string.IsNullOrWhiteSpace(field.DefaultValue)) continue;
 
@@ -124,6 +132,10 @@ public class CreateRecordCommandHandler
         // Guid(s) — resolve to the long id the column actually stores. See
         // UserFieldValueResolver's doc comment for why.
         await UserFieldValueResolver.ResolveAsync(_userRepo, fields, effectiveValues, ct);
+
+        // Snapshot: capture each snapshot field's source value now, once — it stays as it is afterwards.
+        if (_snapshots is not null)
+            await _snapshots.ApplyOnCreateAsync(table, fields, effectiveValues, ct);
 
         // Field-level Required / Unique / Format constraints (Quickbase-style) — checked against
         // the final values about to be persisted, after defaults and reference-override

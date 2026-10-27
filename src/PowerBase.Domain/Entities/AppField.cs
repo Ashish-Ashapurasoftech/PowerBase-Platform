@@ -30,6 +30,10 @@ public class AppField
     public bool IsAuditable { get; set; } = true;
     public bool IsEncrypted { get; set; }
     public bool IsAutoFill { get; set; }
+    /// <summary>Snapshot field: the Fid of the field whose value is captured once, when a record is created. Null = not a snapshot field.</summary>
+    public int? SnapshotSourceFid { get; set; }
+    /// <summary>Snapshot field only: when true the captured value may be edited afterwards; otherwise it is read-only.</summary>
+    public bool SnapshotEditable { get; set; }
     /// <summary>Helper field (e.g. a relationship's "(original)" copy) kept out of every user-facing field list.</summary>
     public bool IsHidden { get; set; }
     public int? Fid { get; set; }

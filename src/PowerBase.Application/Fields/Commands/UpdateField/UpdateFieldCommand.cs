@@ -16,4 +16,7 @@ public record UpdateFieldCommand(
     bool IsEncrypted,
     bool IsAutoFill,
     string? Settings,
-    string CommitMessage);
+    string CommitMessage,
+    int? SnapshotSourceFid = null,
+    bool SnapshotEditable = false,
+    bool InitializeSnapshotForExisting = false);

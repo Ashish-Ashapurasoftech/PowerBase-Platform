@@ -15,6 +15,7 @@ using PowerBase.Application.Fields.Queries.ListFieldTypes;
 using PowerBase.Application.Fields.Queries.GetFieldUsage;
 using PowerBase.Application.Fields.Queries.ListFieldVersions;
 using PowerBase.Application.Fields.Queries.GetFieldVersionDetail;
+using PowerBase.Application.Fields.SnapshotJobs;
 using PowerBase.Domain.Constants;
 using PowerBase.Domain.Entities;
 
@@ -180,8 +181,60 @@ public class FieldsController : ControllerBase
             request.IsRequired, request.DefaultValue,
             request.IsSearchable, request.IsSortable,
             request.IsFilterable, request.IsReportable, request.IsAuditable,
-            request.IsUnique, request.IsEncrypted, request.IsAutoFill, request.Settings, request.CommitMessage), ct);
+            request.IsUnique, request.IsEncrypted, request.IsAutoFill, request.Settings, request.CommitMessage,
+            request.SnapshotSourceFid, request.SnapshotEditable, request.InitializeSnapshotForExisting), ct);
         return NoContent();
+    }
+
+    /// <summary>Starts a background job that re-captures a Snapshot field's source value for every existing record of the
+    /// table, overwriting the current values. Returns at once with the job; poll <c>snapshot/jobs/{jobId}</c> for progress.</summary>
+    [HttpPost("tables/{tableId:guid}/fields/{publicId:guid}/snapshot/reinitialize")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<FieldSnapshotJobResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> ReinitializeSnapshot(
+        [FromServices] FieldSnapshotJobService jobs, Guid tableId, Guid publicId, CancellationToken ct)
+    {
+        var result = await jobs.StartAsync(tableId, publicId, ct);
+        return Ok(new ApiResponse<FieldSnapshotJobResponse>(MapToSnapshotJobResponse(result)));
+    }
+
+    /// <summary>The Snapshot field's most recent Reinitialize job (null data when it never ran).</summary>
+    [HttpGet("tables/{tableId:guid}/fields/{publicId:guid}/snapshot/jobs/latest")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<FieldSnapshotJobResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetLatestSnapshotJob(
+        [FromServices] FieldSnapshotJobService jobs, Guid tableId, Guid publicId, CancellationToken ct)
+    {
+        var result = await jobs.GetLatestAsync(tableId, publicId, ct);
+        return Ok(new ApiResponse<FieldSnapshotJobResponse?>(result is null ? null : MapToSnapshotJobResponse(result)));
+    }
+
+    /// <summary>Progress of one Reinitialize job.</summary>
+    [HttpGet("tables/{tableId:guid}/fields/{publicId:guid}/snapshot/jobs/{jobId:guid}")]
+    [RequireAppPermission(PermissionCodes.FieldsRead, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<FieldSnapshotJobResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetSnapshotJob(
+        [FromServices] FieldSnapshotJobService jobs, Guid tableId, Guid publicId, Guid jobId, CancellationToken ct)
+    {
+        var result = await jobs.GetAsync(tableId, publicId, jobId, ct);
+        return Ok(new ApiResponse<FieldSnapshotJobResponse>(MapToSnapshotJobResponse(result)));
+    }
+
+    /// <summary>Stops a Reinitialize job: a queued one at once, a running one after its current chunk. Records already processed keep their new value.</summary>
+    [HttpPost("tables/{tableId:guid}/fields/{publicId:guid}/snapshot/jobs/{jobId:guid}/cancel")]
+    [RequireAppPermission(PermissionCodes.FieldsUpdate, AppAccessResolver.ByTableId)]
+    [ProducesResponseType(typeof(ApiResponse<FieldSnapshotJobResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> CancelSnapshotJob(
+        [FromServices] FieldSnapshotJobService jobs, Guid tableId, Guid publicId, Guid jobId, CancellationToken ct)
+    {
+        var result = await jobs.CancelAsync(tableId, publicId, jobId, ct);
+        return Ok(new ApiResponse<FieldSnapshotJobResponse>(MapToSnapshotJobResponse(result)));
     }
 
     /// <summary>Paginated audit/version history for a field, newest first.</summary>
@@ -299,6 +352,19 @@ public class FieldsController : ControllerBase
         return NoContent();
     }
 
+    private static FieldSnapshotJobResponse MapToSnapshotJobResponse(FieldSnapshotJobStatusResult r) => new()
+    {
+        JobId = r.JobId,
+        Status = r.Status,
+        TotalCount = r.TotalCount,
+        ProcessedCount = r.ProcessedCount,
+        ChangedCount = r.ChangedCount,
+        LastError = r.LastError,
+        CreatedOn = r.CreatedOn,
+        StartedOn = r.StartedOn,
+        CompletedOn = r.CompletedOn,
+    };
+
     private static FieldResponse MapToResponse(CreateFieldResult r) => new()
     {
         Id = r.Id,
@@ -335,6 +401,8 @@ public class FieldsController : ControllerBase
         IsUnique = f.IsUnique,
         IsSystem = f.IsSystem,
         IsAutoFill = f.IsAutoFill,
+        SnapshotSourceFid = f.SnapshotSourceFid,
+        SnapshotEditable = f.SnapshotEditable,
         Fid = f.Fid,
         CreatedOn = f.CreatedOn,
         IsKeyField = f.IsKeyField,
@@ -359,6 +427,8 @@ public class FieldsController : ControllerBase
         IsSystem = f.IsSystem,
         IsEncrypted = f.IsEncrypted,
         IsAutoFill = f.IsAutoFill,
+        SnapshotSourceFid = f.SnapshotSourceFid,
+        SnapshotEditable = f.SnapshotEditable,
         Fid = f.Fid,
         Settings = f.Settings,
         CreatedOn = f.CreatedOn,

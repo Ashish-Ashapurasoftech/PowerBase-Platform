@@ -19,6 +19,8 @@ public class AppFieldListItemDto
     public bool IsUnique { get; set; }
     public bool IsSystem { get; set; }
     public bool IsAutoFill { get; set; }
+    public int? SnapshotSourceFid { get; set; }
+    public bool SnapshotEditable { get; set; }
     public int? Fid { get; set; }
     public DateTime CreatedOn { get; set; }
     /// <summary>Whether this is the table's current key field (Set Key feature). Set by

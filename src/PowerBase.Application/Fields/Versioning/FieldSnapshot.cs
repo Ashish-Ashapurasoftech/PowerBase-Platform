@@ -20,14 +20,17 @@ public record FieldSnapshot(
     bool IsUnique,
     bool IsEncrypted,
     bool IsAutoFill,
-    string? Settings)
+    string? Settings,
+    int? SnapshotSourceFid = null,
+    bool SnapshotEditable = false)
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public static FieldSnapshot From(AppField field) => new(
         field.Label, field.Description, field.IsRequired, field.DefaultValue,
         field.IsSearchable, field.IsSortable, field.IsFilterable, field.IsReportable,
-        field.IsAuditable, field.IsUnique, field.IsEncrypted, field.IsAutoFill, field.Settings);
+        field.IsAuditable, field.IsUnique, field.IsEncrypted, field.IsAutoFill, field.Settings,
+        field.SnapshotSourceFid, field.SnapshotEditable);
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
 
